@@ -27,10 +27,19 @@ cp "$repository/assets/stela-icon.png" "$app/Contents/Resources/stela-icon.png"
 # Use the workspace package version rather than maintaining a second product version.
 version="$(awk '/^\[workspace.package\]/{section=1;next} section && /^\[/{exit} section && /^version = /{gsub(/"/, "", $3);print $3;exit}' "$repository/Cargo.toml")"
 [[ -n "$version" ]] || { echo "Cannot read the workspace version" >&2; exit 1; }
-revision="$(git -C "$repository" rev-parse --short=12 HEAD)"
-if [[ -n "$(git -C "$repository" status --porcelain --untracked-files=normal -- apps/stela-macos assets Cargo.toml)" ]]; then
-    revision="$revision-modified"
+# A copy of the sources without Git (a Mac or guest build) passes the revision it came from.
+if [[ -n "${STELA_SOURCE_REVISION:-}" ]]; then
+    revision="$STELA_SOURCE_REVISION"
+elif git -C "$repository" rev-parse --git-dir >/dev/null 2>&1; then
+    revision="$(git -C "$repository" rev-parse --short=12 HEAD)"
+    if [[ -n "$(git -C "$repository" status --porcelain --untracked-files=normal -- apps/stela-macos assets Cargo.toml)" ]]; then
+        revision="$revision-modified"
+    fi
+else
+    echo "No Git checkout: set STELA_SOURCE_REVISION to the sources' revision" >&2
+    exit 1
 fi
+[[ "$revision" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "STELA_SOURCE_REVISION must be letters, digits, dots and dashes" >&2; exit 1; }
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :StelaSourceRevision $revision" "$app/Contents/Info.plist"
 
@@ -43,6 +52,9 @@ for size in 16 32 128 256 512; do
 done
 iconutil --convert icns "$iconset" --output "$app/Contents/Resources/Stela.icns"
 plutil -lint "$app/Contents/Info.plist"
+
+# Local and debug symbols only enlarge the copy stela.efi carries into the guest.
+strip -S -x "$app/Contents/MacOS/Stela"
 
 identity="${STELA_SIGN_IDENTITY:--}"
 if [[ "$identity" == - ]]; then

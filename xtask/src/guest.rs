@@ -5,7 +5,8 @@
 //! `Info.plist` in `target/guest/StelaGPU.kext`, whose final link is against
 //! one boot kernel collection. The Metal plugin links here, into
 //! `target/guest/StelaGPU.bundle`. No released `ld64.lld` links arm64e's
-//! authenticated pointers, so `stela-loader` links both.
+//! authenticated pointers, so `stela-loader` links both. The kext also
+//! carries Stela.app when a built package is present ([`app`]).
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -15,11 +16,16 @@ use std::{
 };
 use stela_loader::{aux_kc::TRUSTED_CODE_FILE, trust_cache::CodeHash};
 
+pub mod app;
 pub mod sdk;
 pub mod wire;
 
 /// The macOS the guest components target, as clang's `-target` names it.
 const TARGET: &str = "arm64e-apple-macos27.0";
+/// The kext's path buffers, `char path[256]`, NUL included.
+const KERNEL_PATH_BYTES: usize = 256;
+/// Where the kext installs the plugin's files (`install.cpp`'s `kPlugin`).
+const PLUGIN_PATH: &str = "/System/Volumes/Data/Library/GPUBundles/StelaGPU.bundle/";
 /// What the Metal plugin's `Info.plist` and signature identify it as.
 const BUNDLE_IDENTIFIER: &str = "com.stela.StelaGPU.Metal";
 /// The Metal plugin's executable in its bundle.
@@ -39,6 +45,7 @@ pub fn run() -> Result<()> {
     let bundle = build_bundle(&component, &output, &include)?;
     println!("StelaGPU bundle: {}", bundle.display());
     fs::write(include.join("stela/bundle.h"), bundle_header(&bundle)?)?;
+    fs::write(include.join("stela/app.h"), app_header(root)?)?;
     let kext = build_kext(&component, &output, &xnu, &include)?;
     let code = stela_loader::plugin::code_hashes(&fs::read(bundle.join(BUNDLE_EXECUTABLE))?)?;
     fs::write(kext.join(TRUSTED_CODE_FILE), code.concat())?;
@@ -46,6 +53,28 @@ pub fn run() -> Result<()> {
     stela_cli::gpu::Payload::write(&output)?;
     println!("StelaGPU kext: {}", kext.display());
     Ok(())
+}
+
+/// `stela/app.h`: the Stela.app package [`app::locate`] finds, or a build
+/// without one, which the kext reports at boot.
+fn app_header(root: &Path) -> Result<String> {
+    let Some(path) = app::locate(root)? else {
+        println!(
+            "Stela.app: no package (set {} or run `cargo xtask app`); the kext installs no app",
+            app::VARIABLE
+        );
+        return Ok(app::absent_header());
+    };
+    let package = app::Package::read(&path)
+        .with_context(|| format!("the Stela.app package {}", path.display()))?;
+    let (bytes, archived) = package.sizes()?;
+    println!(
+        "Stela.app {} ({}): {bytes} bytes, {archived} archived, from {}",
+        package.version,
+        package.revision,
+        path.display()
+    );
+    package.header()
 }
 
 /// Compiles each source of `<component>/bundle` once per slice, under
@@ -173,7 +202,6 @@ fn build_kext(component: &Path, output: &Path, xnu: &Path, include: &Path) -> Re
 /// Its executable is the code the boot's trust cache lists, so the kext and
 /// the trust cache always name the same plugin.
 fn bundle_header(bundle: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     let mut files = Vec::new();
     let mut directories = vec![bundle.to_path_buf()];
@@ -205,6 +233,10 @@ fn bundle_header(bundle: &Path) -> Result<String> {
                     .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\'),
                 "{name:?} is not a path the kext spells"
             );
+            ensure!(
+                PLUGIN_PATH.len() + name.len() < KERNEL_PATH_BYTES,
+                "{name:?} is longer than the kext's {KERNEL_PATH_BYTES}-byte paths"
+            );
             let bytes = fs::read(&path)?;
             ensure!(!bytes.is_empty(), "{name} is empty");
             Ok((name.to_owned(), bytes))
@@ -224,17 +256,7 @@ fn bundle_header(bundle: &Path) -> Result<String> {
          };\n",
     );
     for (index, (_, bytes)) in files.iter().enumerate() {
-        write!(
-            header,
-            "static const unsigned char stela_bundle_bytes{index}[] = {{"
-        )?;
-        for (offset, byte) in bytes.iter().enumerate() {
-            if offset % 24 == 0 {
-                header.push_str("\n\t");
-            }
-            write!(header, "{byte},")?;
-        }
-        header.push_str("\n};\n");
+        c_bytes(&mut header, &format!("stela_bundle_bytes{index}"), bytes)?;
     }
     header.push_str("static const struct stela_bundle_file stela_bundle_files[] = {\n");
     for (index, (name, bytes)) in files.iter().enumerate() {
@@ -243,10 +265,7 @@ fn bundle_header(bundle: &Path) -> Result<String> {
         } else {
             0o644
         };
-        let digest: String = Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte},"))
-            .collect();
+        let digest = c_digest(bytes);
         writeln!(
             header,
             "\t{{\"{name}\", 0{mode:o}, {{{digest}}}, stela_bundle_bytes{index}, sizeof stela_bundle_bytes{index}}},"
@@ -256,6 +275,29 @@ fn bundle_header(bundle: &Path) -> Result<String> {
         "};\n#define STELA_BUNDLE_FILES (sizeof stela_bundle_files / sizeof stela_bundle_files[0])\n",
     );
     Ok(header)
+}
+
+/// Appends `static const unsigned char <name>[]` holding `bytes`.
+fn c_bytes(header: &mut String, name: &str, bytes: &[u8]) -> Result<()> {
+    use std::fmt::Write as _;
+    write!(header, "static const unsigned char {name}[] = {{")?;
+    for (offset, byte) in bytes.iter().enumerate() {
+        if offset % 24 == 0 {
+            header.push_str("\n\t");
+        }
+        write!(header, "{byte},")?;
+    }
+    header.push_str("\n};\n");
+    Ok(())
+}
+
+/// `bytes`' SHA-256 as the body of a C array initializer.
+fn c_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte},"))
+        .collect()
 }
 
 /// Writes the Rust `stela.efi` includes for `kext`'s `INFO` and `OBJECTS`, as
@@ -377,5 +419,12 @@ mod tests {
         assert!(header.contains("stela_bundle_bytes1[] = {\n\t255,1,\n};"));
         fs::write(bundle.path().join("Contents/empty"), b"").unwrap();
         assert!(bundle_header(bundle.path()).is_err());
+        fs::remove_file(bundle.path().join("Contents/empty")).unwrap();
+        let long = "x".repeat(KERNEL_PATH_BYTES - PLUGIN_PATH.len());
+        fs::write(bundle.path().join(&long), b"x").unwrap();
+        assert!(bundle_header(bundle.path()).is_err());
+        let install = include_str!("../../guest/stela-gpu/kext/install.cpp");
+        assert!(install.contains(&format!("kPlugin[] = \"{PLUGIN_PATH}\";")));
+        assert!(install.contains(&format!("char path[{KERNEL_PATH_BYTES}];")));
     }
 }

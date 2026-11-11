@@ -55,8 +55,17 @@ enum Task {
     #[command(subcommand)]
     Gpu(gpu::Command),
     /// Build the ARM64e components Stela installs in macOS: the StelaGPU
-    /// kext's objects, against `third_party/xnu`.
+    /// kext's objects, against `third_party/xnu`, carrying the newest
+    /// Stela.app package (or `STELA_APP`'s) when there is one.
     Guest,
+    /// Build Stela.app (`apps/stela-macos`) on this Mac or, over ssh, on the
+    /// Mac `--mac` or `STELA_MAC` names, into `target/stela-macos`, where
+    /// `cargo xtask guest` finds it.
+    App {
+        /// The Mac's ssh name (default: `STELA_MAC`).
+        #[arg(long)]
+        mac: Option<String>,
+    },
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
@@ -83,6 +92,11 @@ fn main() -> ExitCode {
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         Task::Guest => guest::run().map(|()| ExitCode::SUCCESS),
+        Task::App { mac } => {
+            let mac = mac.or_else(|| std::env::var(tools::MAC_VARIABLE).ok());
+            guest::app::build(tools::root(), mac.as_deref().filter(|mac| !mac.is_empty()))
+                .map(|_| ExitCode::SUCCESS)
+        }
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::CpuReference(task) => task.run().map(|()| ExitCode::SUCCESS),
