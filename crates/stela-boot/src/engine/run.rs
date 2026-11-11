@@ -102,7 +102,10 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
             exit.closes
         )
     };
-    let mut keys: Vec<step_timing::SystemExit> = exits.counted().copied().collect();
+    let (numerical, mut keys): (Vec<step_timing::SystemExit>, Vec<_>) = exits
+        .counted()
+        .copied()
+        .partition(|exit| step_timing::numerical_key(exit.key));
     let mut line = String::from("PES SYSTEM count/ns/closes by_count");
     keys.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.count));
     for exit in keys.iter().take(SHOWN) {
@@ -115,6 +118,39 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     }
     if exits.other.count != 0 {
         line.push_str(&item("other", &exits.other));
+    }
+    output::arguments(format_args!("{line}\n"));
+    numerical_exits_report(numerical, &exits.floating, tsc_hz);
+}
+
+/// `PES FLOATING count/ns`: every PE's floating-point exits since the last
+/// beat by what their completion found (`step_timing::FloatingReason`), then
+/// by instruction word, the sixteen most frequent, each with its total
+/// handling time; nothing when there were none.
+fn numerical_exits_report(
+    mut words: Vec<step_timing::SystemExit>,
+    reasons: &[u64; step_timing::FloatingReason::COUNT],
+    tsc_hz: u64,
+) {
+    const SHOWN: usize = 16;
+    if words.is_empty() && reasons.iter().all(|&count| count == 0) {
+        return;
+    }
+    let nanos = |ticks: u64| u128::from(ticks) * 1_000_000_000 / u128::from(tsc_hz.max(1));
+    words.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.count));
+    let count: u64 = words.iter().map(|exit| exit.count).sum();
+    let mut line = format!("PES FLOATING count/ns exits={count} words={}", words.len());
+    for (name, count) in step_timing::FloatingReason::NAMES.iter().zip(reasons) {
+        line.push_str(&format!(" {name}={count}"));
+    }
+    line.push_str(" by_count");
+    for exit in words.iter().take(SHOWN) {
+        line.push_str(&format!(
+            " {}={}/{}",
+            step_timing::system_key_name(exit.key),
+            exit.count,
+            nanos(exit.ticks)
+        ));
     }
     output::arguments(format_args!("{line}\n"));
 }

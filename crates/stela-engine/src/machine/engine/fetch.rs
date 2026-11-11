@@ -570,6 +570,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
         word: u32,
         operation: &FloatingPointOperation,
     ) -> Result<(), crate::floating::Trapped> {
+        if self.step_timing.is_none() {
+            return self.complete_floating_point_untimed(word, operation);
+        }
+        // Under step timing, what the completion found
+        // (`step_timing::FloatingReason`): its fresh cumulative flags, with
+        // FPSR's earlier ones put back after it, so FPSR ends as it would.
+        const CUMULATIVE: u32 = 0x9f;
+        let fpcr = self.cpu.state.fpcr;
+        let before = self.cpu.state.fpsr;
+        self.cpu.state.fpsr = before & !CUMULATIVE;
+        let completed = self.complete_floating_point_untimed(word, operation);
+        let fresh = self.cpu.state.fpsr & CUMULATIVE;
+        self.cpu.state.fpsr |= before;
+        let reason = super::step_timing::FloatingReason::of(fpcr, fresh, completed.is_err());
+        self.system_exits.floating[reason as usize] += 1;
+        if super::step_timing::FloatingReason::moded(fpcr) {
+            self.system_exits.floating[super::step_timing::FloatingReason::Mode as usize] += 1;
+        }
+        completed
+    }
+
+    fn complete_floating_point_untimed(
+        &mut self,
+        word: u32,
+        operation: &FloatingPointOperation,
+    ) -> Result<(), crate::floating::Trapped> {
         #[cfg(all(feature = "std", feature = "native-profile"))]
         if let Some(profile) = &mut self.floating_profile
             && profile.tick()

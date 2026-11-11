@@ -425,6 +425,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         slot = step_timing::DEVICE_SITE_SLOT;
                     }
                     self.timed_word = Some(word);
+                } else if kind == ExitKind::FloatingPoint as u64 && self.step_timing.is_some() {
+                    // Charged by word apart from System keys
+                    // (`step_timing::numerical_key`).
+                    self.timed_word = Some(self.timed_system_word(last, next_pc));
                 }
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok() {
