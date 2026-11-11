@@ -47,34 +47,153 @@ fn read_cached(path: &Path, artifact: &Artifact) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn download(client: &Client, artifact: &Artifact) -> Result<Vec<u8>> {
+/// The most one file's sources may make it wait in all. A source that asks
+/// for a longer pause (a Retry-After of an hour, as GitLab's per-IP limit
+/// sends) is left for the next source at once.
+const WAIT_BUDGET: Duration = Duration::from_secs(30);
+/// Requests to one source for one file.
+const ATTEMPTS: u32 = 3;
+
+/// How one request to a source ended, when it brought no file.
+enum Answer {
+    /// A rate limit or a source down for now (429, 503), with the pause
+    /// its Retry-After asks for.
+    Busy(Option<Duration>, String),
+    /// A failure the same request may not meet again.
+    Transient(String),
+    /// An answer asking again would not change.
+    Final(String),
+}
+
+/// The pause a `Retry-After` header asks for, in seconds; an HTTP date is
+/// taken as a long pause.
+fn retry_after(response: &reqwest::blocking::Response) -> Option<Duration> {
+    let value = response.headers().get(header::RETRY_AFTER)?.to_str().ok()?;
+    Some(
+        value
+            .trim()
+            .parse::<u64>()
+            .map_or(Duration::MAX, Duration::from_secs),
+    )
+}
+
+fn request(client: &Client, url: &str, artifact: &Artifact) -> Result<Vec<u8>, Answer> {
     // A minute, and the file at 32 kB/s: a GPU's 64 MB firmware may take
     // many minutes on a slow network.
     let timeout = Duration::from_secs(60 + artifact.length as u64 / 32_000);
-    let mut response = crate::net::send(&format!("downloading {}", artifact.member), || {
-        client
-            .get(artifact.url())
-            .header(header::ACCEPT_ENCODING, "identity")
-            .timeout(timeout)
-    })?
-    .error_for_status()?;
-    ensure!(
-        response.status() == reqwest::StatusCode::OK,
-        "firmware source redirected or returned an unexpected status"
-    );
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|n| n == artifact.length as u64),
-        "firmware source length differs from its pin"
-    );
+    let mut response = match client
+        .get(url)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .timeout(timeout)
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) if crate::net::transient(&error) => {
+            return Err(Answer::Transient(crate::net::explain(&error)));
+        }
+        Err(error) => return Err(Answer::Final(crate::net::explain(&error))),
+    };
+    let status = response.status();
+    match status.as_u16() {
+        200 => {}
+        429 | 503 => {
+            let after = retry_after(&response);
+            let asked = match after {
+                Some(after) if after != Duration::MAX => {
+                    format!(", Retry-After {} s", after.as_secs())
+                }
+                Some(_) => ", Retry-After a date".into(),
+                None => String::new(),
+            };
+            return Err(Answer::Busy(after, format!("answered {status}{asked}")));
+        }
+        _ if crate::net::transient_status(status) => {
+            return Err(Answer::Transient(format!("answered {status}")));
+        }
+        _ => return Err(Answer::Final(format!("answered {status}"))),
+    }
+    if response
+        .content_length()
+        .is_some_and(|n| n != artifact.length as u64)
+    {
+        return Err(Answer::Final("sent a length other than the pin's".into()));
+    }
     let mut bytes = Vec::with_capacity(artifact.length);
-    response
+    if let Err(error) = response
         .by_ref()
         .take(artifact.length as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    artifact.verify(&bytes)?;
+        .read_to_end(&mut bytes)
+    {
+        return Err(Answer::Transient(format!("transfer failed: {error}")));
+    }
+    artifact.verify(&bytes).map_err(|_| {
+        Answer::Final("sent bytes whose length or SHA-256 differs from the pin".into())
+    })?;
     Ok(bytes)
+}
+
+fn host_of(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(url)
+}
+
+fn download(client: &Client, artifact: &Artifact) -> Result<Vec<u8>> {
+    download_from(client, artifact, &artifact.urls(), &mut std::thread::sleep)
+}
+
+/// Download `artifact` from the first of `urls` that sends its pinned
+/// bytes. A source that is busy waits only within [`WAIT_BUDGET`]; past it,
+/// or after [`ATTEMPTS`] requests, the next source is asked at once. The
+/// error names the file and what each source answered.
+fn download_from(
+    client: &Client,
+    artifact: &Artifact,
+    urls: &[String],
+    sleep: &mut dyn FnMut(Duration),
+) -> Result<Vec<u8>> {
+    let mut waited = Duration::ZERO;
+    let mut answers = Vec::new();
+    for url in urls {
+        let host = host_of(url);
+        let mut backoff = Duration::from_secs(1);
+        let mut attempt = 1;
+        let last = loop {
+            let pause = match request(client, url, artifact) {
+                Ok(bytes) => return Ok(bytes),
+                Err(Answer::Busy(Some(after), what)) => (Some(after), what),
+                Err(Answer::Busy(None, what) | Answer::Transient(what)) => (Some(backoff), what),
+                Err(Answer::Final(what)) => (None, what),
+            };
+            match pause {
+                (Some(pause), what)
+                    if attempt < ATTEMPTS
+                        && waited.checked_add(pause).is_some_and(|w| w <= WAIT_BUDGET) =>
+                {
+                    eprintln!(
+                        "note: {} from {host}: {what}; asking again in {} s",
+                        artifact.member,
+                        pause.as_secs().max(1)
+                    );
+                    sleep(pause);
+                    waited += pause;
+                    backoff *= 2;
+                    attempt += 1;
+                }
+                (_, what) => break what,
+            }
+        };
+        if urls.len() > 1 {
+            eprintln!("note: {} from {host}: {last}", artifact.member);
+        }
+        answers.push(format!("{host} {last}"));
+    }
+    anyhow::bail!(
+        "cannot download {}: {}",
+        artifact.member,
+        answers.join("; ")
+    )
 }
 
 fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<u8>> {
@@ -1028,9 +1147,111 @@ mod tests {
                 .redirect(Policy::none())
                 .build()
                 .unwrap();
-            assert_eq!(download(&client, &artifact).is_ok(), valid);
+            assert_eq!(
+                download_from(&client, &artifact, &artifact.urls(), &mut |_| {}).is_ok(),
+                valid
+            );
             server.join().unwrap();
         }
+    }
+
+    /// A source on localhost that answers its requests with `responses` in
+    /// order, then closes; its URL, and how many requests it served.
+    fn source(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/one.bin", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            for response in responses {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let _ = socket.read(&mut [0; 4096]);
+                let _ = socket.write_all(response.as_bytes());
+                served += 1;
+            }
+            served
+        });
+        (url, server)
+    }
+
+    const ABC: Artifact = Artifact {
+        source: "https://vendor.invalid",
+        revision: "synthetic-v1",
+        member: "one.bin",
+        length: 3,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    };
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc";
+    const HOURLY: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2789\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const SHORT: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const DOWN: &str =
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const GONE: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    fn client() -> Client {
+        Client::builder()
+            .timeout(Duration::from_secs(2))
+            .redirect(Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_hour_long_rate_limit_goes_to_the_next_source_at_once() {
+        let (first, first_server) = source(vec![HOURLY]);
+        let (second, second_server) = source(vec![OK]);
+        let mut slept = Vec::new();
+        let bytes =
+            download_from(&client(), &ABC, &[first, second], &mut |d| slept.push(d)).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert!(slept.is_empty(), "{slept:?}");
+        assert_eq!(first_server.join().unwrap(), 1);
+        assert_eq!(second_server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_short_retry_after_is_waited_out_on_the_same_source() {
+        let (first, server) = source(vec![SHORT, OK]);
+        let mut slept = Vec::new();
+        let bytes = download_from(&client(), &ABC, &[first], &mut |d| slept.push(d)).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(slept, [Duration::from_secs(2)]);
+        assert_eq!(server.join().unwrap(), 2);
+    }
+
+    #[test]
+    fn when_every_source_fails_the_error_names_the_file_and_each_answer() {
+        let (first, first_server) = source(vec![DOWN, DOWN, DOWN]);
+        let (second, second_server) = source(vec![GONE]);
+        let mut slept = Vec::new();
+        let error = download_from(&client(), &ABC, &[first, second], &mut |d| slept.push(d))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("cannot download one.bin: 127.0.0.1:"),
+            "{error}"
+        );
+        assert!(
+            error.contains("answered 503 Service Unavailable"),
+            "{error}"
+        );
+        assert!(error.contains("answered 404 Not Found"), "{error}");
+        // Two backoffs on the busy source, within the budget, then the next.
+        assert_eq!(slept, [Duration::from_secs(1), Duration::from_secs(2)]);
+        assert_eq!(first_server.join().unwrap(), 3);
+        assert_eq!(second_server.join().unwrap(), 1);
+        // A wrong file from the first source is never kept; the second's is.
+        let (first, _) = source(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabd",
+        ]);
+        let (second, _) = source(vec![OK]);
+        assert_eq!(
+            download_from(&client(), &ABC, &[first, second], &mut |_| {}).unwrap(),
+            b"abc"
+        );
     }
 
     #[test]
