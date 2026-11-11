@@ -708,41 +708,58 @@ pub fn require_gsp(inventory: &mut Inventory, chip: &str) -> Result<(), Error> {
     }
 }
 
-/// Requires what a Wi-Fi adapter with these PCI IDs loads, where the IDs
-/// alone name it: a MediaTek chip's two images under the chip's binding
-/// (`stela_drivers::net::wifi::mediatek::identity::Chip::target`). Other
-/// adapters choose their files by registers only a boot of the PC reads.
+/// Requires what a Wi-Fi adapter with these PCI IDs loads, under the binding
+/// its driver takes when the USB has none for the observed adapter:
+/// - a MediaTek chip's two images under the chip's binding
+///   (`stela_drivers::net::wifi::mediatek::identity::Chip::target`);
+/// - an RTL8822C's image under the chip's binding
+///   (`stela_drivers::net::wifi::realtek::identity::Profile::chip_target`);
+/// - every image and PNVM an Intel device can select by its MAC, radio and
+///   steps, which only a boot reads, under the device's binding
+///   (`stela_drivers::net::wifi::intel::identity::device_images`, which this
+///   table mirrors).
+///
 /// Returns whether the adapter is one whose files are now required.
 pub fn require_wifi(inventory: &mut Inventory, vendor: u16, device: u16) -> Result<bool, Error> {
-    let (hardware, names) = match (vendor, device) {
+    let intel;
+    let (driver, hardware, names): (_, &str, &[&str]) = match (vendor, device) {
         (0x14c3, 0x7961 | 0x0608) => (
+            "wifi-mt792x",
             "pci:14c3:7961",
-            [
+            &[
                 "mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin",
                 "mediatek/WIFI_RAM_CODE_MT7961_1.bin",
             ],
         ),
         (0x14c3, 0x7922 | 0x0616) => (
+            "wifi-mt792x",
             "pci:14c3:7922",
-            [
+            &[
                 "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
                 "mediatek/WIFI_RAM_CODE_MT7922_1.bin",
             ],
         ),
         (0x14c3, 0x7925 | 0x0717) => (
+            "wifi-mt792x",
             "pci:14c3:7925",
-            [
+            &[
                 "mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin",
                 "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
             ],
         ),
+        // `rtw_8822ce_id_table`.
+        (0x10ec, 0xc822 | 0xc82f) => ("realtek-wifi", "pci:10ec:c822", &["rtw88/rtw8822c_fw.bin"]),
+        (0x8086, _) if !intel_wifi_images(device).is_empty() => {
+            intel = format!("pci:8086:{device:04x}");
+            ("wifi-intel", &intel, intel_wifi_images(device))
+        }
         _ => return Ok(false),
     };
-    for name in names {
+    for &name in names {
         inventory.observe(Requirement {
             name,
             target: Target {
-                driver: "wifi-mt792x",
+                driver,
                 hardware,
                 revision: "linux-firmware",
                 board: None,
@@ -751,6 +768,40 @@ pub fn require_wifi(inventory: &mut Inventory, vendor: u16, device: u16) -> Resu
         })?;
     }
     Ok(true)
+}
+
+/// What the Intel driver can name for the PCI device `device`
+/// (`stela_drivers::net::wifi::intel::identity::device_images`), by the
+/// family its `iwl_hw_card_ids` entry names. `iwlwifi-ma-b0-hr-b0-89.ucode`
+/// has no recipe, so an MA MAC with an HR radio needs the observed inventory.
+fn intel_wifi_images(device: u16) -> &'static [&'static str] {
+    match device {
+        // AX200.
+        0x2723 => &["iwlwifi-cc-a0-77.ucode"],
+        // AX210.
+        0x2725 => &["iwlwifi-ty-a0-gf-a0-89.ucode", "iwlwifi-ty-a0-gf-a0.pnvm"],
+        // BE200.
+        0x272b => &["iwlwifi-gl-c0-fm-c0-c106.ucode", "iwlwifi-gl-c0-fm-c0.pnvm"],
+        // Qu and QuZ MACs.
+        0x02f0 | 0x06f0 | 0x34f0 | 0x3df0 | 0x4df0 | 0x43f0 | 0xa0f0 => &[
+            "iwlwifi-Qu-b0-hr-b0-77.ucode",
+            "iwlwifi-Qu-c0-hr-b0-77.ucode",
+            "iwlwifi-QuZ-a0-hr-b0-77.ucode",
+        ],
+        // So and Ma MACs.
+        0x7af0 | 0x7f70 | 0x51f0 | 0x54f0 | 0x7a70 | 0x51f1 | 0x2729 | 0x7e40 => &[
+            "iwlwifi-so-a0-hr-b0-89.ucode",
+            "iwlwifi-so-a0-gf-a0-89.ucode",
+            "iwlwifi-so-a0-gf-a0.pnvm",
+            "iwlwifi-ma-b0-gf-a0-89.ucode",
+            "iwlwifi-ma-b0-gf-a0.pnvm",
+        ],
+        // Bz MACs.
+        0xa840 | 0x7740 | 0x4d40 => &["iwlwifi-bz-b0-fm-c0-c106.ucode", "iwlwifi-bz-b0-fm-c0.pnvm"],
+        // Sc MACs.
+        0xe440 | 0xe340 | 0xd340 | 0x6e70 | 0xd240 => &["iwlwifi-sc-a0-fm-c0-c106.ucode"],
+        _ => &[],
+    }
 }
 
 /// Requires the regulatory database, without which no Wi-Fi adapter scans
@@ -841,6 +892,17 @@ fn select_mediatek_bluetooth(request: &Request) -> Option<&'static Recipe> {
 /// Bind each original PCI/SYS_CFG1 request to its own chip's pinned image.
 /// Provisioning preserves observations; it grants no native radio admission.
 fn select_realtek_wifi(request: &Request) -> Option<&'static Recipe> {
+    // The RTL8822C chip's binding, which setup writes from PCI IDs alone
+    // (`identity::Profile::chip_target`).
+    if request.target.hardware == "pci:10ec:c822" && request.target.revision == "linux-firmware" {
+        return REALTEK_WIFI.iter().find(|recipe| {
+            recipe.image.member == request.name
+                && matches!(
+                    request.name.as_str(),
+                    "rtw88/rtw8822c_fw.bin" | "rtw88/rtw8822c_wow_fw.bin"
+                )
+        });
+    }
     let pci: Vec<_> = request.target.hardware.split(':').collect();
     if pci.len() != 8
         || pci[0] != "pci"

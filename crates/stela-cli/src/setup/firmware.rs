@@ -170,7 +170,8 @@ pub(super) fn wifi_note(host: &dyn super::host::Host) -> Result<Option<String>> 
 
 /// What [`wifi_note`] says.
 const NO_WIFI_FILES: &str = "this computer has no Wi-Fi adapter whose firmware setup \
-    can add (MediaTek MT7921, MT7922 or MT7925), so the USB has none: the PC needs wired \
+    can add (Intel AX200 to BE200, Realtek RTL8822C, MediaTek MT7921, MT7922 or MT7925), \
+    so the USB has none: the PC needs wired \
     Ethernet, or run setup on the PC itself";
 
 /// Firmware inputs, cache and destination for one provisioning request.
@@ -549,6 +550,17 @@ mod tests {
             assert!(text.contains(name), "{name}: {text}");
         }
         assert!(text.contains("3 exact observed bindings"), "{text}");
+        // An AX210 and an RTL8822CE.
+        let text = plan(&[(0x8086, 0x2725), (0x10ec, 0xc822)]);
+        for name in [
+            "regulatory.db",
+            "iwlwifi-ty-a0-gf-a0-89.ucode",
+            "iwlwifi-ty-a0-gf-a0.pnvm",
+            "rtw88/rtw8822c_fw.bin",
+        ] {
+            assert!(text.contains(name), "{name}: {text}");
+        }
+        assert!(text.contains("4 exact observed bindings"), "{text}");
         // No adapter setup knows: the database alone.
         let text = plan(&[(0x8086, 0x125c)]);
         assert!(text.contains("1 exact observed bindings"), "{text}");

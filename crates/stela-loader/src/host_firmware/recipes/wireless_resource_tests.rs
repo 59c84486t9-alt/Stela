@@ -200,10 +200,115 @@ fn a_wifi_network_requires_the_database_and_a_mediatek_chips_two_images() {
             assert_eq!(selection.recipe.image.member, selection.request.name);
         }
     }
-    // An Intel adapter chooses its files by registers, and Ethernet has none.
+    // Ethernet controllers, Wi-Fi chips no driver here runs, and RTL8852B,
+    // whose driver loads no image, have none.
     let mut inventory = Inventory::default();
-    for (vendor, device) in [(0x8086, 0x2725), (0x8086, 0x125c), (0x14c3, 0x7663)] {
+    for (vendor, device) in [
+        (0x8086, 0x125c),
+        (0x8086, 0x15f3),
+        (0x10ec, 0x8168),
+        (0x14c3, 0x7663),
+        (0x8086, 0x2526),
+        (0x8086, 0x24fd),
+        (0x10ec, 0xb852),
+        (0x10ec, 0xb822),
+        (0x17cb, 0x1103),
+    ] {
         assert!(!require_wifi(&mut inventory, vendor, device).unwrap());
     }
     assert!(inventory.requests().is_empty());
+}
+
+#[test]
+fn a_wifi_network_requires_an_rtl8822cs_image_under_the_chips_binding() {
+    for device in [0xc822, 0xc82f] {
+        let mut inventory = Inventory::default();
+        assert!(require_wifi(&mut inventory, 0x10ec, device).unwrap());
+        let plan = Plan::select(&inventory).unwrap();
+        assert_eq!(plan.selections().len(), 1);
+        let selection = &plan.selections()[0];
+        assert_eq!(selection.request.name, "rtw88/rtw8822c_fw.bin");
+        assert_eq!(selection.request.target.driver, "realtek-wifi");
+        assert_eq!(selection.request.target.hardware, "pci:10ec:c822");
+        assert_eq!(selection.request.target.revision, "linux-firmware");
+        assert_eq!(selection.recipe.image.member, "rtw88/rtw8822c_fw.bin");
+    }
+    // The chip binding holds the RTL8822C's images alone.
+    for (name, hardware, revision) in [
+        ("rtw89/rtw8852b_fw-2.bin", "pci:10ec:c822", "linux-firmware"),
+        ("rtw88/rtw8822c_fw.bin", "pci:10ec:c822", "observed"),
+        ("rtw88/rtw8822c_fw.bin", "pci:10ec:b852", "linux-firmware"),
+    ] {
+        assert!(select(&[request("realtek-wifi", name, hardware, revision)]).is_err());
+    }
+}
+
+#[test]
+fn a_wifi_network_requires_every_image_an_intel_device_can_select() {
+    for (device, names) in [
+        (0x2723, &["iwlwifi-cc-a0-77.ucode"][..]),
+        (
+            0x2725,
+            &["iwlwifi-ty-a0-gf-a0-89.ucode", "iwlwifi-ty-a0-gf-a0.pnvm"][..],
+        ),
+        (
+            0x272b,
+            &["iwlwifi-gl-c0-fm-c0-c106.ucode", "iwlwifi-gl-c0-fm-c0.pnvm"][..],
+        ),
+        (
+            0xa0f0,
+            &[
+                "iwlwifi-Qu-b0-hr-b0-77.ucode",
+                "iwlwifi-Qu-c0-hr-b0-77.ucode",
+                "iwlwifi-QuZ-a0-hr-b0-77.ucode",
+            ][..],
+        ),
+        (
+            0x51f0,
+            &[
+                "iwlwifi-so-a0-hr-b0-89.ucode",
+                "iwlwifi-so-a0-gf-a0-89.ucode",
+                "iwlwifi-so-a0-gf-a0.pnvm",
+                "iwlwifi-ma-b0-gf-a0-89.ucode",
+                "iwlwifi-ma-b0-gf-a0.pnvm",
+            ][..],
+        ),
+        (
+            0x7740,
+            &["iwlwifi-bz-b0-fm-c0-c106.ucode", "iwlwifi-bz-b0-fm-c0.pnvm"][..],
+        ),
+        (0xe440, &["iwlwifi-sc-a0-fm-c0-c106.ucode"][..]),
+    ] {
+        let mut inventory = Inventory::default();
+        assert!(require_wifi(&mut inventory, 0x8086, device).unwrap());
+        let plan = Plan::select(&inventory).unwrap();
+        let selected: Vec<_> = plan
+            .selections()
+            .iter()
+            .map(|selection| {
+                assert_eq!(selection.request.target.driver, "wifi-intel");
+                assert_eq!(
+                    selection.request.target.hardware,
+                    format!("pci:8086:{device:04x}")
+                );
+                assert_eq!(selection.request.target.revision, "linux-firmware");
+                assert_eq!(
+                    selection.recipe.image.member,
+                    format!("intel/iwlwifi/{}", selection.request.name)
+                );
+                selection.request.name.as_str()
+            })
+            .collect();
+        assert_eq!(selected, names, "{device:04x}");
+    }
+    // Every device the driver lists has pinned files; each plan selects.
+    let mut listed = 0;
+    for device in 0..=u16::MAX {
+        let mut inventory = Inventory::default();
+        if require_wifi(&mut inventory, 0x8086, device).unwrap() {
+            listed += 1;
+            Plan::select(&inventory).unwrap();
+        }
+    }
+    assert_eq!(listed, 26);
 }
