@@ -411,12 +411,10 @@ struct Service {
     running: u32,
     /// Whether the disk signals its completions, asked once.
     signals: Cell<Option<bool>>,
-    /// The doorbell count of the last look that found nothing, while nothing
-    /// has moved since: the guest's device writes look far more often than
-    /// the disk completes, and a look of a disk that signals needs a doorbell
-    /// to find anything. A lost one waits for the look its owner schedules
-    /// anyway.
-    looked: Cell<Option<u64>>,
+    /// The last look that found nothing ([`staged_disk::LookGate`]): it
+    /// excuses looks for [`LOOK_WINDOW_MICROS`] while no doorbell moves, as
+    /// a busy core takes the disk's signal only at its next interrupt window.
+    looked: Cell<staged_disk::LookGate>,
     /// Host commands that failed, which the guest sees only as its
     /// controller's error status.
     failures: u64,
@@ -528,7 +526,7 @@ impl BlockDevice for Service {
             timed(DiskPart::Start, || self.inner.start(command))
         };
         self.running += u32::from(started.is_ok());
-        self.looked.set(None);
+        self.looked.set(staged_disk::LookGate::default());
         // Reported with the loader's root and interrupts restored.
         self.failed("start lba", lba, started)
     }
@@ -539,7 +537,7 @@ impl BlockDevice for Service {
             timed(DiskPart::Finish, || self.inner.finish(tag))
         };
         self.running = self.running.saturating_sub(u32::from(finished.is_some()));
-        self.looked.set(None);
+        self.looked.set(staged_disk::LookGate::default());
         // Reported with the loader's root and interrupts restored.
         finished.map(|result| self.failed("finished tag", u64::from(tag), result))
     }
@@ -559,13 +557,17 @@ impl BlockDevice for Service {
         }
         // Read before the look: a signal after it moves the count.
         let doorbells = super::host::doorbells();
-        if self.signals() && self.looked.get() == Some(doorbells) {
+        let now = super::host::fresh_counter();
+        let window = super::host::COUNTER_HZ / 1_000_000 * LOOK_WINDOW_MICROS;
+        let mut gate = self.looked.get();
+        if gate.skip(self.signals(), doorbells, now, window) {
             return false;
         }
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
         let posted = timed(DiskPart::Posted, || self.inner.posted());
-        self.looked.set((!posted).then_some(doorbells));
+        gate.looked(posted, doorbells, now);
+        self.looked.set(gate);
         posted
     }
     fn signals(&self) -> bool {
@@ -592,6 +594,12 @@ static STEPPED: AtomicU64 = AtomicU64::new(0);
 const FALLBACK_MILLIS: u64 = 1;
 /// A completion the disk has not shown is looked for after this long.
 const LOST_MILLIS: u64 = 1;
+/// How long a fruitless look at a signalling disk excuses the next ones
+/// while no core took a doorbell: a few of an NVMe read's latency.
+const LOOK_WINDOW_MICROS: u64 = 20;
+/// The doorbell count at the last step: a later one is a completion signal
+/// no step has answered ([`staged_disk::step_due`]).
+static SEEN_DOORBELLS: AtomicU64 = AtomicU64::new(0);
 
 /// Called under the devices' lock; it only marks the step due.
 fn wake_staged() {
@@ -649,6 +657,8 @@ fn step(worker: &DiskWorker) -> Option<staged_disk::Step> {
         return None;
     }
     STEPS[0].fetch_add(1, Ordering::Relaxed);
+    // Read before the step's look: a signal after it is still unanswered.
+    SEEN_DOORBELLS.store(super::host::doorbells(), Ordering::Relaxed);
     let now = super::host::fresh_counter();
     STEPPED.store(now, Ordering::Relaxed);
     Some(timed(DiskPart::Step, || {
@@ -686,12 +696,19 @@ pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
 /// completions, outside the devices' lock. A PE that waits (`whole`) steps
 /// while each step makes progress, until an interrupt comes for it; one
 /// with guest code to run takes one bounded step, and only for a disk no
-/// processor stepped for [`FALLBACK_MILLIS`]. Nothing here waits for a disk.
+/// processor stepped for [`FALLBACK_MILLIS`] or one whose completion signal
+/// came since the last step. What a step took reaches the guest at the next
+/// release of the devices' lock, whose published deadline then calls the
+/// home machine at once. Nothing here waits for a disk.
 pub(super) fn serve_staged(whole: bool) {
-    if !whole
-        && super::host::fresh_counter().saturating_sub(STEPPED.load(Ordering::Relaxed))
-            < super::host::COUNTER_HZ / 1000 * FALLBACK_MILLIS
-    {
+    if !staged_disk::step_due(
+        whole,
+        super::host::fresh_counter(),
+        STEPPED.load(Ordering::Relaxed),
+        super::host::COUNTER_HZ / 1000 * FALLBACK_MILLIS,
+        super::host::doorbells(),
+        SEEN_DOORBELLS.load(Ordering::Relaxed),
+    ) {
         return;
     }
     for worker in staged_workers() {
@@ -1150,7 +1167,7 @@ pub unsafe fn open(
             root,
             running: 0,
             signals: Cell::new(None),
-            looked: Cell::new(None),
+            looked: Cell::new(staged_disk::LookGate::default()),
             failures: 0,
         })
     };
@@ -1216,7 +1233,7 @@ pub unsafe fn open(
                 root,
                 running: 0,
                 signals: Cell::new(None),
-                looked: Cell::new(None),
+                looked: Cell::new(staged_disk::LookGate::default()),
                 failures: 0,
             }) as Box<dyn BlockDevice>
         })

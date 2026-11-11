@@ -317,6 +317,61 @@ impl DiskWorker {
     }
 }
 
+/// When a look at a signalling host disk's completion queue may be skipped.
+///
+/// A disk that signals its completions moves the host's doorbell count, so
+/// a look that found nothing need not be repeated until the count moves.
+/// But the count moves only when a core takes the disk's interrupt, and a
+/// busy core runs guest code with interrupts off: it takes the signal only
+/// at its next interrupt window, milliseconds away, while the completion is
+/// already in memory. So a fruitless look excuses the next ones only for
+/// `window` counter ticks; after that a look reads memory again, whatever
+/// the count says. A look costs a root change and a read of one word.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LookGate {
+    /// The doorbell count and the counter of the last look that found
+    /// nothing.
+    fruitless: Option<(u64, u64)>,
+}
+
+impl LookGate {
+    /// Whether a look at counter `now`, with the doorbell count at
+    /// `doorbells`, can be skipped for a disk that signals (`signals`).
+    pub fn skip(&self, signals: bool, doorbells: u64, now: u64, window: u64) -> bool {
+        signals
+            && self
+                .fruitless
+                .is_some_and(|(count, at)| count == doorbells && now.wrapping_sub(at) < window)
+    }
+
+    /// What a look at `now`, the count read before it at `doorbells`, found.
+    pub fn looked(&mut self, posted: bool, doorbells: u64, now: u64) {
+        self.fruitless = (!posted).then_some((doorbells, now));
+    }
+
+    /// A start or a finish changed what the disk may post.
+    pub fn reset(&mut self) {
+        self.fruitless = None;
+    }
+}
+
+/// Whether a core that runs guest code (`whole` false) or waits for one
+/// (`whole`) steps the staged disks now, at counter `now`: a waiting one
+/// always; a busy one when no core stepped since `fallback` ticks before
+/// (`stepped`), or when the doorbell count moved past `seen`, the count at
+/// the last step: a host disk's completion signal has come since, and the
+/// completion waits in memory for a step to take it.
+pub fn step_due(
+    whole: bool,
+    now: u64,
+    stepped: u64,
+    fallback: u64,
+    doorbells: u64,
+    seen: u64,
+) -> bool {
+    whole || now.saturating_sub(stepped) >= fallback || doorbells != seen
+}
+
 impl BlockDevice for StagedDisk {
     fn identity(&self) -> &Identity {
         &self.identity

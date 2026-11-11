@@ -644,3 +644,67 @@ fn one_finish_reaps_every_completion_of_a_disk_that_collects_them_together() {
         assert_eq!(model.finish(tag), Some(Ok(None)));
     }
 }
+
+/// 20 us of the 24 MHz counter.
+const WINDOW: u64 = 480;
+
+#[test]
+fn a_fruitless_look_excuses_the_next_ones_only_until_the_window_ends() {
+    let mut gate = LookGate::default();
+    assert!(!gate.skip(true, 7, 1000, WINDOW), "never looked yet");
+    gate.looked(false, 7, 1000);
+    assert!(gate.skip(true, 7, 1000 + WINDOW - 1, WINDOW));
+    // The doorbell count moved: a signal came, so look.
+    assert!(!gate.skip(true, 8, 1001, WINDOW));
+    // No core took the signal, but the window passed: the completion may
+    // be in memory already.
+    assert!(!gate.skip(true, 7, 1000 + WINDOW, WINDOW));
+    // A disk that sends no signal is always looked at.
+    assert!(!gate.skip(false, 7, 1001, WINDOW));
+}
+
+#[test]
+fn a_look_that_found_a_completion_or_a_new_command_excuses_nothing() {
+    let mut gate = LookGate::default();
+    gate.looked(true, 3, 50);
+    assert!(!gate.skip(true, 3, 51, WINDOW));
+    gate.looked(false, 3, 60);
+    assert!(gate.skip(true, 3, 61, WINDOW));
+    gate.reset();
+    assert!(!gate.skip(true, 3, 62, WINDOW));
+    // A counter that wrapped since the look ends the excuse too.
+    gate.looked(false, 3, u64::MAX - 10);
+    assert!(gate.skip(true, 3, u64::MAX, WINDOW));
+    assert!(!gate.skip(true, 3, WINDOW, WINDOW));
+}
+
+#[test]
+fn a_busy_core_steps_at_a_disk_signal_without_waiting_for_the_fallback() {
+    const FALLBACK: u64 = 24_000;
+    // A waiting core always steps.
+    assert!(step_due(true, 10, 10, FALLBACK, 4, 4));
+    // A busy core leaves a disk stepped moments ago to the others...
+    assert!(!step_due(false, 10, 5, FALLBACK, 4, 4));
+    // ...unless a completion's signal came since that step.
+    assert!(step_due(false, 10, 5, FALLBACK, 5, 4));
+    // ...or nobody stepped for the fallback time.
+    assert!(step_due(false, 5 + FALLBACK, 5, FALLBACK, 4, 4));
+}
+
+#[test]
+fn a_completion_posted_after_a_fruitless_step_is_taken_by_the_next_step() {
+    let (mut model, worker, disk) = staged(4);
+    let tag = model.start(write(9, 3)).unwrap();
+    // The step gives the host its command; nothing is posted yet.
+    assert_eq!(stepped(&worker).started, 1);
+    assert_eq!(stepped(&worker).finished, 0);
+    assert_eq!(model.finish(tag), None);
+    disk.borrow_mut().complete_all();
+    // The completion is in memory: the next step takes it at once, and the
+    // model's look finds the result without reaching the disk itself.
+    assert_eq!(stepped(&worker).finished, 1);
+    assert!(model.posted());
+    let calls = disk.borrow().calls;
+    assert_eq!(model.finish(tag), Some(Ok(None)));
+    assert_eq!(disk.borrow().calls, calls);
+}
