@@ -34,7 +34,11 @@
 //! PMCx045 umask 0Fh / F0h L1 DTLB miss L2 hit / L2 miss (walk), PMCx064
 //! umask 09h L2 misses of instruction and data requests, PMCx044 umask 48h
 //! data fills from DRAM or I/O, the core PMU's last-level miss proxy: L3
-//! misses proper are only in the L3 PMU). Other AMD families count cycles,
+//! misses proper are only in the L3 PMU; PMCx1A0 umask 01h / 1Eh dispatch
+//! slots left empty by the front end / by back-end stalls, PMCx0AA umask
+//! 07h ops dispatched and PMCx0C1 ops retired, the top-down split of Zen 4
+//! and 5: 6 or 8 slots per cycle, and dispatched less retired ops is bad
+//! speculation). Other AMD families count cycles,
 //! instructions and mispredicts. Intel counts the architectural events
 //! CPUID leaf 0Ah reports (cycles, instructions, mispredicted branches, LLC
 //! misses); the rest are unsupported there, said once.
@@ -159,7 +163,7 @@ const fn event(name: &'static str, code: u16, umask: u8) -> Event {
 
 const CYCLES_AMD: Event = event("cyc", 0x076, 0);
 const INSTRUCTIONS_AMD: Event = event("ins", 0x0c0, 0);
-const ZEN: [Event; 8] = [
+const ZEN: [Event; 12] = [
     event("brmisp", 0x0c3, 0),
     event("icmiss", 0x18e, 0x18),
     event("itlbh", 0x084, 0),
@@ -168,6 +172,10 @@ const ZEN: [Event; 8] = [
     event("dtlbw", 0x045, 0xf0),
     event("l2miss", 0x064, 0x09),
     event("dram", 0x044, 0x48),
+    event("feslot", 0x1a0, 0x01),
+    event("beslot", 0x1a0, 0x1e),
+    event("disp", 0x0aa, 0x07),
+    event("retops", 0x0c1, 0),
 ];
 const CYCLES_INTEL: Event = event("cyc", 0x3c, 0);
 const INSTRUCTIONS_INTEL: Event = event("ins", 0xc0, 0);
@@ -419,6 +427,32 @@ fn program(layout: &Layout, set: usize) -> usize {
     events.len()
 }
 
+/// The counters from the first that count cycles while selected: under a
+/// hypervisor whose host keeps a counter for itself (a watchdog), the last
+/// ones accept a select and stay 0.
+fn live_counters(layout: &Layout) -> usize {
+    let cycles = layout.select(layout.fixed[0]);
+    let index = |counter: usize| layout.select + counter as u32 * layout.stride;
+    for counter in 0..layout.counters {
+        write(index(counter), cycles);
+    }
+    if let Some((global, value)) = layout.global {
+        write(global, value);
+    }
+    let before: Vec<u64> = (0..layout.counters).map(|c| rdpmc(c as u32)).collect();
+    let started = crate::apic::rdtsc();
+    while crate::apic::rdtsc().wrapping_sub(started) < 100_000 {
+        core::hint::spin_loop();
+    }
+    let live = (0..layout.counters)
+        .take_while(|&counter| rdpmc(counter as u32) != before[counter])
+        .count();
+    for counter in 0..layout.counters {
+        write(index(counter), 0);
+    }
+    live
+}
+
 /// Under `--profile`, program this host core's counters for PE `pe`.
 pub(crate) fn start(pe: usize) {
     let slot = super::local::processor() as usize;
@@ -428,7 +462,7 @@ pub(crate) fn start(pe: usize) {
     let layout = match shared_layout() {
         Some(layout) => layout,
         None => {
-            let Some(layout) = layout() else {
+            let Some(mut layout) = layout() else {
                 if !DESCRIBED.swap(true, Relaxed) {
                     output::arguments(format_args!(
                         "PMU unavailable: no AMD core counters or Intel architectural perfmon; PES PMU left out\n"
@@ -436,6 +470,18 @@ pub(crate) fn start(pe: usize) {
                 }
                 return;
             };
+            // SAFETY: ring 0; an unknown counter takes #GP, which `fixup`
+            // resumes.
+            if unsafe { stela_pmu_rdpmc(0) } == 0 {
+                let live = live_counters(&layout);
+                if live < layout.counters && live > layout.fixed.len() {
+                    output::arguments(format_args!(
+                        "PMU counters {live}..{} take events but stay 0 (another owner holds them): {live} used\n",
+                        layout.counters - 1
+                    ));
+                    layout.counters = live;
+                }
+            }
             let leaked = Box::into_raw(Box::new(layout));
             match LAYOUT.compare_exchange(core::ptr::null_mut(), leaked, Relaxed, Relaxed) {
                 Ok(_) => {}
