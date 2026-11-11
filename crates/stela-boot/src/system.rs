@@ -550,8 +550,14 @@ fn held(refusal: Refusal) -> &'static str {
         Refusal::NoRecovery { installed: true } => {
             "NVRAM asks for a recoveryOS the SSD lacks. Install macOS erases the SSD."
         }
+        Refusal::Stale(stale) => stale.screen(),
         _ => "The Mac's last install did not finish: choose Install macOS again.",
     }
+}
+
+/// Log which case makes the chosen disk stale, once per check.
+fn log_stale(stale: stela_boot_core::chosen_disk::Stale) {
+    output::arguments(format_args!("CHOSEN DISK stale: {}\n", stale.case()));
 }
 
 /// Why the default boot, `options`, can only wait for a restore, checked
@@ -568,6 +574,10 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
         Err(refusal @ Refusal::BlankDisk) => (Some(held(refusal)), "no macOS installed yet"),
         Err(refusal @ Refusal::RecoveryMode) => (Some(held(refusal)), "an install did not finish"),
         Err(refusal @ Refusal::NoRecovery { .. }) => (Some(held(refusal)), "no recoveryOS to boot"),
+        Err(Refusal::Stale(stale)) => {
+            log_stale(stale);
+            (Some(stale.screen()), stale.reason())
+        }
         _ => (None, ""),
     };
     crate::status::done(found);
@@ -595,6 +605,9 @@ pub(crate) fn boot(
             Ok(routed) => break routed,
             Err(Refusal::Other(error)) => output::fatal(error),
             Err(refusal) => {
+                if let Refusal::Stale(stale) = &refusal {
+                    log_stale(*stale);
+                }
                 options = crate::choice::hold(&mut volume, held(refusal)).unwrap_or_else(|| {
                     output::fatal(
                         "the machine can only be restored and this volume has no startup \
