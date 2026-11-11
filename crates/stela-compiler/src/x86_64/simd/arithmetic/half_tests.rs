@@ -185,3 +185,178 @@ fn half_arithmetic_lanes_match_the_reference() {
     }
     assert!(inline > 20_000, "{inline}");
 }
+
+#[derive(Clone, Copy)]
+enum Pairing {
+    Elementwise,
+    Pairwise,
+    Indexed,
+}
+
+/// Finite Half values weighted to what leaves the lane recipe: subnormals,
+/// values near the subnormal boundary, exact cancellation partners, tiny
+/// products and ordinary values; `partner` is the other operand of the lane.
+fn finite_half(random: &mut u64, partner: Option<u64>) -> u64 {
+    *random ^= *random << 13;
+    *random ^= *random >> 7;
+    *random ^= *random << 17;
+    let sign = (*random >> 40 & 1) << 15;
+    match *random % 10 {
+        0 => sign | (*random >> 20 & 0x3ff),
+        1 => sign | (0x0400 + (*random >> 20 & 0x3ff)),
+        2 => partner.map_or(0, |bits| bits ^ 0x8000),
+        3 => partner.unwrap_or(0),
+        4 => sign | ((*random >> 20 & 0x7ff) + 0x1000),
+        5 => sign,
+        6 => partner.map_or(0, |bits| {
+            (bits ^ 0x8000).wrapping_add(*random >> 30 & 3) & 0xffff
+        }),
+        _ => sign | ((*random >> 16 & 0x7fff) % 0x7800 + 0x400),
+    }
+}
+
+/// The packed recipe (`half::packed`) completes every finite vector lane
+/// inline under each rounding mode, including subnormal inputs, exact
+/// cancellation and tiny or subnormal results, with Arm's results and
+/// status; FZ16, AH, overflow and NaN or infinite inputs exit or match.
+#[test]
+fn packed_half_arithmetic_completes_every_finite_lane_inline() {
+    const PACKED_FORMS: &[(u32, BinaryOperation, usize, Pairing)] = &[
+        (0x4e40_1400, BinaryOperation::Add, 8, Pairing::Elementwise),
+        (0x0e40_1400, BinaryOperation::Add, 4, Pairing::Elementwise),
+        (
+            0x4ec0_1400,
+            BinaryOperation::Subtract,
+            8,
+            Pairing::Elementwise,
+        ),
+        (
+            0x6e40_1c00,
+            BinaryOperation::Multiply,
+            8,
+            Pairing::Elementwise,
+        ),
+        (
+            0x2e40_1c00,
+            BinaryOperation::Multiply,
+            4,
+            Pairing::Elementwise,
+        ),
+        (
+            0x6ec0_1400,
+            BinaryOperation::AbsoluteDifference,
+            8,
+            Pairing::Elementwise,
+        ),
+        (
+            0x4e40_1c00,
+            BinaryOperation::MultiplyExtended,
+            8,
+            Pairing::Elementwise,
+        ),
+        (0x6e40_1400, BinaryOperation::Add, 8, Pairing::Pairwise),
+        (0x4f00_9000, BinaryOperation::Multiply, 8, Pairing::Indexed),
+    ];
+    let host = TargetCpu::detect();
+    let mut random = 0x2468_ace0_1357_9bdf_u64;
+    let mut inline = 0usize;
+    let mut exits = 0usize;
+    for target in targets() {
+        let packed = target.supports(TargetCpu::Avx2)
+            && target.supports(TargetCpu::F16c)
+            && !crate::x86_64::asm::vector_extensions::half_supported(target);
+        assert!(host.supports(target));
+        for &(base, operation, lanes, pairing) in PACKED_FORMS {
+            let word = base | M << 16 | N << 5 | D;
+            let code = compile(word, target);
+            for case in 0..4000 {
+                let mut n = [0u64; 8];
+                let mut m = [0u64; 8];
+                for lane in 0..8 {
+                    n[lane] = finite_half(&mut random, None);
+                    m[lane] = finite_half(&mut random, Some(n[lane]));
+                }
+                if case % 50 == 0 {
+                    // An infinity or NaN somewhere.
+                    n[case / 50 % lanes] = 0x7c00 | (case as u64 & 0x201);
+                }
+                let operands: Vec<(u64, u64)> = (0..lanes)
+                    .map(|lane| match pairing {
+                        Pairing::Elementwise => (n[lane], m[lane]),
+                        Pairing::Indexed => (n[lane], m[0]),
+                        Pairing::Pairwise => {
+                            let source = if lane < lanes / 2 { &n } else { &m };
+                            let first = 2 * (lane % (lanes / 2));
+                            (source[first], source[first + 1])
+                        }
+                    })
+                    .collect();
+                let limbs = |values: &[u64; 8]| {
+                    let mut limbs = [0u64; 2];
+                    for (lane, value) in values.iter().enumerate().take(lanes) {
+                        limbs[lane / 4] |= value << (16 * (lane % 4));
+                    }
+                    limbs
+                };
+                let controls: Vec<u32> = if case % 4 == 0 {
+                    controls()
+                } else {
+                    alloc::vec![(case as u32 % 4) << FPCR_ROUNDING_SHIFT]
+                };
+                for fpcr in controls {
+                    let mut initial = GuestState {
+                        fpcr,
+                        fpsr: if case % 3 == 0 { INEXACT } else { 0 },
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    initial.v[N as usize] = limbs(&n);
+                    initial.v[M as usize] = limbs(&m);
+                    initial.v[D as usize] = [u64::MAX, u64::MAX];
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    let outcomes: Vec<_> = operands
+                        .iter()
+                        .map(|&(left, right)| evaluate(Format::Half, operation, fpcr, left, right))
+                        .collect();
+                    let finite = |bits: u64| bits >> 10 & 31 != 31;
+                    let covered = packed
+                        && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_FZ16 | FPCR_AH) == 0
+                        && operands
+                            .iter()
+                            .zip(&outcomes)
+                            .all(|(&(left, right), outcome)| {
+                                finite(left)
+                                    && finite(right)
+                                    && outcome.as_ref().unwrap().exceptions & 0b100 == 0
+                            });
+                    if exit == PC.0 {
+                        assert_eq!(actual, initial, "{word:08x} {operands:x?} {fpcr:#x}");
+                        assert!(
+                            !covered,
+                            "covered lanes exited: {word:08x} {operands:x?} {fpcr:#x} {target:?}"
+                        );
+                        exits += 1;
+                        continue;
+                    }
+                    assert_eq!(exit, RETURN, "{word:08x} {operands:x?}");
+                    let mut expected = initial.clone();
+                    let mut result = [0u64; 2];
+                    for (lane, outcome) in outcomes.iter().enumerate() {
+                        let outcome = outcome.as_ref().expect("no enabled traps");
+                        expected.fpsr |= outcome.exceptions;
+                        result[lane / 4] |= outcome.bits << (16 * (lane % 4));
+                    }
+                    expected.v[D as usize] = result;
+                    assert_eq!(
+                        actual, expected,
+                        "{word:08x} {operands:x?} {fpcr:#x} {:#x} {target:?}",
+                        initial.fpsr
+                    );
+                    inline += 1;
+                }
+            }
+        }
+    }
+    assert!(inline > 50_000 && exits > 0, "{inline} {exits}");
+}

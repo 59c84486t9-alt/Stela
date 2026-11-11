@@ -5,6 +5,7 @@ use crate::x86_64::asm::{
     vector_extensions::{self, HalfOpcode},
 };
 use alloc::{vec, vec::Vec};
+mod packed;
 mod product;
 mod zero;
 
@@ -189,6 +190,10 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
     debug_assert_eq!(operand.format, Format::Half);
     if vector_extensions::half_supported(target) {
         emit_native(code, operand, pc);
+        return;
+    }
+    if packed::supports(operand, target) {
+        packed::emit(code, operand, pc);
         return;
     }
     let mut helper = Vec::new();
