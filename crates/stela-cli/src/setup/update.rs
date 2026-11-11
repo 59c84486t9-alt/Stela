@@ -126,6 +126,13 @@ pub(super) fn update_stela(
     let to = version_id(&image);
     let to_generation = environment.generation();
     ready(&record, usb)?;
+    // Every bundle file goes into the cache before the stick changes, so a
+    // failed download leaves the old stela.efi and the old firmware.
+    let bundle_incomplete = stela_loader::host_firmware::reads_bundle(&image)
+        && super::firmware::bundle_status(&record.volume).is_err();
+    if !dry_run && bundle_incomplete {
+        super::firmware::prefetch_bundle(&image, Some(&record.volume))?;
+    }
     let esp = record.esp.clone();
     // A missing or damaged loader is what an update also puts right.
     let from = fs::read(esp.join(LOADER_PATH)).map_or("none".into(), |image| version_id(&image));
@@ -163,10 +170,29 @@ pub(super) fn update_stela(
             }
             activate(&mut record, to)?;
             requested.provision(&esp, &image)?;
+            // An update whose bundle download stopped it is finished here.
+            for note in
+                super::firmware::provision_bundle(environment.host, &record.volume, &esp, &image)?
+            {
+                writeln!(text, "  firmware       {note}")?;
+            }
             text.push_str("Done.\n");
             return Ok(text);
         }
         writeln!(text, "  stela.efi      version {to} is already installed")?;
+        if bundle_incomplete {
+            writeln!(text, "  firmware       complete the firmware bundle")?;
+            if !dry_run {
+                for note in super::firmware::provision_bundle(
+                    environment.host,
+                    &record.volume,
+                    &esp,
+                    &image,
+                )? {
+                    writeln!(text, "  firmware       {note}")?;
+                }
+            }
+        }
         let spare = record
             .translations
             .as_ref()

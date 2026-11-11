@@ -654,6 +654,11 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     update::check_firmware_support(&esp, &tool)?;
     // The firmware the last boot asked for and the USB lacks.
     let requested = super::firmware::requested(&esp, &tool)?;
+    // Every missing bundle file goes into the cache before the stick
+    // changes; a failed download leaves it as it was.
+    if !command.dry_run {
+        super::firmware::prefetch_bundle(&tool, Some(&record.volume))?;
+    }
     // Machines without an ECID get one; their bundles are prepared again.
     let ipsw = command.optional_image()?;
     if ipsw.is_some() {

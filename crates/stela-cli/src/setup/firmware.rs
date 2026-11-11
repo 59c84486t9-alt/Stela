@@ -204,13 +204,20 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
         Err(error) => return Err(error.into()),
     }
     let bytes = download(client, artifact)?;
+    store(directory, artifact, &bytes)
+}
+
+/// Keep `bytes`, `artifact`'s checked download, in the cache `directory`.
+fn store(directory: &Path, artifact: &Artifact, bytes: &[u8]) -> Result<Vec<u8>> {
+    artifact.verify(bytes)?;
+    let path = directory.join(artifact.sha256);
     fs::create_dir_all(directory)?;
     ensure!(
         !fs::symlink_metadata(directory)?.is_symlink(),
         "firmware cache directory is a symlink"
     );
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    temporary.write_all(&bytes)?;
+    temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary
         .persist_noclobber(&path)
@@ -242,6 +249,79 @@ pub(super) fn bundle_summary() -> String {
         "every supported device: {count} files, {:.1} MiB (each PC loads only its own)",
         bytes as f64 / MIB as f64
     )
+}
+
+/// Download every file of the complete bundle that neither the cache nor
+/// the stick's data volume `volume` (when it exists yet) holds, before
+/// setup, `repair` or `update` changes anything on the stick: a failed
+/// download leaves the stick as it was. Nothing for a stela.efi
+/// (`mount_image`) that reads no bundle.
+pub(super) fn prefetch_bundle(mount_image: &[u8], volume: Option<&Path>) -> Result<()> {
+    if !host_firmware::reads_bundle(mount_image) {
+        return Ok(());
+    }
+    let client = client()?;
+    prefetch(
+        &bundle::complete(),
+        &super::cache_dir().join("firmware"),
+        volume
+            .map(|volume| volume.join(bundle::DIRECTORY))
+            .as_deref(),
+        &mut |artifact| download(&client, artifact),
+    )
+    .context("the firmware bundle could not be downloaded, so the USB was left as it was")?;
+    Ok(())
+}
+
+/// [`prefetch_bundle`] of `files` into `cache` through `download`; the
+/// files `on_stick` already holds by hash are not downloaded. Returns how
+/// many files were downloaded.
+fn prefetch(
+    files: &[(&Artifact, &Artifact)],
+    cache: &Path,
+    on_stick: Option<&Path>,
+    download: &mut dyn FnMut(&Artifact) -> Result<Vec<u8>>,
+) -> Result<usize> {
+    let mut wanted: Vec<(&Artifact, String)> = Vec::new();
+    for (object, notice) in files {
+        for (artifact, path) in [
+            (*object, bundle::object_path(object.sha256)),
+            (*notice, bundle::notice_path(notice.sha256)),
+        ] {
+            if wanted
+                .iter()
+                .any(|(seen, _)| seen.sha256 == artifact.sha256)
+            {
+                continue;
+            }
+            let cached = holds(&cache.join(artifact.sha256), artifact);
+            let kept = on_stick.is_some_and(|directory| holds(&directory.join(&path), artifact));
+            if !cached && !kept {
+                wanted.push((artifact, path));
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+    let bytes: usize = wanted.iter().map(|(artifact, _)| artifact.length).sum();
+    eprintln!(
+        "Downloading the firmware bundle: {} files, {:.1} MiB",
+        wanted.len(),
+        bytes as f64 / MIB as f64
+    );
+    for (index, (artifact, _)) in wanted.iter().enumerate() {
+        eprintln!(
+            "  {} ({:.1} MiB), file {} of {}",
+            artifact.member,
+            artifact.length as f64 / MIB as f64,
+            index + 1,
+            wanted.len()
+        );
+        let bytes = download(artifact)?;
+        store(cache, artifact, &bytes)?;
+    }
+    Ok(wanted.len())
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -372,20 +452,11 @@ pub(super) fn provision_bundle(
         bytes as f64 / MIB as f64,
         directory.display()
     );
-    let client = client()?;
+    // Every download before the first write to the stick.
+    prefetch_bundle(mount_image, Some(volume))?;
     let cache = super::cache_dir().join("firmware");
-    let total = files.len() * 2;
-    let mut done = 0;
     publish_bundle(volume, &files, &mut |artifact| {
-        done += 1;
-        if fs::symlink_metadata(cache.join(artifact.sha256)).is_err() {
-            eprintln!(
-                "  downloading {} ({:.1} MiB), file {done} of at most {total}",
-                artifact.member,
-                artifact.length as f64 / MIB as f64
-            );
-        }
-        cached(&client, &cache, artifact)
+        read_cached(&cache.join(artifact.sha256), artifact)
     })
     .context("the USB did not get the complete firmware bundle")?;
     let mut notes = Vec::new();
@@ -958,6 +1029,68 @@ mod tests {
             "{status}"
         );
         assert!(status.contains("1 of its files are damaged"), "{status}");
+    }
+
+    #[test]
+    fn prefetch_downloads_only_what_neither_the_cache_nor_the_stick_holds() {
+        let catalog = synthetic();
+        let [(a, a_bytes), (b, b_bytes), (notice, notice_bytes)] = &catalog[..] else {
+            unreachable!()
+        };
+        let files: Vec<(&Artifact, &Artifact)> = vec![(a, notice), (b, notice)];
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let volume = dir.path().join("volume");
+        let stick = volume.join(bundle::DIRECTORY);
+        // The stick kept the first file from a stopped setup.
+        fs::create_dir_all(&stick).unwrap();
+        fs::write(stick.join(bundle::object_path(a.sha256)), a_bytes).unwrap();
+        let before = snapshot(&volume);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let fail_on = std::cell::Cell::new(Some(b.sha256));
+        let mut download = |artifact: &Artifact| -> Result<Vec<u8>> {
+            asked.borrow_mut().push(artifact.member);
+            if fail_on.get() == Some(artifact.sha256) {
+                anyhow::bail!("cannot download {}: every source refused", artifact.member);
+            }
+            Ok([a_bytes, b_bytes, notice_bytes]
+                .into_iter()
+                .zip([a, b, notice])
+                .find(|(_, candidate)| candidate.sha256 == artifact.sha256)
+                .unwrap()
+                .0
+                .clone())
+        };
+        // A failed download: the stick is as it was, the cache keeps what
+        // came.
+        let error = prefetch(&files, &cache, Some(&stick), &mut download).unwrap_err();
+        assert!(error.to_string().contains("vendor/b.bin"), "{error}");
+        assert_eq!(snapshot(&volume), before);
+        assert_eq!(*asked.borrow(), ["LICENSES/LICENCE.vendor", "vendor/b.bin"]);
+        // Run again: only the failed file is asked for, once.
+        fail_on.set(None);
+        asked.borrow_mut().clear();
+        assert_eq!(
+            prefetch(&files, &cache, Some(&stick), &mut download).unwrap(),
+            1
+        );
+        assert_eq!(*asked.borrow(), ["vendor/b.bin"]);
+        assert_eq!(snapshot(&volume), before);
+        // Then nothing; and publishing from the cache alone completes the
+        // bundle, keeping the stick's file.
+        assert_eq!(
+            prefetch(&files, &cache, Some(&stick), &mut download).unwrap(),
+            0
+        );
+        let mut from_cache =
+            |artifact: &Artifact| read_cached(&cache.join(artifact.sha256), artifact);
+        publish_bundle(&volume, &files, &mut from_cache).unwrap();
+        let manifest = fs::read(stick.join("bundle.json")).unwrap();
+        assert_eq!(bundle::Bundle::parse(&manifest).unwrap().objects.len(), 2);
+        assert!(
+            !cache.join(a.sha256).exists(),
+            "the stick's file was never downloaded"
+        );
     }
 
     #[test]

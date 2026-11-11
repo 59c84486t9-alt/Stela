@@ -1013,6 +1013,15 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             command.efi = Some(assets::resolve()?);
         }
         read_efi(environment, command.efi.as_ref().unwrap())?;
+        // The firmware bundle goes into the cache before the USB is erased
+        // or changed: a failed download leaves it as it was.
+        let image = fs::read(command.efi.as_ref().unwrap())?;
+        let volume = erase
+            .is_none()
+            .then(|| medium::locate(host, &super::locate_esp(host, &command.usb).ok()?, None).ok())
+            .flatten()
+            .map(|(volume, _)| volume);
+        firmware::prefetch_bundle(&image, volume.as_deref())?;
     }
     let mut early = None;
     if let Some((disk, _, capacity, _)) = &erase {
