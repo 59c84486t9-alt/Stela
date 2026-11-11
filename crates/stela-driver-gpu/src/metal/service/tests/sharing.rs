@@ -1,4 +1,4 @@
-use super::{Memory, TestService, call, connect, service_on, status, texture};
+use super::{Memory, TestService, call, connect, new_buffer, service_on, status, texture};
 use crate::metal::{
     abi::StorageMode,
     device::fixture::MockBackend,
@@ -191,4 +191,142 @@ fn only_events_and_textures_are_shared_and_a_token_opens_its_kind() {
     assert_eq!(opened.resource_id, texture.resource_id);
     assert_eq!(opened.allocated_size, texture.allocated_size);
     assert_ne!(opened.handle, 0);
+}
+
+/// Commits for `connection` a command buffer held until `event` reaches 1.
+fn hold_for(service: &mut TestService, connection: NonZeroU64, event: u64) {
+    use crate::metal::service::wire::commands::{CommandBufferCode, EventCommand};
+    let mut stream = super::Stream::default();
+    let wait = EventCommand { event, value: 1 };
+    stream.push(CommandBufferCode::WaitForEvent.raw(), &wait, &[]);
+    super::commit(service, connection, &stream).unwrap();
+    assert!(service.device().holds());
+}
+
+fn signal(service: &mut TestService, connection: NonZeroU64, event: u64) {
+    call::<_, Empty>(
+        service,
+        connection,
+        Operation::SetEventSignaledValue,
+        &EventValueRequest { event, value: 1 },
+        &mut Memory::default(),
+    )
+    .unwrap();
+}
+
+fn destroyed_images(service: &mut TestService) -> usize {
+    use crate::metal::vulkan::backend::Object;
+    let destroyed = &service.device().backend().destroyed;
+    destroyed
+        .iter()
+        .filter(|object| matches!(object, Object::Image(_)))
+        .count()
+}
+
+/// A texture one connection shares stays while another connection that
+/// held it has a command buffer held for an event, after both released it;
+/// an unshared texture of the sharer is freed at once.
+#[test]
+fn a_shared_texture_waits_for_every_holders_held_work() {
+    let mut service = service_on(MockBackend::new());
+    let (reader, owner) = (connect(&mut service), connect(&mut service));
+    let memory = &mut Memory::default();
+    let shared: TextureResponse = call(
+        &mut service,
+        owner,
+        Operation::NewTexture,
+        &texture(StorageMode::Shared),
+        memory,
+    )
+    .unwrap();
+    share(&mut service, owner, shared.handle, TOKEN).unwrap();
+    let opened: TextureResponse = call(
+        &mut service,
+        reader,
+        Operation::OpenSharedTexture,
+        &ShareToken { token: TOKEN },
+        memory,
+    )
+    .unwrap();
+    let event = new_event(&mut service, reader);
+    hold_for(&mut service, reader, event);
+    release(&mut service, reader, opened.handle);
+    release(&mut service, owner, shared.handle);
+    let own: TextureResponse = call(
+        &mut service,
+        owner,
+        Operation::NewTexture,
+        &texture(StorageMode::Shared),
+        memory,
+    )
+    .unwrap();
+    release(&mut service, owner, own.handle);
+    service.device().poll().unwrap();
+    assert_eq!(
+        destroyed_images(&mut service),
+        1,
+        "only the unshared texture"
+    );
+    signal(&mut service, reader, event);
+    service.device().backend().finish();
+    service.device().poll().unwrap();
+    assert_eq!(destroyed_images(&mut service), 2);
+    assert_eq!(service.device().memory().deferred, 0);
+}
+
+/// A connection that closes frees what only it could read though another
+/// connection's command buffer waits for an event it shared; what the
+/// waiting connection releases of its own older objects stays, is reported
+/// once at a close, and goes when that connection closes too.
+#[test]
+fn closing_connections_free_what_only_they_could_read() {
+    let mut service = service_on(MockBackend::new());
+    let (waiting, signaller) = (connect(&mut service), connect(&mut service));
+    let event = new_event(&mut service, waiting);
+    share(&mut service, waiting, event, TOKEN).unwrap();
+    open_event(&mut service, signaller, TOKEN).unwrap();
+    let older = new_buffer(&mut service, waiting, StorageMode::Private);
+    hold_for(&mut service, waiting, event);
+    new_buffer(&mut service, signaller, StorageMode::Private);
+    call::<_, TextureResponse>(
+        &mut service,
+        signaller,
+        Operation::NewTexture,
+        &texture(StorageMode::Shared),
+        &mut Memory::default(),
+    )
+    .unwrap();
+    // The signaller crashes: its objects go though the wait remains.
+    service.disconnect(signaller).unwrap();
+    service.device().poll().unwrap();
+    let memory = service.device().memory();
+    assert_eq!((memory.deferred, memory.pinned), (0, 0), "{memory:?}");
+    assert_eq!(destroyed_images(&mut service), 1);
+    assert!(service.refused.is_empty(), "nothing held work keeps");
+    assert!(service.device().holds(), "Metal keeps the wait");
+
+    release(&mut service, waiting, older);
+    assert!(service.device().memory().pinned > 0);
+    let other = connect(&mut service);
+    service.disconnect(other).unwrap();
+    let reports = service
+        .refused
+        .iter()
+        .filter(|line| line.contains("wait for events"))
+        .count();
+    assert_eq!(reports, 1, "{:?}", service.refused);
+    let other = connect(&mut service);
+    service.disconnect(other).unwrap();
+    let reports = service
+        .refused
+        .iter()
+        .filter(|line| line.contains("wait for events"))
+        .count();
+    assert_eq!(reports, 1, "reported once");
+
+    service.disconnect(waiting).unwrap();
+    service.device().poll().unwrap();
+    let memory = service.device().memory();
+    assert_eq!((memory.deferred, memory.pinned), (0, 0), "{memory:?}");
+    assert!(!service.device().holds());
 }

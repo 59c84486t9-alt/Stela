@@ -28,6 +28,7 @@ pub mod lifecycle;
 mod memory_book;
 pub use memory_book::MemoryOwner;
 pub mod pass_times;
+pub mod pins;
 pub mod pipelines;
 pub mod queue;
 pub mod resources;
@@ -131,10 +132,14 @@ pub struct Device<B: Backend, C: Compiler> {
     /// A submission failed; nothing pending will complete.
     lost: bool,
     quiesce: Option<lifecycle::QuiesceStatus>,
-    /// Objects waiting for a serial to complete, with the allocation bytes
-    /// charged until their backend memory is destroyed. Entries follow
-    /// submission order.
-    deferred: VecDeque<(u64, Object, u64)>,
+    /// Objects waiting for the command buffers that may read them, with the
+    /// allocation bytes charged until their backend memory is destroyed.
+    /// Entries follow release order.
+    deferred: VecDeque<(pins::Release, Object, u64)>,
+    /// Who may read what is released now ([`Self::release_for`]).
+    scope: pins::Scope,
+    /// The most deferred bytes that only held work kept ([`DeviceMemory`]).
+    peak_pinned: u64,
     allocated: u64,
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
@@ -170,6 +175,12 @@ pub struct DeviceMemory {
     /// Objects destroyed once submitted work completes, and their bytes.
     pub deferred: usize,
     pub deferred_bytes: u64,
+    /// The deferred objects and bytes that only held work keeps: released
+    /// after everything running then completed. The peak is since the
+    /// device opened.
+    pub pinned: usize,
+    pub pinned_bytes: u64,
+    pub peak_pinned_bytes: u64,
     /// Submissions the queue has not finished.
     pub in_flight: usize,
     pub submitted: u64,
@@ -231,10 +242,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// What the device holds now.
     pub fn memory(&self) -> DeviceMemory {
+        let (pinned, pinned_bytes) = self.pinned();
         DeviceMemory {
             allocated: self.allocated,
             deferred: self.deferred.len(),
             deferred_bytes: self.deferred.iter().map(|&(_, _, bytes)| bytes).sum(),
+            pinned,
+            pinned_bytes,
+            peak_pinned_bytes: self.peak_pinned.max(pinned_bytes),
             in_flight: self.queue.in_flight_count(),
             submitted: self.submitted,
             completed: self.completed,
@@ -302,6 +317,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             lost: false,
             quiesce: None,
             deferred: VecDeque::new(),
+            scope: pins::Scope::DEVICE,
+            peak_pinned: 0,
             allocated: 0,
             resources: resources::Resources::default(),
             pipelines: pipelines::Pipelines::default(),
@@ -363,8 +380,48 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(index)
     }
 
-    /// Destroys `object` once every command buffer submitted so far
-    /// completes.
+    /// Runs `release` with `scope` naming who may read what it releases,
+    /// instead of every command buffer: a connection's own objects are
+    /// read only by its command buffers committed since it made them
+    /// ([`pins`]).
+    pub fn release_for<T>(
+        &mut self,
+        scope: pins::Scope,
+        release: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = core::mem::replace(&mut self.scope, scope);
+        let result = release(self);
+        self.scope = outer;
+        result
+    }
+
+    /// A release now, by the current scope.
+    fn release_now(&self) -> pins::Release {
+        pins::Release {
+            serial: self.submitted,
+            scope: self.scope.clone(),
+        }
+    }
+
+    /// Whether no command buffer in flight may read what `release` frees.
+    /// One seen complete but not yet retired still counts: retiring reads
+    /// its mapped ranges.
+    fn frees(&self, release: &pins::Release) -> bool {
+        !self.queue.reads(release)
+    }
+
+    /// The deferred objects and bytes that only held work keeps.
+    fn pinned(&self) -> (usize, u64) {
+        self.deferred
+            .iter()
+            .filter(|(release, ..)| release.serial <= self.completed)
+            .fold((0, 0), |(count, bytes), &(_, _, more)| {
+                (count + 1, bytes + more)
+            })
+    }
+
+    /// Destroys `object` once no command buffer that may read it is in
+    /// flight: by default, every one submitted so far.
     fn defer(&mut self, object: Object) {
         self.defer_allocation(object, 0);
     }
@@ -373,24 +430,34 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if let Object::Memory(memory) = object {
             self.book.release(memory, self.submitted);
         }
-        if !self.lost && self.submitted <= self.freeable() {
+        let release = self.release_now();
+        if !self.lost && self.frees(&release) {
             self.destroy_now(object);
             self.allocated -= allocated;
         } else {
-            self.deferred.push_back((self.submitted, object, allocated));
+            self.deferred.push_back((release, object, allocated));
         }
     }
 
-    /// Frees the descriptors of `id` after the submitted work completes:
-    /// the run of `low_length` from its low half and its high half's run.
+    /// Frees the descriptors of `id` once no command buffer that may read
+    /// them is in flight: the run of `low_length` from its low half and its
+    /// high half's run.
     fn release_id(&mut self, id: ResourceId, arrays: [HeapArray; 2], low_length: u32) {
         let runs = [(id.low(), low_length), (id.high_index(), id.high_count())];
         for ((first, length), array) in runs.into_iter().zip(arrays) {
             if first != super::binding::NULL_DESCRIPTOR {
+                let release = self.release_now();
                 self.descriptors
-                    .release_run(array, first, length, self.submitted);
+                    .release_run_for(array, first, length, release);
             }
         }
+    }
+
+    /// Frees one descriptor once no command buffer that may read it is in
+    /// flight.
+    fn release_descriptor(&mut self, array: HeapArray, index: u32) {
+        let release = self.release_now();
+        self.descriptors.release_run_for(array, index, 1, release);
     }
 
     fn release_memory(&mut self, memory: Memory, bytes: u64) {

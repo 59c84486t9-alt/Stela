@@ -7,12 +7,17 @@
 //! unguessable. A shared object has a hold for each handle to it in any
 //! connection and lives until the last goes. A token holds nothing, so the
 //! frontend's handle object keeps its object alive in the task that shared it.
+//! Every connection that ever held a handle may have committed work that
+//! reads it, so its destruction waits for all of theirs.
 use super::{
     Call, Kind, Object, Service,
     wire::{Fault, ShareObjectRequest, ShareToken, Status},
 };
 use crate::metal::{
-    device::{EventId, TextureId},
+    device::{
+        EventId, TextureId,
+        pins::{Reach, Scope},
+    },
     shader::Compiler,
     vulkan::backend::Backend,
 };
@@ -21,6 +26,8 @@ use alloc::collections::BTreeMap;
 struct Share {
     token: [u64; 2],
     holds: u64,
+    /// The connections that ever held a handle to it.
+    holders: Reach,
 }
 
 /// What the service's connections share, by object and by token.
@@ -43,6 +50,15 @@ impl Shares {
         }
     }
 
+    /// Who may read `object` when the last hold goes, if it was shared:
+    /// every command buffer of a connection that held it.
+    pub(super) fn scope(&self, object: Object) -> Option<Scope> {
+        self.objects.get(&object).map(|share| Scope {
+            created: 0,
+            reach: share.holders.clone(),
+        })
+    }
+
     /// `object` is gone, and its token with it.
     pub(super) fn forget(&mut self, object: Object) {
         if let Some(share) = self.objects.remove(&object) {
@@ -51,15 +67,14 @@ impl Shares {
     }
 
     /// The object of kind `T` that `token` names, with one more hold for a
-    /// handle to it.
-    fn open<T: Kind>(&mut self, token: [u64; 2]) -> Result<T, Fault> {
+    /// handle to it in `connection`.
+    fn open<T: Kind>(&mut self, token: [u64; 2], connection: u64) -> Result<T, Fault> {
         let refused = Fault::new(Status::Invalid, "no such object has that share token");
         let object = *self.tokens.get(&token).ok_or(refused)?;
         let id = T::of(object).ok_or(refused)?;
-        self.objects
-            .get_mut(&object)
-            .expect("a token's object")
-            .holds += 1;
+        let share = self.objects.get_mut(&object).expect("a token's object");
+        share.holds += 1;
+        share.holders = share.holders.with(connection);
         Ok(id)
     }
 }
@@ -84,20 +99,28 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
         self.shares.tokens.insert(token, object);
         let holds = 1;
-        self.shares.objects.insert(object, Share { token, holds });
+        let holders = Reach::One(call.connection.get());
+        self.shares.objects.insert(
+            object,
+            Share {
+                token,
+                holds,
+                holders,
+            },
+        );
         call.reply(&ShareToken { token })
     }
 
     pub(super) fn open_shared_event(&mut self, call: &mut Call) -> Result<(), Fault> {
         let ShareToken { token } = call.request()?;
-        let event: EventId = self.shares.open(token)?;
+        let event: EventId = self.shares.open(token, call.connection.get())?;
         let handle = self.hold(call.connection, Object::Event(event))?;
         call.reply(&handle)
     }
 
     pub(super) fn open_shared_texture(&mut self, call: &mut Call) -> Result<(), Fault> {
         let ShareToken { token } = call.request()?;
-        let texture: TextureId = self.shares.open(token)?;
+        let texture: TextureId = self.shares.open(token, call.connection.get())?;
         let response = self.adopt_texture(call.connection, texture)?;
         call.reply(&response)
     }

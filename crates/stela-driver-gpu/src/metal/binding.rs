@@ -33,6 +33,7 @@
 //! check against these layouts.
 use super::{
     capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS},
+    device::pins::Release,
     error::{Error, Result},
     pipeline::MAX_COLOR_ATTACHMENTS,
     pixel_format::{FilterClass, Planes},
@@ -1073,9 +1074,8 @@ impl HeapLayout {
 pub struct DescriptorIndices {
     /// Free runs as first index to length; no two are adjacent.
     free: BTreeMap<u32, u32>,
-    /// (serial, first index, length) in release order; serials never
-    /// decrease.
-    retiring: VecDeque<(u64, u32, u32)>,
+    /// (release, first index, length) in release order.
+    retiring: VecDeque<(Release, u32, u32)>,
     in_use: u32,
 }
 
@@ -1116,37 +1116,47 @@ impl DescriptorIndices {
         self.release_run(index, 1, serial);
     }
 
-    /// Releases a run once submission `serial` completes. Callers pass the
-    /// last submitted serial, which never decreases.
+    /// Releases a run once every submission through `serial` completes.
     pub fn release_run(&mut self, first: u32, length: u32, serial: u64) {
+        self.release_run_for(first, length, Release::device(serial));
+    }
+
+    /// Releases a run once no submission `release` names can read it.
+    pub fn release_run_for(&mut self, first: u32, length: u32, release: Release) {
         debug_assert!(first != NULL_DESCRIPTOR && length > 0);
-        debug_assert!(
-            self.retiring
-                .back()
-                .is_none_or(|&(last, ..)| last <= serial)
-        );
-        self.retiring.push_back((serial, first, length));
+        self.retiring.push_back((release, first, length));
     }
 
     /// Returns runs whose submissions have completed to the free runs.
     pub fn retire(&mut self, completed: u64) {
-        while let Some(&(serial, mut first, mut length)) = self.retiring.front() {
-            if serial > completed {
-                break;
+        self.retire_with(|release| release.serial <= completed);
+    }
+
+    /// Returns runs to the free runs whose releases `frees` passes.
+    pub fn retire_with(&mut self, frees: impl Fn(&Release) -> bool) {
+        let Self {
+            free,
+            retiring,
+            in_use,
+        } = self;
+        retiring.retain(|(release, first, length)| {
+            if !frees(release) {
+                return true;
             }
-            self.retiring.pop_front();
-            self.in_use -= length;
-            if let Some((&before, &free)) = self.free.range(..first).next_back()
-                && before + free == first
+            let (mut first, mut length) = (*first, *length);
+            *in_use -= length;
+            if let Some((&before, &run)) = free.range(..first).next_back()
+                && before + run == first
             {
-                self.free.remove(&before);
-                (first, length) = (before, free + length);
+                free.remove(&before);
+                (first, length) = (before, run + length);
             }
-            if let Some(after) = self.free.remove(&(first + length)) {
+            if let Some(after) = free.remove(&(first + length)) {
                 length += after;
             }
-            self.free.insert(first, length);
-        }
+            free.insert(first, length);
+            false
+        });
     }
 
     pub fn in_use(&self) -> u32 {
@@ -1190,10 +1200,18 @@ impl DescriptorHeap {
         self.arrays[array.raw() as usize].release_run(first, length, serial);
     }
 
+    pub fn release_run_for(&mut self, array: HeapArray, first: u32, length: u32, release: Release) {
+        self.arrays[array.raw() as usize].release_run_for(first, length, release);
+    }
+
     pub fn retire(&mut self, completed: u64) {
+        self.retire_with(|release| release.serial <= completed);
+    }
+
+    pub fn retire_with(&mut self, frees: impl Fn(&Release) -> bool) {
         self.arrays
             .iter_mut()
-            .for_each(|array| array.retire(completed));
+            .for_each(|array| array.retire_with(&frees));
     }
 
     pub fn in_use(&self, array: HeapArray) -> u32 {
@@ -2185,6 +2203,29 @@ mod tests {
         indices.retire(2);
         assert_eq!(indices.allocate_run(4), Ok(8));
         assert_eq!(indices.in_use(), 11);
+    }
+
+    /// A run a later release frees returns while an earlier one waits.
+    #[test]
+    fn runs_retire_out_of_release_order() {
+        use crate::metal::device::pins::Scope;
+        let mut indices = DescriptorIndices::new(8);
+        assert_eq!(indices.allocate_run(3), Ok(1));
+        assert_eq!(indices.allocate_run(3), Ok(4));
+        let held = Release {
+            serial: 5,
+            scope: Scope::connection(1, 0),
+        };
+        let free = Release {
+            serial: 6,
+            scope: Scope::connection(2, 0),
+        };
+        indices.release_run_for(1, 3, held);
+        indices.release_run_for(4, 3, free);
+        indices.retire_with(|release| release.scope.reach.covers(2));
+        assert_eq!(indices.in_use(), 3);
+        assert_eq!(indices.retiring(), 3);
+        assert_eq!(indices.allocate_run(4), Ok(4), "run 4 merged with the tail");
     }
 
     #[test]

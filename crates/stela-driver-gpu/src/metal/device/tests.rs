@@ -4331,3 +4331,221 @@ fn what_a_held_command_buffer_names_outlives_its_release() {
             .contains(&Object::Buffer(idle_buffer))
     );
 }
+
+/// Commits for connection `key` a command buffer held for an event nothing
+/// has signaled yet.
+fn hold_for_event(device: &mut TestDevice, key: u64) -> (EventId, u64) {
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_wait_for_event(&mut device.resolver(), semaphore, 1)
+        .unwrap();
+    let held = device.commit_for(key, commands).unwrap();
+    assert!(device.holds());
+    (event, held)
+}
+
+/// Releases what `release` destroys as connection `key` does for an object
+/// it got at serial `made`.
+fn release_as<T>(
+    device: &mut TestDevice,
+    key: u64,
+    made: u64,
+    release: impl FnOnce(&mut TestDevice) -> T,
+) -> T {
+    device.release_for(pins::Scope::connection(key, made), release)
+}
+
+/// One connection's command buffer held for an event nobody signals keeps
+/// no other connection's releases (the audit of the held-work fix: all 100
+/// stayed pinned under the device-wide rule).
+#[test]
+fn one_held_command_buffer_pins_no_other_connections_frees() {
+    let mut device = device_on(MockBackend::new());
+    hold_for_event(&mut device, 1);
+    let mut pinned = 0;
+    for _ in 0..100 {
+        // Connection 2 makes and drops a buffer each frame, with a command
+        // buffer of its own that completes.
+        let made = device.submitted_serial();
+        let buffer = device
+            .new_buffer(1 << 16, options(StorageMode::Private))
+            .unwrap();
+        let vk_buffer = device.buffer(buffer).unwrap().buffer;
+        let commands = device.new_command_buffer();
+        device.commit_for(2, commands).unwrap();
+        release_as(&mut device, 2, made, |device| device.destroy_buffer(buffer)).unwrap();
+        device.backend().finish();
+        device.poll().unwrap();
+        if !device
+            .backend()
+            .destroyed
+            .contains(&Object::Buffer(vk_buffer))
+        {
+            pinned += 1;
+        }
+    }
+    assert_eq!(pinned, 0, "{pinned} of 100 frees by connection 2 pinned");
+    let memory = device.memory();
+    assert_eq!((memory.deferred, memory.pinned), (0, 0));
+    assert!(device.holds());
+}
+
+/// A held command buffer keeps what its own connection held when it was
+/// committed and released later, and nothing that connection made since.
+#[test]
+fn a_held_command_buffer_keeps_only_its_connections_older_objects() {
+    let mut device = device_on(MockBackend::new());
+    let made = device.submitted_serial();
+    let older = device
+        .new_buffer(1 << 16, options(StorageMode::Private))
+        .unwrap();
+    let older_buffer = device.buffer(older).unwrap().buffer;
+    let (event, _) = hold_for_event(&mut device, 1);
+    let newer_made = device.submitted_serial();
+    let newer = device
+        .new_buffer(1 << 16, options(StorageMode::Private))
+        .unwrap();
+    let newer_buffer = device.buffer(newer).unwrap().buffer;
+    release_as(&mut device, 1, made, |device| device.destroy_buffer(older)).unwrap();
+    release_as(&mut device, 1, newer_made, |device| {
+        device.destroy_buffer(newer)
+    })
+    .unwrap();
+    device.poll().unwrap();
+    let freed = |device: &mut TestDevice, buffer| {
+        device.backend().destroyed.contains(&Object::Buffer(buffer))
+    };
+    assert!(
+        !freed(&mut device, older_buffer),
+        "the held work may read it"
+    );
+    assert!(freed(&mut device, newer_buffer), "made after the commit");
+    let memory = device.memory();
+    assert_eq!(memory.pinned, 2, "the buffer and its memory");
+    assert!(memory.pinned_bytes >= 1 << 16);
+    device.set_signaled_value(event, 1).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(freed(&mut device, older_buffer));
+    let memory = device.memory();
+    assert_eq!((memory.deferred, memory.pinned), (0, 0));
+    assert!(memory.peak_pinned_bytes >= 1 << 16, "{memory:?}");
+}
+
+/// A texture whose CPU-copy upload rides another connection's held
+/// command buffer stays until that command buffer ran, though its own
+/// connection has no unfinished work.
+#[test]
+fn a_texture_another_connections_held_work_uploads_waits_for_it() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 4,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let made = device.submitted_serial();
+    let texture = device.new_texture(&descriptor).unwrap();
+    let copy = device.texture_cpu_copy(texture, 0, 0).unwrap().unwrap();
+    let source = copy.buffer.buffer;
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0, 0, 0],
+        size: [8, 4, 1],
+    };
+    let strides = Strides {
+        bytes_per_row: 32,
+        bytes_per_image: 0,
+    };
+    device
+        .replace_region(texture, &region, &[7; 128], strides)
+        .unwrap();
+    let (event, _) = hold_for_event(&mut device, 2);
+    release_as(&mut device, 1, made, |device| {
+        device.destroy_texture(texture)
+    })
+    .unwrap();
+    device.poll().unwrap();
+    let freed =
+        |device: &mut TestDevice| device.backend().destroyed.contains(&Object::Buffer(source));
+    assert!(
+        !freed(&mut device),
+        "connection 2's held work reads the copy"
+    );
+    device.set_signaled_value(event, 1).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(freed(&mut device));
+}
+
+/// A sampler state equal descriptors share across connections waits for
+/// every connection that held it.
+#[test]
+fn a_shared_sampler_state_waits_for_each_holders_work() {
+    let mut device = device_on(MockBackend::new());
+    let descriptor = SamplerDescriptor::default();
+    let first = device.new_sampler(&descriptor).unwrap();
+    let second = device.new_sampler(&descriptor).unwrap();
+    let (event, _) = hold_for_event(&mut device, 1);
+    release_as(&mut device, 1, 0, |device| device.destroy_sampler(first)).unwrap();
+    release_as(&mut device, 2, 0, |device| device.destroy_sampler(second)).unwrap();
+    device.poll().unwrap();
+    let samplers = |device: &mut TestDevice| {
+        device
+            .backend()
+            .destroyed
+            .iter()
+            .filter(|object| matches!(object, Object::Sampler(_)))
+            .count()
+    };
+    assert_eq!(
+        samplers(&mut device),
+        0,
+        "connection 1's held work may read it"
+    );
+    device.set_signaled_value(event, 1).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    assert_eq!(samplers(&mut device), 1);
+}
+
+/// Under another connection's hold, 10,000 frames that each make and drop
+/// a sampler state and a texture never run out of descriptors: the device
+/// keeps 4,000 samplers, which the device-wide rule exhausted.
+#[test]
+fn descriptors_last_10000_frames_under_another_connections_hold() {
+    let mut device = device_on(MockBackend::new());
+    hold_for_event(&mut device, 1);
+    let before = device.memory().descriptors;
+    let mut descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ);
+    descriptor.options = options(StorageMode::Shared);
+    descriptor.width = 16;
+    descriptor.height = 16;
+    for frame in 0..10_000 {
+        let made = device.submitted_serial();
+        let sampler = device
+            .new_sampler(&SamplerDescriptor::default())
+            .unwrap_or_else(|error| panic!("frame {frame}: {error:?}"));
+        let texture = device
+            .new_texture(&descriptor)
+            .unwrap_or_else(|error| panic!("frame {frame}: {error:?}"));
+        let commands = device.new_command_buffer();
+        device.commit_for(2, commands).unwrap();
+        release_as(&mut device, 2, made, |device| {
+            device.destroy_sampler(sampler)?;
+            device.destroy_texture(texture)
+        })
+        .unwrap();
+        device.backend().finish();
+        device.poll().unwrap();
+    }
+    let memory = device.memory();
+    assert_eq!(memory.descriptors, before, "{memory:?}");
+    assert_eq!(memory.deferred, 0);
+    assert!(device.holds());
+}

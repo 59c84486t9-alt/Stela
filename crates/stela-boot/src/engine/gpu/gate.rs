@@ -490,7 +490,8 @@ fn report_long_turn(served: &Served) {
 }
 
 /// What a device holds: its allocation with the part waiting for submitted
-/// work, that work, the resources automatic heaps answered nil for (no
+/// work and the part of that only held work keeps (now and its peak), that
+/// work, the resources automatic heaps answered nil for (no
 /// room / room only in pieces), its memory blocks with the resources placed in them and
 /// those in memory of their own, and the connections counting the most
 /// bytes, each as
@@ -503,10 +504,13 @@ fn report_memory(service: &Shared) {
     let mib = |bytes: u64| bytes >> 20;
     let device = memory.device;
     output::arguments(format_args!(
-        "GPU MEMORY allocated={}M deferred={}/{}M in_flight={} completed={}/{} recycled={}/{}M reused={}/{} heap_nils={}/{} blocks={}/{}M placed={}/{}M own={} connections={}",
+        "GPU MEMORY allocated={}M deferred={}/{}M pinned={}/{}M/{}M in_flight={} completed={}/{} recycled={}/{}M reused={}/{} heap_nils={}/{} blocks={}/{}M placed={}/{}M own={} connections={}",
         mib(device.allocated),
         device.deferred,
         mib(device.deferred_bytes),
+        device.pinned,
+        mib(device.pinned_bytes),
+        mib(device.peak_pinned_bytes),
         device.in_flight,
         device.completed,
         device.submitted,

@@ -141,6 +141,9 @@ struct InFlight {
     /// CPU-copy uploads and block decodes of any connection's textures,
     /// which a lost device's report names.
     carries: bool,
+    /// The textures whose uploads or decodes it carries: their destruction
+    /// waits for it too ([`super::pins`]).
+    carried: Vec<TextureId>,
 }
 
 /// Where a committed command buffer's completion shows.
@@ -360,6 +363,37 @@ pub(super) struct Queue {
 impl Queue {
     pub(super) fn in_flight_count(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// Whether a command buffer in flight may read what `release` frees,
+    /// including one seen complete and not yet retired.
+    pub(super) fn reads(&self, release: &super::pins::Release) -> bool {
+        self.in_flight
+            .iter()
+            .any(|flight| release.read_by(flight.key, flight.serial))
+    }
+
+    /// The connections of unfinished command buffers that carry uploads or
+    /// decodes of `texture`.
+    pub(super) fn carriers(&self, texture: TextureId) -> impl Iterator<Item = u64> + '_ {
+        self.in_flight
+            .iter()
+            .filter(move |flight| flight.track != Track::Done && flight.carried.contains(&texture))
+            .map(|flight| flight.key)
+    }
+
+    /// The connections with command buffers held for an event, oldest
+    /// first, without repeats.
+    pub(super) fn holders(&self) -> Vec<u64> {
+        let mut keys = Vec::new();
+        for flight in &self.in_flight {
+            if matches!(flight.track, Track::Held | Track::Started(_))
+                && !keys.contains(&flight.key)
+            {
+                keys.push(flight.key);
+            }
+        }
+        keys
     }
 }
 
@@ -836,6 +870,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // CPU-copy writes reach the images first, after the opening barrier
         // and outside the command buffer's GPU times. Keep pending copies
         // available for the next commit until preparation succeeds.
+        let carried = self.cpu_copy_textures();
         let uploads = self.take_cpu_copy_uploads();
         let carries = !uploads.is_empty();
         held.as_mut_slice()[0].segments[0]
@@ -858,6 +893,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             submits: 0,
             segments: 0,
             carries,
+            carried,
         });
         if held.as_mut_slice().iter().any(|held| {
             held.segments
@@ -1514,6 +1550,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         })
     }
 
+    /// The connections with command buffers held for an event, oldest
+    /// first.
+    pub fn held_connections(&self) -> Vec<u64> {
+        self.queue.holders()
+    }
+
     /// Command buffers seen complete so far, in whatever order they
     /// completed.
     pub fn completions(&self) -> u64 {
@@ -1619,7 +1661,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// commit. Freed when `completed` passed it, its memory was unbound when
     /// the event released the command buffer: a GPU MMU fault that lost the
     /// device. A command buffer dropped unsubmitted with its connection is
-    /// done.
+    /// done. This is the device-wide rule, which execution set indices and
+    /// releases of [`super::pins::Scope::DEVICE`] follow; a connection's
+    /// own releases wait only for its command buffers ([`super::pins`]).
     pub(super) fn freeable(&self) -> u64 {
         self.queue
             .in_flight
@@ -1768,16 +1812,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // A held command buffer that finished frees what waited for it even
         // when `completed` passed it while it was held.
         self.completed = self.completed.max(completed);
-        let freeable = self.freeable();
-        while let Some((_, object, allocated)) = self
-            .deferred
-            .pop_front_if(|(serial, _, _)| *serial <= freeable)
-        {
+        // Each release waits only for the command buffers that may read it
+        // (`pins`): another connection's held work does not keep it.
+        let (mut freed, mut pinned) = (Vec::new(), 0);
+        let (queue, completed) = (&self.queue, self.completed);
+        self.deferred.retain(|(release, object, allocated)| {
+            let frees = !queue.reads(release);
+            if frees {
+                freed.push((*object, *allocated));
+            } else if release.serial <= completed {
+                // Everything running at its release is done: held work
+                // keeps it.
+                pinned += *allocated;
+            }
+            !frees
+        });
+        self.peak_pinned = self.peak_pinned.max(pinned);
+        for (object, allocated) in freed {
             self.destroy_now(object);
             self.allocated -= allocated;
         }
-        self.descriptors.retire(freeable);
-        self.execution_sets.retire(freeable);
+        self.descriptors
+            .retire_with(|release| !self.queue.reads(release));
+        self.execution_sets.retire(self.freeable());
         outcome
     }
 

@@ -67,7 +67,8 @@ const RECYCLED_TEXTURE_BYTES: u64 = 64 << 20;
 /// work submitted before its destruction completes.
 #[derive(Debug)]
 struct Recycled {
-    ready: u64,
+    /// Its destruction: reused or freed once nothing it names reads it.
+    ready: super::pins::Release,
     bytes: u64,
     texture: TextureObject,
 }
@@ -184,6 +185,9 @@ struct SamplerObject {
     /// LOD-clamped variants: (min, max, sampler id).
     clamped: Vec<(f32, f32, ResourceId)>,
     references: u32,
+    /// Who may read it for the holders that released it: equal descriptors
+    /// share one state across connections.
+    released: Option<super::pins::Scope>,
 }
 
 #[derive(Debug)]
@@ -1820,6 +1824,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }))
     }
 
+    /// The textures the next commit's CPU-copy uploads and decodes write.
+    pub(super) fn cpu_copy_textures(&self) -> Vec<TextureId> {
+        let uploads = self.resources.cpu_copy_uploads.iter().map(|&(id, _)| id);
+        let decodes = self.resources.block_decodes.iter().map(|&((id, ..), _)| id);
+        let mut textures: Vec<TextureId> = uploads.chain(decodes).collect();
+        textures.sort_unstable();
+        textures.dedup();
+        textures
+    }
+
     /// Commands that bring images up to date with CPU-copy writes since the
     /// last commit, ending in a barrier; empty when there are none. A
     /// decoded format's written subresources decode whole from its blocks.
@@ -1928,10 +1942,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.resources
             .cpu_copy_uploads
             .retain(|(uploaded, _)| *uploaded != id);
-        match recyclable(&texture) {
-            Some(bytes) if !self.lost => self.recycle_texture(texture, bytes),
-            _ => self.free_texture(texture),
-        }
+        // Command buffers of any connection that carry its uploads read it.
+        let scope = self
+            .queue
+            .carriers(id)
+            .fold(self.scope.clone(), |scope, key| super::pins::Scope {
+                reach: scope.reach.with(key),
+                ..scope
+            });
+        self.release_for(scope, |device| match recyclable(&texture) {
+            Some(bytes) if !device.lost => device.recycle_texture(texture, bytes),
+            _ => device.free_texture(texture),
+        })
     }
 
     /// What the device keeps of destroyed private textures.
@@ -1955,11 +1977,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         {
             return None;
         }
-        // Not while a held command buffer may still name it.
-        let completed = self.freeable();
+        // Not while a command buffer that may name it is in flight, held
+        // ones included.
         let Some(index) =
             self.resources.recycled.iter().position(|entry| {
-                entry.ready <= completed && entry.texture.descriptor == *descriptor
+                entry.texture.descriptor == *descriptor && self.frees(&entry.ready)
             })
         else {
             self.resources.recycle_misses += 1;
@@ -1983,7 +2005,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.allocated -= bytes;
         self.resources.recycled_bytes += bytes;
         self.resources.recycled.push_back(Recycled {
-            ready: self.submitted,
+            ready: self.release_now(),
             bytes,
             texture,
         });
@@ -2000,7 +2022,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.resources.recycled_bytes -= entry.bytes;
             // Its bytes left `allocated` when it was recycled.
             self.allocated += entry.bytes;
-            self.free_texture(entry.texture)?;
+            // Read by whoever could read it when it was destroyed.
+            let scope = entry.ready.scope;
+            self.release_for(scope, |device| device.free_texture(entry.texture))?;
         }
         Ok(())
     }
@@ -2027,17 +2051,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.defer(Object::ImageView(*view));
         }
         for &(_, _, descriptor) in &texture.attachment_storage {
-            self.descriptors
-                .release_run(HeapArray::StorageImages, descriptor, 1, self.submitted);
+            self.release_descriptor(HeapArray::StorageImages, descriptor);
         }
         for copy in texture.tested_copies {
             self.defer(Object::ImageView(copy.image_view));
-            self.descriptors.release_run(
-                HeapArray::StorageImages,
-                copy.descriptor,
-                1,
-                self.submitted,
-            );
+            self.release_descriptor(HeapArray::StorageImages, copy.descriptor);
             self.defer(Object::Image(copy.copy.image));
             self.release_memory(copy.memory, copy.bytes);
         }
@@ -2116,6 +2134,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             id,
             clamped: Vec::new(),
             references: 1,
+            released: None,
         };
         Ok(SamplerId(self.resources.samplers.insert(object)))
     }
@@ -2206,10 +2225,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn destroy_sampler(&mut self, id: SamplerId) -> Result<()> {
         let sampler = self.resources.samplers.get_mut(id.0)?;
         sampler.references -= 1;
+        let released = match &sampler.released {
+            Some(released) => released.union(&self.scope),
+            None => self.scope.clone(),
+        };
         if sampler.references > 0 {
+            sampler.released = Some(released);
             return Ok(());
         }
         let sampler = self.resources.samplers.remove(id.0)?;
+        self.release_for(released, |device| device.free_sampler(sampler));
+        Ok(())
+    }
+
+    /// Frees a sampler state no holder keeps.
+    fn free_sampler(&mut self, sampler: SamplerObject) {
         let ids = core::iter::once(sampler.id).chain(sampler.clamped.iter().map(|&(_, _, id)| id));
         for id in ids.collect::<Vec<_>>() {
             let low = ResourceId::new(id.low(), super::super::binding::NULL_DESCRIPTOR);
@@ -2225,7 +2255,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for sampler in sampler.samplers {
             self.defer(Object::Sampler(sampler));
         }
-        Ok(())
     }
 
     /// `newHeapWithDescriptor:`.

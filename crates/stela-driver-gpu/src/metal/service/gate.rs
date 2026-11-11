@@ -149,12 +149,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                         let [sampled, storage, samplers, uniform, texel] = device.descriptors;
                         format!(
                             "{fault} in operation {} with device allocated={}M deferred={}M \
-                             in_flight={} connection={}M descriptors sampled={sampled} \
+                             pinned={}M in_flight={} connection={}M descriptors sampled={sampled} \
                              storage={storage} samplers={samplers} uniform_texel={uniform} \
                              storage_texel={texel}",
                             call.operation,
                             device.allocated >> 20,
                             device.deferred_bytes >> 20,
+                            device.pinned_bytes >> 20,
                             device.in_flight,
                             self.connections
                                 .get(&connection)

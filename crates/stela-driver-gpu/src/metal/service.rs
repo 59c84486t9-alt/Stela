@@ -24,6 +24,7 @@ use super::{
     device::{
         ArchiveId, BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId,
         HeapId, LibraryId, MemoryId, MemoryOwner, RenderPipelineId, SamplerId, TextureId,
+        pins::Scope,
     },
     error::Error,
     indirect::IndirectCommandBufferId,
@@ -184,6 +185,9 @@ kinds! {
 struct Entry {
     object: Object,
     made: u64,
+    /// The newest serial submitted when the connection got it: only its
+    /// command buffers committed later may read it.
+    serial: u64,
     /// The bytes the object allocated itself, which its connection counts.
     bytes: u64,
 }
@@ -331,6 +335,8 @@ pub struct Service<B: Backend, C: Compiler> {
     served: (u32, Status),
     /// Whether a refusal named the work the device was lost running.
     loss_described: bool,
+    /// Whether a close reported what held work keeps.
+    pins_reported: bool,
     reopen: Option<Reopen<B, C>>,
     prepare: Option<Prepare<B, C>>,
 }
@@ -350,6 +356,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             noted: None,
             served: (0, Status::Ok),
             loss_described: false,
+            pins_reported: false,
             reopen: None,
             prepare: None,
         }
@@ -407,12 +414,35 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         // first failure is reported.
         let mut released = Ok(());
         for entry in entries {
-            if let Err(error) = self.destroy(entry.object) {
+            if let Err(error) = self.destroy(connection, entry.object, entry.serial) {
                 released = released.and(Err(Fault::from(error)));
             }
         }
+        self.report_pinned(connection);
         self.recover();
         released
+    }
+
+    /// Reports once what other connections' held command buffers keep after
+    /// `closed` closed: Metal keeps a wait for an event nothing has
+    /// signaled, so what they may read stays until the event arrives or
+    /// their connection closes.
+    fn report_pinned(&mut self, closed: NonZeroU64) {
+        if self.pins_reported {
+            return;
+        }
+        let holders = self.device.held_connections();
+        let memory = self.device.memory();
+        if holders.is_empty() || memory.pinned == 0 {
+            return;
+        }
+        self.pins_reported = true;
+        self.refused.push(format!(
+            "connection {closed} closed while command buffers of connections {holders:?} wait \
+             for events: {} released objects of {} bytes wait for them until an event arrives \
+             or their connection closes (reported once)",
+            memory.pinned, memory.pinned_bytes,
+        ));
     }
 
     /// Serves a new device in the next epoch once no connection holds an
@@ -446,6 +476,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 self.shares = sharing::Shares::default();
                 self.signaled = 0;
                 self.loss_described = false;
+                self.pins_reported = false;
             }
             Err(error) => {
                 self.refused
@@ -478,6 +509,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let handle = reserved.insert(Entry {
             object: Object::Memory(memory),
             made,
+            serial: self.device.submitted_serial(),
             bytes,
         });
         held.made = made;
@@ -728,7 +760,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         match describe(&self.device) {
             Ok(description) => Ok((self.hold(connection, object)?, description)),
             Err(error) => {
-                self.destroy(object)?;
+                let serial = self.device.submitted_serial();
+                self.destroy(connection, object, serial)?;
                 Err(error.into())
             }
         }
@@ -744,6 +777,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
         let epoch = self.epoch;
         let bytes = self.bytes(object);
+        let serial = self.device.submitted_serial();
         let held = self.connection(connection).and_then(|held| {
             held.made = held.made.checked_add(1).ok_or(Fault::new(
                 Status::OutOfMemory,
@@ -752,6 +786,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             let entry = Entry {
                 object,
                 made: held.made,
+                serial,
                 bytes,
             };
             let handle = held
@@ -783,7 +818,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             Err(fault) => {
                 // Nothing uses the new object yet, so releasing it cannot fail.
-                self.destroy(object)?;
+                self.destroy(connection, object, serial)?;
                 Err(fault)
             }
         }
@@ -827,8 +862,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let epoch = self.epoch;
         let handle = ObjectHandle::decode(handle).ok_or(Fault::STALE)?;
         let held = self.connection(connection)?;
-        let object = held.objects.get(connection, epoch, handle)?.object;
-        self.destroy(object)?;
+        let entry = held.objects.get(connection, epoch, handle)?;
+        let (object, serial) = (entry.object, entry.serial);
+        self.destroy(connection, object, serial)?;
         let held = self.connection(connection)?;
         let entry = held.objects.remove(connection, epoch, handle)?;
         held.allocated -= entry.bytes;
@@ -846,13 +882,30 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
     }
 
-    /// Gives up a handle's hold of `object`, destroying it with the last.
-    fn destroy(&mut self, object: Object) -> Result<(), Error> {
+    /// Gives up `connection`'s hold of `object`, which it got at `serial`,
+    /// destroying it with the last. The device frees what it holds once no
+    /// command buffer that may read it is in flight (`device::pins`): those
+    /// of every connection that held a shared object, of any connection for
+    /// what the device shares among connections itself, and else the
+    /// connection's own committed since `serial`.
+    fn destroy(
+        &mut self,
+        connection: NonZeroU64,
+        object: Object,
+        serial: u64,
+    ) -> Result<(), Error> {
         if self.shares.release(object) {
             return Ok(());
         }
-        let device = &mut self.device;
-        match object {
+        let scope = self.shares.scope(object).unwrap_or_else(|| match object {
+            Object::Library(_)
+            | Object::Archive(_)
+            | Object::Function(_)
+            | Object::RenderPipeline(_)
+            | Object::ComputePipeline(_) => Scope::DEVICE,
+            _ => Scope::connection(connection.get(), serial),
+        });
+        self.device.release_for(scope, |device| match object {
             Object::Memory(id) => device.release_import(id),
             Object::Buffer(id) => device.destroy_buffer(id),
             Object::Texture(id) => device.destroy_texture(id),
@@ -866,7 +919,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::Event(id) => device.destroy_event(id),
             Object::CounterBuffer(id) => device.destroy_counter_sample_buffer(id),
             Object::IndirectCommandBuffer(id) => device.destroy_indirect_command_buffer(id),
-        }?;
+        })?;
         self.shares.forget(object);
         Ok(())
     }
