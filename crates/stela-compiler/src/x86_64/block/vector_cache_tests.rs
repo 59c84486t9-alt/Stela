@@ -51,7 +51,7 @@ fn word(random: &mut Random) -> u32 {
             | n << 5
             | d
     };
-    match random.below(88) {
+    match random.below(100) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -142,6 +142,16 @@ fn word(random: &mut Random) -> u32 {
         84 => 0x0f08_8c00 | n << 5 | d,           // rshrn vd.8b,vn.8h,#8
         85 => 0x4f00_e400 | d,                    // movi vd.16b,#0
         86 => 0x6f07_e7e0 | d,                    // movi vd.2d,#-1
+        87 => three(0x4ea0_9c00),                 // mul vd.4s
+        88 => three(0x0e60_9c00),                 // mul vd.4h (D write)
+        89 => three(0x4ea0_9400),                 // mla vd.4s
+        90 => three(0x2e60_9400),                 // mls vd.4h (D write)
+        91 => three(0x6e60_9400),                 // mls vd.8h
+        92 => three(0x2ea0_1000),                 // uaddw vd.2d,vn.2d,vm.2s
+        93 => three(0x6e60_2000),                 // usubl2 vd.4s,vn.8h,vm.8h
+        94 => three(0x0e20_0000),                 // saddl vd.8h,vn.8b,vm.8b
+        95 => three(0x4ea0_3000),                 // ssubw2 vd.2d,vn.2d,vm.4s
+        96 => three(0x2e60_2000),                 // usubl vd.4s,vn.4h,vm.4h
         _ => three(0x4e20_d400),                  // fadd vd.4s (uncached)
     }
 }
@@ -272,7 +282,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         0xf940_0422,     // ldr x2,[x1,#8]
     ];
     let mut sites = 0;
-    for case in 0..300 {
+    for case in 0..500 {
         let words: Vec<u32> = if case == 0 {
             fixed.to_vec()
         } else {
@@ -311,7 +321,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         }
         sites += accesses.len();
     }
-    assert!(sites > 500, "{sites}");
+    assert!(sites > 700, "{sites}");
 }
 
 #[test]

@@ -805,6 +805,122 @@ fn product(
     )
 }
 
+/// MUL/MLA/MLS of H and S lanes (SSE4.1 for S) by vector, and the widening
+/// additions and subtractions (SSE4.1), from the sources where they are
+/// into the destination's home; returns whether it emitted `operand`.
+fn direct(code: &mut Code, operand: &Operand, target: TargetCpu) -> bool {
+    let Operand {
+        kind,
+        destination,
+        left,
+        right,
+        lane_bytes: lane,
+        bytes,
+        upper,
+        index,
+    } = *operand;
+    let sse41 = target.supports(TargetCpu::Sse41) && !target.data_independent_timing();
+    match kind {
+        Kind::Product {
+            widen: false,
+            accumulate,
+            ..
+        } if index.is_none() && (lane == 2 || lane == 4 && sse41) => {
+            let multiply = if lane == 2 {
+                Host::MultiplyLowWord
+            } else {
+                Host::MultiplyLowDword
+            };
+            let left = vector_source(code, left, 0);
+            let right = vector_source(code, right, 1);
+            match (accumulate, bytes) {
+                (Accumulate::None, 16) => {
+                    let destination = vector_destination(code, destination, 0);
+                    binary(code, multiply, destination, left, right, true, target);
+                }
+                (Accumulate::None, _) => {
+                    three::three(code, multiply, 0, left, right, target);
+                    let destination = vector_destination(code, destination, 0);
+                    super::finish_from(code, destination, 0, 8);
+                }
+                (_, 16) => {
+                    three::three(code, multiply, 0, left, right, target);
+                    let sum = vector_accumulator(code, destination, 1);
+                    let opcode = add_or_subtract(lane, accumulate == Accumulate::Subtract);
+                    binary(code, opcode, sum, sum.xmm, 0, false, target);
+                }
+                _ => {
+                    // MLA/MLS of D vectors: the old destination's high half
+                    // is not part of the result.
+                    three::three(code, multiply, 0, left, right, target);
+                    read_vector(code, destination, 1);
+                    let opcode = add_or_subtract(lane, accumulate == Accumulate::Subtract);
+                    packed(code, opcode, 1, 0);
+                    packed(code, Host::MoveQword, 1, 1);
+                    commit(code, destination, 1);
+                }
+            }
+            true
+        }
+        Kind::Arithmetic {
+            signed,
+            wide_left,
+            subtract,
+        } if sse41 => {
+            let left = vector_source(code, left, 0);
+            let left = if wide_left {
+                left
+            } else {
+                extend_from(code, 0, left, lane, upper, signed, target);
+                0
+            };
+            let right = vector_source(code, right, 1);
+            extend_from(code, 1, right, lane, upper, signed, target);
+            let destination = vector_destination(code, destination, 0);
+            let opcode = add_or_subtract(lane * 2, subtract);
+            binary(code, opcode, destination, left, 1, !subtract, target);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// [`extend`] of `source` (a home or `xmm`) into `xmm` with SSE4.1:
+/// PMOVSX/PMOVZX from the source in place, after moving its high half down
+/// (one VEX PSRLDQ from the source).
+fn extend_from(
+    code: &mut Code,
+    xmm: u8,
+    source: u8,
+    lane: u8,
+    upper: bool,
+    signed: bool,
+    target: TargetCpu,
+) {
+    let mut from = source;
+    if upper {
+        if source != xmm && three::vex(target) {
+            three::shift(code, Shift::RightBytes, xmm, source, 8, target);
+        } else {
+            if source != xmm {
+                packed(code, Host::MoveAligned, xmm, source);
+            }
+            Shift::RightBytes.emit(code, xmm, 8);
+        }
+        from = xmm;
+    }
+    match (lane, signed) {
+        (1, true) => Host::SignExtendByteToWord,
+        (1, false) => Host::ZeroExtendByteToWord,
+        (2, true) => Host::SignExtendWordToDword,
+        (2, false) => Host::ZeroExtendWordToDword,
+        (4, true) => Host::SignExtendDwordToQword,
+        (4, false) => Host::ZeroExtendDwordToQword,
+        _ => unreachable!(),
+    }
+    .register(code, xmm, from, target);
+}
+
 /// Whether [`word_long_product`] lowers a halfword long product on `target`.
 fn word_long_product_supported(lane: u8, widen: bool, target: TargetCpu) -> bool {
     lane == 2 && widen && target.supports(TargetCpu::Sse41) && !target.data_independent_timing()
@@ -829,6 +945,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         && word_long_product_supported(lane, widen, target)
     {
         word_long_product(code, operand, signed, accumulate, target);
+        return;
+    }
+    if direct(code, operand, target) {
         return;
     }
     if !matches!(
