@@ -2,7 +2,7 @@
 name="stela-tls"
 version.workspace=true
 edition.workspace=true
-license.workspace=true
+license="GPL-2.0-or-later AND (Apache-2.0 OR GPL-2.0-or-later)"
 publish=false
 links="stela_mbedcrypto"
 [features]

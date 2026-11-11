@@ -2,9 +2,9 @@
 name = "stela-driver-storage"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived controller code retains its GPL
-# notices.
-license = "MIT AND GPL-2.0-only AND GPL-2.0-or-later"
+# Stela's own code is GPL-2.0-or-later; Linux-derived controller code retains
+# its GPL notices.
+license = "GPL-2.0-or-later AND GPL-2.0-only"
 
 [lints]
 workspace = true

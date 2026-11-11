@@ -2,9 +2,9 @@
 name = "stela-driver-base"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived bus and platform code retains its
-# GPL notices, and ACPICA keeps its BSD terms.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later"
+# Stela's own code is GPL-2.0-or-later; Linux-derived bus and platform code
+# retains its GPL notices, and ACPICA keeps its BSD terms.
+license = "GPL-2.0-or-later AND GPL-2.0-only AND BSD-3-Clause"
 
 [lints]
 workspace = true

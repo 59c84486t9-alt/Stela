@@ -3,7 +3,7 @@ name = "stela-mesa"
 version = "0.0.0"
 edition = "2024"
 publish = false
-license = "MIT"
+license = "GPL-2.0-or-later AND MIT AND Apache-2.0 WITH LLVM-exception"
 build = "build.rs"
 
 # A workspace of none: this crate and the ones it names build only for

@@ -3,9 +3,10 @@ name = "stela-driver-gpu"
 links = "stela_driver_gpu"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived ports retain their GPL notices
-# and the LLVM patches keep the terms of the upstream files they change.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND Apache-2.0 WITH LLVM-exception"
+# Stela's own code is GPL-2.0-or-later; Linux-derived ports retain their GPL
+# notices, Mesa, NVIDIA and Intel sources their MIT notices, and the LLVM
+# patches keep the terms of the upstream files they change.
+license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT AND BSD-3-Clause AND Apache-2.0 WITH LLVM-exception"
 
 [lints]
 workspace = true

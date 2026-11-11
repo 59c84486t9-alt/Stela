@@ -2,9 +2,9 @@
 name = "stela-driver-net"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived adapter code retains its GPL/ISC
-# notices, and the Intel Wi-Fi ports also retain their BSD terms.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC"
+# Stela's own code is GPL-2.0-or-later; Linux-derived adapter code retains its
+# GPL/ISC notices, and the Intel Wi-Fi ports also retain their BSD terms.
+license = "GPL-2.0-or-later AND GPL-2.0-only AND BSD-3-Clause AND BSD-3-Clause-Clear AND ISC"
 
 [lints]
 workspace = true

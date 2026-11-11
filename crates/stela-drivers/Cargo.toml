@@ -2,10 +2,10 @@
 name = "stela-drivers"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived USB, Bluetooth and input code
-# retains its GPL/ISC notices and the Intel shared initialization also retains
-# BSD terms.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND ISC"
+# Stela's own code is GPL-2.0-or-later; Linux-derived USB, Bluetooth and input
+# code retains its GPL/ISC notices, the Intel shared initialization also
+# retains BSD terms, and the Asahi and NXP Bluetooth sources their MIT notices.
+license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT AND BSD-3-Clause AND ISC"
 
 [lints]
 workspace = true

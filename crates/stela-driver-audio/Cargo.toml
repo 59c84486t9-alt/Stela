@@ -2,8 +2,9 @@
 name = "stela-driver-audio"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived audio code retains its GPL notices.
-license = "MIT AND GPL-2.0-only AND GPL-2.0-or-later"
+# Stela's own code is GPL-2.0-or-later; Linux-derived audio code retains its
+# GPL notices, and the ELD header adaptation its MIT notice.
+license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT"
 
 [lints]
 workspace = true
