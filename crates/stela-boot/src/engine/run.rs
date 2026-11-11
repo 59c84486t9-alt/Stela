@@ -1081,6 +1081,19 @@ impl Heartbeat {
                 "/drop_evict/drop_tlbi/space_lru/salt_reuse/mail_all",
                 "/forget_asid/forget_all/forget_va/forget_other",
             ));
+            // Per PE: where its ITLB's fills, drops and forgotten contexts
+            // came from: fills of the lower and upper half, cold fills of
+            // a page taken before in the same address space, entries TLBIs
+            // by VA dropped in one ASID's contexts and in every context,
+            // TLBIs of everything that forgot every context (its own, and
+            // another PE's or its mail's), ones that reached nothing of the
+            // regime it translates in (forgetting other regimes' contexts,
+            // or none), contexts made, TLBIs its mail merged, and pages
+            // walked again at once for contexts made anew.
+            let mut itlb_sources = String::from(concat!(
+                "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
+                "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
+            ));
             let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
                 line.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.iter().zip(before).enumerate() {
@@ -1184,6 +1197,12 @@ impl Heartbeat {
                     all
                 };
                 deltas(&mut itlb, pe, &concat(now), &concat(before));
+                deltas(
+                    &mut itlb_sources,
+                    pe,
+                    &now.itlb_sources,
+                    &before.itlb_sources,
+                );
                 let (cause, was) = (&now.installs, &before.installs);
                 installs.push_str(&format!(
                     " {pe}:{}/{}/{}/{}/{}/{}/{}",
@@ -1293,6 +1312,7 @@ impl Heartbeat {
             output::arguments(format_args!("{lookups}\n"));
             output::arguments(format_args!("{paths}\n"));
             output::arguments(format_args!("{itlb}\n"));
+            output::arguments(format_args!("{itlb_sources}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
                 output::arguments(format_args!("{levels}\n"));

@@ -591,3 +591,104 @@ fn ipa_forms_remove_only_stage_two_entries_and_fb_broadcasts() {
         Broadcast::NSH
     );
 }
+
+/// A form without an address that reaches nothing of a context's regime
+/// ([`Scope::reach`]) removes none of that regime's entries
+/// ([`Scope::covers`]), global or of any ASID or VMID: what lets a cache of
+/// many contexts keep that regime's.
+#[test]
+fn a_form_without_an_address_reaching_nothing_of_a_regime_removes_none_of_it() {
+    use TlbiKind::{ALL, IPAS2, RIPAS2, VMALL, VMALLS12};
+    for kind in [ALL, VMALL, VMALLS12, IPAS2, RIPAS2] {
+        for named in [Named::EL10, Named::EL20, Named::EL2] {
+            for context in [GUEST, HOST] {
+                let scope = Scope::new(
+                    &tlbi(kind, named, TlbiLevel::Any, 1 << 46 | 1 << 39),
+                    context,
+                );
+                for regime in [Regime::El10, Regime::El20, Regime::El2] {
+                    let current = Current {
+                        regime,
+                        asid: Some(7),
+                    };
+                    if scope.reach(&current) != Reach::Nothing {
+                        continue;
+                    }
+                    for (vmid, asid, stage2) in [
+                        (Some(5), Some(7), true),
+                        (None, None, false),
+                        (Some(6), Some(1), true),
+                        (None, Some(7), false),
+                    ] {
+                        let entry = Entry {
+                            regime,
+                            vmid,
+                            asid,
+                            stage2,
+                            ..page(0x10_0000)
+                        };
+                        assert!(
+                            !scope.covers(&entry),
+                            "{kind:?} {named:?} {regime:?} {entry:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// [`Scope::merged`] joins VA and range forms of one regime, VMID and
+/// domain in one half, near each other, into a range removing at least
+/// both; it refuses other forms, regimes and halves, and forms too far
+/// apart for the gap.
+#[test]
+fn merged_scopes_join_near_va_forms_of_one_regime_and_half() {
+    let scope =
+        |kind, named, operand| Scope::new(&tlbi(kind, named, TlbiLevel::Last, operand), GUEST);
+    let (a, b) = (
+        scope(TlbiKind::VA, Named::EL10, 7 << 48 | 0x100),
+        scope(TlbiKind::VA, Named::EL10, 7 << 48 | 0x103),
+    );
+    let merged = a.merged(b, 0x4000).expect("near pages of one ASID");
+    assert_eq!(merged.named_asid(), Some(7));
+    assert_eq!(merged.span(), Some((0x10_0000, 0x10_3000)));
+    for address in [0x10_0000, 0x10_1000, 0x10_3fff] {
+        for asid in [Some(7), None] {
+            assert!(merged.covers(&Entry {
+                asid,
+                address,
+                ..page(0)
+            }));
+        }
+    }
+    assert!(!merged.covers(&Entry {
+        asid: Some(8),
+        ..page(0x10_0000)
+    }));
+    assert!(!merged.covers(&Entry {
+        asid: Some(7),
+        ..page(0x10_4000)
+    }));
+    // Another ASID makes it every ASID's.
+    let other = scope(TlbiKind::VA, Named::EL10, 8 << 48 | 0x101);
+    assert_eq!(merged.merged(other, 0x4000).unwrap().named_asid(), None);
+    // Too far for the gap, another regime, another half, an ASID form.
+    assert!(
+        a.merged(scope(TlbiKind::VA, Named::EL10, 7 << 48 | 0x200), 0x4000)
+            .is_none()
+    );
+    assert!(
+        a.merged(scope(TlbiKind::VA, Named::EL2, 0x101), u64::MAX)
+            .is_none()
+    );
+    let upper = (0xffff_fe00_0010_0000_u64 & ((1 << 56) - 1)) >> 12;
+    assert!(
+        a.merged(scope(TlbiKind::VAA, Named::EL10, upper), u64::MAX)
+            .is_none()
+    );
+    assert!(
+        a.merged(scope(TlbiKind::ASID, Named::EL10, 7 << 48), u64::MAX)
+            .is_none()
+    );
+}

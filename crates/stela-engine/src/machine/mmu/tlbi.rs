@@ -77,6 +77,9 @@ pub struct Scope {
     pub broadcast: Broadcast,
     /// A range form with TG 0b00 removes nothing.
     valid: bool,
+    /// A range of every entry overlapping it, whatever its granule and
+    /// level hint: what [`Scope::merged`] makes of several TLBIs.
+    merged: bool,
 }
 
 /// VA[55:0] and IPA[55:0] as compared by the matching.
@@ -181,6 +184,7 @@ impl Scope {
             level: tlbi.level,
             broadcast: effective_broadcast(tlbi.broadcast, context),
             valid: true,
+            merged: false,
         };
         match tlbi.kind {
             TlbiKind::VA | TlbiKind::VAA => {
@@ -226,10 +230,11 @@ impl Scope {
         let mask = (1u64 << entry.size_bits) - 1;
         let first = entry.address & !mask & ADDRESS_BITS;
         let last = (entry.address | mask) & ADDRESS_BITS;
-        granule(tg) == Some(entry.granule_bits)
-            && (reserved_range_ttl(tg, self.ttl) || i8::try_from(self.ttl & 3) == Ok(entry.level))
-            && self.address & ADDRESS_BITS <= last
-            && self.end & ADDRESS_BITS > first
+        let hinted = self.merged
+            || granule(tg) == Some(entry.granule_bits)
+                && (reserved_range_ttl(tg, self.ttl)
+                    || i8::try_from(self.ttl & 3) == Ok(entry.level));
+        hinted && self.address & ADDRESS_BITS <= last && self.end & ADDRESS_BITS > first
     }
 
     fn level_matches(self, entry: &Entry) -> bool {
@@ -393,6 +398,69 @@ impl Scope {
                 asid: self.asid,
                 addresses,
             })
+    }
+
+    /// The canonical first and last VAs a VA or range form names, which it
+    /// removes the entries holding (VA) or overlapping (range).
+    pub fn span(self) -> Option<(u64, u64)> {
+        match self.kind {
+            TlbiKind::VA | TlbiKind::VAA if self.valid => {
+                let address = canonical(self.address);
+                Some((address, address))
+            }
+            TlbiKind::RVA | TlbiKind::RVAA if self.valid => match self.overlapping() {
+                Reach::Overlapping { first, last } => Some((first, last)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// One scope that removes at least what `self` and `other` remove
+    /// (Arm permits removing more), when both are VA or range forms of one
+    /// regime, VMID and domain whose spans lie in one half of the address
+    /// space within `gap` bytes of each other: a range of every entry
+    /// overlapping both spans and the bytes between, whatever its granule
+    /// or level hint (both forms remove at least the entries holding or
+    /// overlapping their own span), at any level unless both name the last
+    /// level alone, of their ASID if both name one and the same, else of
+    /// every ASID.
+    pub fn merged(self, other: Self, gap: u64) -> Option<Self> {
+        const UPPER: u64 = 1 << 55;
+        let ((first, last), (other_first, other_last)) = (self.span()?, other.span()?);
+        let same = self.regime == other.regime
+            && self.vmid == other.vmid
+            && self.broadcast == other.broadcast
+            && (first ^ other_first) & UPPER == 0;
+        let apart = first.max(other_first).saturating_sub(last.min(other_last));
+        if !same || apart > gap {
+            return None;
+        }
+        let (first, last) = (first.min(other_first), last.max(other_last));
+        let named = |scope: Self| matches!(scope.kind, TlbiKind::VA | TlbiKind::RVA);
+        let one_asid = named(self) && named(other) && self.asid == other.asid;
+        Some(Self {
+            kind: if one_asid {
+                TlbiKind::RVA
+            } else {
+                TlbiKind::RVAA
+            },
+            address: first,
+            // The address after the last; the end of the address space is
+            // its own marker ([`Scope::overlapping`]).
+            end: last
+                .checked_add(1)
+                .filter(|end| *end != u64::MAX)
+                .unwrap_or(u64::MAX),
+            ttl: 0,
+            level: if self.level == TlbiLevel::Last && other.level == TlbiLevel::Last {
+                TlbiLevel::Last
+            } else {
+                TlbiLevel::Any
+            },
+            merged: true,
+            ..self
+        })
     }
 
     /// The canonical VAs a range form names.

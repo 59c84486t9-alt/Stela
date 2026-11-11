@@ -22,6 +22,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         let contexts = self.contexts(el, context);
         self.chain.set_contexts(contexts);
+        if !self.refills.is_empty() {
+            self.refill_pages(el, context);
+        }
         // A fetch elsewhere came between the exit waiting for a block and
         // its target: an exception, an interrupt or another PE's run.
         if self
@@ -200,6 +203,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// and keeps its neighbour. Counts the pages the ITLB lacked in the
     /// context apart from the new keys of pages it held.
     pub(super) fn translate_page(&mut self, pc: u64, key: u64) {
+        self.take_page(pc, key, true);
+    }
+
+    /// [`Self::translate_page`], counting a page the ITLB lacked as a miss
+    /// when `missed` (a fetch's) and as a refill when not
+    /// ([`Self::refill_pages`]).
+    fn take_page(&mut self, pc: u64, key: u64, missed: bool) {
         let half = chain::half(pc);
         let context = self.chain.contexts()[half];
         let page = pc & !(FETCH_PAGE - 1);
@@ -210,10 +220,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let held_page = held.pc == page && held.key == context;
-        self.statistics.itlb[usize::from(held_page)] += 1;
         if !held_page {
+            self.log_fill(page, context);
+        }
+        if !missed {
+            if !held_page {
+                self.statistics.itlb_sources[ItlbSource::Refilled as usize] += 1;
+            }
+        } else if held_page {
+            self.statistics.itlb[1] += 1;
+        } else {
+            self.statistics.itlb[0] += 1;
             let miss = self.itlb_miss(half, slot, page, context);
             self.statistics.itlb_misses[miss as usize] += 1;
+            self.statistics.itlb_sources[ItlbSource::FillsLower as usize + half] += 1;
+            if self.note_itlb_seen(half, page, context) && miss == ItlbMiss::Cold {
+                self.statistics.itlb_sources[ItlbSource::ColdSeen as usize] += 1;
+            }
         }
         let resident = self.itlb.entry(slot);
         if resident.pc == page && resident.key != context && !self.live_context(half, resident.key)
@@ -347,7 +370,99 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Whether lookups of `half` may still run in context `number`: one no
     /// TLBI or control change forgot.
     fn live_context(&self, half: usize, number: u64) -> bool {
-        self.spaces[half].iter().any(|space| space.number == number)
+        self.spaces[half].live(number).is_some()
+    }
+
+    /// Remember that the ITLB took `page` in `context` ([`Self::fill_log`]).
+    fn log_fill(&mut self, page: u64, context: u64) {
+        if self.fill_log.len() < FILL_LOG {
+            self.fill_log.push((page, context));
+        } else {
+            self.fill_log[self.fill_next] = (page, context);
+        }
+        self.fill_next = (self.fill_next + 1) % FILL_LOG;
+    }
+
+    /// Before the contexts of `half` go: keep, by key, the pages each took
+    /// last ([`Self::fill_log`]), for the context made anew for its key to
+    /// walk again ([`Self::refill_pages`]). Lists kept from before for keys
+    /// of `half` no context took since give way.
+    pub(super) fn refill_after(&mut self, half: usize) {
+        self.pending_refills.retain(|&(held, _), _| held != half);
+        let spaces = &self.spaces[half];
+        let pending = &mut self.pending_refills;
+        self.fill_log.retain(|&(page, context)| {
+            if chain::half(page) != half {
+                return true;
+            }
+            if let Some(space) = spaces.live(context) {
+                let pages = pending.entry((half, space.key)).or_default();
+                if pages.len() < REFILLS_PER_CONTEXT {
+                    pages.push(page);
+                }
+            }
+            false
+        });
+        self.fill_next = self.fill_log.len() % FILL_LOG;
+        for pages in self.pending_refills.values_mut() {
+            pages.sort_unstable();
+            pages.dedup();
+        }
+    }
+
+    /// Walk again, in the contexts the fetch now runs in, the pages their
+    /// forgotten predecessors of the same key took last
+    /// ([`Self::refills`]), and give the ITLB those that translate: what a
+    /// fetch of each would record, without an exit for each. A TLB may
+    /// take any translation a walk gives at any time; a page whose walk
+    /// faults or that the host refuses is left to its fetch. `el` (with
+    /// the guarded level) and `context` are what the fetch runs in. A walk
+    /// that forgets contexts ends it, and the fetch takes its contexts
+    /// anew.
+    pub(super) fn refill_pages(&mut self, el: u8, context: Variant) {
+        let generation = self.translation_generation;
+        for pc in core::mem::take(&mut self.refills) {
+            let Some((physical, guarded)) = self.quiet_fetch_physical(pc) else {
+                continue;
+            };
+            if self.translation_generation != generation {
+                let contexts = self.contexts(el, context);
+                self.chain.set_contexts(contexts);
+                return;
+            }
+            let current = Variant {
+                guarded_page: guarded,
+                ..context
+            };
+            let variant = self.page_variant(current, physical);
+            if let Some(id) = self.known_variant(variant) {
+                let key = self.block_key(physical, id);
+                self.take_page(pc, key, false);
+            }
+        }
+    }
+
+    /// Note in [`Self::itlb_seen`] that the ITLB took the page `page` of
+    /// `half` in `context`, by its address space (TTBR0's value in the
+    /// lower half): whether it had before, in whatever context.
+    fn note_itlb_seen(&mut self, half: usize, page: u64, context: u64) -> bool {
+        let table = self.spaces[half]
+            .live(context)
+            .map_or(0, |space| space.key.ttbr0);
+        // A quarter full, it starts over: false answers stay under 25%.
+        if self.itlb_seen.is_empty() || self.itlb_seen_bits >= ITLB_SEEN_BITS / 4 {
+            self.itlb_seen.clear();
+            self.itlb_seen.resize(ITLB_SEEN_BITS / 64, 0);
+            self.itlb_seen_bits = 0;
+        }
+        let mixed =
+            ((page / FETCH_PAGE) ^ table.rotate_left(23)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let bit = (mixed >> (64 - ITLB_SEEN_BITS.trailing_zeros())) as usize;
+        let word = &mut self.itlb_seen[bit / 64];
+        let seen = *word >> (bit % 64) & 1 != 0;
+        *word |= 1 << (bit % 64);
+        self.itlb_seen_bits += usize::from(!seen);
+        seen
     }
 
     /// Compile the block at `pc`, unless its first instruction is a
@@ -1544,6 +1659,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 }
+
+/// The most pages one forgotten context leaves to walk again
+/// ([`Machine::refill_after`]).
+const REFILLS_PER_CONTEXT: usize = 512;
+
+/// The bits of [`Machine::itlb_seen`]: 64 KiB, which tens of thousands of
+/// pages a desktop's processes run fill to a few percent; it starts over
+/// at a quarter.
+const ITLB_SEEN_BITS: usize = 1 << 19;
 
 /// The entries of [`Machine::itlb_ghosts`]: a direct-mapped table.
 const ITLB_GHOSTS: usize = 1 << 12;

@@ -158,7 +158,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The number of the context a fetch in `half` runs in now: the EL with
     /// the guarded level, the variant and the half's translation inputs
-    /// ([`Space`]). ITLB entries name it.
+    /// ([`contexts::Key`]). ITLB entries name it.
     pub(super) fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
         let epoch = self.fetch_epoch(half);
         if let Some(recent) = self.recent[half]
@@ -168,52 +168,90 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return recent.number;
         }
-        let inputs = self.half_inputs(half, el);
-        let found = self.spaces[half]
-            .iter()
-            .position(|space| space.el == el && space.variant == variant && space.inputs == inputs);
-        let space = match found {
-            Some(at) => self.spaces[half].remove(at),
-            None => {
-                if self.spaces[half].len() == SPACES {
-                    self.spaces[half].remove(0);
-                    self.statistics.itlb_drops[2] += 1;
-                }
-                let salt = self.context_salt(half, el, variant, inputs.0.ttbr0);
-                let number = self.next_context << chain::LOOKUP_SALT_BITS | salt;
-                self.next_context += 1;
-                Space {
-                    inputs,
-                    el,
-                    variant,
-                    number,
-                }
-            }
+        let (controls, hcr) = self.half_inputs(half, el);
+        let key = contexts::Key {
+            ttbr0: controls.ttbr0,
+            permissions: if el & 3 == 0 {
+                controls.sprr.el0
+            } else {
+                controls.sprr.el1
+            },
+            frame: self.context_frame(controls, hcr),
+            el,
+            variant,
         };
-        self.spaces[half].push(space);
+        let number = match self.spaces[half].find(&key) {
+            Some(number) => number,
+            None => self.make_context(half, key, &controls),
+        };
+        self.salt_clock += 1;
+        self.salt_uses[(number % chain::LOOKUP_SALTS as u64) as usize] = self.salt_clock;
         self.recent[half].rotate_right(1);
         self.recent[half][0] = Some(Recent {
             el,
             variant,
-            epoch,
-            number: space.number,
+            // A frame's table may have filled and forgotten every context.
+            epoch: self.fetch_epoch(half),
+            number,
         });
-        space.number
+        number
     }
 
-    /// The salt of a context of `half` at `el` in `variant` under `table`:
-    /// the same across the contexts one takes the place of, so that its
-    /// ITLB entries take the places of a forgotten context's, and another
-    /// address space's pages take other slots while there are salts for
-    /// them.
-    fn context_salt(&mut self, half: usize, el: u8, variant: Variant, table: u64) -> u64 {
+    /// A new context of `half` for `key`, whose inputs are `controls`.
+    fn make_context(&mut self, half: usize, key: contexts::Key, controls: &mmu::Controls) -> u64 {
+        let salt = self.context_salt(half, key.variant, key.ttbr0);
+        let made = self.next_context;
+        self.next_context += 1;
+        let (number, evicted) =
+            self.spaces[half].insert(key, mmu::current_asid(controls), controls.regime, |slot| {
+                contexts::context_number(made, slot, salt)
+            });
+        if evicted.is_some() {
+            self.statistics.itlb_drops[2] += 1;
+        }
+        self.statistics.itlb_sources[ItlbSource::Made as usize] += 1;
+        if let Some(pages) = self.pending_refills.remove(&(half, key)) {
+            self.refills.extend(pages);
+        }
+        number
+    }
+
+    /// The number of the frame of the inputs `controls` and `hcr` in
+    /// [`Self::context_frames`]: all but TTBR0 and the SPRR permissions.
+    /// Past [`CONTEXT_FRAMES`] values every context goes with the frames
+    /// they name ([`Self::contexts`] then takes both halves' anew).
+    fn context_frame(&mut self, mut controls: mmu::Controls, hcr: u64) -> u32 {
+        controls.ttbr0 = 0;
+        controls.sprr.el0 = 0;
+        controls.sprr.el1 = 0;
+        let frame = (controls, hcr);
+        if let Some(at) = self.context_frames.iter().rposition(|held| *held == frame) {
+            return at as u32;
+        }
+        if self.context_frames.len() == CONTEXT_FRAMES {
+            self.forget_spaces(0..=1, 3);
+            self.context_frames.clear();
+            // Their keys name frames by number.
+            self.pending_refills.clear();
+        }
+        self.context_frames.push(frame);
+        (self.context_frames.len() - 1) as u32
+    }
+
+    /// The salt of a new context of `half` in `variant` under `table`: the
+    /// one its address space's earlier contexts had while no other owner
+    /// took it since, so that its ITLB entries take the places of a
+    /// forgotten context's; else the least recently used, so that the
+    /// address spaces that ran last keep slots apart.
+    fn context_salt(&mut self, half: usize, variant: Variant, table: u64) -> u64 {
         let id = u64::from(self.variant_id(variant).0);
-        let owner = table ^ (half as u64) ^ u64::from(el) << 1 ^ id << 6;
+        let owner = table ^ (half as u64) ^ id << 6;
         let salt = self.salt_owners.iter().position(|known| *known == owner);
         salt.unwrap_or_else(|| {
-            let salt = self.next_salt;
-            self.next_salt = (salt + 1) % chain::LOOKUP_SALTS;
-            if self.salt_owners[salt] != 0 {
+            let salt = (0..chain::LOOKUP_SALTS)
+                .min_by_key(|&salt| self.salt_uses[salt])
+                .expect("salts");
+            if self.salt_uses[salt] != 0 {
                 self.statistics.itlb_drops[3] += 1;
             }
             self.salt_owners[salt] = owner;
@@ -221,9 +259,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }) as u64
     }
 
-    /// Both halves' contexts at `el` in `variant`.
+    /// Both halves' contexts at `el` in `variant`: of one translation
+    /// generation, so that neither names a context the other's frame
+    /// forgot.
     pub(super) fn contexts(&mut self, el: u8, variant: Variant) -> [u64; 2] {
-        [0, 1].map(|half| self.context(el, variant, half))
+        loop {
+            let generation = self.translation_generation;
+            let contexts = [0, 1].map(|half| self.context(el, variant, half));
+            if self.translation_generation == generation {
+                return contexts;
+            }
+        }
     }
 
     /// What decides how a fetch of `half` at `el` (with the guarded level in
@@ -378,6 +424,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.unsupported(RequirementKind::Translation(unsupported))
             )),
         }
+    }
+
+    /// The page frame of `pc` for execution at the current EL and whether
+    /// it is guarded, when its walk translates and the host permits the
+    /// fetch: [`Self::fetch_physical`] without a fault or report, for a walk
+    /// no instruction asked for ([`Self::refill_pages`]). The walker makes
+    /// no descriptor updates (no FEAT_HAFDBS), so the walk has no effect on
+    /// memory. A global lower page that widens what the PE may hold is
+    /// left to its fetch, which walks again.
+    pub(super) fn quiet_fetch_physical(&mut self, pc: u64) -> Option<(u64, bool)> {
+        let requester = self.cpu.requester();
+        let controls = self.cpu.controls(self.cpu.regime());
+        let mut tables = RamTables(&mut self.host);
+        let Translated::Mapped(translation) =
+            mmu::translate(&controls, pc, Access::Execute, requester, &mut tables)
+        else {
+            return None;
+        };
+        if !self.host.fetch_permitted(pc) {
+            return None;
+        }
+        let half = chain::half(pc);
+        if half == 0 && translation.global && self.widen_lower_globals(pc, translation.size) {
+            return None;
+        }
+        self.fetched_through(half, pc, translation.size, translation.global);
+        Some((
+            translation.physical & !(FETCH_PAGE - 1),
+            translation.guarded,
+        ))
     }
 
     /// Whether the page of `pc`, which executes at the current EL, is guarded

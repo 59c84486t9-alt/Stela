@@ -376,6 +376,45 @@ impl ItlbMiss {
 
 const _: () = assert!(ItlbMiss::Cold as usize + 1 == ItlbMiss::COUNT);
 
+/// Where the ITLB's fills, drops and forgotten contexts came from, past
+/// [`ItlbMiss`] ([`Statistics::itlb_sources`]):
+/// - fills of the lower (user) and upper (kernel) half;
+/// - cold fills of a page the ITLB took before in the same address space,
+///   whatever the context (a refill whose earlier entry left no trace);
+/// - entries TLBIs by VA dropped in one ASID's contexts, and in every
+///   context (no ASID, a global page in the span, or the upper half);
+/// - TLBIs of everything that forgot every context, this PE's own and
+///   another PE's (a broadcast, or the whole invalidation its mail kept);
+/// - such TLBIs that reached nothing of the regime the PE translates in,
+///   which forgot only other regimes' contexts, or none;
+/// - contexts made;
+/// - TLBIs another PE sent that the PE's mail merged into a range;
+/// - pages a context made anew walked again at once, which its forgotten
+///   predecessor of the same key had taken (`Machine::refill_pages`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ItlbSource {
+    FillsLower,
+    FillsUpper,
+    ColdSeen,
+    DropAsid,
+    DropEvery,
+    AllLocal,
+    AllReceived,
+    AllForgot,
+    AllKept,
+    Made,
+    MailMerged,
+    Refilled,
+}
+
+impl ItlbSource {
+    pub(super) const COUNT: usize = 12;
+}
+
+const _: () = assert!(ItlbSource::Refilled as usize + 1 == ItlbSource::COUNT);
+// A fill counts at `FillsLower` plus its half.
+const _: () = assert!(ItlbSource::FillsUpper as usize == ItlbSource::FillsLower as usize + 1);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "std", feature = "native-profile"),
@@ -430,11 +469,15 @@ pub struct Statistics {
     pub itlb_misses: [u64; 4],
     /// ITLB entries of live contexts a fill took the place of, ITLB
     /// entries a TLBI by VA dropped, contexts that left a half's
-    /// `SPACES` most recent (their entries with them), lookup salts a new
+    /// `contexts::LOWER_CONTEXTS` or `UPPER_CONTEXTS` most recent (their
+    /// entries with them), lookup salts a new
     /// owner took from another (`Machine::context_salt`), and TLB
     /// invalidations of everything that stood for more scoped TLBIs than a
     /// PE's mail keeps (`MAIL_SCOPES`).
     pub itlb_drops: [u64; 5],
+    /// The ITLB's fills, drops and forgotten contexts by where they came
+    /// from, in `ItlbSource`'s order.
+    pub itlb_sources: [u64; 12],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
@@ -534,6 +577,7 @@ impl core::ops::AddAssign for Statistics {
             fetch_paths,
             itlb_misses,
             itlb_drops,
+            itlb_sources,
             compiled,
             compile_ticks,
             stored,
@@ -599,6 +643,9 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.itlb_drops.iter_mut().zip(itlb_drops) {
+            *total += count;
+        }
+        for (total, count) in self.itlb_sources.iter_mut().zip(itlb_sources) {
             *total += count;
         }
         for (total, count) in [

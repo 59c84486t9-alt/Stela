@@ -28,6 +28,7 @@ mod code_cache;
 mod code_slots;
 mod compilation;
 mod compression;
+mod contexts;
 mod data_access;
 mod debugging;
 mod degraded;
@@ -616,22 +617,6 @@ struct JumpEntry {
     incarnation: u32,
 }
 
-/// One lookup context of one half: the EL (with the guarded level) and
-/// variant fetches run in and the half's translation inputs
-/// ([`Machine::half_inputs`]), under one number. Between changes no control
-/// value shows (TLBIs, the host's fetch permissions), translation is a
-/// function of these, as a TLB tags its entries, so a return to earlier
-/// controls (a TTBR0 or SPRR permission switched back) finds its pages in
-/// the ITLB still valid. Code changes leave contexts: the ITLB names no
-/// block, only the block key of a page ([`chain::block_key`]).
-#[derive(Debug, Clone, Copy)]
-struct Space {
-    inputs: (mmu::Controls, u64),
-    el: u8,
-    variant: Variant,
-    number: u64,
-}
-
 /// A half's recent context number, with the EL, variant and fetch epoch it
 /// was found for.
 #[derive(Debug, Clone, Copy)]
@@ -656,17 +641,28 @@ impl<T> core::ops::Deref for Padded<T> {
     }
 }
 
-/// The contexts one half keeps, least recently used dropped first.
-const SPACES: usize = 64;
 /// The recent contexts one half finds without comparing controls: enough
 /// for the ELs and GXF states a kernel's exceptions alternate between.
 const RECENT: usize = 4;
 /// `Machine::lower_globals` with no such fetch.
 const NO_GLOBALS: (u64, u64) = (u64::MAX, 0);
+/// The bits of [`Machine::global_leaves`]: 32 KiB, which the few thousand
+/// global leaves (a shared library cache's) fill to about 2%.
+const GLOBAL_LEAVES: usize = 1 << 18;
 
-/// Whether `controls` translate `asid`.
-fn same_asid(controls: &mmu::Controls, asid: u16) -> bool {
-    (mmu::current_asid(controls) ^ asid) & 0xff == 0
+/// The translation inputs besides TTBR0 and the SPRR permissions that a
+/// PE's contexts name at once ([`Machine::context_frames`]).
+const CONTEXT_FRAMES: usize = 64;
+
+/// The fills a PE remembers for [`Machine::refill_after`]: more than the
+/// pages a kernel and the processes it switches between take between two
+/// TLBIs of everything (about 300 kernel pages, then each process's).
+const FILL_LOG: usize = 4096;
+
+/// Whether the context `space` translates `asid`.
+/// ASIDs compare by the eight bits every TCR.AS gives them.
+fn same_asid(space: &contexts::Space, asid: u16) -> bool {
+    (space.asid ^ asid) & 0xff == 0
 }
 
 /// A [`Variant`] in [`Machine::variants`]: a block's and its index keys'
@@ -846,9 +842,14 @@ pub struct Machine<H: Host, D: Devices> {
     /// admits the PE's nonzero BTYPE: the branch target check before the
     /// block runs passes ([`Self::fetch_block`]).
     landing_admitted: bool,
-    /// Each half's lookup contexts ([`Space`]) since its translations last
-    /// changed in a way no control value shows, most recently used last.
-    spaces: [Vec<Space>; 2],
+    /// Each half's lookup contexts ([`contexts::Space`]) since its
+    /// translations last changed in a way no control value shows, by key,
+    /// up to a bound, least recently used dropped first.
+    spaces: [contexts::Contexts; 2],
+    /// The translation inputs of contexts besides TTBR0 and the SPRR
+    /// permissions ([`contexts::Key::frame`]): a few values, which change
+    /// with SCTLR, TCR, MAIR, the regime and the like.
+    context_frames: Vec<(mmu::Controls, u64)>,
     /// Each half's recent contexts, most recent first.
     recent: [[Option<Recent>; RECENT]; 2],
     /// The leaf sizes a fetch of each half translated through since its
@@ -859,6 +860,13 @@ pub struct Machine<H: Host, D: Devices> {
     /// The first and last addresses of the lower half fetched through a
     /// global page since its contexts were last forgotten, or [`NO_GLOBALS`].
     lower_globals: (u64, u64),
+    /// A filter of the lower half's leaves fetched through global
+    /// translations since its contexts were last forgotten, a bit per hash
+    /// ([`GLOBAL_LEAVES`]), and their sizes, a bit per power of two: a TLBI
+    /// by VA and ASID of any other leaf reaches that ASID's contexts alone,
+    /// however wide `lower_globals` is. Allocated at the first such fetch.
+    global_leaves: Vec<u64>,
+    global_sizes: u64,
     /// A filter of the leaves each half fetched through since its contexts
     /// were last forgotten: a TLBI of any other leaf reaches no lookup entry
     /// and no cached fetch, as most by far do not. Each half allocates
@@ -870,16 +878,38 @@ pub struct Machine<H: Host, D: Devices> {
     /// The IMPLEMENTATION DEFINED registers with a cell of their own for
     /// writes ([`STORED_WRITES`]), shared alike.
     stored_writes: Arc<numbering::Registry<Encoding>>,
+    /// The TLBI being applied came in this PE's mail, from another PE
+    /// ([`ItlbSource::AllReceived`]).
+    applying_mail: bool,
     /// The page this PE posted an IC IVAU of since its last DSB.
     code_posted: Option<u64>,
     /// The storage the last generated read returned, if it was a plain one.
     plain_read: Option<(SystemRegister, u64)>,
     /// The next context number; numbers are never reused.
     next_context: u64,
-    /// What owns each lookup salt ([`Self::context_salt`]), and the next
-    /// salt a new owner takes.
+    /// What owns each lookup salt ([`Self::context_salt`]), and when a
+    /// context of it was last used: a new owner takes the least recently
+    /// used salt.
     salt_owners: [u64; chain::LOOKUP_SALTS],
-    next_salt: usize,
+    salt_uses: [u64; chain::LOOKUP_SALTS],
+    salt_clock: u64,
+    /// A filter of the pages the ITLB took, by page and address space,
+    /// whatever their context: what tells a cold fill of a page seen before
+    /// (a refill after its context or entry went unnoticed) from a first
+    /// one ([`ItlbSource::ColdSeen`]). Allocated at the first fill. And
+    /// the bits it has set.
+    itlb_seen: Vec<u64>,
+    itlb_seen_bits: usize,
+    /// The last [`FILL_LOG`] pages the ITLB took, each with its context,
+    /// in a ring ([`Self::refill_after`]), and the next place.
+    fill_log: Vec<(u64, u64)>,
+    fill_next: usize,
+    /// The pages forgotten contexts had taken last, by half and key: a
+    /// context made anew for the key walks them again at once
+    /// ([`Self::refill_pages`]).
+    pending_refills: BTreeMap<(usize, contexts::Key), Vec<u64>>,
+    /// The pages the contexts just made walk again before the fetch goes on.
+    refills: Vec<u64>,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
     /// Accessors by encoding.
@@ -1276,7 +1306,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             itlb: chain::LookupTable::itlb_with(itlb_entries),
             itlb_ghosts: Vec::new(),
             landing_admitted: false,
-            spaces: [Vec::new(), Vec::new()],
+            spaces: [
+                contexts::Contexts::new(contexts::LOWER_CONTEXTS),
+                contexts::Contexts::new(contexts::UPPER_CONTEXTS),
+            ],
+            context_frames: Vec::new(),
             recent: [[None; RECENT]; 2],
             fetched_sizes: [0; 2],
             private_fetches: [false; 2],
@@ -1288,7 +1322,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             plain_read: None,
             next_context: 1,
             salt_owners: [0; chain::LOOKUP_SALTS],
-            next_salt: 0,
+            salt_uses: [0; chain::LOOKUP_SALTS],
+            salt_clock: 0,
+            itlb_seen: Vec::new(),
+            itlb_seen_bits: 0,
+            fill_log: Vec::new(),
+            fill_next: 0,
+            pending_refills: BTreeMap::new(),
+            global_leaves: Vec::new(),
+            global_sizes: 0,
+            refills: Vec::new(),
+            applying_mail: false,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
             timers: None,

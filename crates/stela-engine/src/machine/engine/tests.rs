@@ -2023,6 +2023,8 @@ fn a_fetch_the_host_refuses_takes_a_permission_instruction_abort() {
     ));
     assert_eq!(machine.host.fetch_checks, 1);
     machine.fetch_permissions_changed();
+    // The fetch alone asks, not a walk ahead of it (`refill_pages`).
+    machine.pending_refills.clear();
     let Ok(Fetched::Exception(exception)) = machine.fetch_block(BASE, false) else {
         panic!("an instruction abort")
     };
@@ -3153,6 +3155,8 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     // Another generation numbers the context anew; another EL too, and
     // the same EL and generation give the same number back.
     machine.translations_changed();
+    // `far`'s page translates at its fetch, not ahead (`refill_pages`).
+    machine.pending_refills.clear();
     machine.host.exits = vec![exit(far, ExitKind::Direct)];
     machine.step().unwrap();
     let renewed = machine.chain.contexts()[half];
@@ -3410,6 +3414,8 @@ fn block_entries_survive_a_tlbi_all() {
     let before = machine.chain.contexts()[chain::half(BASE)];
     let key = target_key(&machine, BASE);
     machine.tlb_maintained(Reach::All, Everywhere::All, None);
+    // Each page translates at its fetch, not ahead (`refill_pages`).
+    machine.pending_refills.clear();
     let [found, translated] = [machine.statistics.fetches[0], machine.statistics.fetches[1]];
     let (fills, entries) = (machine.statistics.itlb[0], table_entries(&machine));
     assert_eq!(fetch(&mut machine, BASE), blocks[0]);
@@ -3458,6 +3464,8 @@ fn itlb_fills_name_why_the_page_was_missing() {
     expected[ItlbMiss::Forgotten as usize] += 1;
     assert_eq!(misses(&machine), expected);
     machine.tlb_maintained(Reach::All, Everywhere::All, None);
+    // The page translates at its fetch, not ahead (`refill_pages`).
+    machine.pending_refills.clear();
     fetch(&mut machine);
     expected[ItlbMiss::Context as usize] += 1;
     assert_eq!(misses(&machine), expected);
@@ -8789,6 +8797,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
 mod arena;
 mod exits;
 mod floating_point_traps;
+mod process_switching;
 mod pstate_features;
 mod recovery;
 mod sharing;

@@ -608,20 +608,27 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
 }
 
 /// A PE that reads no mail for a long time, asleep or powered down, holds
-/// at most [`MAIL_SCOPES`] TLB scopes and as many code pages: past them,
-/// one invalidation of everything of that kind.
+/// at most [`MAIL_TLB_SCOPES`] TLB scopes and [`MAIL_SCOPES`] code pages:
+/// past them, scopes that merge with none of the last kept ones and code
+/// pages make one invalidation of everything of that kind.
 #[test]
 fn mail_for_a_pe_that_does_not_read_it_stays_bounded() {
-    use crate::machine::system::TlbiKind::VAA;
+    use crate::machine::system::TlbiKind::ASID;
     let (hub, _) = hub(2);
     for page in 0..10_000u64 {
-        hub.broadcast(0, &[tlbi(VAA, page), Maintenance::Code(Some(page << 14))]);
+        hub.broadcast(
+            0,
+            &[
+                tlbi(ASID, (page % 200) << 48),
+                Maintenance::Code(Some(page << 14)),
+            ],
+        );
     }
     let mail = hub.take(1).unwrap();
     let count =
         |kind: fn(&Maintenance) -> bool| mail.maintenance.iter().filter(|m| kind(m)).count();
     assert!(
-        mail.maintenance.len() <= 2 * MAIL_SCOPES + 2,
+        mail.maintenance.len() <= MAIL_TLB_SCOPES + MAIL_SCOPES + 2,
         "{}",
         mail.maintenance.len()
     );
@@ -630,6 +637,144 @@ fn mail_for_a_pe_that_does_not_read_it_stays_bounded() {
     // What follows a whole invalidation is covered by it.
     assert_eq!(count(|m| matches!(m, Maintenance::Tlb(_))), 0);
     assert_eq!(count(|m| matches!(m, Maintenance::Code(Some(_)))), 0);
+}
+
+/// A run of TLBIs by page, as XNU's and SPTM's loops send them, merges
+/// into one range a sleeping PE applies at once: no invalidation of
+/// everything, and the kernel's contexts outlive it.
+#[test]
+fn a_run_of_tlbis_by_page_merges_into_one_range() {
+    use crate::machine::system::TlbiKind::{VA, VAA};
+    let (hub, _) = hub(2);
+    for page in 0..10_000u64 {
+        hub.broadcast(0, &[tlbi(VAA, 0x10_0000 + page)]);
+    }
+    // Pages of one ASID in the upper half, one apart: another range.
+    for page in 0..100u64 {
+        hub.broadcast(0, &[tlbi(VA, 7 << 48 | (0xfff_ff00_0000 + 2 * page))]);
+    }
+    let mail = hub.take(1).unwrap();
+    assert_eq!(mail.merged, 10_000 - 1 + 100 - 1);
+    let [Maintenance::Tlb(lower), Maintenance::Tlb(upper)] = mail.maintenance[..] else {
+        panic!("two ranges: {:?}", mail.maintenance);
+    };
+    assert_eq!(
+        lower.span(),
+        Some((0x1_0000_0000, 0x1_0000_0000 + 9_999 * 0x1000))
+    );
+    assert_eq!(lower.named_asid(), None);
+    let upper_first = mmu::tlbi::canonical(0xfff_ff00_0000 << 12);
+    assert_eq!(
+        upper.span(),
+        Some((upper_first, upper_first + 198 * 0x1000))
+    );
+    assert_eq!(upper.named_asid(), Some(7));
+}
+
+/// Whatever TLBIs a PE's mail keeps or merges, every entry one of them
+/// removes, the kept scopes remove: by [`tlbi::Scope::covers`], and by
+/// what the PE's ITLB and shadow apply ([`tlbi::Scope::everywhere`],
+/// [`tlbi::Scope::reach`], [`tlbi::Scope::named_asid`]).
+#[test]
+fn merged_mail_removes_every_entry_its_tlbis_remove() {
+    use crate::machine::system::TlbiKind::{RVA, RVAA, VA, VAA};
+    let mut seed = 0x1234_5678_9abc_def0u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..40 {
+        let mut mail = Mail::default();
+        let mut sent = Vec::new();
+        let count = [20, 300, 2000][round % 3];
+        for _ in 0..count {
+            let draw = next();
+            let asid = (draw >> 8) % 4;
+            // Pages of four places in each half, 4 KiB apart.
+            let place = (draw >> 16) % 4;
+            let upper = if draw >> 20 & 1 != 0 {
+                0xf_ffff_0000_0000
+            } else {
+                0
+            };
+            let page = upper | place << 24 | ((draw >> 24) % 64);
+            let kind = [VA, VAA, RVA, RVAA][(draw % 4) as usize];
+            let operand = match kind {
+                // TG 4 KiB, SCALE 0, NUM 1: four pages from BaseADDR.
+                RVA | RVAA => {
+                    let base = (canonical_page(page) >> 12) & ((1 << 37) - 1);
+                    asid << 48 | 1 << 46 | 1 << 39 | base
+                }
+                _ => asid << 48 | page & ((1 << 44) - 1),
+            };
+            let Maintenance::Tlb(scope) = tlbi(kind, operand) else {
+                unreachable!()
+            };
+            sent.push(scope);
+            mail.keep(Maintenance::Tlb(scope));
+        }
+        let all = mail
+            .maintenance
+            .iter()
+            .any(|kept| matches!(kept, Maintenance::TlbAll));
+        let kept: Vec<tlbi::Scope> = mail
+            .maintenance
+            .iter()
+            .filter_map(|kept| match kept {
+                Maintenance::Tlb(scope) => Some(*scope),
+                _ => None,
+            })
+            .collect();
+        assert!(kept.len() <= MAIL_TLB_SCOPES);
+        assert_eq!(kept.len() + mail.merged as usize, sent.len(), "{all}");
+        // Entries at and around every sent page, of every size and ASID.
+        for scope in &sent {
+            let (first, last) = scope.span().unwrap();
+            for address in [first, last, first.wrapping_sub(0x1000), last + 0x1000] {
+                for (size_bits, granule_bits, level) in [(12, 12, 3), (14, 14, 3), (21, 12, 2)] {
+                    for asid in [None, Some(0), Some(1), Some(3)] {
+                        let entry = tlbi::Entry {
+                            regime: mmu::Regime::El10,
+                            vmid: None,
+                            asid,
+                            address: address & ((1 << 56) - 1),
+                            size_bits,
+                            granule_bits,
+                            level,
+                            stage1: true,
+                            stage2: false,
+                            table: false,
+                        };
+                        if !scope.covers(&entry) {
+                            continue;
+                        }
+                        assert!(
+                            all || kept.iter().any(|kept| kept.covers(&entry)),
+                            "{scope:?} removes {entry:x?}, no kept scope does"
+                        );
+                    }
+                }
+            }
+            // What the ITLB and shadow apply: a span holding the sent one,
+            // of its ASID or of every ASID.
+            let holds = |kept: &tlbi::Scope| {
+                let (kept_first, kept_last) = kept.span().unwrap();
+                kept_first <= first
+                    && last <= kept_last
+                    && kept
+                        .named_asid()
+                        .is_none_or(|asid| scope.named_asid() == Some(asid))
+            };
+            assert!(all || kept.iter().any(holds), "{scope:?}");
+        }
+    }
+}
+
+/// The canonical VA of 4 KiB page number `page`.
+fn canonical_page(page: u64) -> u64 {
+    mmu::tlbi::canonical(page << 12)
 }
 
 #[test]
@@ -1839,5 +1984,241 @@ fn board_wait_runs_out_and_reports_once() {
     assert_eq!(
         hub.board.wait(0, &snapshot, 100, &mut counter),
         Waited::Passed
+    );
+}
+
+/// A PE that slept through hundreds of other PEs' TLBIs by page, of many
+/// processes' pages scattered over the lower half, keeps its kernel
+/// translations: its mail merges them into lower-half ranges instead of an
+/// invalidation of everything, so the wake path's pages stay in its ITLB.
+#[test]
+fn a_sleeping_pe_keeps_its_kernel_translations_through_a_pile_of_page_tlbis() {
+    use crate::machine::system::TlbiKind::VA;
+    const KERNEL: u64 = 0xffff_fe00_1000_0000;
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    let el = machine.cpu.pstate.el;
+    let variant = machine.current_variant(false, false);
+    let contexts = machine.contexts(el, variant);
+    machine.chain.set_contexts(contexts);
+    for page in 0..32 {
+        let pc = KERNEL + page * FETCH_PAGE;
+        machine.fetched_through(1, pc, FETCH_PAGE, true);
+        machine.translate_page(pc, stela_compiler::x86_64::chain::block_key(page << 12, 2));
+    }
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..600 {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let (asid, page) = ((seed >> 56) % 200 + 1, (seed >> 20) & 0xff_ffff);
+        hub.broadcast(1, &[tlbi(VA, asid << 48 | page)]);
+    }
+    machine.read_mail().unwrap();
+    assert_eq!(machine.statistics.itlb_drops[4], 0, "no whole invalidation");
+    assert!(machine.statistics.itlb_sources[super::super::ItlbSource::MailMerged as usize] > 0);
+    assert_eq!(machine.contexts(el, variant), contexts);
+    for page in 0..32 {
+        assert!(machine.current_key(KERNEL + page * FETCH_PAGE).is_some());
+    }
+}
+
+#[test]
+fn passive_registers_are_read_without_the_devices_lock() {
+    use super::super::PassiveRegisters;
+    struct Word(AtomicU64);
+    impl PassiveRegisters for Word {
+        fn read(&self, physical: u64, bytes: u8) -> Option<u64> {
+            (physical == 0x40 && bytes == 8).then(|| self.0.load(Ordering::Relaxed))
+        }
+    }
+    #[derive(Default)]
+    struct Counted {
+        word: Option<Arc<Word>>,
+        reads: usize,
+    }
+    impl Devices for Counted {
+        fn passive_registers(&self) -> Option<Arc<dyn PassiveRegisters>> {
+            self.word
+                .as_ref()
+                .map(|word| Arc::clone(word) as Arc<dyn PassiveRegisters>)
+        }
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            self.reads += 1;
+            Ok(3)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+    }
+    let word = Arc::new(Word(AtomicU64::new(9)));
+    let (hub, _) = hub(2);
+    let home = SharedDevices::new(
+        Counted {
+            word: Some(Arc::clone(&word)),
+            reads: 0,
+        },
+        hub,
+    );
+    let mut worker = home.worker();
+    // While another call holds the devices' lock, the passive word reads.
+    let held = home.board.lock(Call::Other);
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 0), ScalarRead::Served(Ok(9)));
+    word.0.store(11, Ordering::Relaxed);
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(11));
+    drop(held);
+    // Any other width or address takes the lock to the model.
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 0), ScalarRead::Served(Ok(3)));
+    assert_eq!(worker.read_scalar(1, 0x48, 8, 0), ScalarRead::Served(Ok(3)));
+    assert_eq!(home.with(|devices| devices.reads), 2);
+}
+
+/// The copies a transfer leaves ([`Devices::take_unlocked`]) run on the PE
+/// that settled the write, after it released the devices' lock, each once,
+/// with PEs settling at once; and what each came to is published by a
+/// transfer on that PE before its call returns, with no other PE or tick
+/// coming by (build-50: a completion waited for an idle home machine).
+#[test]
+fn transfers_leave_their_copies_to_run_outside_the_lock() {
+    use super::super::{LockedMemory, Memory, UnlockedDma};
+    use crate::machine::mmu::MemoryLocks;
+    use std::sync::OnceLock;
+    type Shared = Arc<OnceLock<Arc<shared_devices::Board<Copying>>>>;
+    struct Copy {
+        board: Shared,
+        address: u64,
+        ran: Arc<AtomicUsize>,
+        alone: Arc<AtomicBool>,
+    }
+    impl UnlockedDma for Copy {
+        fn run(self: Box<Self>, memory: &mut dyn Memory) {
+            let board = self.board.get().expect("the board is built");
+            // Free unless another PE took it since: checked while one runs.
+            if self.alone.load(Ordering::SeqCst) {
+                assert!(board.devices.try_lock().is_ok(), "outside the lock");
+            }
+            assert!(memory.write(self.address, &[1]));
+            self.ran.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    /// A device whose write starts a copy and whose transfer publishes
+    /// every copy that ran.
+    struct Copying {
+        board: Shared,
+        deferred: bool,
+        wants: [bool; 4],
+        left: Vec<Box<dyn UnlockedDma>>,
+        ran: Arc<AtomicUsize>,
+        published: usize,
+        alone: Arc<AtomicBool>,
+    }
+    impl Devices for Copying {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, cpu: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            self.wants[cpu] = true;
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+        fn defer_dma(&mut self) {
+            self.deferred = true;
+        }
+        fn take_unlocked(&mut self) -> Vec<Box<dyn UnlockedDma>> {
+            core::mem::take(&mut self.left)
+        }
+        fn transfer(&mut self, cpu: usize, _: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
+            assert!(self.deferred, "a shared board defers its copies");
+            self.published = self.ran.load(Ordering::SeqCst);
+            if core::mem::take(&mut self.wants[cpu]) {
+                self.left.push(Box::new(Copy {
+                    board: Arc::clone(&self.board),
+                    address: cpu as u64,
+                    ran: Arc::clone(&self.ran),
+                    alone: Arc::clone(&self.alone),
+                }));
+            }
+            Ok(())
+        }
+    }
+    /// RAM that counts each PE's byte.
+    struct Counted(Arc<[AtomicUsize; 4]>);
+    impl Memory for Counted {
+        fn read(&mut self, _: u64, _: &mut [u8]) -> bool {
+            true
+        }
+        fn write(&mut self, physical: u64, _: &[u8]) -> bool {
+            self.0[physical as usize].fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+    impl LockedMemory for Counted {
+        fn under(&mut self, _: MemoryLocks) -> &mut dyn Memory {
+            self
+        }
+    }
+    let board: Shared = Arc::new(OnceLock::new());
+    let ran = Arc::new(AtomicUsize::new(0));
+    let alone = Arc::new(AtomicBool::new(true));
+    let devices = Copying {
+        board: Arc::clone(&board),
+        deferred: false,
+        wants: [false; 4],
+        left: Vec::new(),
+        ran: Arc::clone(&ran),
+        published: 0,
+        alone: Arc::clone(&alone),
+    };
+    let hub = Hub::new(4, Ticks(Arc::new(AtomicUsize::new(0))));
+    let home = SharedDevices::new(devices, hub);
+    assert!(board.set(Arc::clone(&home.board)).is_ok());
+    let written = Arc::new([const { AtomicUsize::new(0) }; 4]);
+    // One PE, every other one idle: the copy ran and its result is
+    // published before the call returns.
+    let mut first = home.worker();
+    first.write(1, 0, 4, 0, 0).unwrap();
+    assert!(
+        first
+            .settle_write(1, 0, &mut Counted(Arc::clone(&written)))
+            .transfer
+            .is_ok()
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "before the call returned");
+    assert_eq!(
+        home.with(|devices| devices.published),
+        1,
+        "published at once"
+    );
+    alone.store(false, Ordering::SeqCst);
+    written[1].store(0, Ordering::SeqCst);
+    ran.store(0, Ordering::SeqCst);
+    const ROUNDS: usize = 200;
+    let threads: Vec<_> = (1..4)
+        .map(|cpu| {
+            let mut worker = home.worker();
+            let written = Arc::clone(&written);
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    worker.write(cpu, 0, 4, 0, 0).unwrap();
+                    let settled = worker.settle_write(cpu, 0, &mut Counted(Arc::clone(&written)));
+                    assert!(settled.transfer.is_ok());
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 3 * ROUNDS);
+    for cpu in 1..4 {
+        assert_eq!(written[cpu].load(Ordering::SeqCst), ROUNDS, "PE {cpu}");
+    }
+    assert_eq!(
+        home.with(|devices| (devices.left.len(), devices.published)),
+        (0, 3 * ROUNDS),
+        "every copy published by its own call"
     );
 }

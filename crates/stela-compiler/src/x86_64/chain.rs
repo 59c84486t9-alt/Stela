@@ -1047,16 +1047,26 @@ impl LookupTable {
         salts: u64,
         mut noted: impl FnMut(&LookupEntry),
     ) -> bool {
-        debug_assert_eq!(self.grouping, Grouping::Pc);
-        let groups = *pages.start() >> GRANULE_SHIFT..=*pages.end() >> GRANULE_SHIFT;
-        let span = pages.clone();
-        let found = self.forget_groups(groups, |entry| {
-            let reached = entry.reached(&span, salts);
+        self.forget_range_where(pages.clone(), |entry| {
+            let reached = entry.reached(&pages, salts);
             if reached {
                 noted(entry);
             }
             reached
-        });
+        })
+    }
+
+    /// Forget the ITLB entries of the pages in `pages` that `forget` names
+    /// (for one ASID's contexts, whatever salts other contexts share with
+    /// them): whether the pages had entries to look at.
+    pub fn forget_range_where(
+        &mut self,
+        pages: core::ops::RangeInclusive<u64>,
+        mut forget: impl FnMut(&LookupEntry) -> bool,
+    ) -> bool {
+        debug_assert_eq!(self.grouping, Grouping::Pc);
+        let groups = *pages.start() >> GRANULE_SHIFT..=*pages.end() >> GRANULE_SHIFT;
+        let found = self.forget_groups(groups, |entry| pages.contains(&entry.pc) && forget(entry));
         debug_assert!(self.cell_pcs.is_empty());
         found
     }

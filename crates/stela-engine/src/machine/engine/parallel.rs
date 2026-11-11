@@ -125,8 +125,8 @@ pub(super) enum Maintenance {
     /// A TLBI's entries, which each PE reaches from its own context.
     Tlb(tlbi::Scope),
     /// Every TLB entry of every context: what a mailbox keeps in place of
-    /// more than [`MAIL_SCOPES`] TLBIs, which invalidates more than they did,
-    /// as Arm allows.
+    /// more than [`MAIL_TLB_SCOPES`] TLBIs none of which merge, which
+    /// invalidates more than they did, as Arm allows.
     TlbAll,
     /// IC IVAU of the page holding this physical address, or IC IALLUIS.
     Code(Option<u64>),
@@ -135,11 +135,27 @@ pub(super) enum Maintenance {
     Power(super::ProcessorChange),
 }
 
-/// The TLB scopes, and apart from them the code pages, a mailbox keeps
-/// before it keeps one invalidation of everything instead: a PE that sleeps
-/// for minutes still reads its mail at once and from bounded memory. One
-/// PE's full outgoing list still arrives whole.
+/// The code pages a mailbox keeps before it keeps one invalidation of
+/// every page instead: a PE that sleeps for minutes still reads its mail at
+/// once and from bounded memory. One PE's full outgoing list still arrives
+/// whole.
 const MAIL_SCOPES: usize = OUTGOING;
+
+/// The TLB scopes a mailbox keeps ([`Mail::keep`]): past them, each new one
+/// merges into the kept scope that makes the narrowest range with it, and
+/// only one that merges with none of the last [`MAIL_NEAR`] makes the
+/// mailbox keep an invalidation of everything. About 15 KiB a PE.
+const MAIL_TLB_SCOPES: usize = 4 * OUTGOING;
+
+/// The most recent kept TLB scopes a new one may merge into: a run of
+/// TLBIs by page (XNU's and SPTM's loops of `TLBI VALE1IS`) arrives in
+/// order, so each merges into the one before.
+const MAIL_NEAR: usize = 16;
+
+/// How far apart a new TLB scope's span may be from a kept one's for the
+/// two to merge before the mailbox is full: three 16 KiB pages between
+/// them at most, which the merged range removes besides.
+const MAIL_MERGE_GAP: u64 = 0x1_0000;
 
 /// What other PEs left for one PE.
 #[derive(Debug, Default)]
@@ -151,13 +167,22 @@ pub(super) struct Mail {
     pub maintenance: Vec<Maintenance>,
     /// The serial of the last maintenance in `maintenance`.
     pub serial: u64,
+    /// TLB scopes that merged into one kept before them.
+    pub merged: u64,
 }
 
 impl Mail {
     /// Keep `maintenance` for the PE's next read. An instruction cache
     /// invalidation it has yet to read already covers the same page again,
     /// and so does a whole invalidation of either kind; past
-    /// [`MAIL_SCOPES`] of a kind, one whole invalidation replaces them.
+    /// [`MAIL_SCOPES`] code pages one whole invalidation replaces them. A
+    /// TLB scope next to one of the last kept merges with it
+    /// ([`tlbi::Scope::merged`]); past [`MAIL_TLB_SCOPES`], it merges into
+    /// the one of the last [`MAIL_NEAR`] that makes the narrowest range,
+    /// and one that merges with none of them makes a whole invalidation.
+    /// Every kept scope removes at least what the TLBIs it stands for
+    /// remove, and TLB invalidations commute: the PE applies all its mail
+    /// before it translates again.
     fn keep(&mut self, maintenance: Maintenance) {
         let held = |kind: fn(&Maintenance) -> bool, list: &[Maintenance]| {
             list.iter().filter(|posted| kind(posted)).count()
@@ -177,7 +202,7 @@ impl Mail {
                     return;
                 }
             }
-            Maintenance::Tlb(_) => {
+            Maintenance::Tlb(scope) => {
                 if self
                     .maintenance
                     .iter()
@@ -186,7 +211,27 @@ impl Mail {
                     return;
                 }
                 let scopes = |posted: &Maintenance| matches!(posted, Maintenance::Tlb(_));
-                if held(scopes, &self.maintenance) >= MAIL_SCOPES {
+                let full = held(scopes, &self.maintenance) >= MAIL_TLB_SCOPES;
+                let gap = if full { u64::MAX } else { MAIL_MERGE_GAP };
+                // The narrowest merge with one of the last kept scopes.
+                let nearest = self
+                    .maintenance
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(at, posted)| match posted {
+                        Maintenance::Tlb(held) => Some((at, *held)),
+                        _ => None,
+                    })
+                    .take(MAIL_NEAR)
+                    .filter_map(|(at, held)| Some((at, held.merged(scope, gap)?)))
+                    .min_by_key(|(_, merged)| merged.span().map(|(first, last)| last - first));
+                if let Some((at, merged)) = nearest {
+                    self.maintenance[at] = Maintenance::Tlb(merged);
+                    self.merged += 1;
+                    return;
+                }
+                if full {
                     self.maintenance.retain(|posted| !scopes(posted));
                     self.maintenance.push(Maintenance::TlbAll);
                     return;
@@ -309,6 +354,9 @@ pub struct Counts {
     pub itlb_misses: [u64; 4],
     pub itlb_drops: [u64; 5],
     pub lookup_forgets: [u64; 4],
+    /// Its ITLB's fills, drops and forgotten contexts by where they came
+    /// from ([`super::Statistics::itlb_sources`]).
+    pub itlb_sources: [u64; 12],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
     pub phases: [u64; step_timing::Phase::COUNT],
@@ -1356,6 +1404,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if mail.event && !self.waiting.is_some_and(|wait| wait.down) {
                 self.cpu.signal_event();
             }
+            self.statistics.itlb_sources[super::ItlbSource::MailMerged as usize] += mail.merged;
             for maintenance in &mail.maintenance {
                 self.maintain(*maintenance)?;
             }
@@ -1495,15 +1544,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn maintain(&mut self, maintenance: Maintenance) -> Step {
         match maintenance {
             Maintenance::Tlb(scope) => {
+                self.applying_mail = true;
                 self.tlb_maintained(
                     scope.reach(&self.cpu.tlbi_current()),
                     scope.everywhere(),
                     scope.named_asid(),
                 );
+                self.applying_mail = false;
             }
             Maintenance::TlbAll => {
                 self.statistics.itlb_drops[4] += 1;
+                self.applying_mail = true;
                 self.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None);
+                self.applying_mail = false;
             }
             Maintenance::Code(Some(physical)) => {
                 self.invalidate_posted_code_page(physical);
@@ -1701,6 +1754,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             itlb_misses: statistics.itlb_misses,
             itlb_drops: statistics.itlb_drops,
             lookup_forgets: statistics.lookup_forgets,
+            itlb_sources: statistics.itlb_sources,
             phases: self
                 .step_timing
                 .as_ref()

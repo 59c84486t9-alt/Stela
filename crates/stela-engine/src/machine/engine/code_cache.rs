@@ -43,6 +43,16 @@ fn fetched_leaf_bits(base: u64, size: u64) -> [(usize, u64); 2] {
     })
 }
 
+/// The bits of [`Machine::global_leaves`] for the leaf of `size` bytes at
+/// `base`.
+fn global_leaf_bits(base: u64, size: u64) -> [(usize, u64); 2] {
+    let hash = (base | u64::from(size.trailing_zeros())).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    [hash >> 40, hash >> 14].map(|bits| {
+        let bit = bits as usize & (GLOBAL_LEAVES - 1);
+        (bit / 64, 1 << (bit % 64))
+    })
+}
+
 /// Whether `slot`'s bit is set in `bits`.
 fn bit_set(bits: &[u64], slot: u32) -> bool {
     bits.get(slot as usize / 64)
@@ -208,29 +218,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget the contexts of `halves` that translate `asid`: what a TLBI of
     /// one process leaves of the others', which their ITLB entries stay good
     /// for.
-    /// ASIDs compare by the eight bits every TCR.AS gives them.
     pub(super) fn forget_asid(&mut self, halves: core::ops::RangeInclusive<usize>, asid: u16) {
         for half in halves {
             self.statistics.lookup_forgets[0] += 1;
-            self.spaces[half].retain(|space| !same_asid(&space.inputs.0, asid));
+            self.spaces[half].retain(|space| !same_asid(space, asid));
             self.recent[half] = [None; RECENT];
         }
         self.advance_table_generation();
     }
 
-    /// The live salts of `half`'s contexts that `asid` reaches.
-    fn asid_salts(&self, half: usize, asid: u16) -> u64 {
-        self.spaces[half]
-            .iter()
-            .filter(|space| same_asid(&space.inputs.0, asid))
-            .fold(0, |salts, space| {
-                salts | 1 << (space.number % chain::LOOKUP_SALTS as u64)
-            })
+    /// A TLBI of everything of some regimes reached nothing of `regime`'s
+    /// ([`mmu::tlbi::Scope::reach`] answered [`mmu::tlbi::Reach::Nothing`]
+    /// for the context the PE translates in): the contexts of other
+    /// regimes go, which it may have reached, and `regime`'s stay.
+    fn forget_other_regimes(&mut self, regime: mmu::Regime) {
+        let mut forgot = false;
+        for half in 0..2 {
+            if self.spaces[half].len() == 0 {
+                continue;
+            }
+            if self.spaces[half].iter().all(|space| space.regime != regime) {
+                self.forget_contexts(half..=half, 1);
+                forgot = true;
+                continue;
+            }
+            if self.spaces[half].retain(|space| space.regime == regime) != 0 {
+                self.statistics.lookup_forgets[1] += 1;
+                self.recent[half] = [None; RECENT];
+                forgot = true;
+            }
+        }
+        let source = if forgot {
+            ItlbSource::AllForgot
+        } else {
+            ItlbSource::AllKept
+        };
+        self.statistics.itlb_sources[source as usize] += 1;
+        self.advance_translation_generation();
     }
 
     /// [`Self::forget_spaces`] for a caller that advances the generation.
     fn forget_contexts(&mut self, halves: core::ops::RangeInclusive<usize>, cause: usize) {
         for half in halves {
+            self.refill_after(half);
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
             self.recent[half] = [None; RECENT];
@@ -241,6 +271,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.private_fetches[half] = false;
             if half == 0 {
                 self.lower_globals = NO_GLOBALS;
+                if core::mem::take(&mut self.global_sizes) != 0 {
+                    self.global_leaves.fill(0);
+                }
             }
         }
     }
@@ -266,7 +299,45 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if half == 0 && global {
             let (first, last) = self.lower_globals;
             self.lower_globals = (first.min(pc), last.max(pc.saturating_add(size)));
+            if self.global_leaves.is_empty() {
+                self.global_leaves = vec![0; GLOBAL_LEAVES / 64];
+            }
+            for (word, bit) in global_leaf_bits(pc & !(leaf - 1), leaf) {
+                self.global_leaves[word] |= bit;
+            }
+            self.global_sizes |= leaf;
         }
+    }
+
+    /// Whether a lower-half fetch since its contexts were last forgotten may
+    /// have translated through a global leaf that holds or overlaps
+    /// `first..=last`: no TLBI by VA and ASID of the span reaches another
+    /// ASID's entries otherwise (Arm `TLBIMatch`: a non-global entry
+    /// matches only its own ASID).
+    fn global_span(&self, first: u64, last: u64) -> bool {
+        let (global_first, global_last) = self.lower_globals;
+        if last < global_first || first > global_last {
+            return false;
+        }
+        let mut sizes = self.global_sizes;
+        while sizes != 0 {
+            let size = sizes.isolate_lowest_one();
+            sizes &= sizes - 1;
+            let (start, end) = (first & !(size - 1), last | (size - 1));
+            let leaves = (end - start) / size;
+            if leaves >= SCANNED_LEAVES {
+                return true;
+            }
+            let held = (0..=leaves).any(|leaf| {
+                global_leaf_bits(start + leaf * size, size)
+                    .iter()
+                    .all(|&(word, bit)| self.global_leaves[word] & bit != 0)
+            });
+            if held {
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether a fetch of `half` translated through the leaf of `size` bytes
@@ -331,15 +402,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Drop the ITLB entries of the pages a TLBI by VA reaches
-    /// ([`Self::fetched_span`]): those of every context, or of `asid`'s alone
-    /// while no global page was fetched in its span of the lower half, which
-    /// only such a page shares. A process's exit reaches the shared libraries
-    /// this way, which every other process's entries still hold good for.
-    /// The ITLB finds the entries of the span's pages in every context from
-    /// its index of where each granule's went (`chain::LookupTable`).
-    /// Contexts stay: the hot pages of one that went would each cost an exit
-    /// on every PE that runs them. The block table's entries stay too: a
-    /// page translated anew finds them again by its frame.
+    /// ([`Self::fetched_span`]): those of every context, or of `asid`'s
+    /// contexts alone while no global page was fetched in its span of the
+    /// lower half, which only such a page shares. A process's exit reaches
+    /// the shared libraries this way, which every other process's entries
+    /// still hold good for. The ITLB finds the entries of the span's pages
+    /// in every context from its index of where each granule's went
+    /// (`chain::LookupTable`), and keeps those of contexts of other ASIDs,
+    /// whatever salt they share. Contexts stay: the hot pages of one that
+    /// went would each cost an exit on every PE that runs them. The block
+    /// table's entries stay too: a page translated anew finds them again by
+    /// its frame.
     pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
@@ -351,18 +424,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let Some((first, last)) = self.fetched_span(half, first, last) else {
                 continue;
             };
-            let (global_first, global_last) = self.lower_globals;
-            let scoped = asid.filter(|_| half == 0 && (last < global_first || first > global_last));
-            let reached = match scoped {
-                Some(asid) => self.asid_salts(half, asid),
-                None => u64::MAX,
+            let scoped = asid.filter(|_| half == 0 && !self.global_span(first, last));
+            let source = match scoped {
+                Some(_) => ItlbSource::DropAsid,
+                None => ItlbSource::DropEvery,
             };
-            let (ghosts, drops) = (&mut self.itlb_ghosts, &mut self.statistics.itlb_drops[1]);
-            let noted = |entry: &chain::LookupEntry| {
-                *drops += 1;
-                super::compilation::note_itlb_ghost(ghosts, entry, ItlbMiss::Forgotten);
+            let spaces = &self.spaces[half];
+            let (ghosts, statistics) = (&mut self.itlb_ghosts, &mut self.statistics);
+            let forget = |entry: &chain::LookupEntry| {
+                let reached = scoped.is_none_or(|asid| {
+                    spaces
+                        .live(entry.key)
+                        .is_some_and(|space| same_asid(space, asid))
+                });
+                if reached {
+                    statistics.itlb_drops[1] += 1;
+                    statistics.itlb_sources[source as usize] += 1;
+                    super::compilation::note_itlb_ghost(ghosts, entry, ItlbMiss::Forgotten);
+                }
+                reached
             };
-            if self.itlb.forget_range_noting(first..=last, reached, noted) {
+            if self.itlb.forget_range_where(first..=last, forget) {
                 self.statistics.lookup_forgets[2] += 1;
             }
         }
@@ -371,7 +453,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// A translation control changed: cached fetch translations go, and
     /// of the host's shadow what the new controls translate differently
     /// ([`Host::set_regime`]). Lookup contexts are keyed by the controls'
-    /// values ([`Space`]), so a return to earlier ones finds theirs again.
+    /// values ([`contexts::Key`]), so a return to earlier ones finds theirs
+    /// again.
     pub(super) fn controls_changed(&mut self) {
         self.derived_changed();
         self.permissions_changed();
@@ -432,7 +515,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     None => self.forget_spaces(0..=last, 0),
                 }
             }
-            mmu::tlbi::Everywhere::All => self.forget_spaces(0..=1, 1),
+            // The forms without an address. One that reaches nothing of the
+            // regime the PE translates in reaches no entry of it
+            // (`Scope::reach`, `Scope::covers`).
+            mmu::tlbi::Everywhere::All if reach == mmu::tlbi::Reach::Nothing => {
+                self.forget_other_regimes(self.cpu.tlbi_current().regime);
+            }
+            mmu::tlbi::Everywhere::All => {
+                // Mail's whole invalidations count as received too
+                // (`itlb_drops`' mail_all tells them apart).
+                let source = match self.applying_mail {
+                    true => ItlbSource::AllReceived,
+                    false => ItlbSource::AllLocal,
+                };
+                self.statistics.itlb_sources[source as usize] += 1;
+                self.forget_spaces(0..=1, 1);
+            }
         }
         self.statistics.tlb_maintenance += 1;
         if reach != mmu::tlbi::Reach::All {
