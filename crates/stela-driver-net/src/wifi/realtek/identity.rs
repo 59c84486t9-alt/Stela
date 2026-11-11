@@ -24,6 +24,9 @@ pub struct Observed {
     pub sys_cfg1: u32,
 }
 
+/// The revision of a chip binding ([`Profile::chip_target`]).
+pub const CHIP_REVISION: &str = "linux-firmware";
+
 /// `rtw_8822ce_id_table`.
 pub const RTL8822C_DEVICES: [u16; 2] = [0xc822, 0xc82f];
 
@@ -103,24 +106,69 @@ impl Profile {
             self.cut()
         )
     }
+    /// The binding `stela setup` writes for an adapter it knows by PCI IDs
+    /// alone: the chip, as rtw88 and rtw89 name one image per chip.
+    pub fn chip_target(self) -> Target<'static> {
+        Target {
+            driver: "realtek-wifi",
+            hardware: match self.chip {
+                Chip::Rtl8822C => "pci:10ec:c822",
+                Chip::Rtl8852B => "pci:10ec:b852",
+            },
+            revision: CHIP_REVISION,
+            board: None,
+        }
+    }
+    /// Whether `image` is this chip's file under the observed binding or the
+    /// chip's ([`Self::chip_target`]).
+    pub fn binds(self, image: &Image<'_>) -> bool {
+        let hardware = self.hardware_key();
+        let revision = self.revision_key();
+        let observed = Target {
+            driver: "realtek-wifi",
+            hardware: &hardware,
+            revision: &revision,
+            board: None,
+        };
+        image.name() == self.firmware_name()
+            && (image.target() == observed || image.target() == self.chip_target())
+    }
+    /// Load the image under the observed binding, or else under the chip's
+    /// when the USB has none for this adapter. A failure is the observed
+    /// request's.
     pub fn stage(self, provider: &dyn Provider) -> Result<Staged<'_>, StageError> {
         let hardware = self.hardware_key();
         let revision = self.revision_key();
-        let image = provider
-            .load(Requirement {
-                name: self.firmware_name(),
-                target: Target {
-                    driver: "realtek-wifi",
-                    hardware: &hardware,
-                    revision: &revision,
-                    board: None,
-                },
-                minimum_bytes: match self.chip {
-                    Chip::Rtl8822C => 64,
-                    Chip::Rtl8852B => 32,
-                },
-            })
-            .map_err(StageError::Resource)?;
+        let observed = Requirement {
+            name: self.firmware_name(),
+            target: Target {
+                driver: "realtek-wifi",
+                hardware: &hardware,
+                revision: &revision,
+                board: None,
+            },
+            minimum_bytes: match self.chip {
+                Chip::Rtl8822C => 64,
+                Chip::Rtl8852B => 32,
+            },
+        };
+        let chip = Requirement {
+            target: self.chip_target(),
+            ..observed
+        };
+        let image = match provider.load(observed) {
+            Err(error)
+                if matches!(
+                    error.kind,
+                    firmware::ErrorKind::Missing | firmware::ErrorKind::WrongTarget
+                ) =>
+            {
+                provider
+                    .load(chip)
+                    .map_err(|_| StageError::Resource(error))?
+            }
+            loaded => loaded.map_err(StageError::Resource)?,
+        };
         let layout = match self.chip {
             Chip::Rtl8822C => Layout::Rtw88(super::firmware::Rtw88::parse(image.bytes())?),
             Chip::Rtl8852B => {
@@ -239,6 +287,48 @@ pub(crate) mod tests {
         }
         assert!(matches!(
             profile.stage(&Catalog::from_handoff(vec![]).unwrap()),
+            Err(StageError::Resource(firmware::Error {
+                kind: firmware::ErrorKind::Missing,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn an_adapter_with_no_observed_binding_takes_its_chips_image() {
+        let data = super::super::firmware::tests::legacy_fixture();
+        let hash = Sha256::digest(&data).into();
+        let chip = profile().chip_target();
+        assert_eq!(chip.hardware, "pci:10ec:c822");
+        assert_eq!(chip.revision, CHIP_REVISION);
+        let catalog = Catalog::from_handoff(vec![Resource {
+            name: "rtw88/rtw8822c_fw.bin",
+            target: chip,
+            provenance: Provenance {
+                source: "synthetic-test",
+                revision: "1",
+                member: "rtw88/rtw8822c_fw.bin",
+                license: "MIT",
+            },
+            expected_length: data.len(),
+            expected_sha256: hash,
+            bytes: data,
+        }])
+        .unwrap();
+        // Both RTL8822CE IDs, at any cut, are one chip.
+        for device in RTL8822C_DEVICES {
+            for cut in [0, 3] {
+                let profile = Profile::select(observed(device, cut)).unwrap();
+                let staged = profile.stage(&catalog).unwrap();
+                assert_eq!(staged.image.target(), chip);
+                assert!(profile.binds(&staged.image));
+            }
+        }
+        // RTL8852B's chip is another chip.
+        let rtl8852b = Profile::select(observed(0xb852, 1)).unwrap();
+        assert_ne!(rtl8852b.chip_target(), chip);
+        assert!(matches!(
+            rtl8852b.stage(&catalog),
             Err(StageError::Resource(firmware::Error {
                 kind: firmware::ErrorKind::Missing,
                 ..

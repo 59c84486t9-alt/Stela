@@ -167,17 +167,7 @@ impl<I: Io> Download<I> {
         }
         // Staged fields are diagnostic and mutable, whereas Image keeps
         // the immutable Provider binding. Revalidate both before touching I/O.
-        let hardware = profile.hardware_key();
-        let revision = profile.revision_key();
-        if staged.image.name() != profile.firmware_name()
-            || staged.image.target()
-                != (crate::firmware::Target {
-                    driver: "realtek-wifi",
-                    hardware: &hardware,
-                    revision: &revision,
-                    board: None,
-                })
-        {
+        if !profile.binds(&staged.image) {
             return Err(Error::WrongFirmwareTarget.into());
         }
         // Reparse the exact provider bytes; public diagnostic layouts cannot
