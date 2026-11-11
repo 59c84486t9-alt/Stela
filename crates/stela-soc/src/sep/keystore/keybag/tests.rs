@@ -1064,3 +1064,59 @@ fn change_lock_state_carries_the_trailing_flags_word() {
     trailing.extend_from_slice(&[0; 4]);
     assert!(decode(&trailing).is_err());
 }
+
+/// The device state transitions the kernel sends besides unlock: sel 8's
+/// lock (1) and the lock assertion hold (5) and drop (6). An assertion
+/// keeps the bag open across a lock until the last one is dropped.
+#[test]
+fn lock_assertions_defer_a_lock_until_the_last_drop() {
+    let mut sep = Sep::new(ROOT);
+    let handle = sep.create(2, SECRET);
+    sep.bind(handle).unwrap();
+    let transition = |sep: &mut Sep, handle: i32, transition: u32| -> Result<u64, Refusal> {
+        let fields = sep.ask(
+            2,
+            DEVICE_STATE_TRANSITION,
+            0,
+            &transition_body(handle, transition, &[]),
+        )?;
+        assert_eq!(fields.len(), 16);
+        // No deadline: the kernel times the assertion itself.
+        assert_eq!(fields[8..], [0; 8]);
+        Ok(u64::from_le_bytes(fields[..8].try_into().unwrap()))
+    };
+    let session = |sep: &mut Sep, which: u32| transition(sep, SESSION_BAG, which);
+    // A locked bag cannot be held open.
+    let refusal = session(&mut sep, HOLD_ASSERTION).unwrap_err();
+    assert_eq!(refusal.answer.unwrap().frame.parameter, FAILURE);
+    assert_eq!(sep.ss(SESSION_BAG), 1);
+    sep.lock_state(UNLOCK, SECRET).unwrap();
+    assert_eq!(session(&mut sep, HOLD_ASSERTION), Ok(0));
+    assert_eq!(session(&mut sep, HOLD_ASSERTION), Ok(0));
+    // The lock waits for the assertions; the bag stays open.
+    assert_eq!(session(&mut sep, LOCK_TRANSITION), Ok(0));
+    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(0));
+    assert_eq!(sep.ss(SESSION_BAG), 8);
+    // The last drop applies the lock and asks the kernel to notify it.
+    assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(NOTIFY_LOCK_STATE));
+    assert_eq!(sep.ss(SESSION_BAG), 9);
+    assert!(session(&mut sep, DROP_ASSERTION).is_err());
+    // The passcode opens it again; a lock without assertions is at once.
+    sep.lock_state(UNLOCK, SECRET).unwrap();
+    assert_eq!(session(&mut sep, LOCK_TRANSITION), Ok(NOTIFY_LOCK_STATE));
+    assert_eq!(session(&mut sep, LOCK_TRANSITION), Ok(0));
+    // An unlock while a lock waits cancels it.
+    sep.lock_state(UNLOCK, SECRET).unwrap();
+    assert_eq!(session(&mut sep, HOLD_ASSERTION), Ok(0));
+    assert_eq!(sep.lock_state(LOCK, &[]), Ok((UNLOCKED_SINCE_LOAD, 0)));
+    sep.lock_state(UNLOCK, SECRET).unwrap();
+    assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(0));
+    assert_eq!(sep.ss(SESSION_BAG), 8);
+    // The creation handle is its own instance: it holds no assertion.
+    assert!(transition(&mut sep, handle, DROP_ASSERTION).is_err());
+    // A bag without a passcode never locks.
+    let open = sep.create(2, b"");
+    assert_eq!(transition(&mut sep, open, LOCK_TRANSITION), Ok(0));
+    assert_eq!(sep.ss(open), (NO_PIN | BEEN_UNLOCKED) as u8);
+}

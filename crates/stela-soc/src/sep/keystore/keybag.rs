@@ -1,5 +1,5 @@
 //! User keybags: create, save, load, unload and UUID; session binding, lock
-//! state, unlock and passcode change.
+//! state, unlock, lock and lock assertions, passcode change.
 //!
 //! **Callers.** At login `applekeystored` (26A434 `/usr/libexec/applekeystored`,
 //! x86_64 slice 0x100031f87..0x1000320c9; the arm64e slice has the same calls)
@@ -75,9 +75,31 @@ pub(super) const MAKE_SYSTEM: u8 = 0x0d;
 /// `__ipc_device_state_transition` (VA 0xfffffe0009d5da4c), variant 0:
 /// session, handle, transition, u64, secret; reply two u64s, which
 /// `device_state_transition` (VA 0xfffffe0009d26590) passes to
-/// `handle_device_state_return` as flags and deadline. `unlock_the_device`
-/// (sel 9) sends transition 0 with the passcode.
+/// `handle_device_state_return` as flags and deadline. The 26B123 kernel's
+/// senders (`device_state_transition` VA 0xfffffe0009d411f4 and its
+/// callers): `unlock_the_device` (sel 9) sends [`UNLOCK_TRANSITION`] with
+/// the passcode; sel 8 sends [`LOCK_TRANSITION`] with argument 0 (sel 32,
+/// which enters sel 8's code with argument 1, and sel 0x7a's transition 1,
+/// and transition 10 are not modeled);
+/// `hold_device_lockassertion` (VA 0xfffffe0009d4143c, from the user
+/// client's `handleLockAssertion`, after the kernel checked the device
+/// state) sends [`HOLD_ASSERTION`] and `drop_device_lockassertion` (VA
+/// 0xfffffe0009d4158c, from the assertion timers) sends [`DROP_ASSERTION`],
+/// both with argument 0 and no secret. The kernel keeps the assertion's
+/// timeout itself (`handleLockAssertion` arms its own timer), so the reply's
+/// deadline stays 0.
 pub(super) const DEVICE_STATE_TRANSITION: u8 = 0x18;
+/// Unlock with the passcode.
+const UNLOCK_TRANSITION: u32 = 0;
+/// Lock now.
+const LOCK_TRANSITION: u32 = 1;
+/// Hold a lock assertion: the bag stays unlocked until it is dropped.
+const HOLD_ASSERTION: u32 = 5;
+/// Drop a lock assertion.
+const DROP_ASSERTION: u32 = 6;
+/// At most this many assertions are held on one bag: a bound for a client
+/// that holds without dropping. The kernel holds one per user client.
+const MAX_ASSERTIONS: u32 = 4096;
 /// `__ipc_change_secret_v3` (VA 0xfffffe0009d5cabc from `change_password`
 /// VA 0xfffffe0009d28908, sel 15): session, handle, old secret, new secret,
 /// two more blobs, then u32s for a byte, the generation option and flags
@@ -487,6 +509,11 @@ struct Bag {
     passcode: Option<Zeroizing<[u8; KEY_BYTES]>>,
     /// Whether the passcode opened this instance since it was loaded.
     been_unlocked: bool,
+    /// Lock assertions held on this instance: while any is held, a lock
+    /// leaves the passcode seed open and waits for the last drop.
+    assertions: u32,
+    /// A lock arrived while assertions were held.
+    lock_pending: bool,
 }
 
 impl Bag {
@@ -521,7 +548,24 @@ impl Bag {
                 self.passcode.clone()
             },
             been_unlocked: !self.header.has_passcode(),
+            assertions: 0,
+            lock_pending: false,
         }
+    }
+
+    /// Lock: drop the passcode seed of a bag with a passcode, or, while a
+    /// lock assertion is held, remember the lock for the last drop. Returns
+    /// whether the lock state changed.
+    fn lock(&mut self) -> bool {
+        if !self.header.has_passcode() || self.passcode.is_none() {
+            return false;
+        }
+        if self.assertions > 0 {
+            self.lock_pending = true;
+            return false;
+        }
+        self.passcode = None;
+        true
     }
 }
 
@@ -692,6 +736,8 @@ impl Keybags {
         };
         Ok(Bag {
             been_unlocked: passcode.is_some(),
+            assertions: 0,
+            lock_pending: false,
             header,
             device_sealed,
             passcode_sealed,
@@ -768,6 +814,8 @@ impl Keybags {
                     device,
                     passcode: Some(seed),
                     been_unlocked: true,
+                    assertions: 0,
+                    lock_pending: false,
                 };
                 if passcode.is_empty() {
                     return self.finish(Then::Create(bag), None);
@@ -866,10 +914,7 @@ impl Keybags {
                 }
                 LOCK => {
                     let bag = self.find_mut(handle)?;
-                    let changed = bag.header.has_passcode() && bag.passcode.is_some();
-                    if bag.header.has_passcode() {
-                        bag.passcode = None;
-                    }
+                    let changed = bag.lock();
                     let state = bag.state();
                     Ok(Outcome::Reply(lock_state_reply(
                         state,
@@ -937,7 +982,10 @@ impl Keybags {
                 argument,
                 secret,
             } => {
-                if transition != 0 {
+                if !matches!(
+                    transition,
+                    UNLOCK_TRANSITION | LOCK_TRANSITION | HOLD_ASSERTION | DROP_ASSERTION
+                ) {
                     return Err(self.refuse_shape(
                         "device state transition",
                         transition.into(),
@@ -945,9 +993,51 @@ impl Keybags {
                     ));
                 }
                 if argument != 0 {
-                    return Err(self.refuse_shape("unlock transition argument", argument, note));
+                    return Err(self.refuse_shape("transition argument", argument, note));
                 }
-                self.unlock(handle, secret, Unlocked::Transition)
+                if transition == UNLOCK_TRANSITION {
+                    return self.unlock(handle, secret, Unlocked::Transition);
+                }
+                if !secret.is_empty() {
+                    return Err(self.refuse_shape(
+                        "transition secret length",
+                        secret.len() as u64,
+                        note,
+                    ));
+                }
+                let bag = self.find_mut(handle)?;
+                let changed = match transition {
+                    LOCK_TRANSITION => bag.lock(),
+                    HOLD_ASSERTION => {
+                        // An assertion keeps an open bag open; it cannot
+                        // open a locked one.
+                        if bag.passcode.is_none() {
+                            return Err(refuse!("SEP keybag lock assertion needs an unlocked bag"));
+                        }
+                        if bag.assertions >= MAX_ASSERTIONS {
+                            return Err(refuse!("SEP keybag lock assertions are exhausted"));
+                        }
+                        bag.assertions += 1;
+                        false
+                    }
+                    _ => {
+                        if bag.assertions == 0 {
+                            return Err(refuse!("SEP keybag holds no lock assertion"));
+                        }
+                        bag.assertions -= 1;
+                        if bag.assertions == 0 && bag.lock_pending {
+                            bag.lock_pending = false;
+                            bag.lock()
+                        } else {
+                            false
+                        }
+                    }
+                };
+                Ok(Outcome::Reply(unlocked_reply(
+                    Unlocked::Transition,
+                    0,
+                    if changed { NOTIFY_LOCK_STATE } else { 0 },
+                )))
             }
         }
     }
@@ -1045,6 +1135,7 @@ impl Keybags {
                 let changed = bag.passcode.is_none();
                 bag.passcode = Some(seed);
                 bag.been_unlocked = true;
+                bag.lock_pending = false;
                 let state = bag.state();
                 self.progress(UNLOCKED);
                 Ok(Outcome::Reply(unlocked_reply(
