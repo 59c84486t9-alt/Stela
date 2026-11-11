@@ -150,7 +150,7 @@ fn per_round(threads: usize, legacy: bool) -> u64 {
 /// `cargo test -p stela-engine --release --lib shared_path_scaling --
 /// --ignored --nocapture`
 #[test]
-#[ignore = "manual: opt-in timing"]
+#[ignore = "manual: opt-in"]
 fn shared_path_scaling() {
     for threads in [1, 4, 8] {
         let before = per_round(threads, true);

@@ -1477,7 +1477,7 @@ fn a_deferred_read_whose_copy_fails_ends_as_a_failed_copy_in_place() {
 /// copy outside. `cargo test --release -p stela-soc --lib read_lock_costs
 /// -- --ignored --nocapture`.
 #[test]
-#[ignore = "host timing benchmark"]
+#[ignore = "manual: opt-in"]
 fn read_lock_costs() {
     let engine = crate::inline_key::Engine::default();
     engine.provision(zeroize::Zeroizing::new([9; 32]));

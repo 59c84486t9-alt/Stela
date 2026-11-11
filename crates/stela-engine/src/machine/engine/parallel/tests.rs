@@ -1633,7 +1633,7 @@ fn a_signal_racing_with_a_halt_always_wakes_the_target() {
 /// every send raises a line and bumps the target's epoch (no kick: it
 /// does not sleep).
 #[test]
-#[ignore = "manual: opt-in timing"]
+#[ignore = "manual: opt-in"]
 fn signal_send_costs() {
     const SENDS: u32 = 200_000;
     for contended in [false, true] {

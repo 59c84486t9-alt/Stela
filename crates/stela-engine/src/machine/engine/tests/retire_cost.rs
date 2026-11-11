@@ -85,7 +85,7 @@ fn retire_one_part(pages: usize, link: bool) -> Measured {
 }
 
 #[test]
-#[ignore = "host timing; run by hand in release"]
+#[ignore = "manual: opt-in"]
 fn retire_cost() {
     for pages in [4, 12] {
         for link in [false, true] {

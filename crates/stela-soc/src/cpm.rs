@@ -179,7 +179,7 @@ mod tests {
     /// Host cost of a CLPC sampler read: `cargo test -p stela-soc --lib
     /// cpm::tests::read_cost -- --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "manual: opt-in"]
     fn read_cost() {
         extern crate std;
         let mut sink = InterruptLatch::new();

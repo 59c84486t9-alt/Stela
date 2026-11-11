@@ -101,7 +101,7 @@ fn a_write_elsewhere_runs_the_usb_schedule_only_with_work() {
 /// with the schedule left to its work: `cargo test --release -p stela-soc
 /// --lib machine::tests::passive::access_costs -- --ignored --nocapture`.
 #[test]
-#[ignore]
+#[ignore = "manual: opt-in"]
 fn access_costs() {
     extern crate std;
     use stela_engine::machine::engine::{Hub, Kick, ScalarRead, SharedDevices};

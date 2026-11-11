@@ -2545,7 +2545,7 @@ mod tests {
     /// differing in every row. Run with
     /// `cargo test -p stela-soc --release --lib refine_timings -- --ignored --nocapture`.
     #[test]
-    #[ignore = "timing, release only"]
+    #[ignore = "manual: opt-in"]
     fn refine_timings() {
         const WIDTH: usize = 2560;
         const HEIGHT: usize = 1440;

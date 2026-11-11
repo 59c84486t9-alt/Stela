@@ -1663,7 +1663,7 @@ mod tests {
     /// vector fma32, f16 vecfp with a broadcast Y lane):
     /// `cargo test -p stela-compiler --release amx::native -- --ignored --nocapture`.
     #[test]
-    #[ignore = "timing report, not a check"]
+    #[ignore = "manual: opt-in"]
     fn native_and_model_costs() {
         let mut random = Random(0x1234_5678_9abc_def1);
         let initial = fill(&mut random);

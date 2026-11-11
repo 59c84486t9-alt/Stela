@@ -690,7 +690,7 @@ mod tests {
     /// `cargo test -p stela-engine --release --lib alias_cost -- --ignored
     /// --nocapture`.
     #[test]
-    #[ignore = "host timing; run by hand in release"]
+    #[ignore = "manual: opt-in"]
     fn alias_cost() {
         extern crate std;
         const PAGE: u64 = 0x8000_0000;

@@ -2286,7 +2286,7 @@ fn an_abort_waits_for_the_compose_in_flight() {
 /// compose outside. `cargo test --release -p stela-soc --lib
 /// compose_lock_costs -- --ignored --nocapture`.
 #[test]
-#[ignore = "host timing benchmark"]
+#[ignore = "manual: opt-in"]
 fn compose_lock_costs() {
     #[derive(Clone, Default)]
     struct Hd(alloc::sync::Arc<std::sync::Mutex<Vec<u8>>>);

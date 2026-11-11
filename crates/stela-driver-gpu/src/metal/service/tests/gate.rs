@@ -649,7 +649,7 @@ fn the_kexts_import_is_timed_as_a_call_of_its_own() {
 /// the turn and asks the device. The mock's timeline query is free; on the
 /// PC that query is a host kernel call the boot CPU serves (`GPU POSTED`).
 #[test]
-#[ignore = "a measurement, not a check"]
+#[ignore = "manual: opt-in"]
 fn poll_paths_cost() {
     extern crate std;
     const CALLS: u32 = 200_000;

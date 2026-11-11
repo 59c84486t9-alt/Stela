@@ -151,7 +151,7 @@ fn run(processes: u64, switches: u64, page_tlbis: bool, all_every: u64) -> Rates
 
 /// Prints misses per switch; the assertions only check the model runs.
 #[test]
-#[ignore = "host model: prints ITLB misses per process switch"]
+#[ignore = "manual: opt-in"]
 fn process_switching_miss_rates() {
     const SWITCHES: u64 = 20_000;
     println!("processes  tlbis  all_every  user/switch  kernel/switch");
@@ -375,7 +375,7 @@ fn a_full_frame_table_forgets_every_context_and_names_live_ones() {
 /// Host nanoseconds of an engine fetch that refills the ITLB after a TLBI
 /// of everything, against one that finds its page, and of the walk alone.
 #[test]
-#[ignore = "host timing: prints the cost of an ITLB refill"]
+#[ignore = "manual: opt-in"]
 fn itlb_refill_cost() {
     use std::time::Instant;
     const RET: u32 = 0xd65f_03c0;

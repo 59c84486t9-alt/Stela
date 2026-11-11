@@ -155,7 +155,7 @@ fn time(
 /// `cargo test -p stela-engine --release --lib exit_transition_costs --
 /// --ignored --nocapture`
 #[test]
-#[ignore = "manual: opt-in timing"]
+#[ignore = "manual: opt-in"]
 fn exit_transition_costs() {
     for host in [false, true] {
         let mut machine = user(host);
@@ -245,7 +245,7 @@ fn time_cold(
 /// refilled by other data before every pair, which is how a guest's exits
 /// find them: hot (none), past L2 (2 MiB), past L3 (256 MiB).
 #[test]
-#[ignore = "manual: opt-in timing"]
+#[ignore = "manual: opt-in"]
 fn exit_transition_cold_costs() {
     for mib in [0usize, 2, 256] {
         let mut evict = std::vec![0u64; mib * 1024 * 1024 / 8];

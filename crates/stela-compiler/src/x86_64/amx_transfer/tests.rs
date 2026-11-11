@@ -326,7 +326,7 @@ fn run(code: &[u8], state: &mut crate::GuestState) -> (u64, u64) {
 /// --nocapture`.
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 #[test]
-#[ignore]
+#[ignore = "manual: opt-in"]
 fn amx_transfer_costs() {
     use core::ffi::c_void;
     unsafe extern "C" {

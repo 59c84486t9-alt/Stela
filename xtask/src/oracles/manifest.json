@@ -4690,6 +4690,22 @@
   },
   {
     "package": "stela-compiler",
+    "test": "native_and_model_costs",
+    "source": "crates/stela-compiler/src/amx/native.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing report of the native AMX kernels against the reference model for fma32, fma64, vecfp, fma16 and fused constant modes; run on request"
+  },
+  {
+    "package": "stela-driver-gpu",
+    "test": "poll_paths_cost",
+    "source": "crates/stela-driver-gpu/src/metal/service/tests/gate.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing report of a Poll answered from the published serial against one that takes the turn and asks the mock device; a measurement, not a check; run on request"
+  },
+  {
+    "package": "stela-compiler",
     "test": "sve_merge_costs",
     "source": "crates/stela-compiler/src/x86_64/sve/integer_bits/tests/costs.rs",
     "kind": "manual",
@@ -4737,5 +4753,117 @@
       "STELA_TEST_OPENSSL_PYTHON"
     ],
     "reason": "Requires an explicit Python3 executable with OpenSSL-backed ssl, local loopback TCP sockets, TLS1.2/TLS1.3 and X25519/P256 support; runs all9standard client suites with generated generic fixture identities."
+  },
+  {
+    "package": "stela-compiler",
+    "test": "amx_transfer_costs",
+    "source": "crates/stela-compiler/src/x86_64/amx_transfer/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "alias_cost",
+    "source": "crates/stela-engine/src/machine/engine/block_index.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing; run by hand in release; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "signal_send_costs",
+    "source": "crates/stela-engine/src/machine/engine/parallel/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "exit_transition_costs",
+    "source": "crates/stela-engine/src/machine/engine/tests/exits.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "exit_transition_cold_costs",
+    "source": "crates/stela-engine/src/machine/engine/tests/exits.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "process_switching_miss_rates",
+    "source": "crates/stela-engine/src/machine/engine/tests/process_switching.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host model: prints ITLB misses per process switch; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "itlb_refill_cost",
+    "source": "crates/stela-engine/src/machine/engine/tests/process_switching.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing: prints the cost of an ITLB refill; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "retire_cost",
+    "source": "crates/stela-engine/src/machine/engine/tests/retire_cost.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing; run by hand in release; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "shared_path_scaling",
+    "source": "crates/stela-engine/src/machine/engine/tests/sharing.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "read_lock_costs",
+    "source": "crates/stela-soc/src/ans/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing benchmark; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "read_cost",
+    "source": "crates/stela-soc/src/cpm.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "compose_lock_costs",
+    "source": "crates/stela-soc/src/dcp/iomfb/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing benchmark; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "access_costs",
+    "source": "crates/stela-soc/src/machine/tests/passive.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "refine_timings",
+    "source": "crates/stela-soc/src/scanout.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "timing, release only; run on request"
   }
 ]
