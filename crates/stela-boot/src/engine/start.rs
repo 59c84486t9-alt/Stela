@@ -2222,9 +2222,16 @@ fn start_platform(
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
-    // the other host processors start.
+    // the other host processors start. Its time is logged: it walks every
+    // mapping the firmware left, which no step's time shows.
+    let activating = host::rdtsc();
     let native_mmio = unsafe { crate::native_mmio::Source::activate(handoff, host_owner) }
-        .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
+        .inspect(|_| {
+            output::arguments(format_args!(
+                "NATIVE MMIO aperture owned ms={}\n",
+                host::rdtsc().wrapping_sub(activating) / (handoff.tsc_hz / 1000).max(1)
+            ))
+        })
         .inspect_err(|error| {
             output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
         })

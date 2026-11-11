@@ -549,6 +549,9 @@ impl Source {
             .map_err(failed)?;
         }
         let aliases = aliases(wire, &catalog, &snapshot, space, &written)?;
+        // How many mappings the permission imports, which its activation
+        // time and every map's conflict check scale with.
+        crate::output::arguments(format_args!("NATIVE MMIO aliases={}\n", aliases.len()));
         platform.check_context(space)?;
         for root in catalog.roots() {
             let mut table = *root;
