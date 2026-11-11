@@ -9,6 +9,43 @@ use core::{
 use triomphe::{Arc as Shared, UniqueArc};
 mod metadata;
 
+/// Whether two imported aliases overlap with different known cache
+/// policies; an unknown policy (`None`) conflicts with nothing here. A
+/// firmware map can hold a hundred thousand page-sized aliases, so this
+/// sorts by start instead of comparing every pair: an alias overlaps an
+/// earlier-starting one exactly when it starts before that one's end, so
+/// the furthest end seen for each policy decides.
+fn fixed_policies_conflict(aliases: &[ExistingAlias]) -> Result<bool, Error> {
+    let mut fixed = Vec::new();
+    fixed
+        .try_reserve_exact(aliases.len())
+        .map_err(|_| Error::Unavailable)?;
+    fixed.extend(
+        aliases
+            .iter()
+            .filter_map(|alias| alias.attribute.map(|policy| (alias.physical, policy))),
+    );
+    fixed.sort_unstable_by_key(|(span, _)| span.start());
+    // One entry per policy met so far: there are three.
+    let mut furthest: Vec<(CacheAttribute, u64)> = Vec::new();
+    furthest
+        .try_reserve_exact(3)
+        .map_err(|_| Error::Unavailable)?;
+    for (span, policy) in fixed {
+        if furthest
+            .iter()
+            .any(|&(other, end)| other != policy && span.start() < end)
+        {
+            return Ok(true);
+        }
+        match furthest.iter_mut().find(|(other, _)| *other == policy) {
+            Some((_, end)) => *end = (*end).max(span.end()),
+            None => furthest.push((policy, span.end())),
+        }
+    }
+    Ok(false)
+}
+
 static ACTIVATED: AtomicBool = AtomicBool::new(false);
 const INSTALLING: u8 = 0;
 const LIVE: u8 = 1;
@@ -233,15 +270,8 @@ impl Authority {
                 return Err(Error::InvalidRange);
             }
         }
-        for (at, a) in aliases.iter().enumerate() {
-            if aliases[..at].iter().any(|b| {
-                a.physical.overlaps(b.physical)
-                    && a.attribute.is_some()
-                    && b.attribute.is_some()
-                    && a.attribute != b.attribute
-            }) {
-                return Err(Error::CacheConflict);
-            }
+        if fixed_policies_conflict(&aliases)? {
+            return Err(Error::CacheConflict);
         }
         let mut next = 1u64;
         let mut imported = Vec::new();

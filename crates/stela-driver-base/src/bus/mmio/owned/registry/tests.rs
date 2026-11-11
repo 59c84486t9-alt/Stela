@@ -2139,4 +2139,162 @@ fn conflicting_alias_refuses_before_counted_admission_and_same_owner_maps_after_
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
 
+fn imported(start: u64, bytes: u64, attribute: Option<CacheAttribute>) -> ExistingAlias {
+    ExistingAlias {
+        physical: PhysicalSpan::new(start, bytes).unwrap(),
+        attribute,
+    }
+}
+
+/// The rule `prepare` held before it sorted: every pair compared.
+fn pairwise_conflict(aliases: &[ExistingAlias]) -> bool {
+    aliases.iter().enumerate().any(|(at, a)| {
+        aliases[..at].iter().any(|b| {
+            a.physical.overlaps(b.physical)
+                && a.attribute.is_some()
+                && b.attribute.is_some()
+                && a.attribute != b.attribute
+        })
+    })
+}
+
+#[test]
+fn imported_aliases_conflict_only_on_overlapping_known_policies() {
+    use CacheAttribute::{Uncached, WriteBack, WriteCombining};
+    let cases: [(Vec<ExistingAlias>, bool); 7] = [
+        (Vec::new(), false),
+        // Same policy, overlapping: one mapping seen twice.
+        (
+            vec![
+                imported(BASE, 8192, Some(WriteBack)),
+                imported(BASE + 4096, 8192, Some(WriteBack)),
+            ],
+            false,
+        ),
+        // Adjacent pages with different policies do not overlap.
+        (
+            vec![
+                imported(BASE, 4096, Some(WriteBack)),
+                imported(BASE + 4096, 4096, Some(Uncached)),
+            ],
+            false,
+        ),
+        // An unknown policy blocks new mappings, but conflicts with no import.
+        (
+            vec![
+                imported(BASE, 1 << 20, None),
+                imported(BASE, 4096, Some(Uncached)),
+            ],
+            false,
+        ),
+        (
+            vec![
+                imported(BASE, 4096, Some(WriteBack)),
+                imported(BASE, 4096, Some(Uncached)),
+            ],
+            true,
+        ),
+        // A long earlier alias reaches a later one past others between.
+        (
+            vec![
+                imported(BASE + (64 << 20), 4096, Some(Uncached)),
+                imported(BASE, 4096, Some(WriteBack)),
+                imported(BASE + 8192, 4096, Some(Uncached)),
+                imported(BASE, 128 << 20, Some(WriteCombining)),
+            ],
+            true,
+        ),
+        (
+            vec![
+                imported(BASE + 4096, 4096, Some(Uncached)),
+                imported(BASE, 4096, Some(WriteBack)),
+                imported(BASE + 8192, 4096, Some(WriteBack)),
+            ],
+            false,
+        ),
+    ];
+    for (aliases, conflict) in &cases {
+        assert_eq!(pairwise_conflict(aliases), *conflict, "{aliases:?}");
+        assert_eq!(
+            fixed_policies_conflict(aliases),
+            Ok(*conflict),
+            "{aliases:?}"
+        );
+    }
+    let model = Model::fixture();
+    let conflicting = vec![
+        imported(BASE, 4096, Some(WriteBack)),
+        imported(BASE + 2048, 1, Some(Uncached)),
+    ];
+    assert!(matches!(
+        Authority::prepare(Arc::<Model>::clone(&model), SPACE, conflicting),
+        Err(Error::CacheConflict)
+    ));
+}
+
+#[test]
+fn sorted_conflict_rule_matches_every_pair_compared() {
+    let policies = [
+        None,
+        Some(CacheAttribute::WriteBack),
+        Some(CacheAttribute::WriteCombining),
+        Some(CacheAttribute::Uncached),
+    ];
+    // A fixed xorshift sequence of small, often overlapping sets.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let (mut conflicts, mut clean) = (0, 0);
+    for _ in 0..4000 {
+        let count = (next() % 7) as usize;
+        let aliases: Vec<_> = (0..count)
+            .map(|_| {
+                let start = BASE + (next() % 16) * 4096;
+                let bytes = (1 + next() % 4) * 4096;
+                imported(start, bytes, policies[(next() % 4) as usize])
+            })
+            .collect();
+        let expected = pairwise_conflict(&aliases);
+        assert_eq!(
+            fixed_policies_conflict(&aliases),
+            Ok(expected),
+            "{aliases:?}"
+        );
+        if expected {
+            conflicts += 1;
+        } else {
+            clean += 1;
+        }
+    }
+    assert!(conflicts > 100 && clean > 100, "{conflicts} {clean}");
+}
+
+#[test]
+fn a_page_granular_firmware_map_imports_without_comparing_every_pair() {
+    // A quarter million page-sized aliases of mixed known policy, none
+    // overlapping: the pairwise rule needs about 3e10 comparisons for them.
+    let aliases: Vec<_> = (0..250_000u64)
+        .map(|page| {
+            let policy = if page % 3 == 0 {
+                CacheAttribute::Uncached
+            } else {
+                CacheAttribute::WriteBack
+            };
+            imported(page * 4096, 4096, Some(policy))
+        })
+        .collect();
+    assert_eq!(fixed_policies_conflict(&aliases), Ok(false));
+    let mut overlapping = aliases;
+    overlapping.push(imported(
+        123_456 * 4096,
+        4096,
+        Some(CacheAttribute::WriteCombining),
+    ));
+    assert_eq!(fixed_policies_conflict(&overlapping), Ok(true));
+}
+
 mod configuration;
