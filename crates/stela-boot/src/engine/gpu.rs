@@ -1148,7 +1148,7 @@ pub(super) fn claim_all(
         let mut refused = Vec::new();
         for adapter in nvidia {
             output::arguments(format_args!(
-                "GPU {} left with firmware: build the image with `cargo xtask boot build --nvk`\n",
+                "GPU {} left with firmware: build the image with `cargo xtask boot build`\n",
                 adapter.address
             ));
             refused.push(refused_as(adapter, Reason::Other));
@@ -1371,7 +1371,7 @@ pub(super) fn no_metal_device() -> Option<&'static str> {
         .is_empty()
         .then_some("no GPU started; the lines above say why");
     #[cfg(not(feature = "nvk"))]
-    Some("this stela.efi was built without GPU drivers (`--nvk`)")
+    Some("this stela.efi was built without GPU drivers (the `nvk` feature)")
 }
 
 /// Records whether this boot is single-user, which decides what a missing
