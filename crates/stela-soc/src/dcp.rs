@@ -32,6 +32,7 @@
 pub mod abi;
 pub mod afk;
 pub mod avipc;
+pub mod compose;
 pub mod gpu;
 pub mod iomfb;
 pub mod link;
@@ -548,6 +549,27 @@ impl Coprocessor {
     /// the newest one's surfaces through `port` (the display pipe's DART,
     /// where the AP mapped them), and queue their completion callbacks,
     /// which leave at the next link DMA step.
+    /// [`Self::present`] composed outside the devices' lock
+    /// ([`compose`]): the compose to run, its pages resolved through
+    /// `resolve` in pages of `page` bytes, or `None` to present in place.
+    pub fn compose(
+        &mut self,
+        now: u64,
+        page: u64,
+        resolve: impl FnMut(u64) -> core::result::Result<u64, stela_contracts::dma::DmaError>,
+    ) -> Option<compose::Compose> {
+        self.link
+            .borrow_mut()
+            .service_mut()
+            .compose(now, page, resolve)
+    }
+
+    /// Finish the present a compose left once it ended
+    /// ([`iomfb::Methods::finish_compose`]).
+    pub fn finish_compose(&mut self) -> Result<bool> {
+        self.link.borrow_mut().service_mut().finish_compose(0)
+    }
+
     pub fn present(&mut self, now: u64, port: &mut Port<'_, '_>) -> Result<()> {
         let mut link = self.link.borrow_mut();
         link.service_mut()
@@ -566,6 +588,8 @@ impl Firmware for Coprocessor {
         self.rtkit.start(outbox)
     }
     fn stop(&mut self) -> Result<()> {
+        // A compose still in flight keeps its swaps: the check below refuses.
+        let _ = self.link.borrow_mut().service_mut().settle_compose();
         if !self.retained_idle() {
             return Err(refuse!(
                 "DCP CPU stop with unfinished RPC, scanout or AFK work"
@@ -591,6 +615,10 @@ impl Firmware for Coprocessor {
                 return Err(refuse!(
                     "DCP IOP memory-loss power transition is not modeled"
                 ));
+            }
+            if matches!(fields, 0x201 | 0x202) {
+                // As in `stop`: the idle check refuses one still in flight.
+                let _ = self.link.borrow_mut().service_mut().settle_compose();
             }
             if matches!(fields, 0x201 | 0x202) && !self.retained_idle() {
                 return Err(refuse!(

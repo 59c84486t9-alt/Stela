@@ -31,6 +31,25 @@ pub trait LocalRegisters: Send + Sync {
     }
 }
 
+/// Device registers every PE reads without the devices' lock: words whose
+/// value only software's writes change and whose read has no effect, such
+/// as performance counters a power manager samples thousands of times a
+/// second. Writes still take the lock; the model publishes each value where
+/// this reads it.
+pub trait PassiveRegisters: Send + Sync {
+    /// The value a `bytes`-byte read at `physical` returns, if this serves
+    /// it; `None` sends the read to [`Devices::read_scalar`].
+    fn read(&self, physical: u64, bytes: u8) -> Option<u64>;
+}
+
+/// A data copy a device's DMA left to run outside the devices' lock
+/// ([`Devices::take_unlocked`]): it reaches only guest RAM and state of its
+/// own, which the device reads back under the lock once the copy is done.
+pub trait UnlockedDma {
+    /// Carry the copy out on guest RAM `memory`.
+    fn run(self: Box<Self>, memory: &mut dyn Memory);
+}
+
 /// Equal, consecutive native code ranges a host reclaims as whole parts.
 #[derive(Clone, Copy)]
 pub struct CodePartitions {
@@ -599,6 +618,21 @@ pub trait Devices {
     /// that no lock need guard, fixed for the board's life.
     fn local_registers(&self, _cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
         None
+    }
+    /// The registers any PE reads without the devices' lock, fixed for the
+    /// board's life once its PEs run.
+    fn passive_registers(&self) -> Option<Arc<dyn PassiveRegisters>> {
+        None
+    }
+    /// Leave the data copies of the devices' DMA to [`Self::take_unlocked`]
+    /// from now on: a board shared between PEs runs each outside the
+    /// devices' lock. Without this call every copy runs in its transfer.
+    fn defer_dma(&mut self) {}
+    /// The copies the transfers since the last call left
+    /// ([`Self::defer_dma`]), which the caller runs before its next device
+    /// call; what they come to reaches the devices at their next transfer.
+    fn take_unlocked(&mut self) -> Vec<Box<dyn UnlockedDma>> {
+        Vec::new()
     }
     /// [`LocalRegisters::storage`] of PE `cpu`'s `encoding`.
     fn register_storage(&mut self, cpu: usize, encoding: Encoding) -> Option<u64> {

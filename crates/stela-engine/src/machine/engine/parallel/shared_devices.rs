@@ -1,7 +1,7 @@
 //! The board's devices shared by the PE threads: the locked board and its
 //! device-bus calls.
 
-use super::super::{GateCall, GateOutcome, LocalRegisters};
+use super::super::{GateCall, GateOutcome, LocalRegisters, PassiveRegisters, UnlockedDma};
 use super::*;
 use core::mem::ManuallyDrop;
 
@@ -66,6 +66,11 @@ pub(super) fn pack(pins: Option<Lines>) -> u8 {
 }
 
 pub(super) const UNLATCHED: u8 = u8::MAX;
+
+/// The transfers a call makes on its own PE to publish what its copies
+/// outside the devices' lock came to, while each leaves more
+/// ([`SharedDevices::run_unlocked`]).
+const UNLOCKED_ROUNDS: usize = 4;
 
 pub(super) fn unpack(pins: u8) -> Option<Lines> {
     (pins != UNLATCHED).then_some(Lines {
@@ -367,6 +372,8 @@ pub struct SharedDevices<D> {
     pub(super) home: bool,
     /// Each PE's [`Devices::local_registers`], once asked for.
     local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
+    /// [`Devices::passive_registers`], asked for once the board is built.
+    passive: Option<Arc<dyn PassiveRegisters>>,
     /// The ticks this handle's calls waited for the lock since
     /// [`Devices::take_lock_wait`].
     waited: AtomicU64,
@@ -374,8 +381,10 @@ pub struct SharedDevices<D> {
 
 impl<D: Devices> SharedDevices<D> {
     /// The home machine's handle.
-    pub fn new(devices: D, hub: Arc<Hub>) -> Self {
+    pub fn new(mut devices: D, hub: Arc<Hub>) -> Self {
         let pes = hub.pes();
+        devices.defer_dma();
+        let passive = devices.passive_registers();
         let mut registers = [0u64; 16];
         for bit in 0..1 << 10 {
             let (op1, crm, op2) = ((bit >> 7) as u8, (bit >> 3 & 15) as u8, (bit & 7) as u8);
@@ -411,6 +420,7 @@ impl<D: Devices> SharedDevices<D> {
             board: Arc::new(board),
             home: true,
             local: Vec::new(),
+            passive,
             waited: AtomicU64::new(0),
         }
     }
@@ -421,6 +431,7 @@ impl<D: Devices> SharedDevices<D> {
             board: Arc::clone(&self.board),
             home: false,
             local: Vec::new(),
+            passive: self.passive.clone(),
             waited: AtomicU64::new(0),
         }
     }
@@ -562,6 +573,50 @@ impl<D: Devices> SharedDevices<D> {
         devices.notify(cpu, now);
         result
     }
+
+    /// Run the data copies a transfer by PE `cpu` at `now` left
+    /// ([`Devices::take_unlocked`]) on `memory`, outside the devices' lock,
+    /// then transfer again at once on this PE: that publishes what they came
+    /// to, such as a read's completion and its interrupt, and tells the PEs
+    /// whose lines it changed. No other PE need come by: an idle home
+    /// machine may be about to halt, and a wake sent before it marks itself
+    /// asleep would be lost. The first refusal of those transfers.
+    fn run_unlocked(
+        &self,
+        cpu: usize,
+        now: u64,
+        mut copies: Vec<Box<dyn UnlockedDma>>,
+        memory: &mut dyn super::super::Memory,
+    ) -> Result<(), DeviceError> {
+        let mut result = Ok(());
+        for _ in 0..UNLOCKED_ROUNDS {
+            if copies.is_empty() {
+                return result;
+            }
+            for copy in copies.drain(..) {
+                copy.run(memory);
+            }
+            let (transfer, more) = self.changing(Call::Transfer, cpu, now, |devices, now| {
+                (devices.transfer(cpu, memory, now), devices.take_unlocked())
+            });
+            if result.is_ok() {
+                result = transfer;
+            }
+            copies = more;
+        }
+        // Copies kept coming: run the last ones and leave their publication
+        // to the home machine, told as a line change, which its sleep checks.
+        if !copies.is_empty() {
+            for copy in copies {
+                copy.run(memory);
+            }
+            let home = self.board.hub.home.load(Ordering::Acquire);
+            self.board.dma.store(0, Ordering::Release);
+            self.board.hub.lines_changed_unwoken(home);
+            self.board.hub.wake(home);
+        }
+        result
+    }
 }
 
 impl<D: Devices> Devices for SharedDevices<D> {
@@ -572,11 +627,20 @@ impl<D: Devices> Devices for SharedDevices<D> {
         self.with(|devices| devices.observe_pc_sample(physical, pc));
     }
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        if let Some(value) = self.passive.as_ref().and_then(|p| p.read(physical, bytes)) {
+            return Ok(value);
+        }
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.read(cpu, physical, bytes, now)
         })
     }
+    /// A passive register ([`Devices::passive_registers`]) is read without
+    /// the lock: its value is what the last write published, and its read
+    /// changes nothing the lock would settle.
     fn read_scalar(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> ScalarRead {
+        if let Some(value) = self.passive.as_ref().and_then(|p| p.read(physical, bytes)) {
+            return ScalarRead::Served(Ok(value));
+        }
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.read_scalar(cpu, physical, bytes, now)
         })
@@ -862,9 +926,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
         memory: &mut dyn super::super::Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
-        self.changing(Call::Transfer, cpu, now, |devices, now| {
-            devices.transfer(cpu, memory, now)
-        })
+        let (result, copies) = self.changing(Call::Transfer, cpu, now, |devices, now| {
+            (devices.transfer(cpu, memory, now), devices.take_unlocked())
+        });
+        let published = self.run_unlocked(cpu, now, copies, memory);
+        result.and(published)
     }
     fn take_call(&mut self, cpu: usize) -> Option<GateCall> {
         self.with(|devices| devices.take_call(cpu))
@@ -879,9 +945,19 @@ impl<D: Devices> Devices for SharedDevices<D> {
         now: u64,
         memory: &mut dyn super::super::LockedMemory,
     ) -> super::super::Settled {
-        self.changing(Call::Transfer, cpu, now, |devices, now| {
-            devices.settle_write(cpu, now, memory)
-        })
+        let (mut settled, copies) = self.changing(Call::Transfer, cpu, now, |devices, now| {
+            (
+                devices.settle_write(cpu, now, memory),
+                devices.take_unlocked(),
+            )
+        });
+        if !copies.is_empty() {
+            let published = self.run_unlocked(cpu, now, copies, memory.under(settled.after));
+            if settled.transfer.is_ok() {
+                settled.transfer = published;
+            }
+        }
+        settled
     }
     fn device_name(&self, physical: u64) -> Option<&'static str> {
         self.with(|devices| devices.device_name(physical))

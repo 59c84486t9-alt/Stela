@@ -46,9 +46,11 @@ use stela_engine::machine::engine::DeviceError;
 use stela_engine::machine::engine::Devices;
 use stela_engine::machine::engine::LocalRegisters;
 use stela_engine::machine::engine::Memory;
+use stela_engine::machine::engine::PassiveRegisters;
 use stela_engine::machine::engine::Reset;
 use stela_engine::machine::engine::Start;
 use stela_engine::machine::engine::Transition;
+use stela_engine::machine::engine::UnlockedDma;
 use stela_engine::machine::registers::Lines;
 use stela_engine::system::access::AccessKind;
 use stela_soc_data::board::PowerOwner;
@@ -252,6 +254,17 @@ pub struct AppleDevices {
     ecid: u64,
     /// Each transfer part's host time, while the host gives a clock.
     transfer_times: transfer_times::TransferTimes,
+    /// The registers PEs read without the devices' lock.
+    passive: crate::passive::PassiveMap,
+    /// Each PE's last device write, as address and bytes, and the one whose
+    /// DMA the current transfer runs ([`Devices::settle_write`]).
+    last_write: Vec<Option<(u64, u8)>>,
+    writer: Option<(u64, u8)>,
+    /// Whether DMA data copies are left to [`Devices::take_unlocked`].
+    defer_dma: bool,
+    /// The displays' composes left since the last
+    /// [`Devices::take_unlocked`] ([`dcp::compose`]).
+    composes: Vec<dcp::compose::Compose>,
 }
 
 /// The host polls its USB sessions once a high-speed microframe, in which
@@ -650,7 +663,21 @@ impl AppleDevices {
             inline_keys: crate::inline_key::Engine::default(),
             ecid: 0,
             transfer_times: transfer_times::TransferTimes::default(),
+            passive: crate::passive::PassiveMap::default(),
+            last_write: Vec::new(),
+            writer: None,
+            defer_dma: false,
+            composes: Vec::new(),
         }
+    }
+
+    /// Note PE `cpu`'s device write, whose DMA its next
+    /// [`Devices::settle_write`] runs.
+    fn note_write(&mut self, cpu: usize, physical: u64, bytes: u8) {
+        if self.last_write.len() <= cpu {
+            self.last_write.resize(cpu + 1, None);
+        }
+        self.last_write[cpu] = Some((physical, bytes));
     }
 
     /// Time each part of every transfer ([`TRANSFER_PARTS`]) with `clock`,
@@ -1004,6 +1031,7 @@ impl Devices for AppleDevices {
         now: u64,
     ) -> Result<(), DeviceError> {
         self.observe_time(now, "write");
+        self.note_write(cpu, physical, bytes);
         use stela_engine::machine::engine::ConsumedWrite;
         match self.consume_scalar_write(cpu, physical, bytes, value, now, None)? {
             ConsumedWrite::Complete { settlement } => settlement,
@@ -1021,6 +1049,7 @@ impl Devices for AppleDevices {
         owners: &mut dyn stela_engine::machine::engine::CanonicalDeviceWrite,
     ) -> Result<stela_engine::machine::engine::ConsumedWrite, DeviceError> {
         self.observe_time(now, "write");
+        self.note_write(cpu, physical, bytes);
         if let Some(completed) =
             self.consume_processor_power_write(cpu, physical, bytes, value, now, owners)?
         {
@@ -1064,6 +1093,34 @@ impl Devices for AppleDevices {
                     ipi::IpiError::Unsupported(_, reason) => reason,
                 }),
         )
+    }
+
+    fn defer_dma(&mut self) {
+        self.defer_dma = true;
+    }
+
+    /// The storage masters' read copies ([`crate::ans::ReadCopy`]).
+    fn take_unlocked(&mut self) -> Vec<Box<dyn UnlockedDma>> {
+        let mut copies: Vec<Box<dyn UnlockedDma>> = Vec::new();
+        for &(ans, _) in &self.storage_masters {
+            if let Some(ans) = self.bus.device_mut::<Ans>(ans) {
+                copies.extend(
+                    ans.take_copies()
+                        .map(|copy| Box::new(copy) as Box<dyn UnlockedDma>),
+                );
+            }
+        }
+        copies.extend(
+            self.composes
+                .drain(..)
+                .map(|compose| Box::new(compose) as Box<dyn UnlockedDma>),
+        );
+        copies
+    }
+
+    fn passive_registers(&self) -> Option<Arc<dyn PassiveRegisters>> {
+        (!self.passive.is_empty())
+            .then(|| Arc::new(self.passive.clone()) as Arc<dyn PassiveRegisters>)
     }
 
     fn local_registers(&self, cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
@@ -1294,6 +1351,28 @@ impl Devices for AppleDevices {
         lap.end(&mut self.transfer_times, 8);
         results.into_iter().find(Result::is_err).unwrap_or(settled)
     }
+
+    /// As the default, with the transfer knowing PE `cpu`'s write: a USB
+    /// master that write did not reach runs its schedule only when it has
+    /// work ([`AppleDevices::usb_due`]); the home machine's transfers run
+    /// it whatever, as before.
+    fn settle_write(
+        &mut self,
+        cpu: usize,
+        now: u64,
+        memory: &mut dyn stela_engine::machine::engine::LockedMemory,
+    ) -> stela_engine::machine::engine::Settled {
+        self.writer = self.last_write.get_mut(cpu).and_then(Option::take);
+        let lock = self.memory_lock();
+        let transfer = self.transfer(cpu, memory.under(lock), now);
+        self.writer = None;
+        stela_engine::machine::engine::Settled {
+            transfer,
+            lock,
+            call: self.take_call(cpu),
+            after: self.memory_lock(),
+        }
+    }
 }
 
 impl AppleDevices {
@@ -1350,6 +1429,9 @@ impl AppleDevices {
                 .bus
                 .pair_mut::<Ans, Sart>(ans, sart)
                 .expect("a storage master names ANS2 and SART");
+            if self.defer_dma {
+                ans.defer_copies();
+            }
             if !ans.pending(now) {
                 continue;
             }
@@ -1477,15 +1559,55 @@ impl AppleDevices {
         for index in 0..self.dcp_masters.len() {
             self.service_dcp_link(index, cpu, memory, now)?;
             let master = &self.dcp_masters[index];
+            let mut finished = Ok(false);
             let presenting = self
                 .bus
                 .device_mut::<Asc>(master.asc)
                 .filter(|asc| asc.execution_enabled())
                 .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
                 .is_some_and(|coprocessor| {
+                    // A compose that ended finishes its present first.
+                    finished = coprocessor.finish_compose();
                     coprocessor.refresh(now);
                     coprocessor.frame_ready(now)
                 });
+            match finished {
+                Ok(true) => self.frame_presented = true,
+                Ok(false) => {}
+                Err(reason) => {
+                    return Err(DeviceError::TransferRefused(
+                        refuse!("DCPEXT swap surface").because(reason),
+                    ));
+                }
+            }
+            if presenting
+                && self.defer_dma
+                && let Some((surface, stream)) = master.surface
+            {
+                let (asc, dart) = self
+                    .bus
+                    .pair_mut::<Asc, Dart>(master.asc, surface)
+                    .expect("a DCP master names its ASC and surface DART");
+                let coprocessor = asc
+                    .firmware_mut::<dcp::Coprocessor>()
+                    .expect("a DCP master's ASC runs the DCP model");
+                let page = stela_contracts::dma::Iommu::page(&*dart);
+                let resolve = |iova: u64| {
+                    let last = iova
+                        .checked_add(page - 1)
+                        .ok_or(stela_contracts::dma::DmaError::Memory)?;
+                    dart.resolve(memory, stream, iova, last, false)
+                };
+                // No link service follows in this locked call: a call that
+                // drops swaps would wait for a compose that runs only once
+                // the lock is released. The transfer the composing PE makes
+                // right after it ([`SharedDevices::run_unlocked`]) finishes
+                // the present and serves the link.
+                if let Some(compose) = coprocessor.compose(now, page, resolve) {
+                    self.composes.push(compose);
+                    continue;
+                }
+            }
             if presenting {
                 let (surface, stream) = master.surface.ok_or_else(|| {
                     DeviceError::TransferRefused(
@@ -1545,12 +1667,42 @@ impl AppleDevices {
         })
     }
 
+    /// Whether USB master `master`'s schedule has work at `now`, its cable
+    /// and PHY already brought up to date: what the home machine's DMA
+    /// deadline is for ([`Devices::dma_deadline`]), and the work a step takes
+    /// whatever the time.
+    fn usb_due(controller: &Dwc3, master: &UsbMaster, now: u64) -> bool {
+        if master.phy_changed
+            || master.session_reset
+            || controller.service_due()
+            || controller.dma_fault().is_some()
+            || controller.host_pending()
+            || controller.available() != master.attached
+        {
+            return true;
+        }
+        let function = master.peripheral.as_ref().map(|p| p as &dyn Function);
+        let poll = master.attached.then_some(master.next_poll);
+        poll.into_iter()
+            .chain(controller.host_deadline(function))
+            .any(|due| due <= now)
+    }
+
+    /// Each USB master's step. After a write that reached none of a master's
+    /// devices (core, PHY, DART) the master skips its schedule unless it has
+    /// work ([`Self::usb_due`]), keeping its session clock where the step
+    /// would have; the home machine's transfers always run it.
     fn transfer_usb(
         &mut self,
         cpu: usize,
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        let written = self.writer.map(|(physical, bytes)| {
+            Width::from_bytes(u64::from(bytes))
+                .and_then(|width| self.bus.route(physical, width).ok())
+                .map(|(device, _)| device)
+        });
         for master in &mut self.usb_masters {
             let (controller, dart) = self
                 .bus
@@ -1595,6 +1747,18 @@ impl AppleDevices {
                         .flatten(),
                 )
                 .map_err(fail)?;
+            let optional = written.is_some_and(|device| {
+                device.is_some_and(|device| {
+                    ![master.device, master.phy, master.dart].contains(&device)
+                })
+            });
+            if optional && !Self::usb_due(controller, master, now) {
+                // A detached session moves nothing; its clock moves on.
+                if !master.attached && now >= master.next_poll {
+                    master.next_poll = usb_poll(now, master.next_poll).1;
+                }
+                continue;
+            }
             let function = master.peripheral.as_mut().map(|p| p as &mut dyn Function);
             controller.service_host(&mut port, function).map_err(fail)?;
             controller.flush(&mut port).map_err(fail)?;
@@ -1639,3 +1803,15 @@ impl AppleDevices {
 
 #[cfg(test)]
 mod tests;
+
+impl UnlockedDma for crate::ans::ReadCopy {
+    fn run(self: Box<Self>, memory: &mut dyn Memory) {
+        crate::ans::ReadCopy::run(*self, memory);
+    }
+}
+
+impl UnlockedDma for dcp::compose::Compose {
+    fn run(self: Box<Self>, memory: &mut dyn Memory) {
+        dcp::compose::Compose::run(*self, memory);
+    }
+}

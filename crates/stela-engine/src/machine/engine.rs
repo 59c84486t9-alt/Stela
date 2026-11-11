@@ -7,7 +7,7 @@ mod reports;
 use boundary::*;
 pub use boundary::{
     CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
-    LockedMemory, NoDevices, ScalarRead, Settled, Start,
+    LockedMemory, NoDevices, PassiveRegisters, ScalarRead, Settled, Start, UnlockedDma,
 };
 use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;

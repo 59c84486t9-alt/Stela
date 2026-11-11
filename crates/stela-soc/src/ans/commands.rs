@@ -8,6 +8,7 @@
 //! 0x3dec1e0/0x3dec2ac/0x3dec35c (boot-from-host activate, download and
 //! parameters, see [`super::bfh`]). Unknown vendor effects stop before
 //! completion.
+use super::copy::{CopyDone, ReadCopy};
 use super::{
     Ans, COMMAND_BYTES, COMPLETION_BYTES, MODE_RESTORE, NVMMU_PAGE_BYTES, Queue, bfh, die,
     namespace::{Namespace, ReadPlan},
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::Result;
 use crate::inline_key::InlineKey;
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::block::{BlockError, Finished, Request};
 use stela_soc_data::ans::BLOCK_BYTES;
@@ -262,15 +263,23 @@ impl Command {
 pub(super) struct Outcome {
     pub result: u32,
     pub status: u16,
+    /// A read's data still on its way to guest RAM ([`super::copy`]): the
+    /// completion waits for it.
+    pub copy: Option<Arc<CopyDone>>,
 }
 impl Outcome {
     fn status(status: u16) -> Self {
-        Self { result: 0, status }
+        Self {
+            result: 0,
+            status,
+            copy: None,
+        }
     }
     fn result(result: u32) -> Self {
         Self {
             result,
             status: SUCCESS,
+            copy: None,
         }
     }
     /// The status of a command the model cannot carry out.
@@ -878,27 +887,31 @@ impl Ans {
         port: &mut Port<'_, '_>,
     ) -> Result<Outcome> {
         Ok(match (wait, done) {
-            (
-                Wait::Read {
-                    plan,
-                    bytes,
-                    prps,
-                    inline,
-                },
-                done,
-            ) => match host_bytes(done) {
+            (wait @ Wait::Read { .. }, done) => match host_bytes(done) {
+                // On a shared board the copy runs outside the devices' lock
+                // and the completion waits for it ([`super::copy`]).
+                Ok(host) if self.defer_copies => {
+                    let (copy, done) = ReadCopy::new(wait, host).expect("a read's wait");
+                    self.copies.push(copy);
+                    Outcome {
+                        copy: Some(done),
+                        ..Outcome::status(SUCCESS)
+                    }
+                }
                 Ok(host) => {
+                    let Wait::Read {
+                        plan,
+                        bytes,
+                        prps,
+                        inline,
+                    } = wait
+                    else {
+                        unreachable!("matched a read")
+                    };
                     // Deallocated blocks read as zeros (DLFEAT) after the
                     // inline engine as well.
-                    let host = match inline {
-                        Some((key, unit)) => {
-                            let mut data = host.unwrap_or_else(|| vec![0; bytes]);
-                            key.transform(unit, &mut data, false)?;
-                            Some(data)
-                        }
-                        None => host,
-                    };
-                    prps.write(port, &plan.finish(bytes, host))?;
+                    let data = ReadCopy::data(&plan, bytes, host, inline.as_ref())?;
+                    prps.write(port, &data)?;
                     Outcome::status(SUCCESS)
                 }
                 Err(error) => block_result(Err(error)),

@@ -40,7 +40,8 @@
 //! the memory-stall deltas to 48 bits itself, testing bit 47 for overflow,
 //! which a counter that never counts never sets. So each is held as 64 bits
 //! (inference).
-use alloc::sync::Arc;
+use crate::passive::Words;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use stela_compiler::aarch64::system::registers::Encoding;
 use stela_engine::machine::engine::LocalRegisters;
@@ -72,23 +73,39 @@ enum Counter {
 #[derive(Debug, Clone)]
 pub struct CoreCounters {
     layout: Layout,
-    values: Arc<Values>,
-}
-
-#[derive(Debug)]
-struct Values {
-    aon: [AtomicU64; MAX_AON],
-    stall: [AtomicU64; STALL_SLOTS],
+    /// The AON counters, then the memory-stall counters: other PEs load
+    /// them without the devices' lock ([`crate::passive`]).
+    values: Arc<Words>,
 }
 
 impl CoreCounters {
     pub fn new(layout: Layout) -> Self {
         Self {
             layout,
-            values: Arc::new(Values {
-                aon: [const { AtomicU64::new(0) }; MAX_AON],
-                stall: [const { AtomicU64::new(0) }; STALL_SLOTS],
-            }),
+            values: Words::new(MAX_AON + STALL_SLOTS),
+        }
+    }
+
+    /// Each counter slot of this layout that a load reads, as its offset
+    /// in the `cpu-impl-reg`, the cells and its index there.
+    pub fn passive_words(&self) -> impl Iterator<Item = (u64, &Arc<Words>, usize)> {
+        let aon = (0..AON_SLOTS as u64).map(|n| AON + n * AON_STRIDE);
+        let extra = (0..EXTRA_SLOTS as u64).map(|n| AON_EXTRA + n * EXTRA_STRIDE);
+        let stall = (0..STALL_SLOTS as u64).map(|k| STALL + k * STALL_STRIDE);
+        let windows: Vec<_> = self.layout.windows().collect();
+        aon.chain(extra).chain(stall).filter_map(move |offset| {
+            let counter = self.of_offset(offset)?;
+            windows
+                .iter()
+                .any(|&(start, bytes)| (start..start + bytes).contains(&offset))
+                .then(|| (offset, &self.values, Self::index(counter)))
+        })
+    }
+
+    fn index(counter: Counter) -> usize {
+        match counter {
+            Counter::Aon(n) => n,
+            Counter::Stall(k) => MAX_AON + k,
         }
     }
 
@@ -139,10 +156,7 @@ impl CoreCounters {
     }
 
     fn value(&self, counter: Counter) -> &AtomicU64 {
-        match counter {
-            Counter::Aon(n) => &self.values.aon[n],
-            Counter::Stall(k) => &self.values.stall[k],
-        }
+        self.values.cell(Self::index(counter))
     }
 
     /// An MRS (`write` `None`) or MSR of `encoding` by the PE whose block

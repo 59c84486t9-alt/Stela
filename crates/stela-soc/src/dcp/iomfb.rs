@@ -81,17 +81,20 @@ use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Interface, LINK_UNSUPPORTED, Method, Packed};
 use super::avipc::DisplayState;
+use super::compose::{Compose, Composition, Pages};
 use super::link::SHARED_VARIABLES;
 use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
 use super::swap::{self, Layer, Submission};
 use crate::Result;
+use crate::handoff::Handoff;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -399,15 +402,44 @@ struct Outgoing {
     output: u32,
 }
 
+/// The spin-loop hints a call that drops swaps waits for a compose in
+/// flight ([`Methods::settle_compose`]): far longer than a compose takes
+/// (milliseconds), short enough that the devices' lock is not held for good.
+const SETTLE_SPINS: u64 = 1 << 26;
+
+/// What a vblank latched ([`Methods::batch`]): its counter and the count
+/// at the look that took it, the swaps it shows (the oldest `count`), the
+/// newest one's layer slots and layers, and the rows that may change.
+struct Batch {
+    now: u64,
+    due: u64,
+    count: usize,
+    planes: [Option<scanout::Layer>; swap::LAYERS],
+    layers: Vec<scanout::Layer>,
+    damage: Option<core::ops::Range<usize>>,
+}
+
 /// The IOMFB methods of the one connected display, presenting to a host
 /// scanout.
 pub struct Methods {
     /// The booted build's method interface: which tag names which method.
     interface: &'static Interface,
-    scanout: Box<dyn Scanout>,
+    /// The host scanout, `None` while a compose outside the devices' lock
+    /// has it ([`super::compose`]).
+    scanout: Option<Box<dyn Scanout>>,
+    /// The scanout's fixed mode.
+    mode: Mode,
     /// The storage of the last composed frame, for the next
-    /// ([`scanout::present`]).
+    /// ([`scanout::present`]); taken with the scanout.
     frame: scanout::Composed,
+    /// The present whose compose runs outside the devices' lock, and what
+    /// it hands back.
+    composing: Option<(Batch, Arc<Handoff<Composition>>)>,
+    /// A compose read past its resolved pages: the next present is made in
+    /// place.
+    in_place: bool,
+    /// A compose outside the lock outlasted [`SETTLE_SPINS`] (reported once).
+    compose_stall_reported: bool,
     /// The layer slots on screen since the last present, `None` before it.
     shown: Option<[Option<scanout::Layer>; swap::LAYERS]>,
     /// Slots that swaps dropped without a present (an abort or a shutdown)
@@ -552,8 +584,12 @@ impl Methods {
         let advertised = Advertised::sized(scanout.mode(), refresh, scanout.physical_size_mm());
         Self {
             interface,
-            scanout,
+            mode: scanout.mode(),
+            scanout: Some(scanout),
             frame: scanout::Composed::default(),
+            composing: None,
+            in_place: false,
+            compose_stall_reported: false,
             shown: None,
             unshown: 0,
             advertised,
@@ -603,7 +639,7 @@ impl Methods {
 
     /// The fixed mode the one connected display runs.
     pub fn mode(&self) -> Mode {
-        self.scanout.mode()
+        self.mode
     }
 
     /// The last `setPowerState` the AP asked for.
@@ -734,7 +770,10 @@ impl Methods {
     pub fn refresh_deadline(&self) -> Option<u64> {
         let wanted = self.notified
             || (!self.frames.is_empty() && self.display.borrow().active())
-            || self.scanout.queued();
+            || self
+                .scanout
+                .as_ref()
+                .is_some_and(|scanout| scanout.queued());
         (wanted && !self.shut_down).then_some(self.next_refresh)
     }
 
@@ -749,8 +788,9 @@ impl Methods {
         if self.shut_down {
             return;
         }
-        if self.scanout.queued()
-            && let Err(reason) = self.scanout.flush()
+        if let Some(scanout) = self.scanout.as_mut()
+            && scanout.queued()
+            && let Err(reason) = scanout.flush()
         {
             self.refusal(format!("DCP scanout refused a queued frame: {reason}"));
         }
@@ -814,12 +854,38 @@ impl Methods {
     /// never completed before the pixels it shows are consumed; a failed
     /// present keeps every swap and the latch for a retry.
     pub fn present(&mut self, now: u64, read: impl FnMut(u64, &mut [u8]) -> bool) -> Result<()> {
-        if !self.display.borrow().active() {
+        let Some(batch) = self.batch(now) else {
             return Ok(());
+        };
+        self.in_place = false;
+        let scanout = self
+            .scanout
+            .as_mut()
+            .expect("no batch while a compose has the scanout");
+        scanout::present(
+            scanout.as_mut(),
+            &batch.layers,
+            batch.damage.clone(),
+            read,
+            &mut self.frame,
+        )?;
+        // Both the surface DMA and host sink can refuse. The submitted swaps
+        // own their surfaces until presentation succeeds, or the AP explicitly
+        // aborts/shuts down; neither failure consumes them or queues D594.
+        self.presented(batch);
+        Ok(())
+    }
+
+    /// What the vblank the display last passed latches at counter `now`,
+    /// if a swap is ready and no compose is in flight: the swaps it shows,
+    /// the newest one's layers and the rows that may change.
+    fn batch(&mut self, now: u64) -> Option<Batch> {
+        if !self.display.borrow().active() || self.composing.is_some() {
+            return None;
         }
         self.refresh(now);
         if !self.frame_ready(now) {
-            return Ok(());
+            return None;
         }
         let due = self.latched.expect("a ready frame has an open latch");
         let count = self.ready_swaps(now);
@@ -834,17 +900,125 @@ impl Methods {
         let damage = self
             .shown
             .map(|shown| damage(&shown, &planes, updated, self.mode().height));
-        scanout::present(
-            self.scanout.as_mut(),
-            &layers,
+        Some(Batch {
+            now,
+            due,
+            count,
+            planes,
+            layers,
             damage,
-            read,
-            &mut self.frame,
-        )?;
-        // Both the surface DMA and host sink can refuse. The submitted swaps
-        // own their surfaces until presentation succeeds, or the AP explicitly
-        // aborts/shuts down; neither failure consumes them or queues D594.
-        self.latched = None;
+        })
+    }
+
+    /// Present at counter `now` as [`Self::present`] does, composing
+    /// outside the devices' lock ([`super::compose`]): the compose to run,
+    /// once every page the layers reach resolves (`resolve`, in pages of
+    /// `page` bytes). `None` with nothing to present, a compose in flight,
+    /// or a page that does not resolve; [`Self::present`] then presents
+    /// what is latched in place.
+    pub fn compose(
+        &mut self,
+        now: u64,
+        page: u64,
+        resolve: impl FnMut(u64) -> core::result::Result<u64, stela_contracts::dma::DmaError>,
+    ) -> Option<Compose> {
+        if self.composing.is_some() || self.scanout.is_none() || self.in_place {
+            return None;
+        }
+        // Read-only until it is certain the compose leaves: the batch is
+        // taken again in place otherwise.
+        let probe = self.batch(now)?;
+        let pages = Pages::resolve(&probe.layers, page, resolve)?;
+        let scanout = self.scanout.take().expect("checked above");
+        let composed = core::mem::take(&mut self.frame);
+        let (compose, done) = Compose::new(
+            scanout,
+            composed,
+            probe.layers.clone(),
+            probe.damage.clone(),
+            pages,
+        );
+        self.composing = Some((probe, done));
+        Some(compose)
+    }
+
+    /// Wait for a compose in flight and finish its present, before a call
+    /// that drops queued swaps acts on them: they are then as a present in
+    /// place would have left them. A present's refusal is recorded as the
+    /// call's. A compose that does not end within [`SETTLE_SPINS`] (its PE
+    /// runs it as soon as it leaves the devices' lock, so none should) is
+    /// reported once and refuses the call, which keeps the swaps.
+    pub fn settle_compose(&mut self) -> Result<()> {
+        self.settle_compose_within(SETTLE_SPINS)
+    }
+
+    fn settle_compose_within(&mut self, spins: u64) -> Result<()> {
+        if let Err(reason) = self.finish_compose(spins) {
+            self.refusal(format!("DCP present refused: {reason}"));
+        }
+        if !self.composing() {
+            return Ok(());
+        }
+        if !core::mem::replace(&mut self.compose_stall_reported, true) {
+            self.refusal("DCP compose outside the devices' lock did not end in time".to_string());
+        }
+        Err(refuse!(
+            "a compose outside the devices' lock is still in flight"
+        ))
+    }
+
+    /// Whether a compose outside the devices' lock is in flight.
+    pub fn composing(&self) -> bool {
+        self.composing.is_some()
+    }
+
+    /// Take back what a finished compose left, if it did: the scanout and
+    /// its rows, then the present finished as in place. `Ok(true)` when it
+    /// presented, `Ok(false)` when nothing finished or a read missed the
+    /// resolved pages (the latch stays open for a present in place), and
+    /// the present's refusal. A compose in flight is waited for at most
+    /// `spins` spin-loop hints.
+    pub fn finish_compose(&mut self, spins: u64) -> Result<bool> {
+        let Some((_, done)) = &self.composing else {
+            return Ok(false);
+        };
+        let finished = done.wait(spins);
+        let Some(Composition {
+            sink,
+            composed,
+            result,
+            missed,
+        }) = finished
+        else {
+            return Ok(false);
+        };
+        let (batch, _) = self.composing.take().expect("checked above");
+        self.scanout = Some(sink);
+        self.frame = composed;
+        if missed {
+            self.in_place = true;
+            return Ok(false);
+        }
+        result?;
+        self.presented(batch);
+        Ok(true)
+    }
+
+    /// Finish the present of `batch`, whose rows the scanout now holds:
+    /// complete its swaps, oldest first, and pace by it.
+    fn presented(&mut self, batch: Batch) {
+        let Batch {
+            now,
+            due,
+            count,
+            planes,
+            layers,
+            damage: _,
+        } = batch;
+        // A vblank passed during a compose opened a new latch: it stays.
+        if self.latched == Some(due) {
+            self.latched = None;
+        }
         if self
             .shown
             .as_ref()
@@ -898,7 +1072,6 @@ impl Methods {
             });
         }
         self.completed.push_back((shown.swap_id, true));
-        Ok(())
     }
 
     fn refusal(&mut self, text: String) {
@@ -1460,6 +1633,9 @@ impl Service for Methods {
             // aborts, the value `swap_start_dcp` carries for its swaps.
             (AP, "abort_swaps_dcp") => {
                 let client = fields.u64()?;
+                if let Err(reason) = self.settle_compose() {
+                    return self.refuse(tag, reason);
+                }
                 let aborted: Vec<u32> = self
                     .started
                     .iter()
@@ -1498,6 +1674,9 @@ impl Service for Methods {
                         tag,
                         refuse!("link_shutdown_signal saves the pipe for hibernation, which is not modeled"),
                     );
+                }
+                if let Err(reason) = self.settle_compose() {
+                    return self.refuse(tag, reason);
                 }
                 self.shut_down = true;
                 self.started.clear();

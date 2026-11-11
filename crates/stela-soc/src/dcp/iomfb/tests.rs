@@ -2027,3 +2027,265 @@ fn a_submit_past_the_held_swaps_refuses_and_keeps_its_swap_started() {
     assert_eq!(methods.frames.len(), QUEUED_SWAPS);
     assert!(methods.started.iter().any(|&(started, _)| started == id));
 }
+
+/// A screen whose frames another thread can push, as a compose outside the
+/// devices' lock does.
+#[derive(Clone, Default)]
+struct SharedScreen(alloc::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+impl Scanout for SharedScreen {
+    fn mode(&self) -> Mode {
+        MODE
+    }
+    fn present(&mut self, rows: &[u8]) -> Result<()> {
+        self.0.lock().unwrap().push(rows.to_vec());
+        Ok(())
+    }
+}
+
+/// Guest RAM holding the DART's pages for test surfaces: I/O address
+/// `dva` is at `GUEST + dva`.
+const GUEST: u64 = 0x8_0000_0000;
+const DART_PAGE: u64 = 0x4000;
+
+fn guest_ram() -> stela_contracts::dma::test_support::Ram {
+    let mut ram = stela_contracts::dma::test_support::Ram::new(GUEST, 0x10000);
+    for (index, byte) in ram.bytes.iter_mut().enumerate() {
+        *byte = (index * 7 + index / 64) as u8;
+    }
+    ram
+}
+
+fn resolve(dva: u64) -> core::result::Result<u64, stela_contracts::dma::DmaError> {
+    if dva < 0x10000 {
+        Ok(GUEST + dva)
+    } else {
+        Err(stela_contracts::dma::DmaError::Fault(1))
+    }
+}
+
+/// The swaps of a two-layer frame, then one moving its small layer.
+fn compose_swaps(methods: &mut Methods) -> [Vec<u8>; 2] {
+    let mut submits = [Vec::new(), Vec::new()];
+    for (index, x) in [(0, 1u32), (1, 3)] {
+        let id = start_swap(methods);
+        let mut input = submission(id, &[(0, 4, 2, 0x1000), (1, 2, 2, 0x5000)]);
+        place(&mut input, 1, rect(0, 0, 1, 1), rect(x, 1, 1, 1));
+        submits[index] = input;
+    }
+    submits
+}
+
+/// Each present of [`compose_swaps`], in place and composed outside the
+/// lock, shows the same frames and completes the same swaps, and a
+/// compose's swaps complete only once it is finished.
+#[test]
+fn a_compose_outside_the_lock_presents_as_in_place() {
+    let mut shown = Vec::new();
+    for deferred in [false, true] {
+        let screen = SharedScreen::default();
+        let frames = screen.0.clone();
+        let mut methods = Methods::new(Box::new(screen), interface());
+        let mut ram = guest_ram();
+        let submits = compose_swaps(&mut methods);
+        let mut completed = Vec::new();
+        for (step, input) in submits.iter().enumerate() {
+            assert_eq!(returned(methods.call(*b"A407", input, 0xc)), [0; 12]);
+            let now = step as u64 * 1_000_000;
+            if deferred {
+                let compose = methods
+                    .compose(now, DART_PAGE, resolve)
+                    .expect("pages resolve");
+                assert!(methods.composing());
+                assert!(
+                    methods.compose(now, DART_PAGE, resolve).is_none(),
+                    "one at a time"
+                );
+                methods
+                    .present(now, |_, _| panic!("no present in place while composing"))
+                    .unwrap();
+                assert!(
+                    methods.take_callback().is_none(),
+                    "not complete before the compose"
+                );
+                assert!(!methods.finish_compose(0).unwrap(), "not run yet");
+                compose.run(&mut ram);
+                assert!(methods.finish_compose(0).unwrap());
+                assert!(!methods.composing());
+            } else {
+                methods
+                    .present(now, |dva, bytes| {
+                        use stela_contracts::dma::Memory;
+                        ram.read(GUEST + dva, bytes)
+                    })
+                    .unwrap();
+            }
+            while let Some(callback) = methods.take_callback() {
+                completed.push((callback.tag, callback.input[..4].to_vec()));
+                (callback.then)(&mut methods, &[]).unwrap();
+            }
+        }
+        shown.push((frames.lock().unwrap().clone(), completed));
+    }
+    assert_eq!(shown[0].0.len(), 2);
+    assert_eq!(shown[0], shown[1]);
+}
+
+/// A compose that reaches a page the DART does not map is not made: the
+/// present happens in place, where the fault has its effects.
+#[test]
+fn a_layer_with_an_unresolved_page_presents_in_place() {
+    let mut methods = Methods::new(Box::new(SharedScreen::default()), interface());
+    let id = start_swap(&mut methods);
+    let input = submission(id, &[(0, 4, 2, 0x10000)]);
+    assert_eq!(returned(methods.call(*b"A407", &input, 0xc)), [0; 12]);
+    assert!(methods.compose(0, DART_PAGE, resolve).is_none());
+    assert!(!methods.composing());
+    methods
+        .present(0, |_, bytes| {
+            bytes.fill(1);
+            true
+        })
+        .unwrap();
+    assert_eq!(methods.take_callback().unwrap().tag, SWAP_COMPLETE);
+}
+
+/// An abort waits for a compose in flight on another PE, whose swaps then
+/// complete before the abort drops the rest.
+#[test]
+fn an_abort_waits_for_the_compose_in_flight() {
+    struct Sent(
+        super::super::compose::Compose,
+        stela_contracts::dma::test_support::Ram,
+    );
+    // SAFETY: the test's screen is shared through a mutex, and nothing
+    // else in the compose is touched by the main thread meanwhile.
+    unsafe impl Send for Sent {}
+    impl Sent {
+        fn run(self) {
+            let Self(compose, mut ram) = self;
+            compose.run(&mut ram);
+        }
+    }
+    let screen = SharedScreen::default();
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    let shown = start_client_swap(&mut methods, 0x1000);
+    returned(methods.call(*b"A407", &submission(shown, &[(0, 4, 2, 0x1000)]), 0xc));
+    let compose = methods
+        .compose(0, DART_PAGE, resolve)
+        .expect("pages resolve");
+    let dropped = start_client_swap(&mut methods, 0x1000);
+    returned(methods.call(*b"A407", &submission(dropped, &[(0, 4, 2, 0x1000)]), 0xc));
+    let sent = Sent(compose, guest_ram());
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        sent.run();
+    });
+    let abort = Packed::new().u64(0x1000).finish(8).unwrap();
+    assert_eq!(returned(methods.call(*b"A479", &abort, 4)), [0; 4]);
+    thread.join().unwrap();
+    assert!(!methods.composing());
+    assert_eq!(frames.lock().unwrap().len(), 1);
+    assert!(methods.frames.is_empty());
+    let callback = methods.take_callback().unwrap();
+    assert_eq!(callback.tag, SWAP_COMPLETE);
+    assert_eq!(&callback.input[..4], &shown.to_le_bytes());
+}
+
+/// Host micro-benchmark: the time a full-HD present holds the devices'
+/// lock in place, against a compose's resolve and finish under it and its
+/// compose outside. `cargo test --release -p stela-soc --lib
+/// compose_lock_costs -- --ignored --nocapture`.
+#[test]
+#[ignore = "host timing benchmark"]
+fn compose_lock_costs() {
+    #[derive(Clone, Default)]
+    struct Hd(alloc::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Scanout for Hd {
+        fn mode(&self) -> Mode {
+            FULL_HD
+        }
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
+            self.0.lock().unwrap().push(rows[0]);
+            Ok(())
+        }
+    }
+    let bytes = 1920 * 1080 * 4;
+    let mut ram = stela_contracts::dma::test_support::Ram::new(GUEST, bytes + 0x10000);
+    let resolve =
+        |dva: u64| -> core::result::Result<u64, stela_contracts::dma::DmaError> { Ok(GUEST + dva) };
+    const ROUNDS: u32 = 20;
+    let mut times = [0u128; 4];
+    for deferred in [false, true] {
+        let mut methods = Methods::new(Box::new(Hd::default()), interface());
+        for round in 0..ROUNDS {
+            // Every frame changes every row.
+            for (index, byte) in ram.bytes.iter_mut().enumerate().step_by(1920 * 4) {
+                *byte = (index as u32 + round) as u8;
+            }
+            let id = start_swap(&mut methods);
+            let input = submission(id, &[(0, 1920, 1080, 0)]);
+            returned(methods.call(*b"A407", &input, 0xc));
+            let now = u64::from(round) * 1_000_000;
+            if deferred {
+                let started = std::time::Instant::now();
+                let compose = methods.compose(now, DART_PAGE, resolve).unwrap();
+                times[1] += started.elapsed().as_nanos();
+                let started = std::time::Instant::now();
+                compose.run(&mut ram);
+                times[2] += started.elapsed().as_nanos();
+                let started = std::time::Instant::now();
+                assert!(methods.finish_compose(0).unwrap());
+                times[3] += started.elapsed().as_nanos();
+            } else {
+                let started = std::time::Instant::now();
+                methods
+                    .present(now, |dva, bytes| {
+                        use stela_contracts::dma::Memory;
+                        ram.read(GUEST + dva, bytes)
+                    })
+                    .unwrap();
+                times[0] += started.elapsed().as_nanos();
+            }
+            while let Some(callback) = methods.take_callback() {
+                (callback.then)(&mut methods, &[]).unwrap();
+            }
+        }
+    }
+    let us = |nanos: u128| nanos / u128::from(ROUNDS) / 1000;
+    std::println!(
+        "full-HD present: in place {} us under the lock; deferred {} us resolve + {} us finish under it, {} us compose outside",
+        us(times[0]),
+        us(times[1]),
+        us(times[3]),
+        us(times[2]),
+    );
+}
+
+/// An abort while a compose that never runs is in flight is refused after a
+/// bounded wait, keeps every swap and is reported once; once the compose
+/// runs, the next abort settles it and proceeds.
+#[test]
+fn an_abort_never_waits_for_good_for_a_compose_that_does_not_run() {
+    let mut methods = Methods::new(Box::new(SharedScreen::default()), interface());
+    let shown = start_client_swap(&mut methods, 0x1000);
+    returned(methods.call(*b"A407", &submission(shown, &[(0, 4, 2, 0x1000)]), 0xc));
+    let compose = methods
+        .compose(0, DART_PAGE, resolve)
+        .expect("pages resolve");
+    assert!(methods.settle_compose_within(1000).is_err());
+    assert!(methods.settle_compose_within(1000).is_err());
+    let reported = core::iter::from_fn(|| methods.take_log())
+        .filter(|entry| matches!(entry, Log::Refused(text) if text.contains("did not end in time")))
+        .count();
+    assert_eq!(reported, 1, "reported once");
+    assert!(
+        methods.composing() && methods.frame_pending(),
+        "the swap is kept"
+    );
+    compose.run(&mut guest_ram());
+    let abort = Packed::new().u64(0x1000).finish(8).unwrap();
+    assert_eq!(returned(methods.call(*b"A479", &abort, 4)), [0; 4]);
+    assert!(!methods.composing());
+    assert_eq!(methods.take_callback().unwrap().tag, SWAP_COMPLETE);
+}

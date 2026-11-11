@@ -27,6 +27,7 @@
 //! Undescribed registers, commands, fields and cryptographic effects refuse.
 mod bfh;
 mod commands;
+mod copy;
 mod debug;
 mod die;
 
@@ -48,6 +49,8 @@ use alloc::{
 pub use bfh::BootImage;
 #[cfg(test)]
 use bfh::Identity;
+use copy::Copied;
+pub use copy::ReadCopy;
 use namespace::Medium;
 use prp::dma_error;
 use stela_contracts::Refusal;
@@ -230,6 +233,10 @@ struct Completed {
     queue: usize,
     command: commands::Command,
     outcome: commands::Outcome,
+    /// Whether its host transfer completed after it executed: a read copy
+    /// that fails then ends the command without a completion, as a failed
+    /// copy in place there does; one that executed at once fails alone.
+    after_host: bool,
 }
 
 pub struct Ans {
@@ -285,6 +292,11 @@ pub struct Ans {
     last_submission: Option<Submission>,
     /// The inline key engine the SEP provisions (`inline_key`).
     inline: inline_key::Engine,
+    /// Whether a completed read's copy to guest RAM is left to
+    /// [`Self::take_copies`] ([`copy`]); otherwise it runs in place.
+    defer_copies: bool,
+    /// The read copies left since the last [`Self::take_copies`].
+    copies: Vec<ReadCopy>,
 }
 
 impl Ans {
@@ -353,6 +365,8 @@ impl Ans {
             tunables: tunables::Tables::default(),
             last_submission: None,
             inline: inline_key::Engine::default(),
+            defer_copies: false,
+            copies: Vec::new(),
         })
     }
 
@@ -405,7 +419,8 @@ impl Ans {
 
     /// The commands the controller owns at counter `now`, oldest first, each
     /// as queue:tag/stage/age in counter ticks: queued to execute, running
-    /// its host transfer or completed while its CQ is full. Then each CQ's
+    /// its host transfer, its read data on its way to guest RAM (`copy`) or
+    /// completed while its CQ is full. Then each CQ's
     /// unconsumed completions, the interrupt and the host disk: what tells
     /// a lost command from a lost completion or interrupt.
     pub fn diagnostic(&self, now: u64) -> String {
@@ -420,7 +435,12 @@ impl Ans {
             }))
             .chain(self.completed.iter().map(|done| {
                 let tag = done.command.cid();
-                (age(tag), "cq-full", done.queue, tag)
+                let stage = if done.outcome.copy.is_some() {
+                    "copy"
+                } else {
+                    "cq-full"
+                };
+                (age(tag), stage, done.queue, tag)
             }))
             .collect();
         owned.sort_unstable_by_key(|&(age, ..)| core::cmp::Reverse(age));
@@ -541,6 +561,18 @@ impl Ans {
     pub fn with_inline_engine(mut self, engine: inline_key::Engine) -> Self {
         self.inline = engine;
         self
+    }
+
+    /// Leave each completed read's copy to guest RAM to
+    /// [`Self::take_copies`] from now on ([`copy`]).
+    pub fn defer_copies(&mut self) {
+        self.defer_copies = true;
+    }
+
+    /// The read copies the transfers since the last call left: each must
+    /// run ([`ReadCopy::run`]) for its command to complete.
+    pub fn take_copies(&mut self) -> impl Iterator<Item = ReadCopy> + '_ {
+        self.copies.drain(..)
     }
 
     fn configure(&mut self, value: u32) -> Result<()> {
@@ -771,6 +803,7 @@ impl Ans {
                 queue,
                 command: inflight.command,
                 outcome,
+                after_host: true,
             });
         }
         // Submitted commands execute in order; a host transfer runs while
@@ -819,6 +852,7 @@ impl Ans {
                         queue,
                         command,
                         outcome: commands::Outcome::unsupported(),
+                        after_host: false,
                     });
                     refused.get_or_insert(error(reason));
                     continue;
@@ -830,6 +864,7 @@ impl Ans {
                     queue,
                     command,
                     outcome,
+                    after_host: false,
                 }),
                 commands::Executed::Host(wait) => {
                     let key = (queue as u32) << 16 | u32::from(tag);
@@ -857,6 +892,7 @@ impl Ans {
                 queue,
                 ref command,
                 ref outcome,
+                after_host,
             } = self.completed[index];
             let error = |reason: Refusal| refusal(queue, reason);
             let q = self.queues[queue];
@@ -866,6 +902,29 @@ impl Ans {
             if q.pending == q.cq_entries {
                 index += 1;
                 continue;
+            }
+            // A read whose data is still on its way holds back every
+            // completion after it, which keeps their order as it was.
+            if let Some(copy) = &outcome.copy {
+                match copy.outcome() {
+                    Copied::Running => break,
+                    Copied::Done => {}
+                    // As a copy in place that failed after its host
+                    // transfer: the command ends without a completion and
+                    // the transfer reports why.
+                    Copied::Failed(reason) if after_host => {
+                        self.completed.remove(index);
+                        return Err(error(reason));
+                    }
+                    // As one that failed as it executed: the command fails
+                    // alone, with the status of one the model cannot carry
+                    // out, and the queues go on.
+                    Copied::Failed(reason) => {
+                        self.completed[index].outcome = commands::Outcome::unsupported();
+                        refused.get_or_insert(error(reason));
+                        continue;
+                    }
+                }
             }
             let tag = command.cid();
             let mut completion = [0; 16];

@@ -21,8 +21,9 @@
 //! are not documented and an emulated die has no event source, so like the
 //! core counters ([`crate::core_counters`]) they hold what software writes,
 //! 0 from reset (inference): no activity is invented, and CLPC sees none.
-use super::regfile::Held;
 use crate::Result;
+use crate::passive::Words;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
@@ -35,13 +36,15 @@ use {
     stela_contracts::bus::refuse,
 };
 const NAME: &str = "cpm-power";
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Cpm {
     performance: bool,
     /// The described offsets, sorted: CLPC's samplers read the counters
     /// thousands of times a second, and a check must not build the list.
     described: Vec<u64>,
-    values: Held,
+    /// Each described word's value, by its index in `described`: PEs read
+    /// them without the devices' lock ([`crate::passive`]).
+    values: Arc<Words>,
     counting: bool,
 }
 impl Cpm {
@@ -50,10 +53,25 @@ impl Cpm {
         described.sort_unstable();
         Self {
             performance,
+            values: Words::new(described.len()),
             described,
-            values: Held::default(),
             counting: false,
         }
+    }
+    /// The words a read needs no lock for, each as its offset, the cells
+    /// and its index: every described word but the counter enable, whose
+    /// read refuses.
+    pub fn passive_words(&self) -> impl Iterator<Item = (u64, &Arc<Words>, usize)> {
+        self.described
+            .iter()
+            .enumerate()
+            .filter(|&(_, &offset)| offset != COUNTER_ENABLE)
+            .map(|(index, &offset)| (offset, &self.values, index))
+    }
+    fn index(&self, o: u64) -> usize {
+        self.described
+            .binary_search(&o)
+            .expect("a checked CPM offset is described")
     }
     pub fn offsets(&self) -> Vec<u64> {
         stela_soc_data::cpm::offsets(self.performance)
@@ -87,7 +105,7 @@ impl MmioDevice for Cpm {
                 "CPM counter enable readback is not established"
             )));
         }
-        Ok(self.values.get(o))
+        Ok(self.values.get(self.index(o)))
     }
     fn write(&mut self, o: u64, w: Width, v: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
         let fail = |r: Refusal| refuse(NAME, o, w, Direction::Write, r);
@@ -100,7 +118,7 @@ impl MmioDevice for Cpm {
             }
             self.counting = true;
         } else {
-            self.values.set(o, v);
+            self.values.set(self.index(o), v);
         }
         Ok(())
     }

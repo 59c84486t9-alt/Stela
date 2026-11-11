@@ -4083,4 +4083,5 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
 }
 
 mod data_integration;
+mod passive;
 mod pc_sampler;

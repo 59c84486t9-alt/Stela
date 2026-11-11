@@ -687,7 +687,7 @@ impl Dart {
         self.enabled[sid / 32] >> (sid % 32) & 1 != 0
     }
 
-    fn walk(
+    pub(super) fn walk(
         &self,
         memory: &mut dyn Memory,
         sid: usize,

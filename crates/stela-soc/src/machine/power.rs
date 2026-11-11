@@ -291,6 +291,7 @@ impl AppleDevices {
             model = model.with_ane_states(stela_soc_data::board::ANE_CLOCKS_MHZ.len());
         }
         let table = model.pstate_bytes();
+        let shared = model.share_words();
         let device = self.bus.add(Box::new(model));
         for (offset, bytes) in [
             (cluster::ACC_OFFSET, cluster::ACC_BYTES),
@@ -302,6 +303,10 @@ impl AppleDevices {
                 .map(device, base + offset, bytes, offset)
                 .map_err(|error| refuse!("CPU cluster placement: {error}", ?error))?;
         }
+        // Every shared word lies in one of the windows just mapped.
+        for (offset, words, index) in shared {
+            self.passive.add(base + offset, &words, index);
+        }
         Ok(())
     }
 
@@ -309,6 +314,10 @@ impl AppleDevices {
     pub fn add_cpm_power(&mut self, physical: u64, performance: bool) -> Result<()> {
         let model = Cpm::new(performance);
         let offsets = model.offsets();
+        let passive: Vec<_> = model
+            .passive_words()
+            .map(|(offset, words, index)| (offset, Arc::clone(words), index))
+            .collect();
         let device = self.bus.add(Box::new(model));
         for offset in offsets {
             self.bus
@@ -321,6 +330,10 @@ impl AppleDevices {
                     offset,
                 )
                 .map_err(|e| refuse!("CPM power placement: {e}", ?e))?;
+        }
+        // Every mapped word is in the window, so its address does not wrap.
+        for (offset, words, index) in passive {
+            self.passive.add(physical + offset, &words, index);
         }
         Ok(())
     }
@@ -434,7 +447,12 @@ impl AppleDevices {
     /// A CPU/CPM energy bank at its absolute `hw-dpe-reg` address. Map only
     /// the two accumulators and, for CPM, its separate configuration word.
     pub fn add_cpu_energy(&mut self, physical: u64, cpm: bool) -> Result<()> {
-        let device = self.bus.add(Box::new(Energy::new(cpm)));
+        let model = Energy::new(cpm);
+        let passive: Vec<_> = model
+            .passive_words()
+            .map(|(offset, words, index)| (offset, Arc::clone(words), index))
+            .collect();
+        let device = self.bus.add(Box::new(model));
         self.bus
             .map(device, physical, energy::COUNTER_BYTES, 0)
             .map_err(|error| refuse!("CPU energy placement: {error}", ?error))?;
@@ -449,6 +467,10 @@ impl AppleDevices {
                     energy::CONTROL_OFFSET,
                 )
                 .map_err(|error| refuse!("CPM energy configuration placement: {error}", ?error))?;
+        }
+        // The words are mapped, so their addresses do not wrap.
+        for (offset, words, index) in passive {
+            self.passive.add(physical + offset, &words, index);
         }
         Ok(())
     }

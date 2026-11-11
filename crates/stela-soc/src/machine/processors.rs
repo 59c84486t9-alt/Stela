@@ -164,10 +164,19 @@ impl AppleDevices {
         physical: u64,
         layout: stela_soc_data::core_counters::Layout,
     ) -> Result<(), MapError> {
-        let device = self.bus.add(Box::new(CoreCounters::new(layout)));
+        let model = CoreCounters::new(layout);
+        let passive: Vec<_> = model
+            .passive_words()
+            .map(|(offset, words, index)| (offset, Arc::clone(words), index))
+            .collect();
+        let device = self.bus.add(Box::new(model));
         for (offset, bytes) in layout.windows() {
             let start = physical.checked_add(offset).ok_or(MapError::Overflow)?;
             self.bus.map(device, start, bytes, offset)?;
+        }
+        // Each passive slot lies in a window just mapped.
+        for (offset, words, index) in passive {
+            self.passive.add(physical + offset, &words, index);
         }
         if self.core_counters.len() <= cpu {
             self.core_counters.resize(cpu + 1, None);

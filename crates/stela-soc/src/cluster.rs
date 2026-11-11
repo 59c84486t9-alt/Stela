@@ -64,6 +64,8 @@ pub mod t6000;
 
 use super::regfile::Held;
 use crate::Result;
+use crate::passive::Words;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
@@ -121,6 +123,9 @@ pub struct Cluster {
     registers: Held,
     counters: Vec<u64>,
     mapped: bool,
+    /// Once placed, every described word's offset (sorted) and its value
+    /// where PEs read it without the devices' lock ([`crate::passive`]).
+    shared: Option<(Vec<u64>, Arc<Words>)>,
 }
 
 impl Cluster {
@@ -145,7 +150,49 @@ impl Cluster {
             registers,
             counters: Vec::new(),
             mapped: false,
+            shared: None,
         })
+    }
+
+    /// Share every described word with readers outside the devices' lock:
+    /// each word's offset, the cells and its index there. Writes keep the
+    /// cells current from then on. Every described read just returns the
+    /// word, so a passive read is the read.
+    pub fn share_words(&mut self) -> Vec<(u64, Arc<Words>, usize)> {
+        let table = (0..self.pstate_bytes() / 8).map(|word| PSTATE_OFFSET + word * 8);
+        let mut offsets: Vec<u64> = self
+            .dvmr
+            .iter()
+            .copied()
+            .chain(table)
+            .chain(self.counters.iter().copied())
+            .chain([COMMAND, SNOOZE])
+            .chain(self.mapped.then_some(THROTTLER))
+            .chain(SCRATCH)
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let words = Words::new(offsets.len());
+        for (index, &offset) in offsets.iter().enumerate() {
+            words.set(index, self.registers.get(offset));
+        }
+        let shared = offsets
+            .iter()
+            .enumerate()
+            .map(|(index, &offset)| (offset, Arc::clone(&words), index))
+            .collect();
+        self.shared = Some((offsets, words));
+        shared
+    }
+
+    /// Store `value` at described `offset`, and in the shared cells.
+    fn set(&mut self, offset: u64, value: u64) {
+        self.registers.set(offset, value);
+        if let Some((offsets, words)) = &self.shared
+            && let Ok(index) = offsets.binary_search(&offset)
+        {
+            words.set(index, value);
+        }
     }
 
     /// A P cluster's states: only the last have a DVMR limit, and each names
@@ -265,9 +312,9 @@ impl MmioDevice for Cluster {
             if value & SET == 0 && state != self.registers.get(COMMAND) & STATE {
                 return Err(fail(refuse!("CPU state change requires a SET request")));
             }
-            self.registers.set(offset, value & !SET);
+            self.set(offset, value & !SET);
         } else {
-            self.registers.set(offset, value);
+            self.set(offset, value);
         }
         Ok(())
     }

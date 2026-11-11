@@ -271,7 +271,7 @@ impl Dart {
         Ok(u64::from_le_bytes(bytes))
     }
 
-    fn walk(
+    pub(super) fn walk(
         &self,
         memory: &mut dyn Memory,
         input_sid: usize,

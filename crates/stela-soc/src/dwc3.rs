@@ -513,6 +513,13 @@ impl Dwc3 {
         core::mem::take(&mut self.session_reset)
     }
 
+    /// Whether the adapter's next service has work whatever the time: a
+    /// session to cancel, a PHY disconnection to report or device events
+    /// to post.
+    pub fn service_due(&self) -> bool {
+        self.session_reset || self.pending_phy_disconnect || !self.pending.is_empty()
+    }
+
     fn error(offset: u64, direction: Direction, reason: impl Into<Refusal>) -> MmioError {
         refuse(NAME, offset, Width::Word, direction, reason)
     }

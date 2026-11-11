@@ -238,6 +238,27 @@ impl Dart {
     }
 }
 
+impl Dart {
+    /// The physical address `stream` reaches at `iova` for the bytes up to
+    /// `last` (in the same page), as [`Iommu::translate`] finds it, but
+    /// without its effects: a fault is neither recorded nor signalled. What
+    /// a copy outside the devices' lock reads by; a page that does not
+    /// resolve is left to `translate`, under the lock.
+    pub fn resolve(
+        &self,
+        memory: &mut dyn Memory,
+        stream: usize,
+        iova: u64,
+        last: u64,
+        write: bool,
+    ) -> Result<u64, DmaError> {
+        match &self.model {
+            Model::T8110(model) => model.walk(memory, stream, iova, last, write),
+            Model::Legacy(model) => model.walk(memory, stream, iova, last, write),
+        }
+    }
+}
+
 impl Iommu for Dart {
     fn page(&self) -> u64 {
         match &self.model {

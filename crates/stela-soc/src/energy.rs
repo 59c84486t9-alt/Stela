@@ -18,6 +18,8 @@
 //! both counts zero: accumulators disabled, with no other field set, as a
 //! boot chain that programs none of them would. Configuration then holds
 //! full writes. iBoot's conditional programming is not reproduced.
+use crate::passive::Words;
+use alloc::sync::Arc;
 use stela_contracts::refuse;
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
@@ -37,19 +39,36 @@ pub const CONTROL_OFFSET: u64 = CONTROL;
 /// Core energy offset within its per-core `reg` window (RegMap 0xe..0x11
 /// and 0x1a..0x1d, DT reg[10..13]/reg[19..22]).
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Energy {
-    counts: [u64; 2],
+    /// The two counts, then the CPM configuration: PEs read them without
+    /// the devices' lock ([`crate::passive`]).
+    words: Arc<Words>,
     cpm: bool,
-    control: u64,
 }
 
 impl Energy {
     pub fn new(cpm: bool) -> Self {
         Self {
-            counts: [0; 2],
+            words: Words::new(3),
             cpm,
-            control: 0,
+        }
+    }
+
+    /// Each described word's offset, the cells and its index there.
+    pub fn passive_words(&self) -> impl Iterator<Item = (u64, &Arc<Words>, usize)> {
+        let control = self.cpm.then_some(CONTROL);
+        [0, SRAM]
+            .into_iter()
+            .chain(control)
+            .map(|offset| (offset, &self.words, Self::index(offset)))
+    }
+
+    fn index(offset: u64) -> usize {
+        if offset == CONTROL {
+            2
+        } else {
+            (offset / SRAM) as usize
         }
     }
 
@@ -71,10 +90,8 @@ impl MmioDevice for Energy {
             Err(refuse!(
                 "energy register or width without described meaning"
             ))
-        } else if offset == CONTROL {
-            Ok(self.control)
         } else {
-            Ok(self.counts[(offset / SRAM) as usize])
+            Ok(self.words.get(Self::index(offset)))
         };
         value.map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))
     }
@@ -95,11 +112,7 @@ impl MmioDevice for Energy {
                 "energy register or width without described meaning",
             ));
         }
-        if offset == CONTROL {
-            self.control = value;
-        } else {
-            self.counts[(offset / SRAM) as usize] = value;
-        }
+        self.words.set(Self::index(offset), value);
         Ok(())
     }
 }

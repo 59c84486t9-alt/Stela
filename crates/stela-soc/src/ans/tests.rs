@@ -1356,3 +1356,176 @@ fn nvmmu_data_pages_are_4k_with_16k_controller_queue_alignment() {
     assert_eq!(rig.ans.page(), 16384);
     assert_eq!(rig.ans.queues[0].pending, 1);
 }
+
+/// A completion's command ID and status at slot `slot` of the I/O CQ.
+fn io_completion(rig: &mut Rig, slot: u64) -> (u16, u16) {
+    let entry = rig.bytes(IOCQ + slot * 16, 16);
+    (
+        u16::from_le_bytes([entry[12], entry[13]]),
+        u16::from_le_bytes([entry[14], entry[15]]) >> 1,
+    )
+}
+
+#[test]
+fn a_deferred_read_completes_after_its_copy_and_holds_later_completions_behind_it() {
+    let mut rig = Rig::new();
+    rig.ans.defer_copies();
+    rig.io_queues();
+    let pattern: Vec<u8> = (0..4096).map(|i| (i * 13) as u8).collect();
+    assert!(rig.ram.write(DATA, &pattern));
+    rig.submit(1, 2, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+    assert!(
+        rig.ans.take_copies().next().is_none(),
+        "a write copies in place"
+    );
+    rig.retire(1, 2);
+    assert!(rig.ram.write(DATA, &[0; 4096]));
+    rig.submit(1, 3, 2, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+    // The read executed; its data and completion wait for the copy.
+    let copies: Vec<ReadCopy> = rig.ans.take_copies().collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(rig.bytes(DATA, 4096), vec![0; 4096]);
+    assert_eq!(rig.ans.queues[1].pending, 0);
+    // A flush after it completes behind it, never ahead.
+    rig.submit(1, 4, 0, 1, 0, [0; 6]).unwrap();
+    assert_eq!(rig.ans.queues[1].pending, 0);
+    assert!(rig.ans.pending(0));
+    for copy in copies {
+        copy.run(&mut rig.ram);
+    }
+    assert_eq!(rig.bytes(DATA, 4096), pattern);
+    rig.run().unwrap();
+    assert_eq!(rig.ans.queues[1].pending, 2);
+    assert_eq!(io_completion(&mut rig, 1), (3, 0));
+    assert_eq!(io_completion(&mut rig, 2), (4, 0));
+}
+
+#[test]
+fn deferred_keyed_reads_decrypt_in_the_copy_as_in_place() {
+    let engine = crate::inline_key::Engine::default();
+    engine.provision(zeroize::Zeroizing::new([9; 32]));
+    let area = engine.wrap(&[0x3c; 32]).unwrap();
+    let command = |opcode| Command {
+        opcode,
+        nsid: 1,
+        prp: DATA,
+        words: [3, 0, 0, 0, 7, 0],
+    };
+    let plain: Vec<u8> = (0..4096).map(|i| (i * 7) as u8).collect();
+    let mut read = Vec::new();
+    for defer in [false, true] {
+        let mut rig = Rig::new();
+        rig.ans.inline = engine.clone();
+        if defer {
+            rig.ans.defer_copies();
+        }
+        rig.io_queues();
+        assert!(rig.ram.write(DATA, &plain));
+        rig.submit_keyed(1, 2, command(1), None, 1, area).unwrap();
+        rig.retire(1, 2);
+        assert!(rig.ram.write(DATA, &[0; 4096]));
+        rig.submit_keyed(1, 3, command(2), None, 1, area).unwrap();
+        for copy in rig.ans.take_copies().collect::<Vec<_>>() {
+            copy.run(&mut rig.ram);
+        }
+        rig.run().unwrap();
+        assert_eq!(io_completion(&mut rig, 1), (3, 0));
+        read.push(rig.bytes(DATA, 4096));
+    }
+    assert_eq!(read[0], plain);
+    assert_eq!(read[1], plain);
+}
+
+#[test]
+fn a_deferred_read_whose_copy_fails_ends_as_a_failed_copy_in_place() {
+    let outside = RAM + 0x10_0000;
+    let mut seen = Vec::new();
+    for defer in [false, true] {
+        let mut rig = Rig::new();
+        if defer {
+            rig.ans.defer_copies();
+        }
+        rig.io_queues();
+        let submitted = rig.submit(1, 2, 2, 1, outside, [3, 0, 0, 0, 0, 0]);
+        let result = if defer {
+            assert!(submitted.is_ok());
+            assert_eq!(rig.ans.queues[1].pending, 0);
+            for copy in rig.ans.take_copies().collect::<Vec<_>>() {
+                copy.run(&mut rig.ram);
+            }
+            rig.run()
+        } else {
+            submitted
+        };
+        assert!(result.is_err(), "defer={defer}");
+        assert!(rig.ans.completed.is_empty());
+        assert!(rig.ans.inflight.is_empty());
+        let pending = rig.ans.queues[1].pending;
+        let first = (pending != 0).then(|| io_completion(&mut rig, 1));
+        if pending != 0 {
+            rig.retire(1, 2);
+        }
+        // The next command runs and completes.
+        rig.submit(1, 3, 0, 1, 0, [0; 6]).unwrap();
+        seen.push((pending, first, rig.ans.queues[1].pending));
+    }
+    assert_eq!(seen[0], seen[1]);
+}
+
+/// Host micro-benchmark: the time a keyed 4 KiB read holds the devices'
+/// lock with its copy in place, against its run under the lock and its
+/// copy outside. `cargo test --release -p stela-soc --lib read_lock_costs
+/// -- --ignored --nocapture`.
+#[test]
+#[ignore = "host timing benchmark"]
+fn read_lock_costs() {
+    let engine = crate::inline_key::Engine::default();
+    engine.provision(zeroize::Zeroizing::new([9; 32]));
+    let area = engine.wrap(&[0x3c; 32]).unwrap();
+    let command = |opcode| Command {
+        opcode,
+        nsid: 1,
+        prp: DATA,
+        words: [3, 0, 0, 0, 7, 0],
+    };
+    const ROUNDS: u32 = 2000;
+    let mut times = [0u128; 3];
+    for defer in [false, true] {
+        let mut rig = Rig::new();
+        rig.ans.inline = engine.clone();
+        if defer {
+            rig.ans.defer_copies();
+        }
+        rig.io_queues();
+        rig.submit_keyed(1, 2, command(1), None, 1, area).unwrap();
+        rig.retire(1, 2);
+        for round in 0..ROUNDS {
+            let tag = 3 + (round % 2) as u16;
+            let started = std::time::Instant::now();
+            rig.submit_keyed(1, tag, command(2), None, 1, area).unwrap();
+            let under = started.elapsed().as_nanos();
+            if defer {
+                times[1] += under;
+                let copies: Vec<ReadCopy> = rig.ans.take_copies().collect();
+                let started = std::time::Instant::now();
+                for copy in copies {
+                    copy.run(&mut rig.ram);
+                }
+                times[2] += started.elapsed().as_nanos();
+                let started = std::time::Instant::now();
+                rig.run().unwrap();
+                times[1] += started.elapsed().as_nanos();
+            } else {
+                times[0] += under;
+            }
+            rig.retire(1, tag);
+        }
+    }
+    let ns = |nanos: u128| nanos / u128::from(ROUNDS);
+    std::println!(
+        "keyed 4 KiB read: in place {} ns under the lock; deferred {} ns under it, {} ns copy outside",
+        ns(times[0]),
+        ns(times[1]),
+        ns(times[2]),
+    );
+}
