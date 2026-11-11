@@ -38,6 +38,33 @@ const VERSION: &str = "libauthinstall-1104.0.9";
 pub const LOCAL_POLICY: [u8; 22] = stela_formats::local_policy::PAYLOAD;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Why an install needs the network, as setup and the boot screen say it.
+/// Every install does, even with macOS on the USB: the AP root ticket is
+/// signed during setup, but the Cryptex1 ticket and the recoveryOS
+/// LocalPolicy bind nonces the guest draws during the restore, and the
+/// LocalPolicy also binds the new Recovery volume's UUID, so no setup can
+/// ask for them ahead.
+pub fn network_reason(remote_image: bool) -> &'static str {
+    match remote_image {
+        false => {
+            "Installing macOS needs a network for Apple's signing server; macOS itself is on the USB."
+        }
+        true => {
+            "Installing macOS needs a network for Apple's signing server and to download macOS."
+        }
+    }
+}
+
+/// The install's stop when the host network did not open: no install can
+/// finish without the signing server, so it stops before the restore
+/// changes the Mac's disk instead of at its first signing request.
+pub fn no_network(remote_image: bool, problem: &str) -> String {
+    format!(
+        "{} {problem} The install did not start.",
+        network_reason(remote_image)
+    )
+}
+
 /// One HTTP POST to the signing service with `headers` besides its
 /// content type, without waiting: the response body once it has arrived,
 /// `None` while it is on its way. Asking again with the same body continues

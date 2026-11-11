@@ -565,3 +565,17 @@ fn a_nonce_bound_cryptex_takes_apples_ticket_only_with_the_signing_service() {
         [9, 8, 7]
     );
 }
+
+#[test]
+fn every_install_names_the_signing_server_and_only_a_network_install_the_download() {
+    let local = network_reason(false);
+    let remote = network_reason(true);
+    assert!(local.contains("Apple's signing server") && local.contains("on the USB"));
+    assert!(!local.contains("download"));
+    assert!(remote.contains("Apple's signing server") && remote.contains("download macOS"));
+    let stop = no_network(false, "No network cable or Wi-Fi.");
+    assert!(stop.starts_with(local), "{stop}");
+    assert!(stop.contains("No network cable or Wi-Fi."));
+    assert!(stop.ends_with("The install did not start."));
+    assert_eq!(stop.matches("signing server").count(), 1, "{stop}");
+}
