@@ -417,6 +417,24 @@ pub fn claims_identity(function: &crate::bus::pci::Identity) -> bool {
         || usb::handoff::Kind::of(function.class).is_some()
 }
 
+/// An HD Audio function beside a display controller's function 0 is that
+/// GPU's HDMI/DP audio, as Linux `get_bound_vga` finds it. No HDMI/DP codec
+/// profile here serves one outside the admitted identities.
+const DISPLAY_AUDIO: &str = "HDMI/DP audio controller of a GPU outside the supported HD Audio identities (its outputs carry no audio)";
+
+/// Why no driver here takes `class` at `address`, given the slots whose
+/// function 0 is a display controller.
+fn unclaimed(class: [u8; 3], address: Address, displays: &[Address]) -> Option<&'static str> {
+    let beside_display = displays.iter().any(|display| {
+        (display.segment, display.bus, display.device)
+            == (address.segment, address.bus, address.device)
+    });
+    if class[..2] == [0x04, 0x03] && address.function != 0 && beside_display {
+        return Some(DISPLAY_AUDIO);
+    }
+    unsupported(class)
+}
+
 /// Why no driver here takes a function of a device class the host needs,
 /// or none for classes outside this crate's scope.
 fn unsupported(class: [u8; 3]) -> Option<&'static str> {
@@ -933,6 +951,12 @@ pub unsafe fn probe_with_provider(
         function.vendor == 0x8086
             && usb::handoff::Kind::of(function.class) == Some(usb::handoff::Kind::Ehci)
     });
+    let displays: Vec<Address> = scanned
+        .iter()
+        .flatten()
+        .filter(|function| function.class[0] == 0x03 && function.address.function == 0)
+        .map(|function| function.address)
+        .collect();
     for found in scanned {
         for mut function in found {
             let address = function.address;
@@ -1290,7 +1314,7 @@ pub unsafe fn probe_with_provider(
                         .collect()
                 })
             } else {
-                if let Some(why) = unsupported(function.class) {
+                if let Some(why) = unclaimed(function.class, address, &displays) {
                     devices.unsupported.push((address, function.class, why));
                 }
                 continue;
@@ -2004,6 +2028,34 @@ mod tests {
         assert!(unsupported([0x0c, 0x05, 0x00]).is_some_and(|why| why.contains("i801")));
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
+    }
+
+    #[test]
+    fn hd_audio_beside_a_display_function_is_reported_as_display_audio() {
+        let at = |bus, device, function| Address {
+            segment: 0,
+            bus,
+            device,
+            function,
+        };
+        let displays = [at(0x0d, 0, 0)];
+        let audio = [0x04, 0x03, 0x00];
+        assert_eq!(
+            unclaimed(audio, at(0x0d, 0, 1), &displays),
+            Some(DISPLAY_AUDIO)
+        );
+        // A chipset or board HD Audio controller keeps the general reason.
+        for address in [at(0x0d, 1, 1), at(0x0e, 0, 1), at(0x0d, 0, 0)] {
+            assert_eq!(
+                unclaimed(audio, address, &displays),
+                Some("HD Audio controller outside the supported identities")
+            );
+        }
+        // Other classes beside a GPU are unaffected.
+        assert_eq!(
+            unclaimed([0x0c, 0x03, 0x10], at(0x0d, 0, 3), &displays),
+            unsupported([0x0c, 0x03, 0x10])
+        );
     }
 
     #[test]
