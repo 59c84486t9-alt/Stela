@@ -86,7 +86,7 @@ impl Serial {
     /// Send `bytes`, which may end or start inside a character.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            // QEMU's terminal treats LF and CR independently.
+            // A serial terminal treats LF and CR independently.
             if byte == b'\n' {
                 send(b'\r');
             }

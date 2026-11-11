@@ -47,7 +47,7 @@ static DCP_PRESENTED: AtomicBool = AtomicBool::new(false);
 /// PEs' work between slices ([`flush`]), outside that lock, mostly from
 /// waiting PEs and in bounded steps from busy ones other than the boot PE.
 ///
-/// Where the display has two frames (QEMU's DISPI registers), the rows go
+/// Where the display has two frames (a virtual display's DISPI registers), the rows go
 /// into the hidden one, which is then shown, and only the rows that frame
 /// lacks since it last held a frame.
 pub struct GopScanout {

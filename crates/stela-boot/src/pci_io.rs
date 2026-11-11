@@ -171,21 +171,23 @@ pub(crate) fn framebuffer_source(
     )
     .map(|bar| FramebufferSource { address, bar }))
 }
-/// QEMU's standard VGA (`hw/display/vga-pci.c`), vendor and device.
-const QEMU_VGA: u32 = 0x1111_1234;
+/// The Bochs-compatible virtual display device (PCI 1234:1111, QEMU's
+/// standard VGA, `hw/display/vga-pci.c`), vendor and device. No PC graphics
+/// card has this ID, so the paths below run only on a virtual machine.
+const BOCHS_DISPLAY: u32 = 0x1111_1234;
 /// Its MMIO BAR, whose first bytes hold the EDID with `edid=on`
 /// (QEMU's `docs/specs/standard-vga.rst`: 0x0000..0x0400 "edid data blob").
-const QEMU_VGA_MMIO_BAR: u8 = 2;
+const DISPLAY_MMIO_BAR: u8 = 2;
 const EDID_BYTES: usize = 128;
 
-/// The EDID base block QEMU's standard VGA on GOP `handle` serves in its
+/// The EDID base block the virtual display device on GOP `handle` serves in its
 /// registers, which OVMF reads to pick its first mode but does not install
 /// as a protocol. `None` for another device or when the read fails; the
 /// caller checks the block.
-pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
+pub(crate) fn bochs_display_edid(handle: Handle) -> Option<Vec<u8>> {
     let mut pci = gop_pci(handle)?;
     let header = pci.read_header().ok()?;
-    if u32::from_le_bytes(header[..4].try_into().ok()?) != QEMU_VGA {
+    if u32::from_le_bytes(header[..4].try_into().ok()?) != BOCHS_DISPLAY {
         return None;
     }
     let mut edid = Vec::new();
@@ -197,7 +199,7 @@ pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
         (pci.mem_read)(
             &mut *pci,
             0,
-            QEMU_VGA_MMIO_BAR,
+            DISPLAY_MMIO_BAR,
             0,
             EDID_BYTES,
             edid.as_mut_ptr().cast(),
@@ -206,7 +208,7 @@ pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
     read.is_success().then_some(edid)
 }
 
-/// The Bochs DISPI registers in QEMU's standard VGA's MMIO BAR, 16 bits
+/// The Bochs DISPI registers in the virtual display's MMIO BAR, 16 bits
 /// each (QEMU's `docs/specs/standard-vga.rst`: 0x0500..0x0516), by index
 /// (`include/hw/display/bochs-vbe.h`).
 pub(crate) const DISPI_REGISTERS: u64 = 0x500;
@@ -215,11 +217,11 @@ pub(crate) const DISPI_X_OFFSET: u64 = 8;
 pub(crate) const DISPI_Y_OFFSET: u64 = 9;
 const DISPI_VIDEO_MEMORY_64K: u64 = 0xa;
 
-/// The physical address of the DISPI registers of QEMU's standard VGA on
+/// The physical address of the DISPI registers of the virtual display on
 /// GOP `handle`, when its screen at `base` starts its video memory, shows
 /// rows of `stride` pixels from its top and the video memory holds a second
 /// frame of `frame_bytes` after it: the screen can then show either.
-pub(crate) fn qemu_vga_flip(
+pub(crate) fn bochs_display_flip(
     handle: Handle,
     base: u64,
     stride: usize,
@@ -227,7 +229,7 @@ pub(crate) fn qemu_vga_flip(
 ) -> Option<u64> {
     let mut pci = gop_pci(handle)?;
     let header = pci.read_header().ok()?;
-    if u32::from_le_bytes(header[..4].try_into().ok()?) != QEMU_VGA {
+    if u32::from_le_bytes(header[..4].try_into().ok()?) != BOCHS_DISPLAY {
         return None;
     }
     let single = |regions: Vec<BarRegion>| match regions.as_slice() {
@@ -235,7 +237,7 @@ pub(crate) fn qemu_vga_flip(
         _ => None,
     };
     let memory = single(pci.bar_regions(0).ok()?)?;
-    let registers = single(pci.bar_regions(QEMU_VGA_MMIO_BAR).ok()?)?;
+    let registers = single(pci.bar_regions(DISPLAY_MMIO_BAR).ok()?)?;
     let mut register = |index: u64| {
         let mut value = 0u16;
         // SAFETY: live boot protocol; EfiPciIoWidthUint16 (1) reads one
@@ -244,7 +246,7 @@ pub(crate) fn qemu_vga_flip(
             (pci.mem_read)(
                 &mut *pci,
                 1,
-                QEMU_VGA_MMIO_BAR,
+                DISPLAY_MMIO_BAR,
                 DISPI_REGISTERS + index * 2,
                 1,
                 ptr::from_mut(&mut value).cast(),

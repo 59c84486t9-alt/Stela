@@ -135,7 +135,7 @@ pub struct Framebuffer {
     size_mm: Option<(u32, u32)>,
     /// The address of the registers that choose which of two frames in
     /// video memory shows, the one at `base` or the one after it, when the
-    /// display has them (QEMU's standard VGA's DISPI registers).
+    /// display has them (a virtual display's Bochs DISPI registers).
     pub(crate) flip: Option<usize>,
     pub(crate) pci_source: Option<crate::pci_io::FramebufferSource>,
 }
@@ -175,9 +175,12 @@ impl Framebuffer {
             )),
         }
         let frame = screen.frame_bytes();
-        if let Some(registers) =
-            crate::pci_io::qemu_vga_flip(handle, screen.base as u64, screen.stride, frame as u64)
-        {
+        if let Some(registers) = crate::pci_io::bochs_display_flip(
+            handle,
+            screen.base as u64,
+            screen.stride,
+            frame as u64,
+        ) {
             screen.flip = Some(registers as usize);
             screen.bytes = screen.bytes.max(2 * frame);
             crate::output::arguments(format_args!(
@@ -400,7 +403,7 @@ impl Framebuffer {
     fn dispi(&self, index: u64, value: Option<u16>) -> Option<u16> {
         let register = (self.flip? + index as usize * 2) as *mut u16;
         // SAFETY: `flip` is the uncached mapping of the display's DISPI
-        // registers, 16-bit each, that `qemu_vga_flip` observed.
+        // registers, 16-bit each, that `bochs_display_flip` observed.
         unsafe {
             if let Some(value) = value {
                 register.write_volatile(value);

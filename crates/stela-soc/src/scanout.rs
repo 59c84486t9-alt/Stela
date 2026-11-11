@@ -1,7 +1,7 @@
 //! The host scanout a completed DCP swap is presented to: one fixed virtual
 //! monitor. The boot crate implements it over the UEFI GOP framebuffer
 //! (`crates/stela-boot/src/engine/display.rs`, two frames flipped through
-//! QEMU's DISPI registers where the display has them) or, once a bound GPU
+//! a virtual display's DISPI registers where it has them) or, once a bound GPU
 //! owns the display, over DRM mode setting
 //! (`crates/stela-boot/src/engine/gpu/display.rs`, three dumb buffers in
 //! video memory and page flips).

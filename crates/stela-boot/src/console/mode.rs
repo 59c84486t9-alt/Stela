@@ -192,7 +192,10 @@ fn edid(handle: Handle) -> Option<(Vec<u8>, &'static str)> {
             discovered(only(handles::<EdidDiscovered>())?)
                 .map(|edid| (edid, "discovered, the only display's"))
         })
-        .or_else(|| crate::pci_io::qemu_vga_edid(handle).map(|edid| (edid, "QEMU VGA's registers")))
+        .or_else(|| {
+            crate::pci_io::bochs_display_edid(handle)
+                .map(|edid| (edid, "the virtual display device's registers"))
+        })
 }
 
 fn handles<P: ProtocolPointer + ?Sized>() -> Option<Vec<Handle>> {
