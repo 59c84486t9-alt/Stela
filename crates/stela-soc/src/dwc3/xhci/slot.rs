@@ -30,9 +30,27 @@
 //! Endpoint records a hub's Hub, MTT, Number of Ports and TT Think Time;
 //! split transactions are the hub function's concern, not the
 //! controller's. The controller assigns USB address `slot ID`. Refused
-//! rather than modeled: streams (MaxPSASize 0), isochronous TRBs (no
-//! function has an isochronous endpoint), Link TRBs with IOC on transfer
-//! rings, and TDs of more than `MAX_TD_TRBS` TRBs.
+//! rather than modeled: streams (MaxPSASize 0), Link TRBs with IOC on
+//! transfer rings, and TDs of more than `MAX_TD_TRBS` TRBs.
+//!
+//! Isochronous TDs (4.11.2.5, 4.10.3.1, 6.4.1.3) run once each, in the
+//! service interval (ESIT, 2^Interval microframes) their Isoch TRB names:
+//! with SIA, the next ESIT after the endpoint's previous TD (or the next
+//! one after now for a stream that is starting); otherwise the first ESIT
+//! of the frame its Frame ID names, when that frame is at most
+//! `LAST_SCHEDULE_FRAME` frames ahead, and a Missed Service Error on the
+//! TD when it is behind. The controller fetches a TD when its predecessor
+//! has run, so while a stream runs a Frame ID is measured from that
+//! stream's next ESIT, not from MFINDEX: a service that comes late (the
+//! engine runs this model between guest slices) runs the due TDs in order
+//! instead of reporting intervals the bus did not really miss. A stream
+//! more than `LATE_TOLERANCE` microframes behind starts again from now. A
+//! TD's packets go to or come from the function in its ESIT; a function
+//! with no data for an IN packet sends a zero-length one, and a failed
+//! packet (no device, STALL, babble) completes the TD with that error
+//! without halting the endpoint. A ring still empty at the ESIT after its
+//! last TD posts one Ring Underrun (OUT) or Ring Overrun (IN) event with a
+//! zero TRB pointer, and the stream restarts at the next doorbell.
 use super::{
     CONTEXT_STATE_ERROR, CYCLE, Event, LINK, MAX_SLOTS, MICROFRAME, PARAMETER_ERROR,
     SLOT_NOT_ENABLED, SUCCESS, TOGGLE, TRANSACTION_ERROR, TRB_BYTES, TRB_ERROR, Xhci,
@@ -51,6 +69,12 @@ const CONTEXT: u64 = 32;
 const MAX_TD_TRBS: usize = 64;
 /// Packets one service may move before yielding to the engine.
 const PACKETS_PER_SERVICE: usize = 512;
+/// Frames ahead of its stream's next ESIT an isochronous Frame ID may name
+/// (xHCI 4.11.2.5: less than half the 2048-frame counter period).
+const LAST_SCHEDULE_FRAME: u64 = 895;
+/// Microframes an isochronous stream may fall behind and still continue
+/// where it is (64 ms); a stream further behind restarts from now.
+const LATE_TOLERANCE: u64 = 512;
 /// Tries at a NAKed SET_ADDRESS status stage before Address Device fails.
 const CONTROL_RETRIES: usize = 8;
 /// A transfer runs only on an endpoint that holds its gathered TD.
@@ -65,6 +89,7 @@ const EVENT_DATA: u32 = 7;
 const NO_OP: u32 = 8;
 const TRANSFER: u32 = 32;
 
+const SIA: u32 = 1 << 31;
 const ISP: u32 = 1 << 2;
 const CH: u32 = 1 << 4;
 const IOC: u32 = 1 << 5;
@@ -76,6 +101,9 @@ const BABBLE: u32 = 3;
 const STALL_ERROR: u32 = 6;
 const ENDPOINT_NOT_ENABLED: u32 = 12;
 const SHORT_PACKET: u32 = 13;
+const RING_UNDERRUN: u32 = 14;
+const RING_OVERRUN: u32 = 15;
+const MISSED_SERVICE: u32 = 23;
 const STOPPED: u32 = 26;
 
 const CONTROL: u32 = 4;
@@ -122,9 +150,13 @@ impl Trb {
     }
     fn length(&self) -> u32 {
         match self.kind() {
-            NORMAL | DATA => self.status & 0x1_ffff,
+            NORMAL | DATA | ISOCH => self.status & 0x1_ffff,
             _ => 0,
         }
+    }
+    /// A TRB that carries data: Normal, Data Stage or Isoch.
+    fn data(&self) -> bool {
+        matches!(self.kind(), NORMAL | DATA | ISOCH)
     }
     fn interrupter(&self) -> usize {
         (self.status >> 22) as usize
@@ -143,6 +175,9 @@ struct Td {
     accumulated: u32,
     short: bool,
     started: bool,
+    /// An isochronous TD's ESIT, as a microframe count, once scheduled;
+    /// `None` after a Missed Service Error.
+    scheduled: Option<u64>,
 }
 
 impl Td {
@@ -172,6 +207,9 @@ struct Endpoint {
     /// A doorbell restarted the endpoint and its output context still says
     /// Stopped. Drivers read that state to choose Stop Endpoint.
     restarted: bool,
+    /// An isochronous stream's next ESIT after the last TD it ran, as a
+    /// microframe count.
+    isoch_next: Option<u64>,
 }
 
 impl Endpoint {
@@ -188,7 +226,17 @@ impl Endpoint {
             waiting: false,
             next: 0,
             restarted: false,
+            isoch_next: None,
         }
+    }
+
+    fn isoch(&self) -> bool {
+        matches!(self.kind(), ISOCH_OUT | ISOCH_IN)
+    }
+
+    /// Microframes from one service opportunity to the next.
+    fn interval(&self) -> u64 {
+        1 << (self.context[0] >> 16 & 0xf)
     }
 
     fn kind(&self) -> u32 {
@@ -296,6 +344,9 @@ enum Step {
     Halt,
     /// The service's packet budget ran out; the endpoint stays rung.
     Yield,
+    /// An isochronous TD waits for its ESIT, which starts at this system
+    /// count.
+    Wait(u64),
 }
 
 impl Xhci {
@@ -600,6 +651,8 @@ impl Xhci {
             endpoint.state = EpState::Stopped;
             endpoint.rung = false;
             endpoint.waiting = false;
+            // A stopped isochronous stream starts again from its next TD.
+            endpoint.isoch_next = None;
             SUCCESS
         })?;
         if let Some((trb, residual)) = stopped {
@@ -761,7 +814,7 @@ impl Xhci {
                     continue;
                 }
                 let dci = n + 1;
-                let ready = if dci % 2 == 1 && dci > 1 {
+                let ready = if dci % 2 == 1 && dci > 1 && !endpoint.isoch() {
                     device.and_then(|f| f.ready_at(address(dci)))
                 } else {
                     Some(0)
@@ -804,7 +857,9 @@ impl Xhci {
                     continue;
                 }
                 if endpoint.waiting {
-                    let ready = if dci % 2 == 1 && dci > 1 {
+                    // An isochronous endpoint runs at its ESIT whatever the
+                    // function has to say.
+                    let ready = if dci % 2 == 1 && dci > 1 && !endpoint.isoch() {
                         function
                             .as_deref()
                             .and_then(|f| usb::route_ref(f, route))
@@ -846,6 +901,7 @@ impl Xhci {
             if endpoint.td.is_none() {
                 match Self::gather(port, endpoint.ring, dci)? {
                     Some(td) => endpoint.td = Some(td),
+                    None if endpoint.isoch() => return self.isoch_dry(id, dci, now),
                     None => {
                         endpoint.rung = false;
                         let ring = endpoint.ring;
@@ -870,6 +926,15 @@ impl Xhci {
                     let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
                     let td = endpoint.td.take().expect(RUNNING_TD);
                     endpoint.ring = td.after;
+                    if let Some(esit) = td.scheduled {
+                        endpoint.isoch_next = Some(esit + endpoint.interval());
+                    }
+                }
+                Step::Wait(due) => {
+                    let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
+                    endpoint.waiting = true;
+                    endpoint.next = due;
+                    return Ok(());
                 }
                 Step::Nak => {
                     let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
@@ -940,6 +1005,7 @@ impl Xhci {
             accumulated: 0,
             short: false,
             started: false,
+            scheduled: None,
         }))
     }
 
@@ -1019,12 +1085,20 @@ impl Xhci {
         budget: &mut usize,
     ) -> Result<Step> {
         let max_packet = self.enabled_slot(id).endpoints[dci - 1].max_packet();
+        let isoch = self.enabled_slot(id).endpoints[dci - 1].isoch();
         let endpoint_address = address(dci);
         loop {
             let td = self.td(id, dci);
             let Some(&trb) = td.trbs.get(td.index) else {
                 return Ok(Step::Done);
             };
+            if isoch
+                && !td.started
+                && let Some(step) = self.isoch_due(id, dci, port.access.now)?
+            {
+                return Ok(step);
+            }
+            let td = self.td(id, dci);
             match trb.kind() {
                 EVENT_DATA => {
                     let (code, length) = (
@@ -1044,7 +1118,12 @@ impl Xhci {
                     self.complete(&trb, 0, SUCCESS, id, dci)?;
                     continue;
                 }
-                ISOCH => return Err(refuse!("xHCI isochronous transfers are not modeled")),
+                ISOCH | NORMAL | DATA if isoch => {}
+                ISOCH => {
+                    td.index += 1;
+                    self.complete(&trb, trb.length(), TRB_ERROR, id, dci)?;
+                    continue;
+                }
                 SETUP | STATUS | NORMAL | DATA => {}
                 _ => {
                     td.index += 1;
@@ -1056,6 +1135,9 @@ impl Xhci {
                 return Ok(Step::Yield);
             }
             let Some(function) = device.as_deref_mut() else {
+                if isoch {
+                    return self.isoch_error(id, dci, TRANSACTION_ERROR);
+                }
                 return self.halt(port, id, dci, TRANSACTION_ERROR);
             };
             *budget -= 1;
@@ -1105,6 +1187,100 @@ impl Xhci {
         }
     }
 
+    /// System count at which microframe `count` begins, while running.
+    fn microframe_time(&self, count: u64) -> u64 {
+        let start = self.started.unwrap_or(0);
+        start.saturating_add(
+            count
+                .saturating_sub(self.mfindex)
+                .saturating_mul(MICROFRAME),
+        )
+    }
+
+    /// Schedules an isochronous TD that has not run: `Some(Wait)` before
+    /// its ESIT, `Some(Done)` after a Missed Service Error, `None` to run it.
+    fn isoch_due(&mut self, id: usize, dci: usize, now: u64) -> Result<Option<Step>> {
+        let current = self.microframes(now);
+        let endpoint = &self.enabled_slot(id).endpoints[dci - 1];
+        let interval = endpoint.interval();
+        let td = endpoint.td.as_ref().expect(RUNNING_TD);
+        let esit = match td.scheduled {
+            Some(esit) => Some(esit),
+            None => {
+                let trb = td.trbs[0];
+                // A stream too far behind restarts from now.
+                let stream = endpoint
+                    .isoch_next
+                    .filter(|next| next + LATE_TOLERANCE >= current);
+                if trb.control & SIA != 0 {
+                    Some(stream.unwrap_or_else(|| (current + 1).next_multiple_of(interval)))
+                } else {
+                    let base = stream.unwrap_or(current);
+                    let frame = u64::from(trb.control >> 20 & 0x7ff);
+                    let ahead = (frame + 2048 - base / 8 % 2048) % 2048;
+                    (ahead <= LAST_SCHEDULE_FRAME).then(|| {
+                        let start = (base / 8 + ahead) * 8;
+                        start.max(base.next_multiple_of(interval.min(8)))
+                    })
+                }
+            }
+        };
+        let Some(esit) = esit else {
+            let trb = self.td(id, dci).trbs[0];
+            self.td(id, dci).index = usize::MAX;
+            self.complete(&trb, trb.length(), MISSED_SERVICE, id, dci)?;
+            return Ok(Some(Step::Done));
+        };
+        self.td(id, dci).scheduled = Some(esit);
+        let due = self.microframe_time(esit);
+        Ok((now < due).then_some(Step::Wait(due)))
+    }
+
+    /// An isochronous packet failed: the TD completes with `code` on its
+    /// current TRB, its other data lost, and the endpoint keeps running.
+    fn isoch_error(&mut self, id: usize, dci: usize, code: u32) -> Result<Step> {
+        let td = self.td(id, dci);
+        let trb = td.trbs[td.index.min(td.trbs.len() - 1)];
+        let residual = trb.length().saturating_sub(td.offset);
+        td.index = td.trbs.len();
+        self.complete(&trb, residual, code, id, dci)
+            .map(|()| Step::Done)
+    }
+
+    /// An isochronous ring with no TD: the stream waits for its next ESIT,
+    /// then posts one Ring Underrun or Overrun event and stops until a
+    /// doorbell.
+    fn isoch_dry(&mut self, id: usize, dci: usize, now: u64) -> Result<()> {
+        let slot = self.enabled_slot(id);
+        let interrupter = (slot.context[2] >> 22) as usize;
+        let Some(next) = slot.endpoints[dci - 1].isoch_next else {
+            slot.endpoints[dci - 1].rung = false;
+            return Ok(());
+        };
+        let due = self.microframe_time(next);
+        let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
+        if now < due {
+            endpoint.waiting = true;
+            endpoint.next = due;
+            return Ok(());
+        }
+        endpoint.isoch_next = None;
+        endpoint.rung = false;
+        let code = if dci % 2 == 1 {
+            RING_OVERRUN
+        } else {
+            RING_UNDERRUN
+        };
+        self.note(format!(
+            "slot {id} dci {dci}: isochronous ring empty ({code})"
+        ));
+        self.post_to(
+            interrupter,
+            transfer_event(0, 0, code, false, id, dci),
+            true,
+        )
+    }
+
     /// One IN data packet, scattered over the TD's TRBs from the cursor.
     /// `None` continues the TD.
     fn packet_in(
@@ -1117,13 +1293,20 @@ impl Xhci {
     ) -> Result<Option<Step>> {
         let mut buffer = [0u8; 1024];
         let packet = &mut buffer[..max_packet.min(1024)];
+        let isoch = self.enabled_slot(id).endpoints[dci - 1].isoch();
         let n = match function.packet(address(dci), Token::In, packet)? {
             Reply::Ack(n) => n,
+            // An isochronous IN with nothing to send is a zero-length packet.
+            Reply::Nak if isoch => 0,
             Reply::Nak => return Ok(Some(Step::Nak)),
+            Reply::Stall if isoch => return self.isoch_error(id, dci, TRANSACTION_ERROR).map(Some),
             Reply::Stall => return self.halt(port, id, dci, STALL_ERROR).map(Some),
         };
         let remaining = self.td(id, dci).remaining();
         if n as u64 > remaining {
+            if isoch {
+                return self.isoch_error(id, dci, BABBLE).map(Some);
+            }
             return self.halt(port, id, dci, BABBLE).map(Some);
         }
         let mut data = &packet[..n];
@@ -1132,7 +1315,7 @@ impl Xhci {
             let Some(&trb) = td.trbs.get(td.index) else {
                 break;
             };
-            if !matches!(trb.kind(), NORMAL | DATA) {
+            if !trb.data() {
                 // An Event Data TRB between data TRBs runs on its own.
                 if data.is_empty() {
                     break;
@@ -1205,7 +1388,7 @@ impl Xhci {
         };
         while filled < want {
             let trb = self.td(id, dci).trbs[index];
-            if !matches!(trb.kind(), NORMAL | DATA) {
+            if !trb.data() {
                 return Err(refuse!("xHCI packet spans a non-data TRB"));
             }
             let take = ((trb.length() - offset) as usize).min(want - filled);
@@ -1227,9 +1410,15 @@ impl Xhci {
                 offset = 0;
             }
         }
+        let isoch = self.enabled_slot(id).endpoints[dci - 1].isoch();
         match function.packet(address(dci), Token::Out, &mut buffer[..want])? {
             Reply::Ack(n) if n == want => {}
             Reply::Ack(_) => return Err(refuse!("function acknowledged part of an OUT packet")),
+            // Isochronous transactions have no handshake: a function that
+            // does not take the data loses it.
+            Reply::Nak | Reply::Stall if isoch => {
+                return self.isoch_error(id, dci, TRANSACTION_ERROR).map(Some);
+            }
             Reply::Nak => return Ok(Some(Step::Nak)),
             Reply::Stall => return self.halt(port, id, dci, STALL_ERROR).map(Some),
         }
@@ -1240,7 +1429,7 @@ impl Xhci {
             let Some(&trb) = td.trbs.get(td.index) else {
                 break;
             };
-            if !matches!(trb.kind(), NORMAL | DATA) {
+            if !trb.data() {
                 break;
             }
             let take = ((trb.length() - td.offset) as usize).min(left);

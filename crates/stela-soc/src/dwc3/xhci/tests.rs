@@ -859,6 +859,105 @@ fn route_strings_reach_functions_behind_an_enabled_hub_port() {
 /// this model, with Stela's native USB functions as the devices: DMA
 /// buffers are host memory, which the model reaches through a `Memory`
 /// over the same addresses.
+/// Isochronous TDs run in the frame their Frame ID names, or at once with
+/// SIA; a frame already behind is a Missed Service Error; a failed packet
+/// completes its TD without halting the endpoint, and a ring left empty at
+/// the next service interval posts one Ring Underrun.
+#[test]
+fn isochronous_tds_run_in_their_service_interval() {
+    const ISOCH_TRB: u32 = 5 << 10;
+    const SIA: u32 = 1 << 31;
+    const RING_UNDERRUN: u32 = 14;
+    const MISSED_SERVICE: u32 = 23;
+    const RING: u64 = RAM + 0xa000;
+    let mut b = enumerated();
+    // Isochronous OUT endpoint 1 (DCI 2), one frame (2^3 microframes).
+    b.put_context(INPUT, [0, 1 | 1 << 2, 0, 0, 0, 0, 0, 0]);
+    b.put_context(INPUT + 0x20, [3 << 27, 1 << 16, 0, 0, 0, 0, 0, 0]);
+    b.put_context(
+        INPUT + 0x20 * 3,
+        [
+            3 << 16,
+            1 << 3 | 192 << 16,
+            RING as u32 | 1,
+            (RING >> 32) as u32,
+            192,
+            0,
+            0,
+            0,
+        ],
+    );
+    let e = b.command([
+        INPUT as u32,
+        (INPUT >> 32) as u32,
+        0,
+        CONFIGURE_ENDPOINT << 10 | 1 << 24 | CYCLE,
+    ]);
+    assert_eq!(e[2] >> 24, SUCCESS);
+    let frame = 8 * MICROFRAME;
+    let isoch = |control: u32| [BUFFER as u32, (BUFFER >> 32) as u32, 192, control];
+    // Frame 10: a TD for frame 12 waits for it.
+    b.now = 10 * frame;
+    trb(
+        &mut b.ram,
+        RING,
+        isoch(ISOCH_TRB | 12 << 20 | TRB_IOC | CYCLE),
+    );
+    wr(&mut b.x, DOORBELLS + 4, 2);
+    b.service();
+    assert_eq!(event(&mut b.ram, b.events)[3] & CYCLE, 0);
+    assert_eq!(b.x.deadline(None), Some(12 * frame));
+    b.now = 12 * frame;
+    b.service();
+    // The keyboard has no OUT endpoint: the packet fails, the TD
+    // completes and the endpoint keeps running.
+    let e = b.event();
+    assert_eq!(
+        (e[0], e[2] >> 24, e[2] & 0xff_ffff, e[3] >> 16 & 0x1f),
+        (RING as u32, TRANSACTION_ERROR, 192, 2)
+    );
+    assert_eq!(b.context(OUTPUT + 0x20 * 2)[0] & 7, 1);
+    // Nothing queued at the next interval: one Ring Underrun.
+    assert_eq!(b.x.deadline(None), Some(13 * frame));
+    b.now = 13 * frame;
+    b.service();
+    let e = b.event();
+    assert_eq!(
+        (e[0], e[1], e[2] >> 24, e[3] >> 16 & 0x1f),
+        (0, 0, RING_UNDERRUN, 2)
+    );
+    b.now = 20 * frame;
+    b.service();
+    assert_eq!(event(&mut b.ram, b.events)[3] & CYCLE, 0);
+    // Frame 5 is behind frame 20: Missed Service, at once.
+    trb(
+        &mut b.ram,
+        RING + 16,
+        isoch(ISOCH_TRB | 5 << 20 | TRB_IOC | CYCLE),
+    );
+    wr(&mut b.x, DOORBELLS + 4, 2);
+    b.service();
+    let e = b.event();
+    assert_eq!(
+        (e[0], e[2] >> 24, e[2] & 0xff_ffff),
+        ((RING + 16) as u32, MISSED_SERVICE, 192)
+    );
+    // SIA: the next interval after now.
+    b.now = 20 * frame + 3 * MICROFRAME;
+    trb(
+        &mut b.ram,
+        RING + 32,
+        isoch(ISOCH_TRB | SIA | TRB_IOC | CYCLE),
+    );
+    wr(&mut b.x, DOORBELLS + 4, 2);
+    b.service();
+    assert_eq!(event(&mut b.ram, b.events)[3] & CYCLE, 0);
+    assert_eq!(b.x.deadline(None), Some(21 * frame));
+    b.now = 21 * frame;
+    b.service();
+    assert_eq!(b.event()[0], (RING + 32) as u32);
+}
+
 pub(crate) mod host {
     use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
     use core::cell::RefCell;
