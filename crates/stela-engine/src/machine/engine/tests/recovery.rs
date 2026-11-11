@@ -208,7 +208,7 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         machine.link(entry, target_pc, ExitKind::Direct);
         assert_eq!(machine.statistics.links, 1, "actual direct thunk installed");
     } else {
-        machine.link_dynamic(entry, btype);
+        machine.link_dynamic(entry, btype, target_pc);
         assert_eq!(
             machine.statistics.lookups, 1,
             "actual lookup thunk installed"

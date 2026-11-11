@@ -706,13 +706,15 @@ fn cell_bucket(pc: u64) -> usize {
 
 /// What an exit through a stamped cell was linked with
 /// ([`LookupTable::note_link`]): its patch point, its target, the
-/// instructions its block ran and its word.
+/// instructions its block ran, its word and the BTYPE its branch sets (0
+/// but for the exit of a [`predicted_tail`] of a BR or BLR form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellLink {
     pub site: u64,
     pub pc: u64,
     pub retired: u32,
     pub word: ExitWord,
+    pub btype: u8,
 }
 
 /// A table of [`LookupEntry`]s in two-entry sets, by slot, and an index of
@@ -2222,7 +2224,7 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
         return None;
     }
     let mut code = Code::new();
-    let (to_table, to_probe) = cell_probe(&mut code, policy, false);
+    let (to_table, to_probe) = cell_probe(&mut code, policy, false, btype);
     let padding = CELL_PROBE_BYTES
         .checked_sub(code.len())
         .expect("the cell probe fits its bytes");
@@ -2280,11 +2282,7 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
     asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
     asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
-    for bit in 0..2 {
-        if btype & 1 << bit != 0 {
-            asm.bit_imm(BitTest::Bts, Qword, R8, BLOCK_BTYPE_SHIFT as u8 + bit);
-        }
-    }
+    entered_btype(&mut asm, R8, btype);
     asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
     found(&mut asm);
     for miss in misses {
@@ -2300,10 +2298,20 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     for _ in 0..padding {
         code.asm().int3();
     }
-    let (to_table, to_probe) = cell_probe(&mut code, policy, true);
+    let (to_table, to_probe) = cell_probe(&mut code, policy, true, btype);
     crate::x86_64::asm::resolve(&mut code, to_table, table);
     crate::x86_64::asm::resolve(&mut code, to_probe, PROBE_ENTRY);
     Some(code.into_bytes())
+}
+
+/// The BTYPE bits of `block` ([`BLOCK_BTYPE_SHIFT`]) set in `register`,
+/// which holds the entered block's index, for a transfer that sets `btype`.
+fn entered_btype(asm: &mut crate::x86_64::asm::Asm, register: Gpr, btype: u8) {
+    for bit in 0..2 {
+        if btype & 1 << bit != 0 {
+            asm.bit_imm(BitTest::Bts, Qword, register, BLOCK_BTYPE_SHIFT as u8 + bit);
+        }
+    }
 }
 
 /// A cell probe at the end of `code`, R9 at the cell (R10 keeps it across
@@ -2313,10 +2321,14 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
 /// tells the sites of the shared jump apart by the branches since each
 /// tail's jump, and one more costs a misprediction a transfer. The jumps to
 /// the table probe with the key in R8, and to its start for a torn read.
+/// A probe of a nonzero `btype` (the exits of [`predicted_tail`]s of BR and
+/// BLR forms) takes the cell's entry only when it accepts that BTYPE, and
+/// names it in `block`, as the table probe does; BTYPE 0 adds nothing.
 fn cell_probe(
     code: &mut Code,
     policy: Interruption,
     stamping: bool,
+    btype: u8,
 ) -> (crate::x86_64::asm::Patch, crate::x86_64::asm::Patch) {
     let mut asm = code.asm();
     asm.place(Rcx, CONTROL);
@@ -2333,6 +2345,10 @@ fn cell_probe(
     let stale = asm.jcc(Cond::Ne);
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
     let other = asm.jcc(Cond::Ne);
+    if btype != 0 {
+        asm.test_imm(Size::Byte, R11, 1 << btype);
+        misses.push(asm.jcc(Cond::E));
+    }
     asm.mov_load(Dword, R8, Mem::base(R10, ENTRY_BLOCK));
     asm.mov_load(Qword, R9, Mem::base(R10, ENTRY_CODE));
     let torn = seqlock_check(&mut asm, R10);
@@ -2352,6 +2368,7 @@ fn cell_probe(
     misses.push(asm.jcc(Cond::B));
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
     asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
+    entered_btype(&mut asm, R8, btype);
     asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
     if stamping {
         stamp(&mut asm);
@@ -2474,6 +2491,45 @@ pub fn stamped_tail(
         block,
         entry,
         probe,
+        0,
+        Interruption::Epoch,
+    )
+}
+
+/// A [`stamped_tail`] for the direct exit of a [`predicted_tail`] of a
+/// branch that sets `btype`: its hit names the BTYPE in `block` as the
+/// table probe does, and `probe` is the stamping cell probe of the
+/// dispatcher of `btype`, which takes only entries that accept it. The
+/// linker gives one only for a `block` that accepts `btype`: a stamp lives
+/// only while the cell holds that block. `None` as for a [`stamped_tail`],
+/// or for a `btype` that is not a BTYPE.
+#[allow(clippy::too_many_arguments)]
+pub fn stamped_branch_tail(
+    at: u64,
+    cell: u64,
+    number: u32,
+    target: u64,
+    word: impl Into<ExitWord>,
+    ran: u32,
+    block: u32,
+    entry: u64,
+    probe: u64,
+    btype: u8,
+) -> Option<[u8; STAMPED_TAIL_BYTES]> {
+    if btype > 3 {
+        return None;
+    }
+    stamped_with_policy(
+        at,
+        cell,
+        number,
+        target,
+        word.into(),
+        ran,
+        block,
+        entry,
+        probe,
+        btype,
         Interruption::Epoch,
     )
 }
@@ -2489,6 +2545,7 @@ fn stamped_with_policy(
     block: u32,
     entry: u64,
     probe: u64,
+    btype: u8,
     policy: Interruption,
 ) -> Option<[u8; STAMPED_TAIL_BYTES]> {
     if number as usize >= STAMPED_CELLS || ran >= 1 << (u32::BITS - ExitWord::RAN_SHIFT) {
@@ -2524,7 +2581,13 @@ fn stamped_with_policy(
         Mem::base(Rcx, RETIRED),
         i32::try_from(ran).ok()?,
     );
-    asm.mov_rm_imm32(Qword, Mem::base(Rcx, BLOCK), block);
+    if btype == 0 {
+        asm.mov_rm_imm32(Qword, Mem::base(Rcx, BLOCK), block);
+    } else {
+        let named = u64::from(block as u32) | u64::from(btype) << BLOCK_BTYPE_SHIFT;
+        asm.mov_imm64(R9, named);
+        asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R9);
+    }
     let transfer = asm.jmp();
     let distance = relative(at + transfer.end() as u64, entry)?;
     code.patch(transfer.offset(), distance.to_le_bytes());
@@ -2659,6 +2722,44 @@ pub fn cell_tail(
     let mut code = Code::new();
     code.asm().mov_imm64(R9, cell);
     tail(&mut code, at, word.into(), ran, probe)?;
+    code.try_into().ok()
+}
+
+/// Where a [`predicted_tail`]'s direct exit to its predicted target begins:
+/// its patch point is [`direct_patch`] of the tail's address plus this.
+pub const PREDICTED_EXIT: usize = 15;
+/// Bytes in a [`predicted_tail`]: the compare, the direct exit and a
+/// [`lookup_tail`].
+pub const PREDICTED_TAIL_BYTES: usize = PREDICTED_EXIT + DIRECT_EXIT_BYTES + TAIL_BYTES;
+
+/// The tail at host address `at` of an exit to the target in RAX that the
+/// engine predicts is `target`: a one-target inline cache. When RAX is
+/// `target` it takes a direct exit to `target` of `word`
+/// ([`PREDICTED_EXIT`]), which returns RAX and EDX exactly as the
+/// redirected exit does and which the engine links like a block's direct
+/// exit, through a cell ([`cell_tail`], [`stamped_branch_tail`]); any other
+/// target takes the [`lookup_tail`] to `probe` after it. Both leave EDX as
+/// the redirected exit or its lookup tail would, so whichever runs, the
+/// transfer or exit is the one the lookup tail makes. `None` as for a
+/// [`lookup_tail`].
+pub fn predicted_tail(
+    at: u64,
+    target: GuestAddress,
+    word: impl Into<ExitWord>,
+    ran: u32,
+    probe: u64,
+) -> Option<[u8; PREDICTED_TAIL_BYTES]> {
+    let word = word.into();
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.mov_imm64(R8, target.0);
+    asm.alu(Alu::Cmp, Qword, Rax, R8);
+    let other = asm.jcc8(Cond::Ne);
+    debug_assert_eq!(asm.len(), PREDICTED_EXIT);
+    let exit = at + PREDICTED_EXIT as u64;
+    asm.fixed(&direct_exit_at(exit, target, word));
+    asm.bind(other);
+    tail(&mut code, at, word, ran, probe)?;
     code.try_into().ok()
 }
 
@@ -3824,6 +3925,8 @@ mod tests {
     mod differential;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod patching;
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    mod predicted;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod shared;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]

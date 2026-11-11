@@ -459,6 +459,7 @@ fn stamps_go_with_drops_contexts_and_cell_changes() {
         pc,
         retired: 4,
         word: ExitKind::Direct.into(),
+        btype: 0,
     };
     table.note_link(number, link);
     for _ in 1..HOT_CELL {

@@ -1208,6 +1208,7 @@ impl Heartbeat {
                 "PES STAMPED hits/miss_epoch/miss_context/miss_interrupt/restamped/changed/promoted",
             );
             let mut stamped_in_use = 0;
+            let mut predicted = 0;
             let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
                 line.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.iter().zip(before).enumerate() {
@@ -1332,6 +1333,7 @@ impl Heartbeat {
                     &before.stamped[..promoted],
                 );
                 stamped_in_use = stamped_in_use.max(now.stamped[promoted]);
+                predicted += now.stamped[promoted + 1].saturating_sub(before.stamped[promoted + 1]);
                 deltas(
                     &mut store,
                     pe,
@@ -1461,7 +1463,7 @@ impl Heartbeat {
             ));
             output::arguments(format_args!("{store}\n"));
             stamped.push_str(&format!(" in_use={stamped_in_use}"));
-            stamped_line = Some(stamped);
+            stamped_line = Some((stamped, predicted));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
                 output::arguments(format_args!("{levels}\n"));
@@ -1498,10 +1500,12 @@ impl Heartbeat {
                 self.beats.is_multiple_of(HOT_TOTAL_BEATS),
             );
         }
-        if let Some(mut line) = stamped_line {
+        if let Some((mut line, predicted)) = stamped_line {
             if machine.step_timing().is_some() {
                 line.push_str(&dynamic_sites(&self.dynamic));
             }
+            // Exits of PAC branch thunks given a predicted tail this beat.
+            line.push_str(&format!(" predicted={predicted}"));
             output::arguments(format_args!("{line}\n"));
         }
         output::arguments(format_args!(

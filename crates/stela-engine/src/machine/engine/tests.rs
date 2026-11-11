@@ -6616,8 +6616,185 @@ fn pac_returns_go_through_a_lookup_dispatcher() {
             (site as usize, exit.to_vec())
         ]
     );
-    assert_eq!(machine.statistics.lookups, 1);
+    assert_eq!(
+        (
+            machine.statistics.lookups,
+            machine.statistics.predicted_tails
+        ),
+        (1, 0)
+    );
     assert!(!machine.code.blocks.record(0).dynamic_open());
+}
+
+/// The first branch through a BRAA X16, X17's PAC thunk gives its exit a
+/// tail of its own that predicts the authenticated target: its direct exit
+/// to it is linked through a cell, with the probes of the branch's BTYPE,
+/// before the exit jumps to the tail; any other target takes the table
+/// probe, as a lookup tail sends it.
+#[test]
+fn pac_branches_take_a_predicted_tail_linked_through_a_cell() {
+    const BRAA: u32 = 0xd71f_0a11; // braa x16, x17
+    let mut machine = machine(&[BRAA]);
+    let base = machine.cpu.pc;
+    let target = base + 0x2000;
+    machine.host.exits = vec![NativeExit::Exit {
+        next_pc: target,
+        kind: ExitKind::Indirect as u64,
+    }];
+    machine.step().unwrap();
+    let thunk = x86_64_pointer::thunk(
+        x86_64_pointer::Form::of(block::PointerAuthenticationOperation::Branch {
+            key: block::PointerAuthenticationKey::Ia,
+            target: 16,
+            modifier: block::PointerAuthenticationModifier::Register(17),
+            link: false,
+        })
+        .unwrap(),
+        GuestAddress(base),
+        TAGS,
+        SERVICE as usize as u64,
+    );
+    let at = machine
+        .host
+        .installed
+        .iter()
+        .position(|code| *code == thunk.code)
+        .unwrap()
+        + 1;
+    let at = at * NATIVE_CODE_STRIDE;
+    let site = chain::dynamic_patch((at + thunk.dynamic.unwrap()) as u64);
+    // The probes of BTYPE 0b01, the predicted tail, then its exit's cell
+    // tail.
+    let installed = machine.host.installed.len();
+    assert_eq!(
+        machine.host.installed[installed - 3],
+        chain::lookup_dispatcher(0b01).unwrap()
+    );
+    let probes = ((installed - 2) * NATIVE_CODE_STRIDE) as u64;
+    let tail = ((installed - 1) * NATIVE_CODE_STRIDE) as u64;
+    let cell_tail = (installed * NATIVE_CODE_STRIDE) as u64;
+    let predicted = chain::predicted_tail(
+        tail,
+        GuestAddress(target),
+        ExitKind::Indirect,
+        1,
+        probes + chain::PROBE_ENTRY as u64,
+    )
+    .unwrap();
+    let exit = chain::direct_patch(tail + chain::PREDICTED_EXIT as u64);
+    let cell = machine
+        .code
+        .cache()
+        .targets
+        .site_cell(exit)
+        .expect("the predicted exit's cell");
+    assert_eq!(cell.pc, target);
+    let patches = machine.host.patches.len();
+    let linked = &machine.host.patches[patches - 4..];
+    assert_eq!(linked[0], (tail as usize, predicted.to_vec()));
+    assert_eq!(linked[1].0, cell_tail as usize);
+    assert_eq!(linked[1].1.len(), chain::CELL_TAIL_BYTES);
+    assert_eq!(
+        linked[2],
+        (
+            exit as usize,
+            chain::jump(exit, cell_tail).unwrap().to_vec()
+        )
+    );
+    assert_eq!(
+        linked[3],
+        (site as usize, chain::jump(site, tail).unwrap().to_vec())
+    );
+    assert_eq!(
+        (
+            machine.statistics.lookups,
+            machine.statistics.predicted_tails,
+            machine.statistics.links
+        ),
+        (1, 1, 1)
+    );
+    assert!(!machine.code.blocks.record(0).dynamic_open());
+}
+
+/// A hot BRAA X16, X17 exit's predicted direct exit gets a stamped tail
+/// that names its BTYPE with the block, through the probes of that BTYPE,
+/// but only while the block it would enter accepts the BTYPE; else it
+/// keeps its cell tail, whose probe refuses the block.
+#[test]
+fn hot_pac_branches_get_stamped_tails_for_blocks_that_accept_their_btype() {
+    const BRAA: u32 = 0xd71f_0a11; // braa x16, x17
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    for accepts in [true, false] {
+        let mut words = vec![0; 1026];
+        words[0] = BRAA;
+        words[1024] = ADD;
+        words[1025] = RET;
+        let mut machine = machine(&words);
+        let base = machine.cpu.pc;
+        let far = base + 0x1000;
+        let exit = |next_pc, kind: ExitKind| NativeExit::Exit {
+            next_pc,
+            kind: kind as u64,
+        };
+        machine.host.exits = vec![exit(far, ExitKind::Indirect), exit(base, ExitKind::Return)];
+        machine.step().unwrap();
+        machine.step().unwrap();
+        assert_eq!(machine.statistics.predicted_tails, 1);
+        let target_key = machine.current_key(far).expect("a translated page");
+        let tail = machine
+            .host
+            .patches
+            .iter()
+            .find(|(_, bytes)| bytes.len() == chain::PREDICTED_TAIL_BYTES)
+            .expect("the predicted tail")
+            .0 as u64;
+        let site = chain::direct_patch(tail + chain::PREDICTED_EXIT as u64);
+        let (number, cells, held) = {
+            let mut cache = machine.code.cache();
+            assert_eq!(cache.targets.site_cell(site).map(|cell| cell.pc), Some(far));
+            let number = cache.targets.site_cell_number(site).expect("a cell");
+            let slot = cache.targets.slot(far, target_key);
+            let mut held = cache.targets.find(slot, far, target_key);
+            assert_eq!(held.pc, far);
+            if !accepts {
+                // The block of a guarded page whose first instruction takes
+                // no BR through X16 or X17.
+                held.targets = 0b0101;
+                cache.targets.set(slot, held);
+            }
+            (number, cache.targets.stamped_cells(), held)
+        };
+        let heat = (cells as usize + chain::CELL_HEAT + 4 * number as usize)
+            as *const core::sync::atomic::AtomicU32;
+        // SAFETY: the board's stamped cells live while it does; the word is an atomic.
+        unsafe { &*heat }.store(chain::HOT_CELL, Ordering::Relaxed);
+        let patches = machine.host.patches.len();
+        for _ in 0..chain::STAMPED_CELLS / 256 {
+            machine.promote_hot_exits();
+        }
+        assert_eq!(machine.host.patches.len(), patches + 2);
+        let (tail, bytes) = machine.host.patches[patches].clone();
+        assert_eq!(
+            machine.host.patches[patches + 1],
+            (
+                site as usize,
+                chain::jump(site, tail as u64).unwrap().to_vec()
+            )
+        );
+        if accepts {
+            assert_eq!(bytes.len(), chain::STAMPED_TAIL_BYTES);
+            assert_eq!(machine.statistics.stamped_tails, 1);
+            // mov r9, block | BTYPE 0b01 above it.
+            let named = u64::from(held.block) | 1 << chain::BLOCK_BTYPE_SHIFT;
+            let mut movabs = vec![0x49, 0xb9];
+            movabs.extend(named.to_le_bytes());
+            assert!(bytes.windows(10).any(|window| window == movabs));
+        } else {
+            assert_eq!(bytes.len(), chain::CELL_TAIL_BYTES);
+            assert_eq!(machine.statistics.stamped_tails, 0);
+        }
+    }
 }
 
 /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading

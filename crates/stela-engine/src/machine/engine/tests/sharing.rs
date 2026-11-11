@@ -94,7 +94,7 @@ fn round(machine: &mut Machine<FakeHost, NoDevices>, base: u64, legacy: bool) {
                 ExitKind::Direct => {
                     machine.link(slot, pc + 8, ExitKind::Direct);
                 }
-                _ => machine.link_dynamic(slot, 0),
+                _ => machine.link_dynamic(slot, 0, pc),
             }
             if legacy {
                 let code = Arc::clone(&machine.code);

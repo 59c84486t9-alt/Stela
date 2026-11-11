@@ -452,6 +452,9 @@ pub struct Statistics {
     /// Exits out of their page given a stamped tail
     /// ([`stela_compiler::x86_64::chain::stamped_tail`]).
     pub stamped_tails: u64,
+    /// Exits of RETA*, BRA* and BLRA* thunks given a predicted tail
+    /// ([`stela_compiler::x86_64::chain::predicted_tail`]).
+    pub predicted_tails: u64,
     /// How many exits had a stamped tail when this PE last looked (every
     /// promotion step): a level, which adding keeps the larger of.
     pub stamped_in_use: u64,
@@ -622,6 +625,7 @@ impl core::ops::AddAssign for Statistics {
             chained,
             links,
             stamped_tails,
+            predicted_tails,
             stamped_in_use,
             unlinks,
             lookups,
@@ -765,6 +769,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.chained, chained),
             (&mut self.links, links),
             (&mut self.stamped_tails, stamped_tails),
+            (&mut self.predicted_tails, predicted_tails),
             (&mut self.unlinks, unlinks),
             (&mut self.lookups, lookups),
             (&mut self.lookup_hits, lookup_hits),

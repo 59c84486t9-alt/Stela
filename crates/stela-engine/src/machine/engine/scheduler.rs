@@ -417,7 +417,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             self.link(last, next_pc, ExitWord { kind, skipped });
                         }
                         Ok(ExitKind::Return | ExitKind::Indirect | ExitKind::Call) => {
-                            self.link_dynamic(last, btype);
+                            self.link_dynamic(last, btype, next_pc);
                         }
                         _ => {}
                     }
@@ -568,7 +568,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let retired = u32::from(block.instructions) - u32::from(word.skipped);
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let point = chain::direct_patch(block.successors[position].site);
-            if self.link_through_cell(&mut cache, point, next_pc, retired, word) {
+            if self.link_through_cell(&mut cache, point, next_pc, retired, word, 0) {
                 record.settle(position);
                 return true;
             }
@@ -663,11 +663,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// or X17, and for BR forms through another register 0b11 in a guarded
     /// page and 0b01 elsewhere. Blocks are compiled per guarded page, so
     /// the page's BTYPE is the block's.
-    pub(super) fn link_dynamic(&mut self, index: usize, btype: u8) {
+    ///
+    /// The exit of a BRA* thunk, which just authenticated `target`, first
+    /// compares the target with it ([`chain::predicted_tail`]): an arm64e
+    /// auth stub's BRAA X16, X17 has one target, and most BRA* transfers are
+    /// at such sites, so an equal target takes a direct exit linked through
+    /// a cell, which a hot site turns into a direct jump into the target's
+    /// block ([`chain::stamped_branch_tail`]). The thunk's memo still
+    /// authenticates every transfer: only which block an authenticated
+    /// target enters is cached, and validated as every cell is. RETA* and
+    /// BLRA* sites mostly see several targets, where the compare would cost
+    /// a mispredicted branch at each predicted one: they keep the lookup.
+    pub(super) fn link_dynamic(&mut self, index: usize, btype: u8, target: u64) {
         // Decided on the board borrowed: nearly every such exit has its
         // dispatcher already, and a clone of the board's `Arc` would write
         // a count every PE's exits write.
-        let (point, kind, retired) = {
+        let (point, kind, retired, predicted) = {
             let block = &self.code.blocks[index];
             let record = self.code.blocks.record(index);
             let Some(site) = block.dynamic_site.filter(|_| {
@@ -689,7 +700,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return;
             }
             let retired = u32::from(block.instructions);
-            (chain::dynamic_patch(site.get()), kind, retired)
+            // Bit 11 selects the PAC forms of RET, BR and BLR, whose exit
+            // is their thunk's.
+            let predicted = matches!(
+                dynamic_branch(block.terminal),
+                Some((ExitKind::Indirect, _))
+            ) && block.terminal & 1 << 11 != 0;
+            (chain::dynamic_patch(site.get()), kind, retired, predicted)
         };
         let code = Arc::clone(&self.code);
         let record = code.blocks.record(index);
@@ -698,9 +715,63 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !record.dynamic_open() || !record.live() {
             return;
         }
-        if self.redirect_through_lookup(&mut cache, point, retired, kind.into(), btype) {
+        let word = kind.into();
+        if (predicted
+            && self.redirect_through_prediction(&mut cache, point, retired, word, btype, target))
+            || self.redirect_through_lookup(&mut cache, point, retired, word, btype)
+        {
             record.close_dynamic();
         }
+    }
+
+    /// Send the exit of `word` whose patch point is at host address `site`,
+    /// from a block that ran `retired` instructions by a branch that sets
+    /// `btype`, to a [`chain::predicted_tail`] of its own for `target`: its
+    /// direct exit to `target` is linked through a cell before the point
+    /// jumps to the tail, and any other target takes the tail's lookup, as
+    /// [`Self::redirect_through_lookup`] would send it. False, with the
+    /// exit as it was, when the tail or the cell link cannot be made.
+    fn redirect_through_prediction(
+        &mut self,
+        cache: &mut board::Cache,
+        site: u64,
+        retired: u32,
+        word: ExitWord,
+        btype: u8,
+        target: u64,
+    ) -> bool {
+        if !chain::patchable(site) {
+            return false;
+        }
+        let Some((probe, tail)) =
+            self.probe_and_tail(cache, site, btype, chain::PREDICTED_TAIL_BYTES)
+        else {
+            return false;
+        };
+        let at = tail.0 as u64;
+        let (Some(code), Some(jump)) = (
+            chain::predicted_tail(
+                at,
+                GuestAddress(target),
+                word,
+                retired,
+                probe + chain::PROBE_ENTRY as u64,
+            ),
+            chain::jump(site, at),
+        ) else {
+            return false;
+        };
+        // Nothing reaches the tail before the point's jump: its direct exit
+        // is linked first, so no predicted transfer returns to the engine.
+        self.patch_native(tail, &code);
+        let exit = chain::direct_patch(at + chain::PREDICTED_EXIT as u64);
+        if !self.link_through_cell(cache, exit, target, retired, word, btype) {
+            return false;
+        }
+        self.patch_point(NativeCode(site as usize), jump);
+        self.statistics.lookups += 1;
+        self.statistics.predicted_tails += 1;
+        true
     }
 
     /// Send the exit of `word` whose patch point is at host address `site`
@@ -753,6 +824,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// is the site's own. A cell that does not hold the target with that key
     /// sends the transfer to the table probe. The cell goes with the exit's
     /// code ([`Self::evict_code`]), and its entry with the block's.
+    ///
+    /// The direct exit of a [`chain::predicted_tail`] of a branch that sets
+    /// a nonzero `btype` uses the probes of `btype`, whose cell probes take
+    /// only entries that accept it, and gets a stamped tail only for a block
+    /// that accepts it.
     pub(super) fn link_through_cell(
         &mut self,
         cache: &mut board::Cache,
@@ -760,6 +836,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         next_pc: u64,
         retired: u32,
         word: ExitWord,
+        btype: u8,
     ) -> bool {
         if !chain::patchable(site) {
             return false;
@@ -775,7 +852,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             chain::CELL_TAIL_BYTES
         };
-        let Some((probe, tail)) = self.probe_and_tail(cache, site, 0, bytes) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, site, btype, bytes) else {
             return false;
         };
         let current = self.current_key(next_pc).and_then(|key| {
@@ -792,6 +869,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 pc: next_pc,
                 retired,
                 word,
+                btype,
             };
             cache.targets.note_link(number, link);
         }
@@ -800,7 +878,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let stamped = hot
             .then(|| {
                 let (current, number) = (current?, number?);
-                chain::stamped_tail(
+                if btype != 0 && current.targets & 1 << btype == 0 {
+                    return None;
+                }
+                chain::stamped_branch_tail(
                     at,
                     cell,
                     number,
@@ -810,6 +891,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     current.block,
                     current.entry,
                     probe + chain::STAMPING_PROBE_ENTRY as u64,
+                    btype,
                 )
                 .map(|code| (code, number))
             })
@@ -852,7 +934,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // Hot once: tried now whatever the link finds.
                 cache.targets.settle_heat(cell);
             }
-            self.link_through_cell(&mut cache, link.site, link.pc, link.retired, link.word);
+            self.link_through_cell(
+                &mut cache,
+                link.site,
+                link.pc,
+                link.retired,
+                link.word,
+                link.btype,
+            );
         }
         self.statistics.stamped_in_use = cache.targets.stamped_tails() as u64;
     }
