@@ -4,7 +4,8 @@
 //! applies Stela's series from `third_party/patches/<name>/` as commits on
 //! the local branch `stela`. `export` writes a submodule's commits since its
 //! pin back to that series, each file keeping its short name while its
-//! commit's subject stays the same.
+//! commit's subject stays the same, with the repository's configured identity
+//! as the author of Stela's own patches and every such date in UTC.
 use super::support::capture;
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
@@ -341,6 +342,7 @@ pub fn fetch(force: bool) -> Result<()> {
 
 /// Writes each submodule's commits since its pin to its patch series.
 pub fn export() -> Result<()> {
+    let identity = identity()?;
     for submodule in submodules()? {
         // A submodule never checked out has nothing to export.
         if !submodule.directory().join(".git").exists() {
@@ -398,7 +400,10 @@ pub fn export() -> Result<()> {
                 }
                 let subject = subject(&patch)?;
                 let name = names.remove(&subject).unwrap_or_else(|| slug(&subject));
-                fs::rename(patch, patches.join(format!("{number:04}-{name}.patch")))?;
+                let text = publish_header(&fs::read_to_string(&patch)?, &identity)
+                    .with_context(|| patch.display().to_string())?;
+                fs::write(patches.join(format!("{number:04}-{name}.patch")), text)?;
+                fs::remove_file(patch)?;
             }
         } else if patches.is_dir() {
             fs::remove_dir(&patches)?;
@@ -406,6 +411,123 @@ pub fn export() -> Result<()> {
         submodule.record(&submodule.series()?)?;
     }
     Ok(())
+}
+
+/// The repository's configured `user.name <user.email>`, which `export`
+/// writes as the author of Stela's own patches.
+fn identity() -> Result<String> {
+    let field = |key: &str| -> Result<String> {
+        let value = capture(git(tools::root()).args(["config", key])).with_context(|| {
+            format!("set git config {key}; export writes it as the patch author")
+        })?;
+        Ok(value.trim().to_owned())
+    };
+    Ok(format!(
+        "{} <{}>",
+        field("user.name")?,
+        field("user.email")?
+    ))
+}
+
+/// A patch with its header's `From:` set to `identity` and its `Date:` set to
+/// the same instant in UTC, so the series carries neither a submodule commit's
+/// own author address nor its time zone. A patch whose message has a
+/// `Signed-off-by:` trailer is upstream work and keeps its author and date.
+fn publish_header(patch: &str, identity: &str) -> Result<String> {
+    let message = patch.split("\n---\n").next().unwrap_or(patch);
+    if message
+        .lines()
+        .any(|line| line.starts_with("Signed-off-by: "))
+    {
+        return Ok(patch.to_owned());
+    }
+    let mut text = String::with_capacity(patch.len());
+    let mut header = true;
+    for line in patch.split_inclusive('\n') {
+        let content = line.trim_end_matches('\n');
+        header &= !content.is_empty();
+        if header && content.starts_with("From: ") {
+            text.push_str(&format!("From: {identity}\n"));
+        } else if header && let Some(date) = content.strip_prefix("Date: ") {
+            text.push_str(&format!("Date: {}\n", utc_date(date)?));
+        } else {
+            text.push_str(line);
+        }
+    }
+    Ok(text)
+}
+
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// An RFC 2822 date as `git format-patch` writes it (`Tue, 4 Nov 2025
+/// 21:16:44 -0500`), converted to the same instant in UTC.
+fn utc_date(date: &str) -> Result<String> {
+    let parse = || -> Option<i64> {
+        let fields: Vec<&str> = date.split_whitespace().collect();
+        let [_, day, month, year, time, zone] = fields[..] else {
+            return None;
+        };
+        let month = MONTHS.iter().position(|m| *m == month)? as i64 + 1;
+        let mut clock = time.split(':').map(str::parse::<i64>);
+        let (hour, minute, second) = (
+            clock.next()?.ok()?,
+            clock.next()?.ok()?,
+            clock.next()?.ok()?,
+        );
+        let sign = match zone.as_bytes().first()? {
+            b'+' => 1,
+            b'-' => -1,
+            _ => return None,
+        };
+        let zone: i64 = zone.get(1..)?.parse().ok()?;
+        let offset = sign * ((zone / 100) * 3600 + (zone % 100) * 60);
+        let days = days_from_civil(year.parse().ok()?, month, day.parse().ok()?);
+        Some(days * 86400 + hour * 3600 + minute * 60 + second - offset)
+    };
+    let seconds = parse().with_context(|| format!("unreadable patch date {date:?}"))?;
+    let days = seconds.div_euclid(86400);
+    let time = seconds.rem_euclid(86400);
+    let (year, month, day) = civil_from_days(days);
+    Ok(format!(
+        "{}, {day} {} {year} {:02}:{:02}:{:02} +0000",
+        WEEKDAYS[(days + 4).rem_euclid(7) as usize],
+        MONTHS[month as usize - 1],
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    ))
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+/// The proleptic Gregorian date of a day count since 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719468;
+    let era = days.div_euclid(146097);
+    let day_of_era = days - era * 146097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// A patch's subject, unfolded and without `[PATCH]`.
@@ -496,6 +618,53 @@ mod tests {
         ]))
         .unwrap();
         assert!(submodule.checked_out().unwrap());
+    }
+
+    #[test]
+    fn exported_headers_carry_the_configured_identity_in_utc() -> Result<()> {
+        let identity = "Stela Author <author@example.com>";
+        let patch = "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n\
+                     From: Someone Else <someone@example.org>\n\
+                     Date: Tue, 4 Nov 2025 21:16:44 -0500\n\
+                     Subject: [PATCH] nouveau: name each GSP\n\n\
+                     From: a body line\nDate: a body line\n---\n \
+                     a | 1 +\n";
+        assert_eq!(
+            publish_header(patch, identity)?,
+            "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n\
+             From: Stela Author <author@example.com>\n\
+             Date: Wed, 5 Nov 2025 02:16:44 +0000\n\
+             Subject: [PATCH] nouveau: name each GSP\n\n\
+             From: a body line\nDate: a body line\n---\n \
+             a | 1 +\n"
+        );
+        // Upstream work keeps its author and date.
+        let upstream = patch.replace(
+            "\n---\n",
+            "\nSigned-off-by: Someone Else <someone@example.org>\n---\n",
+        );
+        assert_eq!(publish_header(&upstream, identity)?, upstream);
+        // Already in UTC, the header stays the same.
+        let published = publish_header(patch, identity)?;
+        assert_eq!(publish_header(&published, identity)?, published);
+        assert_eq!(
+            utc_date("Wed, 31 Dec 2025 20:00:00 -0500")?,
+            "Thu, 1 Jan 2026 01:00:00 +0000"
+        );
+        assert_eq!(
+            utc_date("Thu, 1 Jan 2026 00:30:00 +0100")?,
+            "Wed, 31 Dec 2025 23:30:00 +0000"
+        );
+        assert_eq!(
+            utc_date("Thu, 29 Feb 2024 23:59:59 -0730")?,
+            "Fri, 1 Mar 2024 07:29:59 +0000"
+        );
+        assert_eq!(
+            utc_date("Sun, 15 Jun 2025 15:37:57 +0200")?,
+            "Sun, 15 Jun 2025 13:37:57 +0000"
+        );
+        assert!(utc_date("Tue, 4 Nov 2025 21:16:44").is_err());
+        Ok(())
     }
 
     #[test]
