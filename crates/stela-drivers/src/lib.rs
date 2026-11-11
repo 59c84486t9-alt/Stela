@@ -17,9 +17,8 @@
 //! records devices, refusals and kept owners. [`firmware`] supplies its
 //! device image catalog.
 //!
-//! The generated [hardware route table](https://github.com/tylertms/Stela/blob/main/docs/design/hardware.md)
-//! is the shared inventory of attached, check-only and planned routes. It is
-//! derived from probe admission and dispatch, with per-route limits;
+//! Probe admission and dispatch are the shared inventory of attached,
+//! check-only and planned routes, with per-route limits;
 //! an ID match or library implementation grants no operational support claim.
 #![no_std]
 #[macro_use]
