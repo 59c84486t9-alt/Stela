@@ -1,5 +1,6 @@
 //! Native USB bus peers. No guest code execution or translator callbacks.
 use crate::Result;
+pub mod audio;
 pub mod control;
 pub mod ecm;
 pub mod hci;
