@@ -1322,8 +1322,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.clock.reads_natively() || self.host.tsc_counter().is_none()
     }
 
+    /// Run on the hub's control of this PE from now on, with this machine's
+    /// contexts, its board's tables and stamps of its board: cell probes
+    /// count a cell's heat only through the control's stamped cells, and
+    /// without them no exit is ever promoted.
     fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
         let contexts = self.chain.contexts();
+        let (stamps, cells) = self.chain.stamps();
         self.chain = control;
         self.chain.initialize(
             self.code.table.address(),
@@ -1331,6 +1336,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
             contexts,
             [self.code.table.mask(), self.itlb.mask()],
         );
+        self.chain.set_stamps(stamps, cells);
+        self.attach_stamps();
+    }
+
+    /// Give this PE's control stamps of its board's block table and that
+    /// table's stamped cells, unless it holds them: a machine that joined
+    /// another board holds its first board's.
+    pub(super) fn attach_stamps(&mut self) {
+        let code = Arc::clone(&self.code);
+        let mut cache = code.cache_at(super::board::LockSite::Other);
+        let cells = cache.targets.stamped_cells();
+        let (stamps, held) = self.chain.stamps();
+        if held == cells && cache.targets.holds_stamps(stamps) {
+            return;
+        }
+        let stamps = cache.targets.new_stamps();
+        drop(cache);
+        self.chain.set_stamps(stamps, cells);
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on

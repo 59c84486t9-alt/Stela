@@ -162,6 +162,17 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).cells).write(cells);
         }
     }
+    /// The stamps and stamped cells [`Self::set_stamps`] gave, or zeros.
+    pub(super) fn stamps(&self) -> (u64, u64) {
+        let control = self.storage.control.get();
+        // SAFETY: the sole owner reads these non-budget fields outside native execution.
+        unsafe {
+            (
+                core::ptr::addr_of!((*control).stamps).read(),
+                core::ptr::addr_of!((*control).cells).read(),
+            )
+        }
+    }
     /// What this PE's stamped tails and stamping cell probe counted
     /// ([`chain::StampCount`]).
     pub(super) fn stamp_counts(&self) -> [u64; chain::STAMP_COUNTS] {

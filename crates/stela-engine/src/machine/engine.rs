@@ -1427,14 +1427,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             machine.itlb.address(),
             [machine.code.table.mask(), machine.itlb.mask()],
         );
-        {
-            let code = Arc::clone(&machine.code);
-            let mut cache = code.cache_at(board::LockSite::Other);
-            let cells = cache.targets.stamped_cells();
-            let stamps = cache.targets.new_stamps();
-            drop(cache);
-            machine.chain.set_stamps(stamps, cells);
-        }
+        machine.attach_stamps();
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();

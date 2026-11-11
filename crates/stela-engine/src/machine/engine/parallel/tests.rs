@@ -2222,3 +2222,114 @@ fn transfers_leave_their_copies_to_run_outside_the_lock() {
         "every copy published by its own call"
     );
 }
+
+/// The word a cell probe counts a transfer through the cell at host
+/// address `cell` in, as [`chain::lookup_dispatcher`]'s does from the
+/// control it runs with: the cell's `heat` word among the control's
+/// stamped cells, or else the control's own `heat`, which nothing reads.
+fn probed_heat(control: &chain::ChainControl, cell: u64) -> Option<*const AtomicU32> {
+    let index = cell.wrapping_sub(control.cells) >> 3;
+    (index < (chain::CELL_LIVE / 8) as u64)
+        .then(|| (control.cells + chain::CELL_HEAT as u64 + index) as *const AtomicU32)
+}
+
+/// A PE gone parallel runs on its hub control: its cell probes count heat
+/// in the board's stamped cells, where the sweep reads it, so a hot exit
+/// out of the page gets a stamped tail, and its stamps are counted.
+#[test]
+fn a_parallel_pe_promotes_the_exits_its_cell_probes_made_hot() {
+    use super::super::tests::{NATIVE_CODE_STRIDE, machine};
+    use stela_compiler::block::ExitKind;
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    let mut words = vec![0; 1026];
+    words[0] = 0x1400_0400; // b .+0x1000
+    words[1024] = ADD;
+    words[1025] = RET;
+    let mut machine = machine(&words);
+    let base = machine.cpu.pc;
+    let far = base + 0x1000;
+    let exit = |next_pc, kind: ExitKind| super::super::NativeExit::Exit {
+        next_pc,
+        kind: kind as u64,
+    };
+    machine.host.exits = vec![exit(far, ExitKind::Direct), exit(base, ExitKind::Return)];
+    let (hub, _) = hub(1);
+    machine.enter_parallel(Arc::clone(&hub)).unwrap();
+    machine.step().unwrap();
+    machine.step().unwrap();
+    let first = &machine.code.blocks[0];
+    let code = &machine.host.installed[first.code.0 / NATIVE_CODE_STRIDE - 1];
+    let site = chain::direct_patch((first.code.0 + code.len() - chain::DIRECT_EXIT_BYTES) as u64);
+    let (number, cells, stamps_held) = {
+        let mut cache = machine.code.cache();
+        let number = cache.targets.site_cell_number(site).expect("a cell");
+        let control = machine.chain.snapshot();
+        (
+            number,
+            cache.targets.stamped_cells(),
+            cache.targets.holds_stamps(control.stamps),
+        )
+    };
+    assert!((number as usize) < chain::STAMPED_CELLS);
+    let control = machine.chain.snapshot();
+    // The cell probe's transfers through the exit's cell.
+    let cell = cells + (number as u64) * size_of::<chain::LookupEntry>() as u64;
+    let patches = machine.host.patches.len();
+    for _ in 0..chain::HOT_CELL {
+        if let Some(heat) = probed_heat(&control, cell) {
+            // SAFETY: a heat word of the board's stamped cells, an atomic,
+            // which live while the board does.
+            unsafe { &*heat }.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for _ in 0..chain::STAMPED_CELLS / 256 {
+        machine.promote_hot_exits();
+    }
+    assert_eq!(machine.host.patches.len(), patches + 2, "a stamped tail");
+    assert_eq!(
+        machine.host.patches[patches].1.len(),
+        chain::STAMPED_TAIL_BYTES
+    );
+    assert_eq!(machine.statistics.stamped_tails, 1);
+    assert_eq!(machine.statistics.stamped_in_use, 1);
+    assert_eq!(control.cells, cells, "the board's stamped cells");
+    assert!(stamps_held, "stamps of the board's table");
+    // What the stamped tails count is read from the PE's own stamps.
+    assert_eq!(machine.chain.stamp_counts(), [0; chain::STAMP_COUNTS]);
+}
+
+/// A PE that joins a board other than the one it was made on takes stamps
+/// of the board's table, not of its first board's, which goes.
+#[test]
+fn a_pe_that_joins_the_board_takes_stamps_of_its_table() {
+    use super::super::board;
+    use super::super::tests::machine;
+    let mut memory = vec![0u8; 4 * 4096];
+    let window = super::super::CodeWindow {
+        exec: memory.as_mut_ptr() as usize,
+        write: memory.as_mut_ptr() as usize,
+        bytes: memory.len(),
+    };
+    let arena = || {
+        Arc::new(board::Code::new(
+            board::slot_capacity(Some(window.bytes)),
+            chain::MIN_LOOKUP_ENTRIES,
+            Some(window),
+        ))
+    };
+    let shared = arena();
+    let (hub, _) = hub(2);
+    hub.share_code(&shared);
+    let mut second = machine(&[0xd65f_03c0]);
+    second.code = arena();
+    second.attach_stamps();
+    let (_attached, control) = Attached::new(&hub, 1, false).unwrap();
+    second.join_code(&hub);
+    assert!(Arc::ptr_eq(&second.code, &shared));
+    second.adopt_parallel_control(control);
+    let control = second.chain.snapshot();
+    let mut cache = shared.cache();
+    assert_eq!(control.cells, cache.targets.stamped_cells());
+    assert!(cache.targets.holds_stamps(control.stamps));
+}

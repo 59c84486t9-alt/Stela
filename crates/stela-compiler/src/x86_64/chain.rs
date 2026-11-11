@@ -1104,6 +1104,12 @@ impl LookupTable {
         address
     }
 
+    /// Whether `stamps` is an address [`Self::new_stamps`] of this table
+    /// returned.
+    pub fn holds_stamps(&self, stamps: u64) -> bool {
+        self.stamp_tables.contains(&stamps)
+    }
+
     /// Note what the exit holding stamped cell `cell` ran and its word, for
     /// a promotion of the exit ([`Self::hot_links`]).
     pub fn note_link(&mut self, cell: u32, link: CellLink) {
