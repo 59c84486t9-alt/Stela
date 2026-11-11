@@ -1,0 +1,434 @@
+# One self-contained `stela` per platform. `stela` embeds stela.efi, which
+# carries the StelaGPU kext; the kext carries the Metal bundle and Stela.app.
+# So the chain runs: Stela.app (macOS) -> stela.efi (Linux) -> stela for
+# Linux, Windows and macOS -> release.
+#
+# A `v*` tag publishes a release. A manual run builds everything and uploads
+# the archives as workflow artifacts, with no release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Stela.app's sources, with their build.sh.
+  APP: apps/stela-macos
+  # The release body and each archive's INSTALL.txt. Plain text that also
+  # reads as Markdown.
+  ABOUT: |-
+    Stela runs macOS for Apple silicon on an x86-64 PC. It boots from UEFI and translates the whole guest system. It is experimental.
+
+    Requirements:
+
+    - An x86-64-v2 PC (Intel Nehalem, AMD Bulldozer or newer) with UEFI, Secure Boot off and 8 GB of RAM or more.
+    - An NVIDIA GeForce GTX 16 or RTX 20, 30, 40 or 50 series GPU. macOS needs it: Stela has no software renderer.
+    - A USB stick: 8 GB for the network installer, 32 GB for the full installer.
+    - An empty GPT partition of at least 60 GB for macOS.
+    - Supported profile: Mac mini (M2) with macOS 27.x. Setup shows other Macs and versions greyed out.
+  INSTALL: |-
+    Install:
+
+    1. Unpack the archive for your system. The stela program has the boot program, the GPU driver and Stela.app built in.
+    2. Run it on the PC that will run macOS, so it adds the firmware for that PC's GPU: sudo ./stela setup (Linux, macOS). On Windows, double-click stela.exe.
+    3. Pick the USB, the installer type and the Mac model, check the named disk, and confirm. Setup erases the USB.
+    4. Boot the PC from the USB. The first install needs the network once (Ethernet or Wi-Fi) for Apple's signing server.
+    5. Later: stela setup status --usb <USB> and stela setup update stela --usb <USB>.
+
+    The programs are not signed by Apple or Microsoft. On macOS run xattr -d com.apple.quarantine stela after a browser download; on Windows SmartScreen asks once.
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag against the workspace version
+        id: version
+        run: |
+          version="$(awk '/^\[workspace.package\]/{s=1;next} s && /^\[/{exit} s && /^version = /{gsub(/"/,"",$3);print $3;exit}' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "::error::Cargo.toml has no [workspace.package] version"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version (expected v$version)"
+            exit 1
+          fi
+          for path in LICENSE NOTICE LICENSES; do
+            if [[ ! -e "$path" ]]; then
+              if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+                echo "::error::$path is missing; a release ships LICENSE, NOTICE and LICENSES/"
+                exit 1
+              fi
+              echo "::warning::$path is missing; a tagged release would fail here"
+            fi
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  app:
+    needs: version
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build Stela.app
+        run: |
+          swift --version
+          # build.sh prints the bundle's path last.
+          app="$("$APP/build.sh" | tee /dev/stderr | tail -1)"
+          [[ -f "$app/Contents/Info.plist" ]] || { echo "::error::$APP/build.sh named no app bundle: $app"; exit 1; }
+          # tar keeps the bundle's modes and code signature byte for byte.
+          tar -C "$(dirname "$app")" -cf Stela.app.tar Stela.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stela-app
+          path: Stela.app.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  efi:
+    needs: [version, app]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      SOURCE: stela-v${{ needs.version.outputs.version }}-source
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - name: Install Clang 21
+        run: |
+          # The kext needs upstream Clang 21 or newer for arm64e.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-21 lld-21 llvm-21 libclang-21-dev
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-efi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/stela-boot/Cargo.lock') }}
+          restore-keys: cargo-efi-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustc --version
+          version="$(clang --version)"
+          echo "${version%%$'\n'*}"
+          [[ "$version" =~ version\ (2[1-9]|[3-9][0-9])\. ]] || { echo "::error::clang on PATH is older than 21"; exit 1; }
+
+      - name: Cache keys
+        id: keys
+        run: |
+          pins="$(git ls-tree HEAD third_party | sha256sum | cut -c1-16)"
+          tools="$(printf '%s\n%s\n' "$(clang --version | head -1)" "$(rustc --version)" | sha256sum | cut -c1-16)"
+          echo "nvk=$pins-$tools" >> "$GITHUB_OUTPUT"
+          # The tools' virtual environment names the image's Python.
+          echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .tools/gpu
+          key: gpu-tools-${{ steps.keys.outputs.image }}-${{ hashFiles('xtask/src/gpu/toolchain.rs') }}
+
+      # Mesa and LLVM compiled for stela.efi. Only an exact key restores:
+      # it covers every input of `target/gpu`.
+      - uses: actions/cache@v4
+        id: nvk
+        with:
+          path: target/gpu
+          key: nvk-${{ steps.keys.outputs.nvk }}-${{ hashFiles('xtask/src/gpu/**', 'crates/stela-driver-gpu/**', 'third_party/patches/**', 'third_party/*.sparse') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: stela-app
+          path: app
+
+      - name: Unpack Stela.app
+        run: |
+          tar -C app -xf app/Stela.app.tar
+          echo "STELA_APP=$PWD/app/Stela.app" >> "$GITHUB_ENV"
+
+      - name: Fetch upstream sources
+        run: cargo xtask gpu fetch
+
+      # The complete corresponding source: the tracked tree (with
+      # third_party/patches) and each submodule's files at its pin, limited
+      # to the sparse paths `gpu fetch` checks out. GitHub's tag archives
+      # leave submodules out.
+      - name: Source archive
+        run: |
+          export LC_ALL=C
+          stage="$RUNNER_TEMP/source"
+          rm -rf "$stage" && mkdir -p "$stage"
+          git archive --format=tar --prefix="$SOURCE/" HEAD | tar -x -C "$stage"
+          index="$RUNNER_TEMP/source.index"
+          git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read -r _ path; do
+            pin="$(git ls-files --stage -- "$path" | cut -d' ' -f2)"
+            # Tracked files outside the sparse set are marked S (skip-worktree).
+            git -C "$path" -c core.quotePath=false ls-files -v | sed -n 's/^[^S] //p' | sort > "$RUNNER_TEMP/sparse"
+            git -C "$path" -c core.quotePath=false ls-tree -r --name-only "$pin" | sort > "$RUNNER_TEMP/pinned"
+            comm -12 "$RUNNER_TEMP/sparse" "$RUNNER_TEMP/pinned" > "$RUNNER_TEMP/files"
+            rm -f "$index"
+            GIT_INDEX_FILE="$index" git -C "$path" read-tree "$pin"
+            GIT_INDEX_FILE="$index" git -C "$path" checkout-index --prefix="$stage/$SOURCE/$path/" --stdin < "$RUNNER_TEMP/files"
+            echo "$path $pin: $(wc -l < "$RUNNER_TEMP/files") files"
+          done
+          mkdir -p dist
+          tar -C "$stage" -cf - "$SOURCE" | zstd -q -T0 -15 -o "dist/$SOURCE.tar.zst"
+          rm -rf "$stage" "$index"
+          ls -l "dist/$SOURCE.tar.zst"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SOURCE }}
+          path: dist/${{ env.SOURCE }}.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Keep the restored Mesa and LLVM build current
+        if: steps.nvk.outputs.cache-hit == 'true'
+        run: |
+          # A fresh checkout is newer than the restored objects; the key
+          # proved the sources the same, so date them before the objects.
+          find third_party crates/stela-driver-gpu -path '*/.git' -prune -o -type f -print0 \
+            | xargs -0 touch -h -d '2000-01-01T00:00:00Z'
+
+      - name: Build stela.efi
+        run: |
+          # NVK is the default once `--nvk` is gone; older trees need the flag.
+          nvk=
+          if [[ "$(cargo xtask boot build --help)" == *--nvk* ]]; then nvk=--nvk; fi
+          cargo xtask boot build --release $nvk
+          efi=target/boot/x86_64-unknown-uefi/release/stela-deploy.efi
+          [[ "$(head -c 2 "$efi")" == MZ ]] || { echo "::error::$efi is not a PE image"; exit 1; }
+          cp "$efi" dist/stela.efi
+          ls -l dist/stela.efi
+          { echo "stela.efi: $(stat -c %s dist/stela.efi) bytes"; echo "sha256 $(sha256sum dist/stela.efi | cut -d' ' -f1)"; } >> "$GITHUB_STEP_SUMMARY"
+          df -h /
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stela-efi
+          path: dist/stela.efi
+          if-no-files-found: error
+          retention-days: 7
+
+  cli:
+    needs: [version, efi]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.35: Ubuntu 22.04, Debian 12, Fedora 36 and newer.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            targets: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            platform: windows-x86_64
+            targets: x86_64-pc-windows-msvc
+          - os: macos-26
+            platform: macos-universal
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      ARCHIVE: stela-v${{ needs.version.outputs.version }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Put LLVM on PATH
+        run: |
+          # Mbed TLS takes -mllvm --disable-select-optimize, LLVM 15 and newer.
+          case "$RUNNER_OS" in
+            Windows) echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH" ;;
+            Linux)
+              [[ -d /usr/lib/llvm-15/bin ]] || { sudo apt-get update -q && sudo apt-get install -y -q clang-15; }
+              echo /usr/lib/llvm-15/bin >> "$GITHUB_PATH"
+              ;;
+          esac
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-cli-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-cli-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.targets }}
+          rustc --version
+          # stela-tls compiles Mbed TLS with clang on every host, and
+          # archives it with llvm-lib for Windows.
+          tools=clang
+          [[ "$RUNNER_OS" == Windows ]] && tools="clang llvm-lib"
+          for tool in $tools; do
+            command -v "$tool" >/dev/null || { echo "::error::$tool is not on PATH"; exit 1; }
+          done
+          clang --version | head -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: stela-efi
+          path: efi
+
+      - name: Build stela
+        run: |
+          export STELA_EFI="$PWD/efi/stela.efi"
+          for target in ${{ matrix.targets }}; do
+            cargo build --release --locked -p stela-cli --target "$target"
+          done
+          mkdir -p "$ARCHIVE"
+          case "$RUNNER_OS" in
+            Windows) cp target/x86_64-pc-windows-msvc/release/stela.exe "$ARCHIVE/" ;;
+            macOS)
+              lipo -create -output "$ARCHIVE/stela" \
+                target/aarch64-apple-darwin/release/stela target/x86_64-apple-darwin/release/stela
+              codesign --force --sign - "$ARCHIVE/stela"
+              lipo -info "$ARCHIVE/stela"
+              ;;
+            *) cp target/x86_64-unknown-linux-gnu/release/stela "$ARCHIVE/" ;;
+          esac
+
+      - name: Check stela
+        run: |
+          binary="$(ls "$ARCHIVE"/stela*)"
+          expected="stela ${{ needs.version.outputs.version }}"
+          actual="$("$binary" --version)"
+          [[ "$actual" == "$expected" ]] || { echo "::error::$binary --version printed '$actual', not '$expected'"; exit 1; }
+          python=python3
+          if [[ "$RUNNER_OS" == Windows ]]; then python=python; fi
+          "$python" -c 'import sys; sys.exit(open(sys.argv[1], "rb").read() not in open(sys.argv[2], "rb").read())' efi/stela.efi "$binary" \
+            || { echo "::error::$binary does not hold the stela.efi the efi job built"; exit 1; }
+          size="$(wc -c < "$binary")"
+          "$binary" setup --help >/dev/null
+          echo "$ARCHIVE: $size bytes" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package
+        run: |
+          printf '%s\n' "$INSTALL" > "$ARCHIVE/INSTALL.txt"
+          cp LICENSE "$ARCHIVE/"
+          if [[ -e NOTICE ]]; then cp NOTICE "$ARCHIVE/"; fi
+          if [[ -d LICENSES ]]; then cp -R LICENSES "$ARCHIVE/"; fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            7z a -tzip -bso0 "$ARCHIVE.zip" "$ARCHIVE"
+          else
+            tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          fi
+          ls -l "$ARCHIVE".*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}.*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    needs: [version, cli]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stela-v*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          count="$(ls dist | wc -l)"
+          [[ "$count" == 4 ]] || { echo "::error::expected 3 archives and the source, found $count: $(ls dist)"; exit 1; }
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          head=HEAD
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then head="$GITHUB_REF_NAME"; fi
+          previous="$(git describe --tags --abbrev=0 --match 'v*' "$head^" 2>/dev/null || true)"
+          range="${previous:+$previous..}$head"
+          total="$(git rev-list --count --no-merges "$range")"
+          {
+            printf '%s\n\n' "$ABOUT"
+            echo "Downloads:"
+            echo
+            echo "- Linux x86-64 (glibc 2.35 or newer): stela-$tag-linux-x86_64.tar.gz"
+            echo "- Windows x86-64: stela-$tag-windows-x86_64.zip"
+            echo "- macOS, Apple silicon and Intel: stela-$tag-macos-universal.tar.gz"
+            echo "- Source, with every submodule at its pin and Stela's patches: stela-$tag-source.tar.zst"
+            echo "- SHA256SUMS: each file's SHA-256"
+            echo
+            printf '%s\n\n' "$INSTALL"
+            echo "License: Stela is GPL-2.0-or-later; the boot program is GPL-2.0-only, as it links code from Linux. Each archive has LICENSE, NOTICE and LICENSES/. The source archive is the complete corresponding source of these binaries."
+            echo
+            if [[ -n "$previous" ]]; then
+              echo "Changes since $previous:"
+            else
+              echo "Changes:"
+            fi
+            echo
+            git log --no-merges --format='- %s' -n 300 "$range"
+            if (( total > 300 )); then
+              echo "- and $((total - 300)) earlier commits"
+            fi
+          } > notes.md
+          wc -l notes.md
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: release-dry-run
+          path: |
+            dist/SHA256SUMS
+            notes.md
+
+      - name: Publish the release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "Stela $GITHUB_REF_NAME" \
+            --notes-file notes.md
