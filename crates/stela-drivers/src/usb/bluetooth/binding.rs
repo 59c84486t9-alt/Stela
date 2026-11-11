@@ -40,7 +40,21 @@ impl Binding {
             return Err("not a legacy Bluetooth HCI interface");
         }
         if interface.number != HCI_INTERFACE {
-            return Err("Bluetooth HCI on an interface other than 0");
+            // btusb claims interface 1 (SCO) and btmtk interface 2 (ISO) for
+            // the HCI on interface 0; this link carries commands, events and
+            // ACL only, so those stay at alternate zero.
+            let hci = super::super::descriptor::interfaces(&device.configuration)
+                .iter()
+                .any(|other| {
+                    (other.number, other.alternate) == (HCI_INTERFACE, 0)
+                        && (other.class, other.subclass, other.protocol)
+                            == (CLASS, SUBCLASS, PROTOCOL)
+                });
+            return Err(if hci {
+                "Bluetooth voice/isochronous interface of the HCI on interface 0 left idle (no SCO or LE audio)"
+            } else {
+                "Bluetooth HCI on an interface other than 0"
+            });
         }
         // Do not accept caller-invented interface data detached from the device.
         if !super::super::descriptor::interfaces(&device.configuration).contains(interface) {

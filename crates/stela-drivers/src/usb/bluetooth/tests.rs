@@ -389,7 +389,10 @@ fn hci_interfaces_need_their_three_endpoints_on_interface_zero() {
     fabricated.number = 4;
     assert!(Binding::new(&original, &fabricated).is_err());
     let sco = &crate::usb::descriptor::interfaces(&original.configuration)[1];
-    assert!(Binding::new(&original, sco).is_err());
+    assert_eq!(
+        Binding::new(&original, sco).unwrap_err(),
+        "Bluetooth voice/isochronous interface of the HCI on interface 0 left idle (no SCO or LE audio)"
+    );
 }
 
 #[test]
