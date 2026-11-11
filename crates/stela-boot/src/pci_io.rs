@@ -2,8 +2,6 @@
 //! Provenance: UEFI 2.11 chapter14, sections14.4.1/.8/.16/.18.
 //! https://uefi.org/specs/UEFI/2.11/14_Protocols_PCI_Bus_Support.html
 //! All callbacks and returned pool storage must end before ExitBootServices.
-#[cfg(feature = "diagnostics")]
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::{
     ffi::c_void,
@@ -55,8 +53,6 @@ const _: () = {
     assert!(offset_of!(PciIo, rom_size) == 144);
 };
 use stela_drivers::bus::pci::Address;
-#[cfg(feature = "diagnostics")]
-use stela_drivers::bus::pci::{ConfigError, ConfigFailure, ConfigSpace};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     Firmware(Status),
@@ -301,39 +297,6 @@ impl PciIo {
         })?;
         Ok(header)
     }
-    #[cfg(feature = "diagnostics")]
-    fn configuration_snapshot(&mut self) -> Result<ConfigurationSnapshot, Error> {
-        let mut words = Box::new([0u32; 1024]);
-        // SAFETY: live EFIAPI protocol, 64 aligned Uint32 reads of the
-        // standard 256-byte config space into kept owned DATA storage.
-        status(unsafe { (self.config_read)(self, 2, 0, 64, words.as_mut_ptr().cast()) })?;
-        let mut bytes = 256;
-        if words[1] & (1 << 20) != 0 {
-            let mut offset = (words[13] & 0xff) as usize;
-            let mut visited = [false; 256];
-            while offset != 0 {
-                if !(0x40..=0xfc).contains(&offset) || !offset.is_multiple_of(4) || visited[offset]
-                {
-                    return Err(Error::DescriptorLength);
-                }
-                visited[offset] = true;
-                let entry = words[offset / 4];
-                if entry as u8 == 0x10 {
-                    // Only PCI Express exposes extended config. Pinned EDK2
-                    // PciIoVerifyConfigAccess explicitly refuses >255 for PCI.
-                    // SAFETY: real declared PCIe capability; protocol
-                    // status still controls support, never filled-in zeros.
-                    status(unsafe {
-                        (self.config_read)(self, 2, 256, 960, words.as_mut_ptr().add(64).cast())
-                    })?;
-                    bytes = 4096;
-                    break;
-                }
-                offset = ((entry >> 8) & 0xff) as usize;
-            }
-        }
-        Ok(ConfigurationSnapshot { words, bytes })
-    }
     pub fn bar_regions(&mut self, index: u8) -> Result<Vec<BarRegion>, Error> {
         if index >= 6 {
             return Err(Error::BarIndex);
@@ -428,57 +391,7 @@ pub struct Census {
     pub functions: Vec<FunctionObservation>,
     pub failures: Vec<CaptureFailure>,
 }
-/// Read-only firmware config DATA. It cannot address hardware and is never
-/// accepted by the native requester/domain boundary.
-#[cfg(feature = "diagnostics")]
-pub(crate) struct ConfigurationSnapshot {
-    words: Box<[u32; 1024]>,
-    bytes: usize,
-}
-#[cfg(feature = "diagnostics")]
-impl ConfigurationSnapshot {
-    fn read<const WIDTH: usize>(&self, offset: u16) -> Result<[u8; WIDTH], ConfigError> {
-        let first = usize::from(offset);
-        if !first.is_multiple_of(WIDTH) || first + WIDTH > self.bytes {
-            return Err(ConfigError::before_effect(ConfigFailure::Access {
-                offset,
-                width: WIDTH,
-            }));
-        }
-        let word = self.words[first / 4].to_le_bytes();
-        Ok(core::array::from_fn(|byte| word[first % 4 + byte]))
-    }
-}
-#[cfg(feature = "diagnostics")]
-impl ConfigSpace for ConfigurationSnapshot {
-    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        Ok(self.read::<1>(offset)?[0])
-    }
-    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        self.read(offset).map(u16::from_le_bytes)
-    }
-    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        self.read(offset).map(u32::from_le_bytes)
-    }
-    fn write8(&mut self, _: u16, _: u8) -> Result<(), ConfigError> {
-        Err(ConfigError::before_effect(
-            ConfigFailure::UnqualifiedControl,
-        ))
-    }
-    fn write16(&mut self, _: u16, _: u16) -> Result<(), ConfigError> {
-        Err(ConfigError::before_effect(
-            ConfigFailure::UnqualifiedControl,
-        ))
-    }
-    fn write32(&mut self, _: u16, _: u32) -> Result<(), ConfigError> {
-        Err(ConfigError::before_effect(
-            ConfigFailure::UnqualifiedControl,
-        ))
-    }
-}
 pub struct FunctionObservation {
-    #[cfg(feature = "diagnostics")]
-    pub(crate) configuration: Option<ConfigurationSnapshot>,
     pub address: Address,
     pub header: [u8; 64],
     // A missing/unimplemented BAR is preserved as the firmware status;
@@ -505,13 +418,6 @@ pub enum CaptureFailure {
     Allocation,
 }
 pub fn capture() -> Result<Census, CaptureFailure> {
-    capture_mode(false)
-}
-#[cfg(feature = "diagnostics")]
-pub(crate) fn capture_configurations() -> Result<Census, CaptureFailure> {
-    capture_mode(true)
-}
-fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
     use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
     let handles = boot::find_handles::<PciIo>()
         .map_err(|error| CaptureFailure::Enumeration(error.status()))?;
@@ -564,16 +470,6 @@ fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
                 continue;
             }
         };
-        #[cfg(feature = "diagnostics")]
-        let configuration = if _copy_configuration {
-            Some(
-                protocol
-                    .configuration_snapshot()
-                    .map_err(CaptureFailure::Function)?,
-            )
-        } else {
-            None
-        };
         let bars = core::array::from_fn(|bar| protocol.bar_regions(bar as u8));
         // FreePool refusal cannot be followed by EBS as though reclamation had
         // succeeded. Caller stops preparation with the status kept.
@@ -584,8 +480,6 @@ fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
             return Err(CaptureFailure::Function(Error::Release(status)));
         }
         result.functions.push(FunctionObservation {
-            #[cfg(feature = "diagnostics")]
-            configuration,
             address,
             header,
             bars,

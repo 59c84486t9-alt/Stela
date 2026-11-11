@@ -226,36 +226,12 @@ impl RootIdentity {
         Ok(())
     }
 
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
-        self.check_current()?;
-        Ok(disable())
-    }
-    /// # Safety
-    /// Enclosing save from this same context; no switch or migration.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) unsafe fn restore(&self, saved: u64) {
-        if self.check_current().is_err() {
-            self.fatal(WorkError::WrongCpu);
-        }
-        // SAFETY: caller supplies this CPU's enclosing save.
-        unsafe {
-            restore(saved);
-        }
-    }
     pub(crate) fn fatal(&self, error: WorkError) -> ! {
         crate::output::arguments(format_args!("NATIVE ROOT FATAL {error:?}\n"));
         crate::output::fatal("native root contract failed")
     }
     pub(crate) fn root_pages(&self) -> &[u64] {
         self.roots.roots()
-    }
-    /// Immutable processor observations only, under the captured root
-    /// catalog. This does not check a fixed-root memory access or epoch.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn processor_snapshot(&self) -> Result<Snapshot, WorkError> {
-        self.check_dispatch()?;
-        Ok(self.snapshot)
     }
     pub(crate) fn memory_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_current()?;
@@ -285,28 +261,8 @@ impl RootContext {
         self.generation()?;
         self.identity.check_current()
     }
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn check_irq_cpu(&self) -> Result<(), WorkError> {
-        self.generation()?;
-        self.identity.check_irq_cpu()
-    }
     pub(crate) fn in_interrupt(&self) -> bool {
         self.generation().is_err() || self.identity.in_interrupt()
-    }
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
-        self.check_current()?;
-        self.identity.save_disable()
-    }
-    /// # Safety
-    /// Enclosing same-CPU save; no switch/migration or active task-frame change.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) unsafe fn restore(&self, saved: u64) {
-        if self.check_current().is_err() {
-            self.fatal(WorkError::Closed);
-        }
-        // SAFETY: same identity and caller's enclosing save.
-        unsafe { self.identity.restore(saved) };
     }
     pub(crate) fn fatal(&self, error: WorkError) -> ! {
         self.identity.fatal(error)
@@ -323,33 +279,6 @@ impl RootContext {
 struct Epoch {
     context: Arc<RootContext>,
     active: AtomicBool,
-}
-/// Immutable exact execution epoch. It never reopens after closure.
-#[cfg(feature = "diagnostics")]
-pub(crate) struct RootProcessScope {
-    epoch: Arc<Epoch>,
-}
-#[cfg(feature = "diagnostics")]
-impl RootProcessScope {
-    pub(crate) fn context(&self) -> &Arc<RootContext> {
-        &self.epoch.context
-    }
-    pub(crate) fn check(&self) -> Result<(), WorkError> {
-        if !self.epoch.active.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        self.context().check_current()?;
-        if self.context().in_interrupt() {
-            return Err(WorkError::InterruptContext);
-        }
-        Ok(())
-    }
-    pub(crate) fn check_irq_cpu(&self) -> Result<(), WorkError> {
-        if !self.epoch.active.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        self.context().check_irq_cpu()
-    }
 }
 /// CPU-affine process epoch. This owner never moves to another processor.
 /// Bootstrap begins with IF0 and grants no interrupt enable or runtime entry.
@@ -371,13 +300,6 @@ impl RootExecution {
     }
     pub(crate) fn context(&self) -> &Arc<RootContext> {
         &self.epoch.context
-    }
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn process_scope(&self) -> Result<Arc<RootProcessScope>, WorkError> {
-        self.check()?;
-        Ok(Arc::new(RootProcessScope {
-            epoch: self.epoch.clone(),
-        }))
     }
 }
 impl Drop for RootExecution {
@@ -535,21 +457,6 @@ impl Owner {
         // root mutation or IRQ between this invalidation and the caller's join.
         identity.ram_generation.store(next, Ordering::Release);
         self.root_context = alloc::sync::Weak::new();
-        Ok(())
-    }
-
-    /// Admit this original Owner/context pair before Clock effects.
-    /// The numbers inside an unrelated snapshot cannot satisfy this check.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
-        if gs_base() != self.local.as_ptr() as u64 {
-            return Err(WorkError::WrongCpu);
-        }
-        execution.check()?;
-        let context = self.root_context.upgrade().ok_or(WorkError::Closed)?;
-        if !Arc::ptr_eq(&context, execution.context()) {
-            return Err(WorkError::CorruptContext);
-        }
         Ok(())
     }
 

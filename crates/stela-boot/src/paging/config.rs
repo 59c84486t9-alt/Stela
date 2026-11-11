@@ -3,7 +3,6 @@
 //! MCFG observations alone cannot construct this Source.
 #[cfg(feature = "diagnostics")]
 mod hpet;
-mod inventory;
 mod platform;
 mod prepare;
 use super::{ActivatedTables, PAGE, RootError};
@@ -22,10 +21,7 @@ use stela_drivers::bus::{
         self, AddressSpace, Authority, CacheAttribute, PhysicalSpan, Protection, Resource,
         ResourceBacking, ResourceKind,
     },
-    pci::{
-        Address, ConfigError, EcamWindow, EnumerationError,
-        assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
-    },
+    pci::assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
 };
 
 // A separate canonical high-half window; builder refuses any overlap.
@@ -56,9 +52,6 @@ pub(crate) enum Error {
     Mapping(owned::Error),
     Root(RootError),
     Tables(Refusal),
-    Config(ConfigError),
-    Discovery(EnumerationError),
-    NotReady(Address),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,16 +65,10 @@ impl fmt::Display for Error {
             Self::Mapping(error) => write!(f, "owned PCI mapping: {error:?}"),
             Self::Root(error) => write!(f, "owned PCI root: {error}"),
             Self::Tables(error) => write!(f, "{error}"),
-            Self::Config(error) => write!(f, "owned PCI configuration: {error:?}"),
-            Self::Discovery(error) => write!(f, "owned PCI topology: {error:?}"),
-            Self::NotReady(address) => {
-                write!(f, "PCI {address} returned CRS; no qualified retry clock")
-            }
         }
     }
 }
 struct Bus {
-    window: EcamWindow,
     resource: Resource,
     _assignment: Assignment<RegisterReservation>,
 }
@@ -91,8 +78,6 @@ pub(crate) struct Source {
     buses: Vec<Bus>,
     #[cfg(feature = "diagnostics")]
     hpet_assignment: core::cell::RefCell<Option<Assignment<RegisterReservation>>>,
-    #[cfg(feature = "diagnostics")]
-    issued_config: core::cell::RefCell<Vec<Address>>,
     _local: PhantomData<*mut ()>,
 }
 struct RegisterReservation {
@@ -189,7 +174,6 @@ impl Source {
                 retention: assignment.retain(),
             }));
             buses.push(Bus {
-                window,
                 resource,
                 _assignment: assignment,
             });
@@ -200,64 +184,7 @@ impl Source {
             buses,
             #[cfg(feature = "diagnostics")]
             hpet_assignment: core::cell::RefCell::new(None),
-            #[cfg(feature = "diagnostics")]
-            issued_config: core::cell::RefCell::new(Vec::new()),
             _local: PhantomData,
         })
-    }
-    fn config_mapping(
-        &self,
-        address: Address,
-        protection: Protection,
-    ) -> Result<(EcamWindow, owned::Mapping), Error> {
-        self.platform.check_bus(address)?;
-        let bus = self
-            .buses
-            .iter()
-            .find(|bus| {
-                bus.window.segment == address.segment
-                    && (bus.window.start_bus..=bus.window.end_bus).contains(&address.bus)
-            })
-            .ok_or(Error::ResourceInventory)?;
-        if address.device >= 32 || address.function >= 8 {
-            return Err(Error::ResourceInventory);
-        }
-        let physical = bus.window.base
-            + (u64::from(address.bus) << 20)
-            + (u64::from(address.device) << 15)
-            + (u64::from(address.function) << 12);
-        let start = bus.resource.physical_span().start();
-        let offset = usize::try_from(
-            physical
-                .checked_sub(start)
-                .ok_or(Error::ResourceInventory)?,
-        )
-        .map_err(|_| Error::ResourceInventory)?;
-        let mapping = self
-            .authority
-            .map(
-                bus.resource.clone(),
-                offset,
-                PAGE,
-                CacheAttribute::Uncached,
-                protection,
-            )
-            .map_err(Error::Mapping)?;
-        Ok((bus.window, mapping))
-    }
-    pub(crate) fn windows(&self) -> impl Iterator<Item = EcamWindow> + '_ {
-        self.buses.iter().map(|bus| bus.window)
-    }
-    pub(crate) fn verify_retired(&self) -> Result<(), Error> {
-        self.platform.verify_empty()?;
-        let status = self.authority.status().map_err(Error::Mapping)?;
-        if status.installing != 0
-            || status.live != 0
-            || status.uncertain != 0
-            || status.quarantined != 0
-        {
-            return Err(Error::Mapping(owned::Error::Busy));
-        }
-        Ok(())
     }
 }

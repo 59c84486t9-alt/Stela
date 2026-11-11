@@ -51,14 +51,6 @@ impl Control {
             thermal,
         })
     }
-    #[cfg(feature = "diagnostics")]
-    pub(in crate::native_clock) fn max_cpuid(&self) -> u32 {
-        self.identity[0]
-    }
-    #[cfg(feature = "diagnostics")]
-    pub(in crate::native_clock) fn thermal_eax(&self) -> u32 {
-        self.thermal.map_or(0, |value| value[0])
-    }
     pub(in crate::native_clock) fn check(&self) -> Result<(), WorkError> {
         if query(0) != self.identity
             || query(1) != self.basic

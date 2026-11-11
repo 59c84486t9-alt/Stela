@@ -1,9 +1,7 @@
 //! Native MMIO root publication. Firmware descriptions supply permissions;
 //! exclusive device ownership is acquired separately by the native dispatcher.
 //! [`Source`] serves the host drivers on every host processor through a
-//! preallocated uncached aperture; [`ScopedSource`] binds the same aperture
-//! to one processor's root epoch for the HPET, clock and stack diagnostics.
-//! WC and dynamic roots refuse.
+//! preallocated uncached aperture. WC and dynamic roots refuse.
 mod aliases;
 mod capture;
 mod ecam;
@@ -11,12 +9,8 @@ mod shared;
 pub(crate) mod shootdown;
 mod window;
 use ecam::RootWindow;
-#[cfg(feature = "diagnostics")]
-mod platform;
 
 pub(crate) use capture::{CaptureHandoff, Prepared, Wire};
-#[cfg(feature = "diagnostics")]
-pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 pub(crate) use shared::{
     ContainedPci, ContainmentError, InitialPciLines, IoapicRegisters, ModePin, NativeExclusiveHpet,
     NativeHpetMapping, PROCESSORS, Source,
@@ -72,7 +66,7 @@ pub(crate) unsafe fn captured(handoff: &crate::handoff::Handoff) -> Result<&'sta
 
 /// # Safety
 /// The original post-EBS handoff and physmap remain installed throughout the
-/// aperture's lifetime. Shared and scoped activation consume the same claim.
+/// aperture's lifetime. Shared activation consumes this claim.
 unsafe fn claim_capture(
     handoff: &'static crate::handoff::Handoff,
 ) -> Result<(&'static Wire, capture::Origin), Error> {

@@ -17,11 +17,9 @@ const LEGACY: u32 = 2;
 const TIMER_INTERRUPTS: u32 = 4 | 0x4000;
 
 /// These are distinct resource owners, never a caller-provided
-/// pointer/lifetime facade. The scoped diagnostic path keeps its
-/// finite RAM epoch; the production path keeps immutable RootIdentity only.
+/// pointer/lifetime facade. The production path keeps immutable RootIdentity
+/// only.
 enum Owner {
-    #[cfg(feature = "diagnostics")]
-    Scoped(crate::native_mmio::HpetMapping),
     Native(NativeHpetMapping),
     #[cfg(feature = "diagnostics")]
     Standalone(crate::paging::config::Hpet),
@@ -29,8 +27,6 @@ enum Owner {
 impl Owner {
     fn descriptor(&self) -> Descriptor {
         match self {
-            #[cfg(feature = "diagnostics")]
-            Self::Scoped(owner) => owner.descriptor(),
             Self::Native(owner) => owner.descriptor(),
             #[cfg(feature = "diagnostics")]
             Self::Standalone(owner) => owner.descriptor(),
@@ -38,8 +34,6 @@ impl Owner {
     }
     fn identity(&self) -> Option<&Arc<RootIdentity>> {
         match self {
-            #[cfg(feature = "diagnostics")]
-            Self::Scoped(owner) => Some(owner.context().identity()),
             Self::Native(owner) => Some(owner.identity()),
             #[cfg(feature = "diagnostics")]
             Self::Standalone(_) => None,
@@ -47,8 +41,6 @@ impl Owner {
     }
     fn check_process(&self) -> Result<(), WorkError> {
         match self {
-            #[cfg(feature = "diagnostics")]
-            Self::Scoped(owner) => owner.check_process(),
             Self::Native(owner) => owner.check_process(),
             #[cfg(feature = "diagnostics")]
             Self::Standalone(owner) => owner.check(),
@@ -56,8 +48,6 @@ impl Owner {
     }
     fn check_irq_cpu(&self) -> Result<(), WorkError> {
         match self {
-            #[cfg(feature = "diagnostics")]
-            Self::Scoped(owner) => owner.check_irq_cpu(),
             Self::Native(owner) => owner.check_irq_cpu(),
             #[cfg(feature = "diagnostics")]
             Self::Standalone(owner) => owner.check(),
@@ -65,8 +55,6 @@ impl Owner {
     }
     fn mapping(&self) -> Result<&Mapping, WorkError> {
         match self {
-            #[cfg(feature = "diagnostics")]
-            Self::Scoped(owner) => Ok(owner.mapping()),
             Self::Native(owner) => owner.mapping(),
             #[cfg(feature = "diagnostics")]
             Self::Standalone(owner) => Ok(owner.mapping()),
@@ -75,10 +63,8 @@ impl Owner {
     #[cfg(feature = "diagnostics")]
     unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
         match self {
-            // SAFETY: forwarded complete reader/IRQ/controller drain;
-            // each variant keeps its own original resource/root permission.
-            Self::Scoped(owner) => unsafe { owner.retire_mapping() },
-            // SAFETY: same drain, using the production registry's owner.
+            // SAFETY: forwarded complete reader/IRQ/controller drain,
+            // using the production registry's owner.
             Self::Native(owner) => unsafe { owner.retire_mapping() },
             // SAFETY: same drain, through the standalone root and registry.
             Self::Standalone(owner) => unsafe { owner.retire_mapping() },
@@ -90,8 +76,6 @@ impl Owner {
 /// lifetime token can instantiate this counter. There is no automatic stop in
 /// Drop: uncertain state remains quarantined by the owned Mapping registry.
 enum Eligibility {
-    #[cfg(feature = "diagnostics")]
-    Scoped,
     Native(Result<PowerControl, WorkError>),
 }
 pub(crate) struct Counter {
@@ -110,13 +94,6 @@ impl Counter {
     /// The separately minted exclusive whole-controller handoff authorizes a
     /// main-counter enable only. Any legacy, comparator/FSB interrupt or pending
     /// status refuses; no unknown route/configuration is disabled or stolen.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn attach_exclusive(
-        owned: crate::native_mmio::ExclusiveHpet,
-    ) -> Result<Self, WorkError> {
-        Self::attach(Owner::Scoped(owned.into_mapping()))
-    }
-
     pub(crate) fn attach_native_exclusive(owned: NativeExclusiveHpet) -> Result<Self, WorkError> {
         Self::attach(Owner::Native(owned.into_mapping()))
     }
@@ -130,8 +107,6 @@ impl Counter {
         // SAFETY: the exact retained mapping checked its process CPU above.
         let native = || Eligibility::Native(unsafe { PowerControl::capture() });
         let eligibility = match &owned {
-            #[cfg(feature = "diagnostics")]
-            Owner::Scoped(_) => Eligibility::Scoped,
             #[cfg(feature = "diagnostics")]
             Owner::Standalone(_) => native(),
             Owner::Native(_) => native(),
@@ -210,16 +185,8 @@ impl Counter {
         }
         self.owned.check_process()
     }
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn owner(&self) -> Result<&crate::native_mmio::HpetMapping, WorkError> {
-        self.check_process()?;
-        match &self.owned {
-            Owner::Scoped(owner) => Ok(owner),
-            Owner::Native(_) | Owner::Standalone(_) => Err(WorkError::Unavailable),
-        }
-    }
     /// Only a native resource plus eligible live platform can back
-    /// an unbounded counter epoch. Scoped/C0 calibration does not mint one.
+    /// an unbounded counter epoch.
     pub(crate) fn continuous_period(&self) -> Result<u32, WorkError> {
         self.owned.check_irq_cpu()?;
         if self.closing || self.retired {
@@ -232,8 +199,6 @@ impl Counter {
                 Ok(self.geometry.period_fs)
             }
             Eligibility::Native(Err(error)) => Err(*error),
-            #[cfg(feature = "diagnostics")]
-            Eligibility::Scoped => Err(WorkError::Unavailable),
         }
     }
 
@@ -284,35 +249,12 @@ impl Counter {
         Ok(())
     }
 
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn period_fs(&self) -> u32 {
-        self.geometry.period_fs
-    }
     pub(crate) fn descriptor(&self) -> Descriptor {
         self.owned.descriptor()
     }
     pub(crate) fn identity(&self) -> Option<&Arc<RootIdentity>> {
         self.owned.identity()
     }
-    /// A short active-spin reference, never an HPET continuity/PC10 grant.
-    /// Require the production owner and the exact CPU identity;
-    /// validate period/routing controls on both sides of the sample.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn calibration_sample(
-        &self,
-        identity: &Arc<RootIdentity>,
-    ) -> Result<u64, WorkError> {
-        if !matches!(&self.owned, Owner::Native(_))
-            || self
-                .identity()
-                .is_none_or(|owner| !Arc::ptr_eq(owner, identity))
-        {
-            return Err(WorkError::Unavailable);
-        }
-        self.check_process()?;
-        self.read_irq()
-    }
-
     pub(crate) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
         self.geometry.ns(ticks).map_err(|_| WorkError::Exhausted)
     }
@@ -370,9 +312,8 @@ impl Counter {
 
     /// # Safety
     /// Every Clock/Runtime/cached pointer/IRQ-entry user has finally stopped and
-    /// drained before this process call. The immutable identity (and a
-    /// diagnostic source's finite scope) remains live until acknowledged unmap. Wholeblock ownership is
-    /// and no future source reader may start.
+    /// drained before this process call. The immutable identity remains live
+    /// until acknowledged unmap, and no future source reader may start.
     #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn retire(&mut self) -> Result<(), WorkError> {
         if self.retired {

@@ -80,10 +80,6 @@ impl TaskAllocations {
     pub(crate) fn region(&self) -> Region {
         self.tasks.region
     }
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn claimed(&self) -> bool {
-        self.tasks.claimed.load(Ordering::Acquire)
-    }
     pub(crate) fn claim(&'static self, expected: Region) -> Result<AllocationClaim, ClaimError> {
         let owner = &self.tasks;
         let region = owner.region;
@@ -104,10 +100,6 @@ pub(crate) struct AllocationClaim {
     owner: &'static Allocation,
 }
 impl AllocationClaim {
-    #[cfg(feature = "diagnostics")]
-    pub(crate) fn region(&self) -> Region {
-        self.owner.region
-    }
     pub(crate) fn contains(&self, physical: u64, bytes: u64) -> bool {
         physical >= self.owner.region.physical
             && physical

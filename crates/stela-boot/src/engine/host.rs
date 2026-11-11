@@ -80,8 +80,6 @@ use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::activated_base;
 pub(crate) use local::context::RootIdentity;
-#[cfg(feature = "diagnostics")]
-pub(crate) use local::context::{RootContext, RootExecution, RootProcessScope};
 #[cfg(feature = "nvk")]
 pub(crate) use local::processor;
 use local::state;

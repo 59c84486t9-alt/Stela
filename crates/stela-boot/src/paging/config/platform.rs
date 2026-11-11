@@ -111,64 +111,6 @@ impl Platform {
         self.prepared.device_range(start, start + PAGE as u64)?;
         Ok(descriptor)
     }
-    pub(super) fn check_bus(&self, address: Address) -> Result<(), Error> {
-        self.check()?;
-        let inventory = stela_boot_core::ecam::EcamInventory::validate(
-            &self.prepared.windows,
-            self.prepared.physical_bits,
-        )
-        .map_err(Error::Mapping)?;
-        let index = self
-            .prepared
-            .windows
-            .iter()
-            .position(|window| {
-                window.segment == address.segment
-                    && (window.start_bus..=window.end_bus).contains(&address.bus)
-            })
-            .ok_or(Error::ResourceInventory)?;
-        inventory
-            .subset(index, address.bus..=address.bus, &self.prepared.roots)
-            .map_err(Error::Mapping)?;
-        Ok(())
-    }
-    pub(super) fn verify_empty(&self) -> Result<(), Error> {
-        self.check()?;
-        let _critical = self.critical().map_err(Error::Mapping)?;
-        for slot in 0..SLOTS {
-            if self.tokens[slot].load(Ordering::Acquire) != 0
-                    // SAFETY: privately owned leaf, bounded slot, IRQ excluded; this checks
-                    // hardware table storage, not just registry metadata.
-                || unsafe { self.leaf(slot).read_volatile() } != 0
-            {
-                return Err(Error::Mapping(owned::Error::UnmapFailed));
-            }
-        }
-        Ok(())
-    }
-    #[cfg(feature = "diagnostics")]
-    pub(super) fn identity_device(&self, span: PhysicalSpan) -> Result<(), Error> {
-        self.check()?;
-        self.prepared.device_range(span.start(), span.end())?;
-        for physical in (span.start()..span.end()).step_by(PAGE) {
-            let leaf = self
-                .root
-                .tables
-                .observe(physical)
-                .map_err(RootError::Traversal)
-                .map_err(Error::Root)?
-                .ok_or(Error::ResourceInventory)?;
-            if leaf.physical != physical
-                || !leaf.writable
-                || leaf.user
-                || !leaf.nx
-                || (self.snapshot.pat >> (8 * leaf.pat_index)) & 0xff != 0
-            {
-                return Err(Error::ResourceConflict);
-            }
-        }
-        Ok(())
-    }
     fn critical(&self) -> Result<Critical<'_>, owned::Error> {
         self.check().map_err(|_| owned::Error::Unavailable)?;
         let flags: u64;

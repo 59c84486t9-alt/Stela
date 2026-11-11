@@ -16,7 +16,6 @@ use uefi::{
 /// protocol or descriptor pointer and cannot itself construct an access grant.
 pub(crate) struct Prepared {
     pub(super) windows: Vec<EcamWindow>,
-    pub(super) roots: Vec<RootWindow>,
     exclusions: Vec<PhysicalSpan>,
     pub(super) physical_bits: u8,
     #[cfg(feature = "diagnostics")]
@@ -139,7 +138,6 @@ impl Prepared {
         }
         let result = Self {
             windows,
-            roots,
             exclusions,
             physical_bits,
             #[cfg(feature = "diagnostics")]

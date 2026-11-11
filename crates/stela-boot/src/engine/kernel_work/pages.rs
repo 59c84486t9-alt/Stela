@@ -57,10 +57,6 @@ impl TaskPageInventory {
         }
         Ok(())
     }
-    #[cfg(feature = "diagnostics")]
-    pub(super) fn count(&self) -> usize {
-        self.rows.len()
-    }
     fn retained_copy(&self) -> Result<Self, Error> {
         self.check().map_err(Error::Work)?;
         if self.rows.is_empty() {
@@ -75,16 +71,6 @@ impl TaskPageInventory {
             rows,
         })
     }
-    /// # Safety
-    /// Actual loader-root BSP owns these allocations through retirement.
-    #[cfg(feature = "diagnostics")]
-    pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
-        // SAFETY: original task and heap allocations are retained.
-        let (provider, extents) = unsafe { self.into_inventory() }?;
-        // SAFETY: diagnostic owns the taskless legacy entry for this boot.
-        unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
-    }
-
     /// # Safety
     /// Serialized native process/deferred context excludes C reentry, migration,
     /// root/cache mutation and source retargeting through catalog retirement.
