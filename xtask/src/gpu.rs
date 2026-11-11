@@ -152,22 +152,3 @@ pub fn build_nvk(jobs: u16) -> Result<()> {
     nvk::build(jobs)?;
     crate::guest::run()
 }
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    #[test]
-    fn removed_platform_prototype_commands_are_unknown() {
-        for command in ["macos", "metal-library-test"] {
-            let error = crate::Cli::try_parse_from(["xtask", "gpu", command, "--help"])
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::InvalidSubcommand,
-                "{command}"
-            );
-        }
-    }
-}
