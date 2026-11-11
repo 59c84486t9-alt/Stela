@@ -13,7 +13,7 @@ use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;
 use reports::*;
 pub use reports::{
-    DeviceRegister, Discard, Event, ExitWordsWalk, Footprint, FootprintWalk, Occupancy,
+    DeviceRegister, Discard, Event, ExitWordsWalk, Footprint, FootprintWalk, Occupancy, PeState,
     Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed, Suspension, TRACE_HITS,
     TraceHit, WATCH_HITS, WatchHit,
 };

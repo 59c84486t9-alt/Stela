@@ -547,6 +547,65 @@ fn a_completion_wait_answers_the_host_each_turn() {
     assert_eq!(machine.host.relaxes, 3);
 }
 
+/// A wait for a PE that does not apply posted maintenance past its bound
+/// is reported once, naming that PE and where it is, and goes on: it ends
+/// normally once the PE applies the maintenance.
+#[test]
+fn a_completion_wait_past_its_bound_is_reported_once_and_goes_on() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.send_outgoing();
+    let limit = machine.profile.counter_frequency / super::MAINTENANCE_WAIT_DIVISOR;
+    // Each turn reads the counter a step later: the bound passes at about
+    // the eighth turn, and PE 1 applies at the 40th.
+    machine.host.counter_step = limit / 8;
+    let other = Arc::clone(&hub);
+    machine.host.on_relax = Some(Box::new(move |turns| {
+        if turns == 40 {
+            let mail = other.take(1).expect("posted mail");
+            other.acknowledge(1, mail.serial);
+        }
+    }));
+    let degraded = machine.statistics.degraded;
+    machine.complete_maintenance().unwrap();
+    assert_eq!(machine.host.relaxes, 40, "waited until PE 1 applied");
+    assert!(machine.posted.is_empty());
+    assert_eq!(machine.statistics.degraded, degraded + 1);
+    let reports = machine.take_unmodeled();
+    assert_eq!(reports.len(), 1, "once: {reports:?}");
+    let RequirementKind::MaintenanceOverrun {
+        pe,
+        serial,
+        unapplied,
+        state,
+        ticks,
+    } = reports[0].kind
+    else {
+        panic!("expected a maintenance overrun, got {:?}", reports[0].kind);
+    };
+    assert_eq!(
+        (pe, serial, unapplied, state),
+        (1, 1, 1, super::super::PeState::Running)
+    );
+    assert!((limit..2 * limit).contains(&ticks), "{ticks} of {limit}");
+    assert!(
+        reports[0]
+            .to_string()
+            .contains("maintenance overrun: PE 1 (running)")
+    );
+
+    // A wait within its bound reports nothing.
+    machine.host.on_relax = None;
+    machine.host.counter_step = 0;
+    machine.post(Maintenance::Code(Some(0x8000)));
+    machine.send_outgoing();
+    let mail = hub.take(1).expect("posted mail");
+    hub.acknowledge(1, mail.serial);
+    machine.complete_maintenance().unwrap();
+    assert!(machine.take_unmodeled().is_empty());
+}
+
 #[test]
 fn maintenance_waits_for_the_dsb_and_reaches_a_pe_in_one_piece_of_mail() {
     let (hub, _) = hub(2);

@@ -1077,6 +1077,24 @@ impl Hub {
         })
     }
 
+    /// Where PE `pe` is, for the report of a maintenance wait that overran
+    /// ([`RequirementKind::MaintenanceOverrun`]): parked waiting in the
+    /// engine (on another PE's broadcast or a stop), or in its run loop (an
+    /// exit, a native slice or a wait for the devices' lock).
+    pub(super) fn waiting_state(&self, pe: usize) -> super::PeState {
+        use super::PeState;
+        let Some(inbox) = self.inboxes.get(pe) else {
+            return PeState::Unknown;
+        };
+        if inbox.parked.load(Ordering::SeqCst) {
+            PeState::Parked
+        } else if inbox.outside.load(Ordering::SeqCst) || inbox.sleeping.load(Ordering::SeqCst) {
+            PeState::Outside
+        } else {
+            PeState::Running
+        }
+    }
+
     /// Whether the home machine is outside its run loop: it advances the
     /// devices with time only from inside it.
     pub(super) fn home_outside(&self) -> bool {
@@ -1149,6 +1167,11 @@ impl core::fmt::Display for ParallelAdmissionError {
     }
 }
 impl core::error::Error for ParallelAdmissionError {}
+
+/// The wait for other PEs to apply posted maintenance past which it is
+/// reported, as a fraction of a second of the system count: half a second,
+/// the time a PE may spend in one exit before XNU's watchdog panics.
+pub(super) const MAINTENANCE_WAIT_DIVISOR: u64 = 2;
 
 /// One unique PE claim kept by its control owner through all native
 /// invocations. The inbox independently keeps the budget allocation.
@@ -1897,6 +1920,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Wait until every other running PE has applied the maintenance this
     /// one posted, reading this PE's own mail meanwhile: two PEs may wait
     /// on each other. A start that arrives meanwhile is posted again.
+    /// A wait past [`MAINTENANCE_WAIT_DIVISOR`] reports once
+    /// [`RequirementKind::MaintenanceOverrun`], naming a PE that has not
+    /// applied the maintenance, and goes on waiting: going on without it
+    /// would leave that PE the old translations or code, and XNU's watchdog
+    /// remains the last resort.
     pub(super) fn complete_maintenance(&mut self) -> Step {
         self.code_posted = None;
         self.mirrors.close_code_page();
@@ -1917,12 +1945,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // A PE stopping the others need not wait for this one meanwhile.
         hub.set_parked(self.current, true);
         let mut applied = Ok(());
+        let limit = self.profile.counter_frequency / MAINTENANCE_WAIT_DIVISOR;
+        let mut reported = false;
         while !hub.applied(&mut posted) {
             if profile.is_some() {
                 polls = polls.saturating_add(1);
             }
             applied = applied.and(self.wait_for_others(&hub));
             self.host.relax();
+            if !reported && let Some(&(pe, serial)) = posted.first() {
+                let waited = self.host.counter().wrapping_sub(started);
+                if waited >= limit {
+                    // Reported once for this wait, which goes on: the
+                    // unapplied PE still may hold the old translations.
+                    reported = true;
+                    self.statistics.degraded += 1;
+                    let requirement = self.requirement(RequirementKind::MaintenanceOverrun {
+                        pe,
+                        serial,
+                        unapplied: u32::try_from(posted.len()).unwrap_or(u32::MAX),
+                        state: hub.waiting_state(pe),
+                        ticks: waited,
+                    });
+                    self.unmodeled.push(requirement);
+                }
+            }
         }
         hub.set_parked(self.current, false);
         // `posted` is empty now: keep its buffer for the next DSB.

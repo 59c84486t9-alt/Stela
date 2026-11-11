@@ -28,6 +28,31 @@ pub enum Event {
     },
 }
 
+/// Where a PE is, for a report of a wait on it
+/// ([`RequirementKind::MaintenanceOverrun`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeState {
+    /// In its run loop: an exit, a native slice or a wait for the devices'
+    /// lock.
+    Running,
+    /// Waiting in the engine, on another PE's broadcast or a stop.
+    Parked,
+    /// Outside its run loop or asleep.
+    Outside,
+    Unknown,
+}
+
+impl fmt::Display for PeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Running => "running",
+            Self::Parked => "parked",
+            Self::Outside => "outside",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
 /// A requirement this engine does not implement, with where it was met.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
@@ -79,6 +104,17 @@ pub enum RequirementKind {
     FaultRecovery(stela_compiler::block::FaultRecoveryError),
     /// Detailed refusal before a checked native frame was executed.
     NativePreparation(String),
+    /// Other PEs had not applied posted TLB or code maintenance after the
+    /// reported bound: `pe`, one of the `unapplied` PEs, in `state`
+    /// ([`super::parallel::Hub::waiting_state`]), was still short of mail
+    /// `serial` after `ticks` of the system count. The wait goes on.
+    MaintenanceOverrun {
+        pe: usize,
+        serial: u64,
+        unapplied: u32,
+        state: PeState,
+        ticks: u64,
+    },
 }
 
 impl fmt::Display for Requirement {
@@ -149,6 +185,17 @@ impl fmt::Display for Requirement {
             RequirementKind::NativePreparation(detail) => {
                 write!(f, "native preparation: {detail}")?
             }
+            RequirementKind::MaintenanceOverrun {
+                pe,
+                serial,
+                unapplied,
+                state,
+                ticks,
+            } => write!(
+                f,
+                "maintenance overrun: PE {pe} ({state}) has not applied mail {serial} after \
+                 {ticks} counter ticks ({unapplied} PEs waited on); still waiting"
+            )?,
         }
         if let Some(syndrome) = self.syndrome {
             write!(f, " esr={syndrome:#x}")?;
