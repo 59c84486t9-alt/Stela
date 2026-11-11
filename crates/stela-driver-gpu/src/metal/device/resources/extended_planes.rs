@@ -132,6 +132,23 @@ impl PlaneChanges {
     }
 }
 
+/// The stamps passes mark their dirty tiles with, one per pass on any
+/// texture, never zero. After 2^32 passes a stamp repeats: a tile last
+/// marked that long ago is then converted again, which its mirror makes a
+/// comparison that writes nothing.
+static STAMPS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn next_stamp() -> u32 {
+    loop {
+        let stamp = STAMPS
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        if stamp != 0 {
+            return stamp;
+        }
+    }
+}
+
 /// Whether `format` is a two-plane extended-range format.
 fn extended(format: PixelFormat) -> bool {
     matches!(format.describe().encoding(), Encoding::ExtendedRange(codes) if codes.planes)
@@ -326,8 +343,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let extent = [descriptor.width as u32, descriptor.height as u32];
         let layers = view.range.layer_count;
         // The layer after the rendered ones mirrors the planes: each
-        // texel's codes word and alpha byte, which encodes compare.
-        let mirrored = layers + 1;
+        // texel's codes word and alpha byte, which encodes compare; the next
+        // holds the dirty tiles passes mark (`TexelArguments::DIRTY_LAYER`).
+        let mirrored = layers + 2;
         let info = ImageInfo {
             flags: ImageCreate::MUTABLE_FORMAT | ImageCreate::EXTENDED_USAGE,
             image_type: ImageType::D2,
@@ -605,6 +623,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Some(_) if current || loads => TexelArguments::MIRROR_COMPARE,
                 Some(_) => TexelArguments::MIRROR_WRITE,
                 None => 0,
+            },
+            // A pass that loads keeps the planes where it does not draw:
+            // its fragments mark the tiles they reach.
+            stamp: if surface.is_some() && loads {
+                next_stamp()
+            } else {
+                0
             },
         }))
     }
@@ -969,6 +994,7 @@ mod tests {
                 layer_count: 1,
             },
         };
+        let mut stamps = Vec::new();
         let mut plan = |loads, surface| {
             let mut changes = PlaneChanges::default();
             let actions = PlaneActions {
@@ -982,6 +1008,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             device.apply_plane_changes(changes);
+            stamps.push(planes.stamp);
             (planes.loads, planes.mirror)
         };
         let (write, compare) = (TexelArguments::MIRROR_WRITE, TexelArguments::MIRROR_COMPARE);
@@ -994,6 +1021,14 @@ mod tests {
         assert_eq!(plan(true, Some((7, 2))), (false, compare));
         // Unreported surfaces keep no mirror.
         assert_eq!(plan(true, None), (true, 0));
+        // Passes that load a followed surface, decoding it or not, mark
+        // their tiles with stamps of their own; clears and unreported
+        // surfaces mark none.
+        assert_eq!(
+            stamps.iter().map(|&stamp| stamp != 0).collect::<Vec<_>>(),
+            [true, false, false, true, false]
+        );
+        assert_ne!(stamps[0], stamps[3]);
         // The working image has the mirror's layer.
         let working = device.extended_working(texture, view).unwrap();
         assert_eq!(working.layers, 1);

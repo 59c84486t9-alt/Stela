@@ -1102,6 +1102,25 @@ alu_count(nir_shader *shader, nir_op op)
    return count;
 }
 
+/* Image stores of any form: deref, bindless or bound. */
+static unsigned
+image_store_count(nir_shader *shader)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+            count += op == nir_intrinsic_image_deref_store || op == nir_intrinsic_bindless_image_store ||
+                     op == nir_intrinsic_image_store;
+         }
+      }
+   }
+   return count;
+}
+
 /* An extended-range attachment's output is clamped to what its codes
  * encode, its alpha to [0, 1], and rounded to its nearest half; other
  * attachments' are left alone. */
@@ -1113,6 +1132,7 @@ extended_range_outputs_clamp(void)
    nir_shader *shader = compile(positioned, "positioned", &plain, &error);
    assert(shader && !alu_count(shader, nir_op_fmin) && !alu_count(shader, nir_op_fsat) &&
           !alu_count(shader, nir_op_f2f16_rtne));
+   unsigned stores = image_store_count(shader);
    stela_metal_release(shader);
    for (uint32_t kind = STELA_AIR_EXTENDED_RANGE_LINEAR; kind <= STELA_AIR_EXTENDED_RANGE_SRGB;
         kind++) {
@@ -1138,6 +1158,8 @@ extended_range_outputs_clamp(void)
              alu_count(shader, nir_op_fmin) == (held ? 3 : 0) &&
              alu_count(shader, nir_op_fsat) == (held ? 1 : 0));
       assert(alu_count(shader, nir_op_f2f16_rtne) == (held ? 8 : 4));
+      /* And mark the dirty tile they reach in the working image. */
+      assert(image_store_count(shader) == stores + 1);
       stela_metal_release(shader);
    }
    /* Another location's kind leaves location 0 alone. */

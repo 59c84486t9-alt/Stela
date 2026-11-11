@@ -25,8 +25,8 @@ use crate::metal::{
         VisibilityResultType, Winding,
     },
     binding::{
-        AccumulateArguments, AverageArguments, BufferBinding, PassImageblock, ResourceId,
-        SequenceVertexBuffer, TessellationArguments, TexelArguments,
+        AccumulateArguments, AverageArguments, BufferBinding, PassDirty, PassImageblock,
+        ResourceId, SequenceVertexBuffer, TessellationArguments, TexelArguments,
     },
     capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
@@ -402,7 +402,7 @@ impl CommandBuffer {
     pub fn begin_render(
         &mut self,
         resolver: &mut dyn Resolver,
-        pass: RenderPassPlan<ImageView>,
+        mut pass: RenderPassPlan<ImageView>,
         visibility_buffer: Option<(BufferRef, VisibilityResultType)>,
         samples: Vec<(CounterSample, PassBoundary)>,
     ) -> Result<()> {
@@ -416,6 +416,24 @@ impl CommandBuffer {
         self.bindings.reset();
         self.bindings
             .set_pass(pass.inputs.textures, pass_samples, imageblock);
+        // The pass's fragments mark the dirty tiles of one IOSurface's
+        // working image, which they reach as its attachment's raw texels;
+        // another's encode goes without them.
+        let mut dirty = PassDirty::default();
+        for (index, planes) in pass.inputs.extended_planes.iter_mut().enumerate() {
+            let Some(planes) = planes.as_mut().filter(|planes| planes.stamp != 0) else {
+                continue;
+            };
+            if dirty.stamp == 0 && pass.inputs.textures[index] == planes.storage {
+                dirty = PassDirty {
+                    stamp: planes.stamp,
+                    attachment: index as u32,
+                };
+            } else {
+                planes.stamp = 0;
+            }
+        }
+        self.bindings.set_dirty(dirty);
         for &(sample, boundary) in &samples {
             if let (CounterSample::Statistic(destination), true) = (sample, boundary.starts()) {
                 self.recorder.sample_statistics(resolver, destination)?;
@@ -431,7 +449,7 @@ impl CommandBuffer {
                     .push(Command::ClearColorImage { image, value });
             }
         }
-        let plane_decodes = self.extended_planes(resolver, &pass, true, None)?;
+        let plane_decodes = self.extended_planes(resolver, &pass, true, None, false)?;
         self.recorder.access(RENDER_PASS);
         self.recorder.pause_statistics();
         let begin = self.recorder.commands().len();
@@ -563,7 +581,7 @@ impl CommandBuffer {
         let commands = self.recorder.commands();
         // What the pass's work may have written; the IOSurface planes'
         // conversions cover only that (`extended_planes`).
-        let drawn = drawn_area(&commands[state.begins[0]..], state.pass.extent);
+        let (drawn, draws_only) = drawn_area(&commands[state.begins[0]..], state.pass.extent);
         for (instance, &index) in state.begins.iter().enumerate() {
             commands[index] =
                 Command::BeginRendering(rendering(&state.pass, instance == 0, instance == last));
@@ -583,7 +601,7 @@ impl CommandBuffer {
         }
         self.average_samples(resolver, &state.pass)?;
         self.narrow_plane_decodes(resolver, &state, DrawnArea::bounds(&drawn))?;
-        self.extended_planes(resolver, &state.pass, false, Some(&drawn))?;
+        self.extended_planes(resolver, &state.pass, false, Some(&drawn), draws_only)?;
         self.follow_depth(resolver, &state.pass)?;
         self.resolve_visibility(resolver, state.visibility)
     }
@@ -599,13 +617,17 @@ impl CommandBuffer {
     /// ([`drawn_area`]), one conversion each: every code survives a decode
     /// and encode, so the rest of the planes already holds what a whole
     /// encode would write. Answers the decodes' command indices, which the
-    /// end narrows to the rectangles' bounds.
+    /// end narrows to the rectangles' bounds. Where the drawn part is all of
+    /// it and only draws wrote it (`draws_only`), an attachment whose
+    /// fragments marked its dirty tiles ([`ExtendedPlanes::stamp`]) encodes
+    /// only those.
     fn extended_planes(
         &mut self,
         resolver: &mut dyn Resolver,
         pass: &RenderPassPlan<ImageView>,
         begins: bool,
         drawn: Option<&[[u32; 4]]>,
+        draws_only: bool,
     ) -> Result<Vec<(usize, usize)>> {
         let mut decodes = Vec::new();
         for (index, planes) in pass.inputs.extended_planes.iter().enumerate() {
@@ -627,9 +649,16 @@ impl CommandBuffer {
                 }
                 None => &whole,
             };
+            let [width, height] = planes.extent;
+            let stamp = match (begins, drawn) {
+                (false, Some([[0, 0, w, h]])) if draws_only && [*w, *h] == [width, height] => {
+                    planes.stamp
+                }
+                _ => 0,
+            };
             let mut ordered = false;
             for &area in areas {
-                let Some((arguments, count)) = plane_conversion(planes, area)? else {
+                let Some((arguments, count)) = plane_conversion(planes, area, stamp)? else {
                     continue;
                 };
                 let upload = self.recorder.upload(
@@ -684,7 +713,7 @@ impl CommandBuffer {
             if drawn == [0, 0, width, height] {
                 continue;
             }
-            let command = match plane_conversion(planes, Some(drawn))? {
+            let command = match plane_conversion(planes, Some(drawn), 0)? {
                 Some((arguments, count)) => {
                     let upload = self.recorder.upload(
                         resolver,
@@ -971,9 +1000,10 @@ const DRAWN_RECTS: usize = 8;
 /// blend and storage access of theirs (points, lines and mesh draws may
 /// reach past the viewport by their width). Anything but a draw inside the
 /// pass (a tile dispatch, a copy, generated commands) may reach any pixel,
-/// so the whole extent; nothing drawn is none.
-fn drawn_area(commands: &[Command], extent: [u32; 2]) -> Vec<[u32; 4]> {
-    let full = alloc::vec![[0, 0, extent[0], extent[1]]];
+/// so the whole extent; nothing drawn is none. Answers too whether only
+/// draws wrote it.
+fn drawn_area(commands: &[Command], extent: [u32; 2]) -> (Vec<[u32; 4]>, bool) {
+    let full = (alloc::vec![[0, 0, extent[0], extent[1]]], false);
     let whole = Rect {
         offset: [0, 0],
         extent,
@@ -1064,10 +1094,12 @@ fn drawn_area(commands: &[Command], extent: [u32; 2]) -> Vec<[u32; 4]> {
             area.add([start[0], start[1], end[0], end[1]]);
         }
     }
-    area.rects
+    let rects = area
+        .rects
         .iter()
         .map(|&[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0])
-        .collect()
+        .collect();
+    (rects, true)
 }
 
 /// The pixels the viewports `set` cover, within `extent`, as
@@ -1177,17 +1209,25 @@ fn narrows(planes: &ExtendedPlanes) -> bool {
 }
 
 /// The texel kernels' arguments converting `planes` over `area`
-/// (`[x, y, width, height]`, all of the extent for `None`), and the texels;
-/// `None` for no texels.
+/// (`[x, y, width, height]`, all of the extent for `None`), and the threads;
+/// `None` for none. With a pass's `stamp` the area is the whole extent and
+/// a workgroup converts each tile its fragments marked
+/// ([`TexelArguments::stamp`]).
 fn plane_conversion(
     planes: &ExtendedPlanes,
     area: Option<[u32; 4]>,
+    stamp: u32,
 ) -> Result<Option<(TexelArguments, u32)>> {
     let [x, y, width, height] = area.unwrap_or([0, 0, planes.extent[0], planes.extent[1]]);
-    let count = width
-        .checked_mul(height)
-        .and_then(|texels| texels.checked_mul(planes.layers))
-        .ok_or(Error::Unsupported("conversions of 4 Gi texels"))?;
+    let tile = TexelArguments::DIRTY_TILE;
+    let count = if stamp != 0 {
+        width.div_ceil(tile) * height.div_ceil(tile) * TexelArguments::WORKGROUP_SIZE
+    } else {
+        width
+            .checked_mul(height)
+            .and_then(|texels| texels.checked_mul(planes.layers))
+            .ok_or(Error::Unsupported("conversions of 4 Gi texels"))?
+    };
     if count == 0 {
         return Ok(None);
     }
@@ -1212,6 +1252,7 @@ fn plane_conversion(
             alpha: at(planes.alpha, planes.alpha_bytes_per_row, 1),
             alpha_bytes_per_row: planes.alpha_bytes_per_row,
             mirror: planes.mirror,
+            stamp,
             ..TexelArguments::default()
         },
         count,

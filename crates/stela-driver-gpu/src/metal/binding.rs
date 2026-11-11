@@ -310,6 +310,19 @@ pub struct ArgumentTable {
     pub imageblock: PassImageblock,
     /// What a fragment function that runs the fragment tests itself reads.
     pub fragment_tests: FragmentTests,
+    /// The pass's dirty tiles, which fragment functions of two-plane
+    /// extended-range attachments mark.
+    pub dirty: PassDirty,
+}
+
+/// A render pass's dirty tiles (`STELA_METAL_TABLE_DIRTY`): each fragment
+/// stores `stamp`, when nonzero, at its tile's texel of the dirty layer of
+/// color `attachment`'s working image, whose encode then converts only those
+/// tiles.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PassDirty {
+    pub stamp: u32,
+    pub attachment: u32,
 }
 
 /// The fragment tests a fragment function runs itself
@@ -359,6 +372,7 @@ impl Default for ArgumentTable {
             blend_color: [0; 4],
             imageblock: PassImageblock::default(),
             fragment_tests: FragmentTests::default(),
+            dirty: PassDirty::default(),
         }
     }
 }
@@ -417,7 +431,8 @@ impl ArgumentTable {
     pub const DEPTH_STENCIL_OFFSET: u32 = Self::IMAGEBLOCK_OFFSET + 16;
     pub const DEPTH_RANGE_OFFSET: u32 = Self::DEPTH_STENCIL_OFFSET + 16;
     pub const DEPTH_COPIES_OFFSET: u32 = Self::DEPTH_RANGE_OFFSET + 16;
-    pub const BYTES: u32 = Self::DEPTH_COPIES_OFFSET + 16;
+    pub const DIRTY_OFFSET: u32 = Self::DEPTH_COPIES_OFFSET + 16;
+    pub const BYTES: u32 = Self::DIRTY_OFFSET + 16;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -460,6 +475,9 @@ impl ArgumentTable {
             .for_each(|word| writer.u32(word));
         writer.u64(tests.depth.0);
         writer.u64(tests.stencil.0);
+        [self.dirty.stamp, self.dirty.attachment, 0, 0]
+            .into_iter()
+            .for_each(|word| writer.u32(word));
     }
 }
 
@@ -578,6 +596,10 @@ pub struct TexelArguments {
     pub bytes_per_row: u32,
     pub bytes_per_image: u32,
     pub origin: [u32; 3],
+    /// A load's pass stamp ([`PassDirty`]): nonzero, the region is the
+    /// whole image from the origin and thread `n` converts column `n % 64`
+    /// of tile `n / 64` where the dirty layer holds the stamp.
+    pub stamp: u32,
     /// For the two-plane extended-range encodings, the address of the
     /// alpha plane's byte of the region's first texel, or zero for none,
     /// and that plane's bytes per row.
@@ -598,6 +620,7 @@ impl TexelArguments {
     pub const ROW_OFFSET: u32 = 32;
     pub const IMAGE_BYTES_OFFSET: u32 = 36;
     pub const ORIGIN_OFFSET: u32 = 40;
+    pub const STAMP_OFFSET: u32 = 52;
     pub const ALPHA_OFFSET: u32 = 56;
     pub const ALPHA_ROW_OFFSET: u32 = 64;
     pub const MIRROR_OFFSET: u32 = 68;
@@ -605,6 +628,10 @@ impl TexelArguments {
     /// `STELA_METAL_TEXELS_MIRROR_WRITE` and `_COMPARE`.
     pub const MIRROR_WRITE: u32 = 1;
     pub const MIRROR_COMPARE: u32 = 2;
+    /// The side of the dirty tiles, and the working image's layer that
+    /// holds them (`STELA_METAL_DIRTY_TILE`, `_LAYER`).
+    pub const DIRTY_TILE: u32 = 64;
+    pub const DIRTY_LAYER: u32 = 2;
     pub const ALIGNMENT: u64 = 16;
     /// Threads per workgroup of the kernels.
     pub const WORKGROUP_SIZE: u32 = 64;
@@ -626,7 +653,7 @@ impl TexelArguments {
         for coordinate in self.origin {
             writer.u32(coordinate);
         }
-        writer.u32(0);
+        writer.u32(self.stamp);
         writer.u64(self.alpha);
         writer.u32(self.alpha_bytes_per_row);
         writer.u32(self.mirror);
@@ -1401,7 +1428,11 @@ mod tests {
                 "STELA_METAL_TABLE_DEPTH_COPIES",
                 ArgumentTable::DEPTH_COPIES_OFFSET,
             ),
+            ("STELA_METAL_TABLE_DIRTY", ArgumentTable::DIRTY_OFFSET),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
+            ("STELA_METAL_DIRTY_TILE", TexelArguments::DIRTY_TILE),
+            ("STELA_METAL_DIRTY_LAYER", TexelArguments::DIRTY_LAYER),
+            ("STELA_METAL_TEXELS_STAMP", TexelArguments::STAMP_OFFSET),
             (
                 "STELA_METAL_ACCUMULATE_RESULTS",
                 AccumulateArguments::RESULTS_OFFSET,
@@ -1957,7 +1988,8 @@ mod tests {
         assert_eq!(ArgumentTable::IMAGEBLOCK_OFFSET, 1760);
         assert_eq!(ArgumentTable::DEPTH_STENCIL_OFFSET, 1776);
         assert_eq!(ArgumentTable::DEPTH_COPIES_OFFSET, 1808);
-        assert_eq!(ArgumentTable::BYTES, 1824);
+        assert_eq!(ArgumentTable::DIRTY_OFFSET, 1824);
+        assert_eq!(ArgumentTable::BYTES, 1840);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0

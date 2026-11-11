@@ -2219,6 +2219,7 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
         narrows: true,
         decodes_whole: false,
         mirror: 0,
+        stamp: 0,
     };
     let record = |draws: &[(ScissorRect, Option<Viewport>, PrimitiveType)]| {
         let mut resolver = MockResolver::default();
@@ -2329,6 +2330,90 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
     let none = record(&[]);
     assert_eq!(none.len(), 1);
     assert_eq!(none[0].0, 0);
+}
+
+/// A pass whose fragments mark an IOSurface working image's dirty tiles
+/// (its attachment's raw texels are the working image) encodes, when only
+/// draws reached all of it, a workgroup per tile with its stamp; a scissor
+/// narrower than the target keeps its rectangle, and a pass whose attachment
+/// is not the working image marks nothing.
+#[test]
+fn marked_passes_encode_their_dirty_tiles() {
+    let mut color = texture(PixelFormat::Rgba8Unorm);
+    color.width = 200;
+    color.height = 70;
+    let planes = crate::metal::pass::ExtendedPlanes {
+        storage: ResourceId(0x55),
+        encoding: 9,
+        extent: [200, 70],
+        layers: 1,
+        color: 1 << 40,
+        color_bytes_per_row: 800,
+        alpha: 2 << 40,
+        alpha_bytes_per_row: 200,
+        loads: true,
+        stores: true,
+        narrows: true,
+        decodes_whole: true,
+        mirror: crate::metal::binding::TexelArguments::MIRROR_COMPARE,
+        stamp: 7,
+    };
+    let record = |scissor: ScissorRect, attached: ResourceId| {
+        let mut resolver = MockResolver::default();
+        let mut commands = CommandBuffer::new(FEATURES);
+        let mut plan = pass(&color, StoreAction::Store, false);
+        plan.inputs.extended_planes[0] = Some(planes);
+        plan.inputs.textures[0] = attached;
+        commands
+            .begin_render(&mut resolver, plan, None, Vec::new())
+            .unwrap();
+        let mut state = render_state(1);
+        state.plan.topology_class = crate::metal::abi::PrimitiveTopologyClass::Unspecified;
+        commands.set_render_pipeline_state(&state).unwrap();
+        commands
+            .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+            .unwrap();
+        commands.set_scissor_rects(&[scissor]).unwrap();
+        commands
+            .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+        commands.end_encoding(&mut resolver).unwrap();
+        let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+        recording.segments[0]
+            .commands
+            .iter()
+            .filter_map(|command| match *command {
+                Command::LoadTexels { arguments, count } => {
+                    let encoded = uploaded(&recording, arguments);
+                    Some((
+                        count,
+                        word(encoded, 52),
+                        [24, 28].map(|at| word(encoded, at)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let whole = ScissorRect {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 70,
+    };
+    // 4 x 2 tiles of 64, a workgroup of 64 threads each.
+    assert_eq!(
+        record(whole, ResourceId(0x55)),
+        [(4 * 2 * 64, 7, [200, 70])]
+    );
+    let part = ScissorRect {
+        x: 8,
+        y: 4,
+        width: 16,
+        height: 8,
+    };
+    assert_eq!(record(part, ResourceId(0x55)), [(16 * 8, 0, [16, 8])]);
+    assert_eq!(record(whole, ResourceId(0x66)), [(200 * 70, 0, [200, 70])]);
 }
 
 #[test]

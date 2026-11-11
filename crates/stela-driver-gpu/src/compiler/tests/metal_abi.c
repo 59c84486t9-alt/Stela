@@ -421,9 +421,13 @@ static void texel_kernels_convert_each_encoding(void)
    ralloc_free(store);
    nir_shader *load = stela_metal_load_texels_kernel(NULL);
    check_kernel(load);
-   assert(intrinsic_count(load, nir_intrinsic_image_deref_load) == 1 + planes);
-   assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == 2 * planes);
-   assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings + 2 * planes);
+   /* Linear: the texel and each planes encoding's mirror; the mirror or
+    * the quantized texel stored; the word and alpha written. Tiled: the
+    * dirty mark, then each planes encoding's texel and mirror; the mirror
+    * stored; the word and alpha written. */
+   assert(intrinsic_count(load, nir_intrinsic_image_deref_load) == 1 + planes + 1 + 2 * planes);
+   assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == 2 * planes + planes);
+   assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings + 2 * planes + 2 * planes);
    ralloc_free(load);
 }
 

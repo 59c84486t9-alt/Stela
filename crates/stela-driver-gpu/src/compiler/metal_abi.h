@@ -42,7 +42,19 @@
 #define STELA_METAL_TABLE_DEPTH_STENCIL 1776u
 #define STELA_METAL_TABLE_DEPTH_RANGE 1792u
 #define STELA_METAL_TABLE_DEPTH_COPIES 1808u
-#define STELA_METAL_TABLE_BYTES 1824u
+/* A fragment table's STELA_AIR_DIRTY_TILES, a uvec4: the pass's stamp, zero
+ * for none, and the color attachment whose working image's
+ * STELA_METAL_DIRTY_LAYER takes it, then two zeros. */
+#define STELA_METAL_TABLE_DIRTY 1824u
+#define STELA_METAL_TABLE_BYTES 1840u
+/* The side of the square tiles a two-plane working image's dirty layer
+ * marks, its log2, and the layer: after the rendered layer and the planes'
+ * mirror. A fragment stores the pass's stamp at its tile's texel there; a
+ * load given the stamp (STELA_METAL_TEXELS_STAMP) converts only those
+ * tiles, a workgroup each. */
+#define STELA_METAL_DIRTY_TILE 64u
+#define STELA_METAL_DIRTY_TILE_SHIFT 6u
+#define STELA_METAL_DIRTY_LAYER 2u
 
 /* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
  * the push constants' arguments address: uint origin[3], then size[3]. */
@@ -68,6 +80,9 @@
  * buffer's bytes per row and image, the region's origin and first layer in
  * the view, then for the two-plane extended-range encodings the address of
  * the alpha plane's first texel, or zero, its bytes per row, and the
+ * pass's stamp (STELA_METAL_DIRTY_LAYER: nonzero, the region is the whole
+ * image from its origin and thread n converts tile n / 64's column n % 64
+ * where the dirty layer holds the stamp), and the
  * planes' mirror (STELA_METAL_TEXELS_MIRROR_*): the view's next layer
  * holds, per texel, the codes word and alpha byte the planes hold, which a
  * load compares to write only the texels that changed. */
@@ -80,6 +95,7 @@
 #define STELA_METAL_TEXELS_ROW 32u
 #define STELA_METAL_TEXELS_IMAGE_BYTES 36u
 #define STELA_METAL_TEXELS_ORIGIN 40u
+#define STELA_METAL_TEXELS_STAMP 52u
 #define STELA_METAL_TEXELS_ALPHA 56u
 #define STELA_METAL_TEXELS_ALPHA_ROW 64u
 #define STELA_METAL_TEXELS_MIRROR 68u

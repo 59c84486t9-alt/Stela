@@ -191,6 +191,10 @@ pub struct ExtendedPlanes {
     /// ([`TexelArguments::mirror`](crate::metal::binding::TexelArguments)):
     /// zero for none, else what its conversions do with it.
     pub mirror: u32,
+    /// The pass's stamp, nonzero where its fragments mark the working
+    /// image's dirty tiles ([`PassDirty`](crate::metal::binding::PassDirty)),
+    /// which its encode then converts alone.
+    pub stamp: u32,
 }
 
 /// Storage copies of a pass's depth and stencil samples and of its stencil

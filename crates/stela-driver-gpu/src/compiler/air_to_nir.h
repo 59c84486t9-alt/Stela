@@ -361,7 +361,17 @@ enum stela_air_device_value {
    /* The viewport's near and far depths as a uvec4 of float bits, then two
     * zeros. */
    STELA_AIR_DEPTH_RANGE,
+   /* A fragment function's pass's dirty tiles, as a uvec4: the stamp each
+    * fragment stores at its tile of a color attachment's dirty layer, zero
+    * for none, and that attachment, then two zeros
+    * (STELA_METAL_TABLE_DIRTY). */
+   STELA_AIR_DIRTY_TILES,
 };
+
+/* The log2 of the side of STELA_AIR_DIRTY_TILES's square tiles, and the
+ * layer of the attachment's raw image that holds them, a texel each. */
+#define STELA_AIR_DIRTY_TILE_SHIFT 6u
+#define STELA_AIR_DIRTY_LAYER 2u
 
 /* STELA_AIR_DEPTH_STENCIL's depth word: the MTLCompareFunction of the depth
  * test in bits 0 to 2, which Vulkan's VkCompareOp numbers alike, depth

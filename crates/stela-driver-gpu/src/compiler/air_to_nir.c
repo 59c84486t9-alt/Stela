@@ -179,6 +179,10 @@ struct translator {
    /* Storage attachment 0's second blend source, color(0) index(1). */
    nir_variable *attachment_source1;
    nir_def *blend_color;
+   /* STELA_AIR_DIRTY_TILES, and the two-plane extended-range color
+    * attachments whose working image may take it. */
+   nir_def *dirty;
+   unsigned dirty_attachments;
    struct attachment_read {
       const struct stela_air_stage_io *io;
       nir_def *placeholder;
@@ -4527,9 +4531,63 @@ attachment_prelude(struct translator *t)
          return false;
       t->storage_attachments |= 1u << n;
    }
-   if (t->storage_attachments)
+   /* The two-plane extended-range attachments mark the tiles their
+    * fragments reach (mark_dirty_tiles). Multisampled ones are never
+    * IOSurface planes. */
+   unsigned kinds = t->stage_options->extended_range;
+   if (t->stage_options->samples <= 1 && t->options->bind_attachment &&
+       t->options->load_device_value) {
+      for (unsigned n = 0; n < AIR_MAX_RENDER_TARGETS; n++) {
+         unsigned kind = kinds >> (n * STELA_AIR_EXTENDED_RANGE_BITS) &
+                         BITFIELD_MASK(STELA_AIR_EXTENDED_RANGE_BITS);
+         if (kind < STELA_AIR_EXTENDED_RANGE_PLANES_HELD)
+            continue;
+         if (!(t->storage_attachments & 1u << n) && !attachment_binding(t, n, false))
+            return false;
+         t->dirty_attachments |= 1u << n;
+      }
+      if (t->dirty_attachments) {
+         t->dirty = t->options->load_device_value(&t->b, STELA_AIR_DIRTY_TILES,
+                                                  t->options->binding_data);
+         if (!t->dirty || t->dirty->num_components != 4 || t->dirty->bit_size != 32 ||
+             !binding_prelude(t))
+            return fail(t, STELA_AIR_ARGUMENT, "invalid device value");
+      }
+   }
+   if (t->storage_attachments || t->dirty_attachments)
       t->b.shader->info.fs.origin_upper_left = true;
    return true;
+}
+
+/* Where a fragment function ends, each fragment that reached it stores its
+ * pass's stamp, when it has one, at its tile's texel of the dirty layer of
+ * the attachment the pass names (STELA_AIR_DIRTY_TILES): the pass's end then
+ * encodes only those tiles into the IOSurface's planes. A fragment that
+ * writes no color marks its tile all the same. */
+static void
+mark_dirty_tiles(struct translator *t)
+{
+   if (!t->dirty)
+      return;
+   nir_function_impl *impl = nir_shader_get_entrypoint(t->b.shader);
+   nir_builder *b = &t->b;
+   b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
+   nir_def *stamp = nir_channel(b, t->dirty, 0), *marked = nir_channel(b, t->dirty, 1);
+   nir_def *tile = nir_ushr_imm(b, nir_f2u32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2)),
+                                STELA_AIR_DIRTY_TILE_SHIFT);
+   nir_def *coord = nir_vec4(b, nir_channel(b, tile, 0), nir_channel(b, tile, 1),
+                             nir_imm_int(b, STELA_AIR_DIRTY_LAYER), nir_imm_int(b, 0));
+   nir_push_if(b, nir_iand(b, nir_ine_imm(b, stamp, 0), nir_inot(b, nir_is_helper_invocation(b, 1))));
+   u_foreach_bit(n, t->dirty_attachments) {
+      nir_push_if(b, nir_ieq_imm(b, marked, n));
+      nir_image_deref_store(b, &attachment_image(t, n)->def, coord, nir_imm_int(b, 0),
+                            nir_vec4(b, stamp, nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0)),
+                            nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                            .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
+      nir_pop_if(b, NULL);
+   }
+   nir_pop_if(b, NULL);
+   nir_progress(true, impl, nir_metadata_none);
 }
 
 static bool
@@ -9676,6 +9734,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       goto done;
    if (stage && stage->stage == STELA_AIR_FRAGMENT && !order_fragments(&t))
       goto done;
+   if (stage && stage->stage == STELA_AIR_FRAGMENT)
+      mark_dirty_tiles(&t);
    if (stage && stage->stage == STELA_AIR_FRAGMENT) {
       shade_per_sample(t.b.shader);
       /* A function running once per sample orders the fragments of each

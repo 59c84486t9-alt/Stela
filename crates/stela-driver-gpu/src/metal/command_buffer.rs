@@ -545,6 +545,13 @@ impl Bindings {
         }
     }
 
+    /// The pass's dirty tiles, which its fragment functions mark.
+    fn set_dirty(&mut self, dirty: crate::metal::binding::PassDirty) {
+        let table = self.table(Stage::Fragment);
+        table.slots.dirty = dirty;
+        table.address = None;
+    }
+
     /// What a fragment function testing fragments itself reads.
     fn set_fragment_tests(&mut self, tests: crate::metal::binding::FragmentTests) {
         let table = self.table(Stage::Fragment);
