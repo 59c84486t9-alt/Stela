@@ -1,6 +1,6 @@
 //! The host firmware's AML, run by the pinned ACPICA
-//! (`stela_drivers::platform::acpi`, whose README is the provider contract)
-//! through the engine's own OSL services: its heap, the TSC, port I/O, PCI
+//! (`stela_drivers::platform::acpi`, whose `Services` table is the provider
+//! contract) through the engine's own OSL services: its heap, the TSC, port I/O, PCI
 //! configuration space and the loader root's mappings.
 //!
 //! The boot keeps its EC binding before namespace initialization. When the
