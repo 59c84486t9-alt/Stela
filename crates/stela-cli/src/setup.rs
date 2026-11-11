@@ -598,8 +598,75 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
     })
 }
 
+/// The actions that find their USB when `--usb` is not given.
+fn finds_usb(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Status
+            | Action::Repair
+            | Action::UpdateStela
+            | Action::UpdateOs
+            | Action::HostFirmwareInstall(_)
+            | Action::HostFirmwareFetch { .. }
+    )
+}
+
+/// The mounted volume of each of this computer's disks that holds a Stela
+/// setup, with the disk it is on: an EFI partition with the setup record,
+/// or else a data volume with Stela's `stela/boot` directory. One per disk.
+fn find_setups(host: &dyn Host) -> Result<Vec<(PathBuf, String)>> {
+    let mut found = Vec::new();
+    for disk in host.disks()? {
+        let mounts = || disk.partitions.iter().filter_map(|p| p.mount.as_ref());
+        let volume = mounts()
+            .find(|mount| mount.join(RECORD).is_file())
+            .or_else(|| mounts().find(|mount| mount.join("stela/boot").is_dir()));
+        if let Some(volume) = volume {
+            found.push((
+                volume.clone(),
+                format!("{} ({})", disk.identifier, disk.name),
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// The USB of the one disk that holds a setup ([`find_setups`]), named on
+/// the error output. None or several are an error that lists them; setup
+/// never guesses between two.
+fn choose_setup(host: &dyn Host) -> Result<PathBuf> {
+    let found = find_setups(host)?;
+    match found.as_slice() {
+        [(volume, disk)] => {
+            eprintln!("Using the Stela USB at {} on {disk}", volume.display());
+            Ok(volume.clone())
+        }
+        [] => bail!(
+            "no mounted volume on this computer holds a Stela setup: plug in the USB, mount its \
+             STELA volume, or name it with --usb"
+        ),
+        several => {
+            let list: String = several
+                .iter()
+                .map(|(volume, disk)| format!("  {} on {disk}\n", volume.display()))
+                .collect();
+            bail!(
+                "{} disks hold a Stela setup:\n{list}Name the one to use with --usb, such as \
+                 --usb {}",
+                several.len(),
+                several[0].0.display()
+            )
+        }
+    }
+}
+
 impl Request {
     fn run(mut self) -> Result<()> {
+        // Without --usb, a maintenance command acts on the one USB that
+        // holds a setup.
+        if finds_usb(&self.action) && self.usb.as_os_str().is_empty() {
+            self.usb = choose_setup(&host::System)?;
+        }
         // A Windows relaunch opens its own window, which only the wizard
         // and `boot-log`, whose raw disk reads need administrator rights,
         // want.
@@ -794,8 +861,14 @@ impl Request {
                     .unwrap_or_else(|| cache_dir().join("firmware"));
                 // Older instructions name a GPU chip: the bundle holds every
                 // chip's files, so this brings the USB to the full bundle.
-                if requirements.is_none() && stela_loader::host_firmware::reads_bundle(&mount_image)
-                {
+                let bundled = stela_loader::host_firmware::reads_bundle(&mount_image);
+                ensure!(
+                    bundled || requirements.is_some() || gpu.is_some(),
+                    "this USB's stela.efi reads no firmware bundle: name a requirements file, or \
+                     run {} first",
+                    fix(&record.esp, "update stela")
+                );
+                if requirements.is_none() && bundled {
                     let mut report = format!(
                         "Host firmware: the USB's bundle holds {}{}.\n",
                         firmware::bundle_summary(),

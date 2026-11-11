@@ -35,7 +35,7 @@ impl Setup {
 enum Command {
     /// Report everything about the setup and check it, changing nothing;
     /// fails when something needs fixing.
-    Status(Usb),
+    Status(Found),
     /// Put back what the setup record says (stela.cfg, the startup choices,
     /// damaged boot files); with `--fetch` or `--ipsw`, also prepare the
     /// active build's restore bundles again and put back a damaged install
@@ -98,6 +98,27 @@ impl Usb {
         Request {
             action,
             usb: self.usb,
+            ..Request::default()
+        }
+    }
+}
+
+/// The USB a command that changes nothing it cannot put back acts on:
+/// without `--usb`, the one mounted volume of this computer's disks that
+/// holds a Stela setup (`find_setups`).
+#[derive(Args)]
+struct Found {
+    /// The USB's EFI partition, or another mounted volume of the same USB.
+    /// Without it, the USB is found when exactly one disk holds a setup.
+    #[arg(long, value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from))]
+    usb: Option<PathBuf>,
+}
+
+impl Found {
+    fn request(self, action: Action) -> Request {
+        Request {
+            action,
+            usb: self.usb.unwrap_or_default(),
             ..Request::default()
         }
     }
@@ -416,7 +437,7 @@ impl Create {
 #[derive(Args)]
 struct Repair {
     #[command(flatten)]
-    usb: Usb,
+    usb: Found,
     #[command(flatten)]
     image: Image,
     /// Download the restore image from Apple to prepare the restore files
@@ -498,7 +519,7 @@ impl Update {
 #[derive(Args)]
 struct UpdateStela {
     #[command(flatten)]
-    usb: Usb,
+    usb: Found,
     /// The `stela.efi` to install instead of the one built into `stela`.
     #[arg(long, hide = true)]
     efi: Option<PathBuf>,
@@ -516,7 +537,7 @@ struct UpdateStela {
 #[derive(Args)]
 struct UpdateOs {
     #[command(flatten)]
-    usb: Usb,
+    usb: Found,
     #[command(flatten)]
     image: Image,
     /// Show what would change, and change nothing.
@@ -695,7 +716,7 @@ enum HostFirmware {
         #[arg(value_name = "DIRECTORY")]
         directory: PathBuf,
         #[command(flatten)]
-        usb: Usb,
+        usb: Found,
         /// Show what would change, and change nothing.
         #[arg(long)]
         dry_run: bool,
@@ -704,14 +725,14 @@ enum HostFirmware {
     /// native drivers. The inventory must come from the target PC, not this
     /// setup host.
     Fetch {
-        #[arg(value_name = "REQUIREMENTS", required_unless_present = "gpu")]
+        #[arg(value_name = "REQUIREMENTS")]
         requirements: Option<PathBuf>,
-        /// Also keep what the USB holds, and add the GPU firmware this NVIDIA
-        /// chip needs, such as ga104. A boot without it names the chip.
+        /// Kept for older instructions: the firmware bundle holds every
+        /// supported chip's files, which this command completes.
         #[arg(long, value_name = "CHIP")]
         gpu: Option<String>,
         #[command(flatten)]
-        usb: Usb,
+        usb: Found,
         /// Cache for pinned host firmware images and redistribution notices.
         #[arg(long, value_name = "DIRECTORY")]
         cache: Option<PathBuf>,

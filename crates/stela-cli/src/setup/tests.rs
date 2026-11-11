@@ -4661,3 +4661,81 @@ fn setup_boot_log_reads_the_usb_raw_when_its_folder_cannot_be_read() {
     assert!(error.contains("has no setup"), "{error}");
     assert!(error.contains("nor does Disk disk5"), "{error}");
 }
+
+#[test]
+fn without_usb_the_one_disk_holding_a_setup_is_used_and_two_are_never_guessed() {
+    let dir = tempfile::tempdir().unwrap();
+    let volume = |name: &str, setup: Option<&str>| {
+        let path = dir.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        if let Some(inner) = setup {
+            fs::create_dir_all(path.join(inner).parent().unwrap()).unwrap();
+            if inner == RECORD {
+                fs::write(path.join(inner), b"{}").unwrap();
+            } else {
+                fs::create_dir_all(path.join(inner)).unwrap();
+            }
+        }
+        path
+    };
+    let system = volume("system", None);
+    let esp = volume("esp", Some(RECORD));
+    let data = volume("data", Some("stela/boot"));
+    let other = volume("other", Some("stela/boot"));
+    let host = |disks: Vec<Disk>| FakeHost::new(BTreeMap::new(), disks);
+    // None: the error says how to name one.
+    let error = choose_setup(&host(vec![disk("disk0", &[("Linux", Some(&system))])]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no mounted volume"), "{error}");
+    assert!(error.contains("--usb"), "{error}");
+    // One: its EFI partition, which holds the record, over its data volume.
+    let one = host(vec![
+        disk("disk0", &[("Linux", Some(&system))]),
+        disk(
+            "disk5",
+            &[("Microsoft Basic Data", Some(&data)), ("EFI", Some(&esp))],
+        ),
+    ]);
+    assert_eq!(choose_setup(&one).unwrap(), esp);
+    // A USB whose EFI partition is not mounted is found by its data volume.
+    let data_only = host(vec![disk(
+        "disk5",
+        &[("EFI", None), ("Microsoft Basic Data", Some(&data))],
+    )]);
+    assert_eq!(choose_setup(&data_only).unwrap(), data);
+    // Two: both are listed and neither is used.
+    let two = host(vec![
+        disk("disk5", &[("EFI", Some(&esp))]),
+        disk("disk6", &[("Microsoft Basic Data", Some(&other))]),
+    ]);
+    let error = choose_setup(&two).unwrap_err().to_string();
+    assert!(error.starts_with("2 disks hold a Stela setup"), "{error}");
+    assert!(error.contains(&esp.display().to_string()), "{error}");
+    assert!(error.contains(&other.display().to_string()), "{error}");
+    assert!(error.contains("Name the one to use with --usb"), "{error}");
+}
+
+#[test]
+fn maintenance_commands_parse_without_usb() {
+    use clap::Parser as _;
+    for args in [
+        &["stela", "setup", "status"][..],
+        &["stela", "setup", "repair"],
+        &["stela", "setup", "update", "stela"],
+        &["stela", "setup", "update", "os"],
+        &["stela", "setup", "host-firmware", "fetch"],
+    ] {
+        let crate::Command::Setup(setup) = crate::Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+            .command
+        else {
+            panic!("not a setup");
+        };
+        let request = setup.request();
+        assert!(request.usb.as_os_str().is_empty(), "{args:?}");
+        assert!(finds_usb(&request.action), "{args:?}");
+    }
+    // Uninstall still names its USB.
+    assert!(crate::Cli::try_parse_from(["stela", "setup", "uninstall"]).is_err());
+}
