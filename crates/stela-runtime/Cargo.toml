@@ -3,6 +3,10 @@ name = "stela-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Board mounting, restore and host I/O for the translated Mac"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

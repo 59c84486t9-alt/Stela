@@ -3,6 +3,10 @@ name = "stela-engine"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-or-later AND BSD-3-Clause"
+description = "Execution of translated ARM64 code: code cache, dispatch, guest memory and system state"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

@@ -3,6 +3,10 @@ name = "stela-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "The stela command: prepares the USB installer that boots macOS on a PC through Stela"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [[bin]]
 name = "stela"

@@ -5,6 +5,10 @@ edition.workspace = true
 # Stela's own code is GPL-2.0-or-later; Linux-derived controller code retains
 # its GPL notices.
 license = "GPL-2.0-or-later AND GPL-2.0-only"
+description = "PC disk controllers: NVMe, AHCI, SD and card readers"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

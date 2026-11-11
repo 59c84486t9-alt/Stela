@@ -3,6 +3,9 @@ name = "stela-fingerprint"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Source fingerprints for build scripts"
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lints]

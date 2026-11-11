@@ -3,6 +3,10 @@ name = "stela-linux"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT AND BSD-3-Clause"
+description = "Linux kernel services for running unchanged Linux driver code"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 links = "stela_linux"
 
 [lints]

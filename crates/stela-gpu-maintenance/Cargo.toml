@@ -3,6 +3,10 @@ name = "stela-gpu-maintenance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Validates and installs the guest GPU components from macOS"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [dependencies]
 stela-loader.workspace = true

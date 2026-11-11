@@ -3,6 +3,9 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Stela's development tasks (cargo xtask)"
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]

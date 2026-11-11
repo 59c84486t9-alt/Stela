@@ -3,8 +3,10 @@ name = "stela-boot-core"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-or-later AND GPL-2.0-only"
+repository.workspace = true
+rust-version.workspace = true
 publish = false
-description = "The UEFI mount's firmware-independent logic: stela.cfg options, ACPI, topology, paging and console decoders, and the passthrough DMA domain"
+description = "Firmware-independent logic of stela.efi: stela.cfg options, ACPI, topology, paging and console decoders"
 
 [features]
 # `_CRS` interrupt routes, decoded by the drivers' ACPI resource types.

@@ -3,6 +3,9 @@ name = "stela-dev"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Stela's research and development commands"
+repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 # The research and development commands; the shipped `stela` is stela-cli's.

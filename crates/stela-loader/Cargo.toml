@@ -3,6 +3,10 @@ name = "stela-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Mach-O loading and the restore-image formats of the kernel hand-off"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [features]
 default = ["std"]

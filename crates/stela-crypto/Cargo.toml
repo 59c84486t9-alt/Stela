@@ -3,6 +3,10 @@ name = "stela-crypto"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-or-later AND (MIT OR Apache-2.0)"
+description = "SHA-1, SHA-256 and AES with x86 kernels and a software fallback"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

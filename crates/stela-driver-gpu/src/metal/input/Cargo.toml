@@ -3,6 +3,10 @@ name = "stela-metal-input"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "C interface to Stela's Metal library parser for the hosted shader compilers"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

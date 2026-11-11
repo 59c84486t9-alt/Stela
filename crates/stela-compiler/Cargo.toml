@@ -3,6 +3,10 @@ name = "stela-compiler"
 version.workspace = true
 edition.workspace = true
 license = "GPL-2.0-or-later AND MIT"
+description = "Ahead-of-time translation of ARM64 code to x86-64"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

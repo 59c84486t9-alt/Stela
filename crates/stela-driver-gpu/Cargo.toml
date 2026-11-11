@@ -7,6 +7,10 @@ edition.workspace = true
 # notices, Mesa, NVIDIA and Intel sources their MIT notices, and the LLVM
 # patches keep the terms of the upstream files they change.
 license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT AND BSD-3-Clause AND Apache-2.0 WITH LLVM-exception"
+description = "PC GPU discovery, the nouveau port and Stela's Metal device"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

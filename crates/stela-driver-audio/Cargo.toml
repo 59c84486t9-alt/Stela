@@ -5,6 +5,10 @@ edition.workspace = true
 # Stela's own code is GPL-2.0-or-later; Linux-derived audio code retains its
 # GPL notices, and the ELD header adaptation its MIT notice.
 license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT"
+description = "PC audio drivers: HDA, AMD ACP and Intel DSP"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

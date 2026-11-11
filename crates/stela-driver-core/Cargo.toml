@@ -3,6 +3,10 @@ name = "stela-driver-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Host device firmware and SMBIOS resource contracts"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

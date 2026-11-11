@@ -6,6 +6,10 @@ edition.workspace = true
 # code retains its GPL/ISC notices, the Intel shared initialization also
 # retains BSD terms, and the Asahi and NXP Bluetooth sources their MIT notices.
 license = "GPL-2.0-or-later AND GPL-2.0-only AND MIT AND BSD-3-Clause AND ISC"
+description = "Stela's PC drivers by device class, with USB, Bluetooth and input"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

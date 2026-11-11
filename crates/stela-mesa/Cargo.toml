@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "GPL-2.0-or-later AND MIT AND Apache-2.0 WITH LLVM-exception"
+description = "Mesa's NVK, NIR and NAK, linked into stela.efi"
+repository = "https://github.com/tylertms/Stela"
+rust-version = "1.99"
 build = "build.rs"
 
 # A workspace of none: this crate and the ones it names build only for

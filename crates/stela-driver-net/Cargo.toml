@@ -5,6 +5,10 @@ edition.workspace = true
 # Stela's own code is GPL-2.0-or-later; Linux-derived adapter code retains its
 # GPL/ISC notices, and the Intel Wi-Fi ports also retain their BSD terms.
 license = "GPL-2.0-or-later AND GPL-2.0-only AND BSD-3-Clause AND BSD-3-Clause-Clear AND ISC"
+description = "PC Ethernet and Wi-Fi drivers"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true
