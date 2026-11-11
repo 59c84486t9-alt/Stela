@@ -413,6 +413,34 @@ impl Catalog {
         Self::from_resources(resources, Bytes::Persistent)
     }
 
+    /// A catalog holding `image`'s verified bytes under the exact `name` and
+    /// `target` a driver asked for: the image's bytes and digest were checked
+    /// when its own catalog was built, so neither is copied nor hashed again.
+    /// The provenance stays the image's.
+    pub fn rebind(image: Image<'static>, name: &str, target: Target<'_>) -> Result<Self, Error> {
+        validate(name, target)?;
+        let provenance = image.provenance();
+        Ok(Self {
+            entries: alloc::vec![Entry {
+                name: name.into(),
+                target: OwnedTarget {
+                    driver: target.driver.into(),
+                    hardware: target.hardware.into(),
+                    revision: target.revision.into(),
+                    board: target.board.map(String::from),
+                },
+                provenance: OwnedProvenance {
+                    source: provenance.source.into(),
+                    revision: provenance.revision.into(),
+                    member: provenance.member.into(),
+                    license: provenance.license.into(),
+                },
+                sha256: image.sha256(),
+                bytes: Bytes::Persistent(image.bytes()),
+            }],
+        })
+    }
+
     /// Number and total bytes of immutable resources, for boot diagnostics.
     pub fn inventory(&self) -> (usize, usize) {
         (
