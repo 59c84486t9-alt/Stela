@@ -281,7 +281,10 @@ fn binary(
     target: crate::TargetCpu,
 ) {
     let xmm = destination.xmm;
-    if three::vex(target) || xmm == left || xmm != right {
+    if xmm == left {
+        // The legacy form in place.
+        opcode.register(code, xmm, right, target);
+    } else if three::vex(target) || xmm != right {
         three::three(code, opcode, xmm, left, right, target);
     } else if commutative {
         three::three(code, opcode, xmm, right, left, target);

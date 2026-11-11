@@ -1,12 +1,13 @@
 //! Overflow-safe halving arithmetic and narrowing/widening helpers.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{
-    Host, commit, packed,
+    Host, binary, commit, packed,
     products::extend,
     read_vector,
     rearrange::constant,
     shifts::{pack_truncated, right_shift, rounded_right},
     three::three,
+    vector_destination, vector_source,
 };
 use crate::x86_64::asm::Code;
 use crate::{
@@ -60,6 +61,45 @@ fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool, ta
         }
     }
 }
+/// UHADD/SHADD/URHADD (and SRHADD of S and D lanes), 16 bytes, from the
+/// sources where they are into the destination: PAVGB/PAVGW, else
+/// (a&b)+((a^b)>>1) or (a|b)-((a^b)>>1). Clobbers XMM0-XMM2.
+fn average(code: &mut Code, operand: &Operand, signed: bool, round: bool, target: TargetCpu) {
+    let lane = operand.lane_bytes;
+    let left = vector_source(code, operand.left, 0);
+    let right = vector_source(code, operand.right, 1);
+    if round && lane <= 2 {
+        let opcode = if lane == 1 {
+            Host::AverageByte
+        } else {
+            Host::AverageWord
+        };
+        let destination = vector_destination(code, operand.destination, 0);
+        binary(code, opcode, destination, left, right, true, target);
+        return;
+    }
+    let both = if round { Host::Or } else { Host::And };
+    three(code, both, 2, left, right, target);
+    three(code, Host::Xor, 0, left, right, target);
+    right_shift(code, 0, lane, 1, signed, target);
+    // XMM1, free now, is the scratch register of the subtraction.
+    let destination = vector_destination(code, operand.destination, u8::from(round));
+    if round {
+        let subtract = add_or_subtract(lane, true);
+        binary(code, subtract, destination, 2, 0, false, target);
+    } else {
+        binary(
+            code,
+            add_or_subtract(lane, false),
+            destination,
+            0,
+            2,
+            true,
+            target,
+        );
+    }
+}
+
 fn pair_long(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
     if lane == 1 && !signed && target >= TargetCpu::Ssse3 {
         constant(code, 1, [1; 16]);
@@ -124,6 +164,17 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         lane_bytes: lane,
         bytes,
     } = *operand;
+    if let Kind::Half {
+        signed,
+        subtract: false,
+        round,
+    } = kind
+        && bytes == 16
+        && !(round && lane <= 2 && signed)
+    {
+        average(code, operand, signed, round, target);
+        return;
+    }
     read_vector(code, left, 0);
     match kind {
         Kind::Half {

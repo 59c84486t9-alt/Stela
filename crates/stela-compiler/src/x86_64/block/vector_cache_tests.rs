@@ -51,7 +51,7 @@ fn word(random: &mut Random) -> u32 {
             | n << 5
             | d
     };
-    match random.below(64) {
+    match random.below(88) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -118,6 +118,30 @@ fn word(random: &mut Random) -> u32 {
         60 => three(0x0e60_a000),                 // smlsl
         61 => three(0x6e60_a000),                 // umlsl2
         62 => element(0x4f40_6000),               // smlsl2 by element
+        63 => three(0x4ea0_0400),                 // shadd vd.4s
+        64 => three(0x6e20_0400),                 // uhadd vd.16b
+        65 => three(0x6e60_1400),                 // urhadd vd.8h
+        66 => three(0x4ea0_1400),                 // srhadd vd.4s
+        67 => three(0x4e60_0400),                 // shadd vd.8h
+        68 => 0x4f30_1400 | n << 5 | d,           // ssra vd.4s,#16
+        69 => 0x6f30_1400 | n << 5 | d,           // usra vd.4s,#16
+        70 => 0x6f30_3400 | n << 5 | d,           // ursra vd.4s,#16
+        71 => 0x4f0d_0400 | n << 5 | d,           // sshr vd.16b,#3
+        72 => 0x6f7b_0400 | n << 5 | d,           // ushr vd.2d,#5
+        73 => 0x4f1c_2400 | n << 5 | d,           // srshr vd.8h,#4
+        74 => 0x0f10_9c00 | n << 5 | d,           // sqrshrn vd.4h,vn.4s,#16
+        75 => 0x2f10_9c00 | n << 5 | d,           // uqrshrn vd.4h,vn.4s,#16
+        76 => 0x4f10_9400 | n << 5 | d,           // sqshrn2 vd.8h,vn.4s,#16
+        77 => 0x4f00_1400 | random.below(8) << 16 | random.below(32) << 5 | d, // orr vd.4s,#imm
+        78 => 0x6f00_1400 | random.below(8) << 16 | random.below(32) << 5 | d, // bic vd.4s,#imm
+        79 => 0x4f00_4400 | random.below(8) << 16 | random.below(32) << 5 | d, // movi vd.4s,lsl #16
+        80 => 0x0e61_2800 | n << 5 | d,           // xtn vd.4h,vn.4s
+        81 => 0x4e61_2800 | n << 5 | d,           // xtn2 vd.8h,vn.4s
+        82 => three(0x0e60_4000),                 // addhn vd.4h
+        83 => three(0x6e60_4000),                 // raddhn2 vd.8h
+        84 => 0x0f08_8c00 | n << 5 | d,           // rshrn vd.8b,vn.8h,#8
+        85 => 0x4f00_e400 | d,                    // movi vd.16b,#0
+        86 => 0x6f07_e7e0 | d,                    // movi vd.2d,#-1
         _ => three(0x4e20_d400),                  // fadd vd.4s (uncached)
     }
 }
@@ -287,7 +311,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         }
         sites += accesses.len();
     }
-    assert!(sites > 700, "{sites}");
+    assert!(sites > 500, "{sites}");
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! AdvSIMD shifts by immediate and per-lane register, including width changes.
 use super::{
-    Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, three, vector_offset,
+    Host, binary, commit, finish, finish_from, greater, packed, read_vector, rearrange::constant,
+    shuffle, three, vector_accumulator, vector_destination, vector_offset, vector_source,
 };
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, Unary, vector_extensions};
 use crate::x86_64::simd::encode::guest;
@@ -154,6 +155,37 @@ pub(crate) fn rounded_right(
     round: bool,
     target: TargetCpu,
 ) {
+    rounded_right_from(code, 0, 0, lane_bytes, amount, signed, round, target);
+}
+
+/// The single host shift by immediate that shifts `lane_bytes` lanes
+/// right, where there is one: logical H, S and D lanes, arithmetic H and S.
+fn single_right_shift(lane_bytes: u8, signed: bool) -> Option<Shift> {
+    match (signed, lane_bytes) {
+        (false, 2) => Some(Shift::RightWord),
+        (false, 4) => Some(Shift::RightDword),
+        (false, 8) => Some(Shift::RightQword),
+        (true, 2) => Some(Shift::ArithmeticWord),
+        (true, 4) => Some(Shift::ArithmeticDword),
+        _ => None,
+    }
+}
+
+/// [`rounded_right`] of `source` (a home or XMM0) into `destination` (XMM0
+/// or a destination home), which only the last instruction writes. VEX
+/// forms read the source in place. Clobbers XMM0 and XMM1 (and the
+/// temporaries of [`right_shift`]).
+#[allow(clippy::too_many_arguments)]
+fn rounded_right_from(
+    code: &mut Code,
+    destination: u8,
+    source: u8,
+    lane_bytes: u8,
+    amount: u8,
+    signed: bool,
+    round: bool,
+    target: TargetCpu,
+) {
     if round && lane_bytes > 1 && !target.data_independent_timing() {
         // The rounding bit, bit amount-1, alone in bit 0 of XMM1: shift it to
         // the top of the lane, then down to the bottom. No constant.
@@ -163,21 +195,43 @@ pub(crate) fn rounded_right(
             4 => (Shift::LeftDword, Shift::RightDword),
             _ => (Shift::LeftQword, Shift::RightQword),
         };
-        three::shift(code, left, 1, 0, bits - amount, target);
+        three::shift(code, left, 1, source, bits - amount, target);
         three::shift(code, right, 1, 1, bits - 1, target);
     } else if round {
-        packed(code, Host::MoveAligned, 1, 0);
+        packed(code, Host::MoveAligned, 1, source);
         logical_shift(code, 1, lane_bytes, amount - 1, false, target);
         lane_mask(code, 2, lane_bytes, 1);
         packed(code, Host::And, 1, 2);
     }
-    right_shift(code, 0, lane_bytes, amount, signed, target);
+    let single = single_right_shift(lane_bytes, signed).filter(|_| amount != 0);
+    let shifted = if round { 0 } else { destination };
+    match single {
+        // The legacy form in place, a VEX form from the source.
+        Some(opcode) if shifted == source => opcode.emit(code, source, amount),
+        Some(opcode) => three::shift(code, opcode, shifted, source, amount, target),
+        None => {
+            if source != 0 {
+                packed(code, Host::MoveAligned, 0, source);
+            }
+            right_shift(code, 0, lane_bytes, amount, signed, target);
+            if !round && destination != 0 {
+                packed(code, Host::MoveAligned, destination, 0);
+            }
+        }
+    }
     if round {
-        add(code, 0, 1, lane_bytes);
+        let add = super::rearrange::add_or_subtract(lane_bytes, false);
+        if destination == 0 {
+            packed(code, add, 0, 1);
+        } else {
+            three::three(code, add, destination, 0, 1, target);
+        }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn narrow(
     code: &mut Code,
+    source: u8,
     lane_bytes: u8,
     amount: u8,
     round: bool,
@@ -185,7 +239,17 @@ fn narrow(
     destination: u8,
     target: TargetCpu,
 ) {
-    rounded_right(code, lane_bytes * 2, amount, false, round, target);
+    let source = vector_source(code, source, 0);
+    rounded_right_from(
+        code,
+        0,
+        source,
+        lane_bytes * 2,
+        amount,
+        false,
+        round,
+        target,
+    );
     pack_truncated(code, lane_bytes, upper, destination, target);
 }
 
@@ -204,6 +268,27 @@ fn saturating_narrow(
     let wide = lane * 2;
     let may_saturate =
         round || operand.amount != lane * BITS_PER_BYTE || signed_source == unsigned_result;
+    let quick = may_saturate
+        && operand.bytes != lane
+        && quick_qc_supported(wide, signed_source, unsigned_result, target);
+    if quick {
+        let source = vector_source(code, operand.source, 0);
+        rounded_right_from(
+            code,
+            0,
+            source,
+            wide,
+            operand.amount,
+            signed_source,
+            round,
+            target,
+        );
+        quick_qc_narrow(code, wide, signed_source, unsigned_result, target);
+        let cleared = cleared_by(wide, signed_source, unsigned_result);
+        finish_saturating_narrow(code, operand, upper, cleared, target);
+        return;
+    }
+    read_vector(code, operand.source, 0);
     if !may_saturate {
         // Both signednesses extract the source's high half as bits. Arithmetic
         // H/S shifts put that half in signed pack range; D needs only a shuffle.
@@ -226,14 +311,6 @@ fn saturating_narrow(
             _ => unreachable!("allocated in-range narrowing width"),
         }
         packed(code, Host::MoveAligned, 6, 0);
-    } else if operand.bytes != lane
-        && quick_qc_supported(wide, signed_source, unsigned_result, target)
-    {
-        rounded_right(code, wide, operand.amount, signed_source, round, target);
-        quick_qc_narrow(code, wide, signed_source, unsigned_result, target);
-        let cleared = cleared_by(wide, signed_source, unsigned_result);
-        finish_saturating_narrow(code, operand, upper, cleared);
-        return;
     } else {
         rounded_right(code, wide, operand.amount, signed_source, round, target);
         if !vector_extensions::saturating_narrow(
@@ -256,31 +333,43 @@ fn saturating_narrow(
     if may_saturate {
         super::saturating::publish_qc(code, if scalar { wide } else { VECTOR_BYTES });
     }
-    finish_saturating_narrow(code, operand, upper, false);
+    finish_saturating_narrow(code, operand, upper, false, target);
 }
 
-/// Commit the narrowed XMM6: into the upper half of the destination, or
+/// Write the narrowed XMM6: into the upper half of the destination, or
 /// alone with the rest cleared (already, where `cleared`).
-fn finish_saturating_narrow(code: &mut Code, operand: &Operand, upper: bool, cleared: bool) {
+fn finish_saturating_narrow(
+    code: &mut Code,
+    operand: &Operand,
+    upper: bool,
+    cleared: bool,
+    target: TargetCpu,
+) {
     let lane = operand.lane_bytes;
     let scalar = operand.bytes == lane;
     if upper {
-        read_vector(code, operand.destination, 1);
-        packed(code, Host::UnpackLowQword, 1, 6);
-        commit(code, operand.destination, 1);
-    } else {
-        if scalar {
-            constant(
-                code,
-                1,
-                core::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
-            );
-            packed(code, Host::And, 6, 1);
-        } else if !cleared {
-            packed(code, Host::MoveQword, 6, 6);
-        }
-        commit(code, operand.destination, 6);
+        let destination = vector_accumulator(code, operand.destination, 1);
+        binary(
+            code,
+            Host::UnpackLowQword,
+            destination,
+            destination.xmm,
+            6,
+            false,
+            target,
+        );
+        return;
     }
+    if scalar {
+        constant(
+            code,
+            1,
+            core::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
+        );
+        packed(code, Host::And, 6, 1);
+    }
+    let destination = vector_destination(code, operand.destination, 6);
+    finish_from(code, destination, 6, if scalar || cleared { 16 } else { 8 });
 }
 
 /// Whether [`quick_qc_narrow`] narrows `wide` lanes on `target`: one host
@@ -490,10 +579,36 @@ pub(super) fn pack_truncated(
     destination: u8,
     target: TargetCpu,
 ) {
-    // VPMOV{WB,DW,QD} clears the high quadword itself.
-    let cleared = vector_extensions::truncating_narrow(code, lane_bytes * 2, 0, 0, target);
+    if !upper {
+        // VPMOV{WB,DW,QD} clears the high quadword itself.
+        let destination = vector_destination(code, destination, 0);
+        if vector_extensions::truncating_narrow(code, lane_bytes * 2, destination.xmm, 0, target) {
+            finish(code, destination);
+            return;
+        }
+        truncate(code, lane_bytes);
+        finish_from(code, destination, 0, 8);
+        return;
+    }
+    if !vector_extensions::truncating_narrow(code, lane_bytes * 2, 0, 0, target) {
+        truncate(code, lane_bytes);
+    }
+    let destination = vector_accumulator(code, destination, 1);
+    binary(
+        code,
+        Host::UnpackLowQword,
+        destination,
+        destination.xmm,
+        0,
+        false,
+        target,
+    );
+}
+
+/// The low half of each lane of XMM0 packed into its low quadword, by
+/// SSE2/SSE4.1 steps.
+fn truncate(code: &mut Code, lane_bytes: u8) {
     match lane_bytes {
-        _ if cleared => {}
         1 => {
             lane_mask(code, 2, 2, 0xff);
             packed(code, Host::And, 0, 2);
@@ -508,16 +623,6 @@ pub(super) fn pack_truncated(
         }
         4 => shuffle(code, 0, 0, 0x88), // select low dword of each qword
         _ => unreachable!("reviewed narrowing width"),
-    }
-    if upper {
-        read_vector(code, destination, 1);
-        packed(code, Host::UnpackLowQword, 1, 0);
-        commit(code, destination, 1);
-    } else {
-        if !cleared {
-            packed(code, Host::MoveQword, 0, 0);
-        }
-        commit(code, destination, 0);
     }
 }
 fn widen(
@@ -620,12 +725,56 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         commit(code, destination, 0);
         return;
     }
-    read_vector(code, source, 0);
+    if let Kind::Right {
+        signed,
+        round,
+        accumulate,
+        insert: false,
+    } = kind
+        && bytes == 16
+    {
+        // From the source where it is into the destination's home.
+        let source = vector_source(code, source, 0);
+        if accumulate {
+            rounded_right_from(code, 0, source, lane_bytes, amount, signed, round, target);
+            let sum = vector_accumulator(code, destination, 1);
+            let add = super::rearrange::add_or_subtract(lane_bytes, false);
+            binary(code, add, sum, sum.xmm, 0, true, target);
+        } else {
+            let destination = vector_destination(code, destination, 0);
+            rounded_right_from(
+                code,
+                destination.xmm,
+                source,
+                lane_bytes,
+                amount,
+                signed,
+                round,
+                target,
+            );
+            finish(code, destination);
+        }
+        return;
+    }
+    if let Kind::Narrow { round, upper } = kind {
+        narrow(
+            code,
+            source,
+            lane_bytes,
+            amount,
+            round,
+            upper,
+            destination,
+            target,
+        );
+        return;
+    }
+    if !matches!(kind, Kind::SaturatingNarrow { .. }) {
+        read_vector(code, source, 0);
+    }
     match kind {
-        Kind::Register { .. } | Kind::SaturatingImmediate { .. } => unreachable!(),
-        Kind::Narrow { round, upper } => {
-            narrow(code, lane_bytes, amount, round, upper, destination, target);
-            return;
+        Kind::Register { .. } | Kind::SaturatingImmediate { .. } | Kind::Narrow { .. } => {
+            unreachable!()
         }
         Kind::SaturatingNarrow {
             signed_source,

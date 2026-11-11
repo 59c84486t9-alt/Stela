@@ -21,6 +21,48 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     };
     let dword = value as u32;
     let bytes16: [u8; 16] = core::array::from_fn(|i| value.to_le_bytes()[i % 8]);
+    if bytes == 16 && operation != ConstantOperation::BitClear {
+        // The constant straight into the destination's home, or ORR into it.
+        let destination = match operation {
+            ConstantOperation::Move => super::vector_destination(code, destination, 0),
+            _ => super::vector_accumulator(code, destination, 1),
+        };
+        let xmm = if operation == ConstantOperation::Move {
+            destination.xmm
+        } else {
+            0
+        };
+        if value == 0 || rearrange::ones_constant(&bytes16) {
+            rearrange::constant(code, xmm, bytes16);
+        } else if super::three::broadcast_general_supported(target) {
+            let periodic = value == u64::from(dword) * 0x1_0000_0001;
+            let mut asm = code.asm();
+            if periodic {
+                asm.mov_imm32(crate::x86_64::asm::Gpr::Rcx, dword);
+            } else {
+                asm.mov_imm64(crate::x86_64::asm::Gpr::Rcx, value);
+            }
+            super::three::broadcast_general(code, xmm, crate::x86_64::asm::Gpr::Rcx, !periodic);
+        } else {
+            code.asm().mov_imm64(crate::x86_64::asm::Gpr::Rcx, value);
+            packed(code, Host::MoveGprQword, xmm, 1);
+            packed(code, Host::UnpackLowQword, xmm, xmm);
+        }
+        if operation == ConstantOperation::Move {
+            super::finish(code, destination);
+        } else {
+            super::binary(
+                code,
+                Host::Or,
+                destination,
+                destination.xmm,
+                0,
+                true,
+                target,
+            );
+        }
+        return;
+    }
     if bytes == 16 && (value == 0 || rearrange::ones_constant(&bytes16)) {
         // PXOR, or PCMPEQD and at most one shift.
         rearrange::constant(code, 0, bytes16);
