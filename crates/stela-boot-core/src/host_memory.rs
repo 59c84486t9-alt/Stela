@@ -35,9 +35,11 @@ const HEAP_SHARE: u64 = 12;
 /// rows=14M index=19M lookup=120M`), 0.98 bytes per window byte. Before
 /// the shared store each core kept its own, 2.9 bytes per byte.
 const HEAP_PER_WINDOW: u64 = 1;
-/// The code window [`HEAP_FLOOR`] was measured with. A larger window raises
-/// the floor by [`HEAP_PER_WINDOW`] per byte past it: its block records
-/// come on top of the peak the floor holds.
+/// The code window [`HEAP_FLOOR`] was measured with. The floor moves by
+/// [`HEAP_PER_WINDOW`] per byte the window differs from it: its block
+/// records come on top of the rest of the peak, which does not depend on
+/// the window. A 12 GiB VM with a 704 MiB window peaked at 2815 MiB carved,
+/// 2623 MiB less the 192 MiB of window past this one.
 const FLOOR_WINDOW: u64 = 512 * MIB;
 /// Heap each running PE keeps for itself: its machine (about 1 MiB at
 /// start), ITLB (512 KiB), fetch and jump caches (about 0.8 MiB) and
@@ -59,6 +61,19 @@ const POOL_RUNNER_FLOOR: u64 = 32 * MIB;
 /// halves reset as a cache of the guest's working set, rather than hold a
 /// tenth of a large host's RAM.
 const POOL_PER_RUNNER: u64 = GIB;
+/// Past small guests a runner's pool grows by a byte per [`POOL_GROWTH`]
+/// bytes of guest DRAM above [`POOL_BASE`], not by a sixty-fourth. Its upper
+/// half holds the kernel's mappings, which grow with the DRAM it touches:
+/// PE0's peaked at 23 MiB of a 52 MiB half with 6.7 GiB of guest DRAM
+/// (`BEAT shadow_peak=52M/23M/52M`), about a 290th. Its lower half is a
+/// cache of recent address spaces: it fills whatever it has (52 MiB there),
+/// and ran out 74 times in a 20-minute run that reset its shadow 33 000
+/// times for TLB maintenance (`SHADOW exhausted= maintained=`). Each half,
+/// 32 MiB and a 320th of the guest, holds more than both measured peaks on
+/// every host from 12 GiB (whose pools lose 6 MiB of 864) up; below that
+/// the sixty-fourth is less.
+const POOL_BASE: u64 = 64 * MIB;
+const POOL_GROWTH: u64 = 160;
 /// The least guest DRAM Stela boots macOS with. Below it macOS spends its
 /// time paging; 26A434 reaches the desktop with 3.1 GiB.
 pub const GUEST_FLOOR: u64 = 3 * GIB;
@@ -146,13 +161,14 @@ impl Shortfall {
 /// Each part takes a share of `free`, between its bounds:
 /// - the heap a twelfth, [`HEAP_PER_WINDOW`] byte per byte of the board's
 ///   code window and [`PE_HEAP`] per runner, within
-///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`], the floor raised by the window past
-///   [`FLOOR_WINDOW`];
+///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`], the floor moved by the window's
+///   difference from [`FLOOR_WINDOW`];
 /// - the code arena what `code_reservation` gives: [`WINDOW_PER_RUNNER`]
 ///   per runner within free RAM / 16, or [`SMALL_WINDOW_PER_RUNNER`] where
 ///   the larger window would leave the guest under its floor;
-/// - the pool 1/[`POOL_SHARE`] of the guest's DRAM for each of up to
-///   [`POOL_SHARERS`] runners, which is what the other parts leave: `pool =
+/// - the pool, for each of up to [`POOL_SHARERS`] runners, 1/[`POOL_SHARE`]
+///   of the guest's DRAM, which is what the other parts leave, or
+///   [`POOL_BASE`] and 1/[`POOL_GROWTH`] of it if that is less: `pool =
 ///   sharers * (free - heap - code - pool) / 64`, solved for `pool`; at least
 ///   [`POOL_RUNNER_FLOOR`] per runner, at most [`POOL_PER_RUNNER`] per sharer.
 ///
@@ -206,11 +222,20 @@ fn estimate_with(free: u64, cores: usize, runners: usize, per_runner: u64) -> Re
     let code = code_reservation_per_runner(free, cores, runners, per_runner)?;
     let running = runners as u64;
     let heap = free / HEAP_SHARE + HEAP_PER_WINDOW * code.window + running * PE_HEAP;
-    let floor = HEAP_FLOOR + HEAP_PER_WINDOW * code.window.saturating_sub(FLOOR_WINDOW);
+    let floor = (HEAP_FLOOR + HEAP_PER_WINDOW * code.window)
+        .saturating_sub(HEAP_PER_WINDOW * FLOOR_WINDOW)
+        / ALIGNMENT
+        * ALIGNMENT;
     let heap = (heap / ALIGNMENT * ALIGNMENT).clamp(floor, HEAP_CEILING.max(floor));
     let rest = free.saturating_sub(heap).saturating_sub(code.bytes);
-    let sharers = running.min(POOL_SHARERS);
-    let pool = (u128::from(sharers) * u128::from(rest) / u128::from(POOL_SHARE + sharers)) as u64;
+    let sharers = u128::from(running.min(POOL_SHARERS));
+    let rest = u128::from(rest);
+    // A sixty-fourth of the guest each, or the base and a 160th if less.
+    let share = sharers * rest / (u128::from(POOL_SHARE) + sharers);
+    let growth = u128::from(POOL_GROWTH);
+    let grown = sharers * (growth * u128::from(POOL_BASE) + rest) / (growth + sharers);
+    let pool = share.min(grown) as u64;
+    let (rest, sharers) = (rest as u64, sharers as u64);
     let pool = (pool / ALIGNMENT * ALIGNMENT).clamp(
         POOL_FLOOR.max(running * POOL_RUNNER_FLOOR),
         sharers * POOL_PER_RUNNER,
