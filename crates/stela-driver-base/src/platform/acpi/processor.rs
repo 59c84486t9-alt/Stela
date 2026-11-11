@@ -406,6 +406,67 @@ fn probe(address: u64, class: u8, cpu: &Cpu) -> Option<u32> {
         .then_some(hint)
 }
 
+/// The idle intervals [`IdleHistory`] keeps, as Linux's menu governor does
+/// (`INTERVALS`).
+pub const IDLE_INTERVALS: usize = 8;
+
+/// A CPU's last [`IDLE_INTERVALS`] idle intervals, in microseconds: what
+/// wakes it before its timer (another core's doorbell, a device) shows in
+/// them, which the timer alone does not tell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdleHistory {
+    intervals: [u32; IDLE_INTERVALS],
+    next: u8,
+    filled: u8,
+}
+
+impl IdleHistory {
+    /// One idle interval of `us` microseconds.
+    pub fn record(&mut self, us: u64) {
+        self.intervals[usize::from(self.next)] = u32::try_from(us).unwrap_or(u32::MAX);
+        self.next = (self.next + 1) % IDLE_INTERVALS as u8;
+        self.filled = (self.filled + 1).min(IDLE_INTERVALS as u8);
+    }
+
+    /// The interval the next idle is expected to last, as Linux's menu
+    /// governor finds it (`get_typical_interval`): the mean of the
+    /// intervals once their standard deviation is within a sixth of it (or
+    /// within 20 us), dropping the largest as outliers while at least three
+    /// quarters remain. None until the history is full, or when the
+    /// intervals have no typical value.
+    pub fn typical_us(&self) -> Option<u64> {
+        if usize::from(self.filled) < IDLE_INTERVALS {
+            return None;
+        }
+        let mut threshold = u64::MAX;
+        loop {
+            let kept = || {
+                self.intervals
+                    .iter()
+                    .map(|&us| u64::from(us))
+                    .filter(move |&us| us <= threshold)
+            };
+            let count = kept().count() as u64;
+            let max = kept().max()?;
+            let mean = kept().sum::<u64>() / count;
+            let variance = kept()
+                .map(|us| (us.abs_diff(mean)).saturating_pow(2))
+                .fold(0u64, u64::saturating_add)
+                / count;
+            let three_quarters = count * 4 >= IDLE_INTERVALS as u64 * 3;
+            if three_quarters && mean.saturating_pow(2) > variance.saturating_mul(36)
+                || variance <= 400
+            {
+                return Some(mean);
+            }
+            if count * 4 <= IDLE_INTERVALS as u64 * 3 {
+                return None;
+            }
+            threshold = max - 1;
+        }
+    }
+}
+
 /// The deepest of `states` whose target residency fits `budget_us`
 /// microseconds (any when None), or the first.
 pub fn select(states: &[Admitted], budget_us: Option<u64>) -> Option<&Admitted> {

@@ -12,7 +12,7 @@ use core::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 use stela_drivers::platform::acpi::processor::{
-    self, Admitted, CState, Cpu, CstError, Declaration, Declared, Enter, Handshake,
+    self, Admitted, CState, Cpu, CstError, Declaration, Declared, Enter, Handshake, IdleHistory,
 };
 
 /// CPUID.01H:ECX[3], MONITOR/MWAIT.
@@ -35,7 +35,14 @@ struct Admission {
     /// `X86_BUG_CLFLUSH_MONITOR`: the monitored line is flushed before
     /// MONITOR arms it.
     flush_monitor: bool,
+    /// This CPU's last idle intervals ([`wait`]).
+    history: core::cell::UnsafeCell<IdleHistory>,
 }
+
+// SAFETY: `history` is reached only by the CPU whose admission it is
+// ([`admission`] finds its own by APIC ID), with interrupts disabled, outside
+// the window in which the wait takes an interrupt.
+unsafe impl Sync for Admission {}
 
 /// The declared processors by APIC ID, published once by [`install`] when
 /// any has states. Without one, a wait halts without asking which CPU it is.
@@ -152,19 +159,31 @@ fn describe(state: &Admitted) -> String {
 }
 
 /// Wait for an interrupt and take it, in the deepest state this CPU
-/// admitted whose target residency fits `budget_us` microseconds until its
-/// next timer (None when none is due). The budget is read only when the CPU
-/// has states to choose between, as reading a timer can trap to a VMM.
+/// admitted whose target residency fits the wait: `budget_us` microseconds
+/// until its next timer (None when none is due), or less when its last idle
+/// intervals show it is woken sooner ([`IdleHistory::typical_us`]), as
+/// another core's doorbell or a device wakes it before its timer and a deep
+/// state's exit latency would delay each such wake. The budget is read only
+/// when the CPU has states to choose between, as reading a timer can trap to
+/// a VMM.
 ///
 /// # Safety
 ///
 /// Interrupts are disabled, and this CPU's IDT takes the interrupt that
 /// ends the wait.
 pub(crate) unsafe fn wait(budget_us: impl FnOnce() -> Option<u64>) {
-    let enter = admission().and_then(|admission| {
-        let state = processor::select(&admission.states, budget_us())?;
+    let admission = admission();
+    let enter = admission.and_then(|admission| {
+        // SAFETY: this CPU's own history, interrupts disabled (`Admission`).
+        let typical = unsafe { &*admission.history.get() }.typical_us();
+        let budget = match (budget_us(), typical) {
+            (Some(timer), Some(typical)) => Some(timer.min(typical)),
+            (timer, typical) => timer.or(typical),
+        };
+        let state = processor::select(&admission.states, budget)?;
         Some((state.enter, admission.flush_monitor))
     });
+    let began = admission.map(|_| rdtsc());
     match enter {
         Some((Enter::Mwait(hint), flush_monitor)) => {
             let line = LINE.0.as_ptr();
@@ -184,6 +203,19 @@ pub(crate) unsafe fn wait(budget_us: impl FnOnce() -> Option<u64>) {
         // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
         _ => unsafe { asm!("sti", "hlt", "cli", options(nostack)) },
     }
+    if let (Some(admission), Some(began)) = (admission, began) {
+        let hz = crate::firmware::tsc_hz();
+        if hz != 0 {
+            let us = u128::from(rdtsc().wrapping_sub(began)) * 1_000_000 / u128::from(hz);
+            // SAFETY: as above; the interrupt that ended the wait was taken.
+            unsafe { &mut *admission.history.get() }.record(u64::try_from(us).unwrap_or(u64::MAX));
+        }
+    }
+}
+
+fn rdtsc() -> u64 {
+    // SAFETY: RDTSC has no memory effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 /// This CPU's admitted states, admitted on its first wait from its own
@@ -207,6 +239,7 @@ fn admission() -> Option<&'static Admission> {
     let admission = Box::leak(Box::new(Admission {
         states: processor::admit(&processor.declared, &cpu).0,
         flush_monitor: cpu.intel && (leaf >> 8) & 0xf == 6 && matches!(model, 0x1d | 0x2e | 0x2f),
+        history: core::cell::UnsafeCell::new(IdleHistory::default()),
     }));
     processor.admission.store(admission, Ordering::Release);
     Some(admission)

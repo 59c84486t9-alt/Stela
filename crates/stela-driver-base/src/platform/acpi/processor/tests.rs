@@ -205,3 +205,62 @@ fn cst_keeps_well_formed_entries_as_linux_does() {
     );
     assert_eq!(parse_cst(Value::Integer(1)), Err(CstError::Invalid));
 }
+
+/// Short wakes that come before the timer make a short typical interval;
+/// one long outlier is dropped; scattered intervals have none.
+#[test]
+fn idle_history_finds_the_typical_interval_as_the_menu_governor_does() {
+    let mut history = IdleHistory::default();
+    for _ in 0..7 {
+        history.record(50);
+    }
+    assert_eq!(history.typical_us(), None, "a history that is not full");
+    history.record(50);
+    assert_eq!(history.typical_us(), Some(50));
+    // One long sleep among short ones is an outlier.
+    history.record(20_000);
+    assert_eq!(history.typical_us(), Some(50));
+    // Intervals all over the place: no typical value.
+    for us in [10, 5_000, 100, 9_000, 300, 15_000, 40, 7_000] {
+        history.record(us);
+    }
+    assert_eq!(history.typical_us(), None);
+    // Close together: their mean, though above 20 us of spread.
+    for us in [1_000, 1_100, 900, 1_000, 1_050, 950, 1_000, 1_000] {
+        history.record(us);
+    }
+    assert_eq!(history.typical_us(), Some(1_000));
+    // A short typical interval picks the shallow state the timer would not.
+    let admitted = [
+        Admitted {
+            kind: 1,
+            latency_us: 1,
+            residency_us: 1,
+            enter: Enter::Halt,
+        },
+        Admitted {
+            kind: 3,
+            latency_us: 100,
+            residency_us: 300,
+            enter: Enter::Mwait(0x20),
+        },
+    ];
+    let budget = |timer: Option<u64>, typical: Option<u64>| match (timer, typical) {
+        (Some(timer), Some(typical)) => Some(timer.min(typical)),
+        (timer, typical) => timer.or(typical),
+    };
+    let mut short = IdleHistory::default();
+    for _ in 0..IDLE_INTERVALS {
+        short.record(40);
+    }
+    assert_eq!(
+        select(&admitted, budget(Some(10_000), short.typical_us()))
+            .unwrap()
+            .kind,
+        1
+    );
+    assert_eq!(
+        select(&admitted, budget(Some(10_000), None)).unwrap().kind,
+        3
+    );
+}
