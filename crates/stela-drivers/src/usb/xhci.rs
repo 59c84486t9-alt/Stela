@@ -313,6 +313,7 @@ pub(crate) const LANGUAGE_EN_US: u16 = 0x0409;
 
 /// Register access, so the controller logic runs against a model in tests.
 pub trait Registers {
+    #[track_caller]
     fn read32(&mut self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
     /// A 64-bit register, as two 32-bit writes, low half first (5.1).
@@ -344,6 +345,12 @@ pub struct DiagnosticRead {
     pub physical_base: u64,
     pub cpu_address: u64,
     pub offset: u64,
+    /// CR3 in effect when this BAR read was issued.
+    pub cr3: u64,
+    /// `xhci.rs` source line that requested this read.
+    pub caller_line: u64,
+    /// Number of native BAR reads issued since boot.
+    pub reads: u64,
 }
 
 static DIAGNOSTIC_SEGMENT: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -353,6 +360,9 @@ static DIAGNOSTIC_FUNCTION: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_BAR: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_CPU: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_OFFSET: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_CR3: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_CALLER_LINE: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_READS: AtomicU64 = AtomicU64::new(0);
 
 pub fn diagnostic_read() -> Option<DiagnosticRead> {
     let segment = DIAGNOSTIC_SEGMENT.load(Ordering::Relaxed);
@@ -364,11 +374,24 @@ pub fn diagnostic_read() -> Option<DiagnosticRead> {
         physical_base: DIAGNOSTIC_BAR.load(Ordering::Relaxed),
         cpu_address: DIAGNOSTIC_CPU.load(Ordering::Relaxed),
         offset: DIAGNOSTIC_OFFSET.load(Ordering::Relaxed),
+        cr3: DIAGNOSTIC_CR3.load(Ordering::Relaxed),
+        caller_line: DIAGNOSTIC_CALLER_LINE.load(Ordering::Relaxed),
+        reads: DIAGNOSTIC_READS.load(Ordering::Relaxed),
     })
 }
 
 impl Registers for Bar {
+    #[track_caller]
     fn read32(&mut self, offset: usize) -> u32 {
+        let current_cr3: u64;
+        // SAFETY: reading the current page-table root has no side effects.
+        unsafe {
+            core::arch::asm!(
+                "mov {}, cr3",
+                out(reg) current_cr3,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
         let address = self.mmio.address(offset);
         DIAGNOSTIC_SEGMENT.store(u64::from(self.address.segment), Ordering::Relaxed);
         DIAGNOSTIC_BUS.store(u64::from(self.address.bus), Ordering::Relaxed);
@@ -377,6 +400,12 @@ impl Registers for Bar {
         DIAGNOSTIC_BAR.store(self.physical_base, Ordering::Relaxed);
         DIAGNOSTIC_CPU.store(address as u64, Ordering::Relaxed);
         DIAGNOSTIC_OFFSET.store(offset as u64, Ordering::Relaxed);
+        DIAGNOSTIC_CR3.store(current_cr3, Ordering::Relaxed);
+        DIAGNOSTIC_CALLER_LINE.store(
+            u64::from(core::panic::Location::caller().line()),
+            Ordering::Relaxed,
+        );
+        DIAGNOSTIC_READS.fetch_add(1, Ordering::Relaxed);
         self.mmio.read32(offset)
     }
     fn write32(&mut self, offset: usize, value: u32) {

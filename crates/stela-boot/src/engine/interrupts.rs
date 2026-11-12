@@ -713,14 +713,18 @@ fn xhci_diagnostic() -> impl core::fmt::Display {
             match self.0 {
                 Some(read) => write!(
                     formatter,
-                    "xhci={:04x}:{:02x}:{:02x}.{} bar0={:#x} cpu={:#x} offset={:#x}",
+                    "xhci={:04x}:{:02x}:{:02x}.{} bar0={:#x} cpu={:#x} offset={:#x} \\
+                     read_cr3={:#x} line={} reads={}",
                     read.segment,
                     read.bus,
                     read.device,
                     read.function,
                     read.physical_base,
                     read.cpu_address,
-                    read.offset
+                    read.offset,
+                    read.cr3,
+                    read.caller_line,
+                    read.reads
                 ),
                 None => formatter.write_str("xhci=none"),
             }
