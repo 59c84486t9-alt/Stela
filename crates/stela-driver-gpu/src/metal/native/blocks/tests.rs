@@ -1,4 +1,6 @@
-use super::{Blocks, Candidate, Needs, Place, Purpose, Resident, Source, Tiling, block_bytes};
+use super::{
+    Blocks, Candidate, Growth, Needs, Place, Purpose, Resident, Source, Tiling, block_bytes,
+};
 use alloc::{vec, vec::Vec};
 
 const MIB: u64 = 1 << 20;
@@ -93,6 +95,39 @@ fn placed(resident: Result<Resident<u32>, Option<&str>>) -> Place {
 /// Places `needs` in type 0's 16 MiB blocks.
 fn place(blocks: &mut Blocks<u32>, heaps: &mut Heaps, needs: Needs) -> Place {
     placed(blocks.allocate(heaps, needs, false, &[candidate(0, 16 * MIB)]))
+}
+
+#[test]
+fn growth_names_what_a_placement_would_allocate_and_an_adopted_block_spares_it() {
+    let mut heaps = Heaps::new(&[1 << 30, 1 << 30]);
+    let mut blocks = Blocks::new(1);
+    let candidates = [candidate(0, 16 * MIB), candidate(1, 16 * MIB)];
+    let small = needs(4096, 256, Tiling::Optimal);
+    // No block yet: the first candidate's block.
+    assert_eq!(
+        blocks.growth(small, false, &candidates),
+        Growth::Block(candidates[0])
+    );
+    // More than half a block, or the driver's preference: memory of its own.
+    let large = needs(9 * MIB, 256, Tiling::Optimal);
+    assert_eq!(blocks.growth(large, false, &candidates), Growth::Own(0));
+    let own = Needs { own: true, ..small };
+    assert_eq!(blocks.growth(own, false, &candidates), Growth::Own(0));
+    assert_eq!(blocks.growth(small, false, &[]), Growth::None);
+    // A block allocated elsewhere takes the place with no allocation here.
+    blocks.adopt_block(0, false, 1000, 16 * MIB);
+    assert_eq!(blocks.growth(small, false, &candidates), Growth::None);
+    assert_eq!(
+        blocks.growth(small, true, &candidates),
+        Growth::Block(candidates[0]),
+        "a mapped resource takes a mapped block"
+    );
+    let place = placed(blocks.allocate(&mut heaps, small, false, &candidates));
+    assert_eq!(blocks.memory(place.block), Some((1000, 16 * MIB)));
+    assert!(heaps.allocations.is_empty());
+    blocks.adopt_own();
+    assert_eq!(blocks.report().own, 1);
+    assert_eq!(blocks.report().blocks, 1);
 }
 
 #[test]

@@ -22,6 +22,7 @@ mod memory;
 mod objects;
 mod physical;
 pub mod pipeline_store;
+mod premade;
 mod record;
 mod sparse;
 #[cfg(test)]
@@ -315,6 +316,18 @@ fn own(dedicated: &vk::MemoryDedicatedRequirements<'_>) -> bool {
         || dedicated.requires_dedicated_allocation == vk::TRUE
 }
 
+/// The requirements of `image`, and whether the driver requires or prefers
+/// memory of its own for it (`VkMemoryDedicatedRequirements`).
+fn image_requirements(device: &ash::Device, image: vk::Image) -> (vk::MemoryRequirements, bool) {
+    let info = vk::ImageMemoryRequirementsInfo2::default().image(image);
+    let mut dedicated = vk::MemoryDedicatedRequirements::default();
+    let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+    // SAFETY: the image is live and the chain outlives the call.
+    unsafe { device.get_image_memory_requirements2(&info, &mut requirements) };
+    let needs = requirements.memory_requirements;
+    (needs, own(&dedicated))
+}
+
 #[derive(Debug)]
 enum CommandBuffers {
     One(vk::CommandBuffer),
@@ -497,6 +510,8 @@ pub struct NativeBackend {
     store: pipeline_store::Persisted,
     /// Pipeline creations deferred outside the service's turn.
     deferral: deferral::Deferral,
+    /// What jobs allocated outside the turn for new images.
+    premade: premade::Premade,
     /// The platform's tick counter, and the phases of `create_image` and
     /// `submit` it timed since the device took them.
     ticks: fn() -> u64,
@@ -742,6 +757,7 @@ impl NativeBackend {
             decode_astc: vk::Pipeline::null(),
             store: pipeline_store::Persisted::none(loader.log),
             deferral: deferral::Deferral::default(),
+            premade: premade::Premade::default(),
             ticks: super::timing::no_clock,
             split: [0; 3],
         };
@@ -977,6 +993,172 @@ impl NativeBackend {
         Err(failure(last))
     }
 
+    /// While the call may defer, leaves the job that allocates what an image
+    /// of `needs` would allocate in the turn, a new kernel buffer object:
+    /// memory of its own, made with the image, or a new block
+    /// ([`premade`]). False when it allocates nothing new, when its key's
+    /// job failed, or when the call may not defer.
+    fn defer_image_memory(
+        &mut self,
+        key: [u8; 32],
+        info: &ImageInfo,
+        request: MemoryRequest,
+        requirements: vk::MemoryRequirements,
+        resource: Resource,
+    ) -> bool {
+        if !self.deferral.deferring() {
+            return false;
+        }
+        let candidates = self.candidates(requirements, request);
+        let needs = Needs {
+            size: requirements.size,
+            alignment: requirements.alignment.max(resource.alignment),
+            tiling: resource.tiling,
+            own: resource.own,
+        };
+        let gone = self.deferral.gone();
+        let job = match self
+            .memories
+            .blocks
+            .growth(needs, request.mapped, &candidates)
+        {
+            blocks::Growth::None => return false,
+            // The call, deferred already, runs again: nothing it makes stays.
+            _ if self.deferral.deferred() => return true,
+            blocks::Growth::Own(_) if self.premade.failed(&key) => return false,
+            blocks::Growth::Own(_) => premade::image_job(
+                &self.device,
+                gone,
+                key,
+                info.clone(),
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_type)
+                    .collect(),
+                request.mapped,
+            ),
+            blocks::Growth::Block(candidate) => {
+                if self
+                    .premade
+                    .failed(&premade::block_key(candidate.memory_type, request.mapped))
+                {
+                    return false;
+                }
+                premade::block_job(
+                    &self.device,
+                    gone,
+                    candidate.memory_type,
+                    candidate.block_bytes,
+                    request.mapped,
+                )
+            }
+        };
+        self.deferral.defer(job)
+    }
+
+    /// Creates the image a job made for this call ([`premade`]): its memory
+    /// is its own, bound already.
+    fn premade_image(
+        &mut self,
+        made: premade::Image,
+        info: &ImageInfo,
+        started: u64,
+    ) -> Result<(Image, Memory, u64)> {
+        let image = made.image;
+        if let Some(pointer) = made.pointer {
+            let mapping = memory::mapping(
+                &self.snapshot.memory.types,
+                made.memory_type,
+                pointer,
+                made.size,
+            );
+            self.mappings.insert(raw(made.memory), mapping);
+        }
+        self.memories.blocks.adopt_own();
+        let memory = self.memories.insert(memory::Allocation::Whole {
+            memory: made.memory,
+            resource: true,
+        });
+        let adopted = (self.ticks)();
+        let result = self.adopt_image(image, info);
+        self.time_split([started, adopted, adopted, (self.ticks)()]);
+        self.or_destroy(
+            result,
+            &[Object::Image(Image(raw(image))), Object::Memory(memory)],
+        )?;
+        self.zeroing
+            .pending
+            .images
+            .insert(raw(image), zero::Unzeroed::new(info));
+        Ok((Image(raw(image)), memory, made.size))
+    }
+
+    /// Keeps what a memory job made: a block joins its pool; an image waits
+    /// for its call's next run.
+    fn adopt_memory(&mut self, key: [u8; 32], mut making: premade::Making) {
+        // A job of a device this backend replaced destroys nothing: that
+        // device is gone.
+        if !Arc::ptr_eq(&making.gone, &self.deferral.gone()) {
+            return;
+        }
+        let (block, evicted) = self.premade.keep(key, making.made.take());
+        if let Some(evicted) = evicted {
+            premade::destroy(&self.device, premade::Kind::Image(evicted));
+        }
+        let Some(block) = block else {
+            return;
+        };
+        match block.pointer {
+            Some(pointer) => {
+                let mapping = memory::mapping(
+                    &self.snapshot.memory.types,
+                    block.memory_type,
+                    pointer,
+                    block.size,
+                );
+                self.mappings.insert(raw(block.memory), mapping);
+            }
+            None => self.zeroing.cover(
+                &self.device,
+                block.memory,
+                block.memory_type,
+                memory::allocation_bytes(block.size, true),
+            ),
+        }
+        self.memories
+            .blocks
+            .adopt_block(block.memory_type, block.mapped, block.memory, block.size);
+    }
+
+    /// The memory types a resource of `requirements` may take for
+    /// `request`, in order of preference, with their block sizes.
+    fn candidates(
+        &self,
+        requirements: vk::MemoryRequirements,
+        request: MemoryRequest,
+    ) -> Vec<Candidate> {
+        let memory = &self.snapshot.memory;
+        let atom = self.snapshot.limits.non_coherent_atom_size.max(1);
+        objects::memory_candidates(memory, requirements.memory_type_bits, request)
+            .into_iter()
+            .map(|index| {
+                let properties = memory.types[index as usize].properties;
+                let heap = memory
+                    .heaps
+                    .get(memory.types[index as usize].heap_index as usize)
+                    .map_or(0, |heap| heap.size);
+                let device_local =
+                    properties.contains(super::vulkan::MemoryProperties::DEVICE_LOCAL);
+                let coherent = properties.contains(super::vulkan::MemoryProperties::HOST_COHERENT);
+                Candidate {
+                    memory_type: index,
+                    block_bytes: blocks::block_bytes(heap, device_local),
+                    atom: if request.mapped && !coherent { atom } else { 1 },
+                }
+            })
+            .collect()
+    }
+
     /// Memory for a buffer or image of `requirements`: a place in a block,
     /// or memory of its own, dedicated to the resource `dedicated` names if
     /// any, when `own` (the driver requires or prefers that), when it is
@@ -989,34 +1171,14 @@ impl NativeBackend {
         request: MemoryRequest,
         dedicated: Option<vk::MemoryDedicatedAllocateInfo<'static>>,
     ) -> Result<(Memory, vk::DeviceMemory, u64, u64)> {
-        let memory = &self.snapshot.memory;
-        let atom = self.snapshot.limits.non_coherent_atom_size.max(1);
-        let candidates: Vec<_> =
-            objects::memory_candidates(memory, requirements.memory_type_bits, request)
-                .into_iter()
-                .map(|index| {
-                    let properties = memory.types[index as usize].properties;
-                    let heap = memory
-                        .heaps
-                        .get(memory.types[index as usize].heap_index as usize)
-                        .map_or(0, |heap| heap.size);
-                    let device_local =
-                        properties.contains(super::vulkan::MemoryProperties::DEVICE_LOCAL);
-                    let coherent =
-                        properties.contains(super::vulkan::MemoryProperties::HOST_COHERENT);
-                    Candidate {
-                        memory_type: index,
-                        block_bytes: blocks::block_bytes(heap, device_local),
-                        atom: if request.mapped && !coherent { atom } else { 1 },
-                    }
-                })
-                .collect();
+        let candidates = self.candidates(requirements, request);
         let needs = Needs {
             size: requirements.size,
             alignment: requirements.alignment.max(resource.alignment),
             tiling: resource.tiling,
             own: resource.own,
         };
+        let memory = &self.snapshot.memory;
         let mut source = memory::Allocator {
             device: &self.device,
             types: &memory.types,
@@ -1377,19 +1539,9 @@ impl NativeBackend {
         unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) }.map_err(failure)
     }
 
-    /// The requirements of `image`, and whether the driver requires or
-    /// prefers memory of its own for it (`VkMemoryDedicatedRequirements`).
+    /// [`image_requirements`] of `image`.
     fn image_needs(&self, image: vk::Image) -> (vk::MemoryRequirements, bool) {
-        let info = vk::ImageMemoryRequirementsInfo2::default().image(image);
-        let mut dedicated = vk::MemoryDedicatedRequirements::default();
-        let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
-        // SAFETY: the image is live and the chain outlives the call.
-        unsafe {
-            self.device
-                .get_image_memory_requirements2(&info, &mut requirements)
-        };
-        let needs = requirements.memory_requirements;
-        (needs, own(&dedicated))
+        image_requirements(&self.device, image)
     }
 
     /// As [`Self::image_needs`], of a buffer.
@@ -1635,6 +1787,10 @@ impl Drop for NativeBackend {
             return;
         }
         self.store.idle(&self.device);
+        // Images jobs made that no call took; the device is idle.
+        for image in self.premade.drain() {
+            premade::destroy(&self.device, premade::Kind::Image(image));
+        }
         let mut source = memory::Allocator {
             device: &self.device,
             types: &self.snapshot.memory.types,
@@ -2352,6 +2508,10 @@ impl Backend for NativeBackend {
         request: MemoryRequest,
     ) -> Result<(Image, Memory, u64)> {
         let started = (self.ticks)();
+        let key = premade::image_key(info, request);
+        if let Some(made) = self.premade.take(&key) {
+            return self.premade_image(made, info, started);
+        }
         let image = objects::image(info, |create| {
             // SAFETY: the create info and its chain outlive the call.
             unsafe { self.device.create_image(create, None) }.map_err(failure)
@@ -2366,6 +2526,11 @@ impl Backend for NativeBackend {
             alignment: 1,
             own,
         };
+        if self.defer_image_memory(key, info, request, needs, resource) {
+            // SAFETY: nothing uses the new image; the job makes its own.
+            unsafe { self.device.destroy_image(image, None) };
+            return Err(super::compiler::DEFERRED);
+        }
         let dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
         let created = (self.ticks)();
         let (memory, device_memory, offset, _) =
@@ -2575,7 +2740,11 @@ impl Backend for NativeBackend {
     }
 
     fn adopt_job(&mut self, done: crate::metal::deferred::Done) {
-        self.adopt_pipeline(done);
+        let crate::metal::deferred::Done { key, owner, made } = done;
+        match made.downcast::<premade::Making>() {
+            Ok(making) => self.adopt_memory(key, *making),
+            Err(made) => self.adopt_pipeline(crate::metal::deferred::Done { key, owner, made }),
+        }
     }
 
     fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache> {

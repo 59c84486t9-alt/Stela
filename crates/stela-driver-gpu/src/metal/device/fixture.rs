@@ -164,6 +164,10 @@ pub(crate) struct MockBackend {
     /// While a call may defer, the next compute pipeline creation defers
     /// to a job that runs until this opens.
     pub(crate) pipeline_gate: Option<Arc<AtomicBool>>,
+    /// While a call may defer, the next image creation leaves its memory to
+    /// a job that runs until this opens, as the driver's kernel allocation
+    /// waits for Linux.
+    pub(crate) image_gate: Option<Arc<AtomicBool>>,
     deferring: Option<JobLock>,
     job: Option<Job>,
     /// Pipeline jobs adopted.
@@ -315,6 +319,13 @@ impl Backend for MockBackend {
         info: &ImageInfo,
         request: MemoryRequest,
     ) -> Result<(Image, Memory, u64)> {
+        if let Some(lock) = &self.deferring
+            && let Some(gate) = self.image_gate.take()
+        {
+            lock.lock.set_deferred(true);
+            self.job = Some(gated_job(3, Owner::Backend, gate));
+            return Err(crate::metal::compiler::DEFERRED);
+        }
         let requirements = self.image_requirements(info)?;
         let memory = self.allocate_memory(requirements.size, request, u32::MAX)?;
         Ok((Image(self.id()), memory, requirements.size))

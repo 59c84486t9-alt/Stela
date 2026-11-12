@@ -34,7 +34,9 @@
 //! missing variant discards its command buffer, as nothing it did before
 //! stays, and once replay changes an indirect command buffer it compiles in
 //! its turn ([`Compiler::stop_deferring`]). Until its job has run, a call
-//! made again is answered `Pending` without a turn.
+//! made again is answered `Pending` without a turn. A new texture's kernel
+//! memory, which Linux can take many frames to make, defers the same way:
+//! the job allocates it, and the call's next run takes it.
 //!
 //! Driver work that needs no service state runs after the call's turn, so
 //! that its host kernel calls, which wait for the boot processor's Linux,
@@ -1097,13 +1099,14 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         caller.write(record, &raw).is_ok()
     }
 
-    /// Whether the call at `record` creates a pipeline or commits commands,
-    /// whose compilations may run outside the lock: nothing it does before
-    /// compiling stays. A commit's replay compiles the variants its draws
-    /// and dispatches need, and its command buffer is discarded when it
-    /// defers one; once replay changes an indirect command buffer, it
-    /// compiles in its turn ([`Compiler::stop_deferring`]).
-    fn compiles(&self, record: u64, caller: &mut dyn CallerMemory) -> bool {
+    /// Whether the call at `record` creates a pipeline or a texture or
+    /// commits commands, whose compilations and new textures' kernel memory
+    /// may be made outside the lock: nothing it does before it defers stays.
+    /// A commit's replay compiles the variants its draws and dispatches
+    /// need, and its command buffer is discarded when it defers one; once
+    /// replay changes an indirect command buffer, it compiles in its turn
+    /// ([`Compiler::stop_deferring`]).
+    fn defers(&self, record: u64, caller: &mut dyn CallerMemory) -> bool {
         let mut raw = [0; size_of::<GateCall>()];
         if caller.read(record, &mut raw).is_err() {
             return false;
@@ -1119,6 +1122,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             Operation::NewMeshPipeline,
             Operation::NewComputePipeline,
             Operation::NewTilePipeline,
+            Operation::NewTexture,
             Operation::Commit,
         ]
         .iter()
@@ -1314,7 +1318,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         let entered = (self.host.ticks)();
         let waited = entered.wrapping_sub(rang);
         let deferring =
-            self.compile_stack.load(Ordering::Acquire) != 0 && self.compiles(record, caller);
+            self.compile_stack.load(Ordering::Acquire) != 0 && self.defers(record, caller);
         turn.catch_up();
         let job_lock = deferring.then_some(&self.job_lock);
         let mut answer = None;

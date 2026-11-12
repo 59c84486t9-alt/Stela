@@ -89,6 +89,17 @@ pub(super) trait Source {
     fn free(&mut self, memory: Self::Memory);
 }
 
+/// What placing a resource would allocate first ([`Blocks::growth`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Growth {
+    /// Nothing: a block has room.
+    None,
+    /// A new block of this candidate's type and size.
+    Block(Candidate),
+    /// Memory of the resource's own, of this type.
+    Own(u32),
+}
+
 /// A resource's place in a block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Place {
@@ -239,6 +250,67 @@ impl<M: Copy> Blocks<M> {
         }
     }
 
+    /// What [`Self::allocate`] would allocate first for `needs`: nothing
+    /// when a block of the first candidate has room, else a block of that
+    /// candidate, or memory of the resource's own.
+    pub(super) fn growth(&self, needs: Needs, mapped: bool, candidates: &[Candidate]) -> Growth {
+        let Some(first) = candidates.first() else {
+            return Growth::None;
+        };
+        let request = Self::request(needs, first);
+        let Some(request) = request.filter(|_| !needs.own) else {
+            return Growth::Own(first.memory_type);
+        };
+        let pool = Pool {
+            memory_type: first.memory_type,
+            mapped,
+        };
+        let room = self
+            .blocks
+            .values()
+            .any(|block| block.pool == pool && block.fit(request, self.granularity).is_some());
+        if room {
+            Growth::None
+        } else {
+            Growth::Block(*first)
+        }
+    }
+
+    /// Adds an empty block of `size` bytes of `memory_type`, allocated
+    /// elsewhere ([`Purpose::Block`]), which later places use.
+    pub(super) fn adopt_block(&mut self, memory_type: u32, mapped: bool, memory: M, size: u64) {
+        let block = Block {
+            pool: Pool {
+                memory_type,
+                mapped,
+            },
+            memory,
+            size,
+            ranges: BTreeMap::new(),
+        };
+        self.blocks.insert(self.next, block);
+        self.next += 1;
+    }
+
+    /// Records a resource in memory of its own allocated elsewhere.
+    pub(super) fn adopt_own(&mut self) {
+        self.own += 1;
+    }
+
+    /// The place `needs` asks of a block of `candidate`'s type; `None` when
+    /// it takes more than half a block.
+    fn request(needs: Needs, candidate: &Candidate) -> Option<Request> {
+        let atom = candidate.atom.max(1);
+        let request = Request {
+            size: needs.size.max(1).checked_next_multiple_of(atom)?,
+            alignment: needs.alignment.max(atom),
+            tiling: needs.tiling,
+        };
+        let half = candidate.block_bytes / 2;
+        (request.alignment.is_power_of_two() && request.size <= half && request.alignment <= half)
+            .then_some(request)
+    }
+
     /// A place in a block of `candidate`'s type, in a new block when none
     /// has room.
     fn place<S: Source<Memory = M>>(
@@ -248,16 +320,7 @@ impl<M: Copy> Blocks<M> {
         mapped: bool,
         candidate: &Candidate,
     ) -> Option<Place> {
-        let atom = candidate.atom.max(1);
-        let request = Request {
-            size: needs.size.max(1).checked_next_multiple_of(atom)?,
-            alignment: needs.alignment.max(atom),
-            tiling: needs.tiling,
-        };
-        let half = candidate.block_bytes / 2;
-        if !request.alignment.is_power_of_two() || request.size > half || request.alignment > half {
-            return None;
-        }
+        let request = Self::request(needs, candidate)?;
         let pool = Pool {
             memory_type: candidate.memory_type,
             mapped,

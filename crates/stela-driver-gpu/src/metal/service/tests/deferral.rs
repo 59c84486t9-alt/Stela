@@ -275,6 +275,55 @@ fn a_commit_whose_pipeline_creation_compiles_waits_outside_the_turn() {
     assert!(submitted(&mut turn).contains(&Command::Dispatch([4, 1, 1])));
 }
 
+/// A new texture whose kernel memory Linux makes slowly holds no turn while
+/// it is made: the call is answered `Pending` at once, another connection's
+/// texture is created while the job blocks, and the call's next run takes
+/// what the job made.
+#[test]
+fn a_texture_whose_memory_a_job_makes_holds_no_turn_meanwhile() {
+    use crate::metal::service::wire::TextureResponse;
+    let mut service = service_on(MockBackend::new());
+    let (a, b) = (connect(&mut service), connect(&mut service));
+    let gate = Arc::new(AtomicBool::new(false));
+    service.device().backend().image_gate = Some(gate.clone());
+    let shared = Arc::new(SharedService::new(service, host(|_| {})));
+    shared.set_compile_stack(1);
+    let new_texture = |memory: &mut Memory| {
+        gate_call(
+            memory,
+            Operation::NewTexture,
+            &super::texture(StorageMode::Private),
+            size_of::<TextureResponse>(),
+        )
+    };
+    let mut memory_a = Memory::default();
+    let texture_a = new_texture(&mut memory_a);
+    shared.serve(a, texture_a, &mut memory_a).unwrap();
+    assert_eq!(status(&mut memory_a, texture_a), Status::Pending);
+    let runner = {
+        let shared = shared.clone();
+        std::thread::spawn(move || shared.run_job(0))
+    };
+    while shared.jobs_waiting() {
+        std::thread::yield_now();
+    }
+    // While the job waits, B's texture takes a turn of its own, and A,
+    // asking again, is answered without one.
+    let mut memory_b = Memory::default();
+    let texture_b = new_texture(&mut memory_b);
+    shared.serve(b, texture_b, &mut memory_b).unwrap();
+    assert_eq!(status(&mut memory_b, texture_b), Status::Ok);
+    shared.serve(a, texture_a, &mut memory_a).unwrap();
+    assert_eq!(status(&mut memory_a, texture_a), Status::Pending);
+    assert!(!runner.is_finished());
+    gate.store(true, Ordering::Release);
+    assert!(runner.join().unwrap());
+    shared.serve(a, texture_a, &mut memory_a).unwrap();
+    assert_eq!(status(&mut memory_a, texture_a), Status::Ok);
+    let mut turn = shared.try_turn().unwrap();
+    assert_eq!(turn.device().backend().adopted, 1);
+}
+
 #[test]
 fn a_job_never_runs_inside_its_callers_call_however_long_it_waits() {
     let mut service = service();

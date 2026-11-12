@@ -104,6 +104,32 @@ impl Deferral {
         self.job.take()
     }
 
+    /// Whether the call served now may defer.
+    pub(super) fn deferring(&self) -> bool {
+        self.deferring.is_some()
+    }
+
+    /// Leaves `job` for the call served now, which then fails with
+    /// `DEFERRED`; false, leaving nothing, unless the call may defer and has
+    /// left no job yet.
+    pub(super) fn defer(&mut self, job: Job) -> bool {
+        let Some(lock) = &self.deferring else {
+            return false;
+        };
+        if self.job.is_some() {
+            return false;
+        }
+        lock.lock.set_deferred(true);
+        self.job = Some(job);
+        true
+    }
+
+    /// The flag set once the device is destroyed, which a job checks before
+    /// it uses the device.
+    pub(super) fn gone(&self) -> Arc<AtomicBool> {
+        self.gone.clone()
+    }
+
     /// Waits out a running job and keeps later ones from the device, which
     /// is about to be destroyed.
     pub(super) fn retire(&self) {

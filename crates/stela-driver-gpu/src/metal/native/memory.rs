@@ -91,28 +91,80 @@ pub(super) struct Allocator<'a> {
     pub dedicated: Option<vk::MemoryDedicatedAllocateInfo<'static>>,
 }
 
-impl Allocator<'_> {
-    fn map(&mut self, memory: vk::DeviceMemory, size: u64, index: u32) -> Result<(), vk::Result> {
-        // SAFETY: `memory` was just allocated from a host-visible type (a
-        // mapped request requires one) and is not mapped yet.
-        let pointer = unsafe {
-            self.device
-                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-        }?;
-        let pointer =
-            NonNull::new(pointer.cast::<u8>()).ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)?;
-        let coherent = self.types[index as usize]
-            .properties
-            .contains(MemoryProperties::HOST_COHERENT);
-        self.mappings.insert(
-            memory.as_raw(),
-            Mapping {
-                pointer,
-                size,
-                coherent,
-            },
-        );
-        Ok(())
+/// The bytes an allocation of `size` takes: unmapped memory not dedicated
+/// to a resource gets fill buffers, which cover it whole in `FILL_ALIGN`s
+/// ([`filled`]).
+pub(super) fn allocation_bytes(size: u64, filled: bool) -> u64 {
+    if filled {
+        size.next_multiple_of(FILL_ALIGN)
+    } else {
+        size
+    }
+}
+
+/// Whether memory gets fill buffers: unmapped and dedicated to no resource.
+/// A dedicated buffer is filled through itself, and images are cleared.
+pub(super) fn filled(mapped: bool, dedicated: bool) -> bool {
+    !mapped && !dedicated
+}
+
+/// A new `VkDeviceMemory` of `bytes` of `memory_type`, dedicated to the
+/// resource `dedicated` names, and mapped whole when `mapped`: what the
+/// turn's allocations and the jobs that allocate outside it share. Its
+/// address, when mapped.
+pub(super) fn allocate_raw(
+    device: &ash::Device,
+    memory_type: u32,
+    bytes: u64,
+    dedicated: Option<vk::MemoryDedicatedAllocateInfo<'static>>,
+    mapped: bool,
+) -> Result<(vk::DeviceMemory, Option<NonNull<u8>>), vk::Result> {
+    let mut flags =
+        vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let mut dedicated = dedicated;
+    let mut info = vk::MemoryAllocateInfo::default()
+        .allocation_size(bytes)
+        .memory_type_index(memory_type)
+        .push_next(&mut flags);
+    if let Some(dedicated) = dedicated.as_mut() {
+        info = info.push_next(dedicated);
+    }
+    // SAFETY: the allocate info and its chain outlive the call.
+    let memory = unsafe { device.allocate_memory(&info, None) }?;
+    if !mapped {
+        return Ok((memory, None));
+    }
+    // SAFETY: `memory` was just allocated from a host-visible type (a mapped
+    // request requires one) and is not mapped yet.
+    let pointer =
+        unsafe { device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }
+            .and_then(|pointer| {
+                NonNull::new(pointer.cast::<u8>()).ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)
+            });
+    match pointer {
+        Ok(pointer) => Ok((memory, Some(pointer))),
+        Err(error) => {
+            // SAFETY: nothing uses the memory just allocated.
+            unsafe { device.free_memory(memory, None) };
+            Err(error)
+        }
+    }
+}
+
+/// The host mapping of `size` bytes of `memory_type` at `pointer`.
+pub(super) fn mapping(
+    types: &[MemoryType],
+    memory_type: u32,
+    pointer: NonNull<u8>,
+    size: u64,
+) -> Mapping {
+    let coherent = types[memory_type as usize]
+        .properties
+        .contains(MemoryProperties::HOST_COHERENT);
+    Mapping {
+        pointer,
+        size,
+        coherent,
     }
 }
 
@@ -126,38 +178,21 @@ impl Source for Allocator<'_> {
         size: u64,
         purpose: Purpose,
     ) -> Result<vk::DeviceMemory, vk::Result> {
-        let mut flags =
-            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-        let mut dedicated = self.dedicated.filter(|_| purpose == Purpose::Own);
-        // Fill buffers cover such memory whole, in `FILL_ALIGN`s.
-        let filled = !self.mapped && dedicated.is_none();
-        let allocation = if filled {
-            size.next_multiple_of(FILL_ALIGN)
-        } else {
-            size
-        };
-        let mut info = vk::MemoryAllocateInfo::default()
-            .allocation_size(allocation)
-            .memory_type_index(memory_type)
-            .push_next(&mut flags);
-        if let Some(dedicated) = dedicated.as_mut() {
-            info = info.push_next(dedicated);
-        }
-        // SAFETY: the allocate info and its chain outlive the call.
-        let memory = unsafe { self.device.allocate_memory(&info, None) }?;
-        if self.mapped
-            && let Err(error) = self.map(memory, size, memory_type)
-        {
-            // SAFETY: nothing uses the memory just allocated.
-            unsafe { self.device.free_memory(memory, None) };
-            return Err(error);
+        let dedicated = self.dedicated.filter(|_| purpose == Purpose::Own);
+        let filled = filled(self.mapped, dedicated.is_some());
+        let allocation = allocation_bytes(size, filled);
+        let (memory, pointer) =
+            allocate_raw(self.device, memory_type, allocation, dedicated, self.mapped)?;
+        if let Some(pointer) = pointer {
+            self.mappings.insert(
+                memory.as_raw(),
+                mapping(self.types, memory_type, pointer, size),
+            );
         }
         if filled {
             self.zeroing
                 .cover(self.device, memory, memory_type, allocation);
         }
-        // Memory dedicated to a resource has no fill buffers: a dedicated
-        // buffer is filled through itself, and images are cleared.
         Ok(memory)
     }
 

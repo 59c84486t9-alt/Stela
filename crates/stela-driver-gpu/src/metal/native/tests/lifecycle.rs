@@ -199,6 +199,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         decode_astc: vk::Pipeline::null(),
         store: crate::metal::native::pipeline_store::Persisted::none(|_| {}),
         deferral: Default::default(),
+        premade: Default::default(),
         ticks: crate::metal::timing::no_clock,
         split: [0; 3],
     }
