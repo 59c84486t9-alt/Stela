@@ -317,12 +317,14 @@ pub(super) const MASK_WRITES: usize = MIRRORED.len() + STORED_CELLS;
 /// A PAC key's halves also close the keys to PAC thunks, which then reopen
 /// together (`Machine::open_pointers`). TPIDR_EL1's also update its open
 /// read cells in every state and log the thread switch for the engine's
-/// diagnostics ([`THREAD_SWITCH`]).
-pub(super) const WRITTEN: [(Encoding, SystemRegister); 18] = [
+/// diagnostics ([`THREAD_SWITCH`]). FPCR's lives in the frame too: the
+/// compiled FP operations read it there at run time.
+pub(super) const WRITTEN: [(Encoding, SystemRegister); 19] = [
     (Encoding::new(3, 0, 4, 0, 1), SystemRegister::ELR_EL1),
     (Encoding::new(3, 0, 4, 0, 0), SystemRegister::SPSR_EL1),
     (STACK_ZERO, SystemRegister::SP_EL0),
     (Encoding::new(3, 3, 4, 4, 1), SystemRegister::FPSR),
+    (registers::encodings::FPCR, SystemRegister::FPCR),
     (registers::encodings::TPIDR_EL0, SystemRegister::TPIDR_EL0),
     (
         registers::encodings::TPIDRRO_EL0,

@@ -647,7 +647,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 index != THREAD_POINTER_WRITE || register == SystemRegister::TPIDR_EL1
             })
             .and_then(|(register, index)| match register {
-                SystemRegister::FPSR => Some(0),
+                SystemRegister::FPSR | SystemRegister::FPCR => Some(0),
                 _ => self
                     .cpu
                     .el2_pointer_key_storage(register)

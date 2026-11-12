@@ -1516,12 +1516,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The thunk completing MSR of `WRITTEN[index]` from Xt at `pc`.
-    fn stored_write_thunk(&self, pc: GuestAddress, index: usize, rt: u8) -> x86_64_pointer::Thunk {
+    pub(super) fn stored_write_thunk(
+        &self,
+        pc: GuestAddress,
+        index: usize,
+        rt: u8,
+    ) -> x86_64_pointer::Thunk {
         let (_, register) = WRITTEN[index];
         let cell = cell_place(written_cell(index));
         let written = self.register_fixed_bits(register);
         if register == SystemRegister::FPSR {
             let offset = core::mem::offset_of!(GuestState, fpsr);
+            return register_read::frame_write_thunk(pc, rt, cell, offset, written);
+        }
+        if register == SystemRegister::FPCR {
+            // The fields this PE holds, as the engine's write keeps them.
+            let written = register_read::Written {
+                keep: u64::from(super::system::fpcr_fields(&self.cpu.registers)),
+                set: 0,
+            };
+            let offset = core::mem::offset_of!(GuestState, fpcr);
             return register_read::frame_write_thunk(pc, rt, cell, offset, written);
         }
         if register == SystemRegister::SP_EL0 {

@@ -64,7 +64,7 @@ pub const FP_TRAPS_WRITABLE: bool = FPCR_FIELDS & FPCR_TRAP_ENABLES == FPCR_TRAP
 const FPCR_ALTERNATE: u32 = 0b111;
 
 /// The FPCR fields the PE whose register file is `registers` holds.
-fn fpcr_fields(registers: &File) -> u32 {
+pub(super) fn fpcr_fields(registers: &File) -> u32 {
     if registers.has(Feature::FEAT_AFP) {
         FPCR_FIELDS | FPCR_ALTERNATE
     } else {

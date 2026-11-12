@@ -303,6 +303,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             }
             Register::FPCR => {
                 cpu.state.fpcr = value as u32 & fpcr_fields(&cpu.registers);
+                self.plain.set(Some((register, 0)));
                 return Ok(());
             }
             // Without AArch32, FPSR keeps only QC and the cumulative flags.

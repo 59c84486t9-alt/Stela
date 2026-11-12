@@ -1569,6 +1569,7 @@ fn written_registers_open_their_cells_on_plain_writes_only() {
     const MSR_ELR_X0: u32 = 0xd518_4020;
     const MSR_SP_EL0_X0: u32 = 0xd518_4100;
     const MSR_FPSR_X0: u32 = 0xd51b_4420;
+    const MSR_FPCR_X0: u32 = 0xd51b_4400;
     let mut machine = machine(&[]);
     machine.cpu.pstate = Pstate::reset(1);
     machine.cpu.pstate.sp = true;
@@ -1605,11 +1606,64 @@ fn written_registers_open_their_cells_on_plain_writes_only() {
             value: 0
         }
     );
+    machine.system_instruction(MSR_FPCR_X0).unwrap();
+    assert_eq!(
+        cell(&machine.mirrors, Register::FPCR),
+        Cell {
+            readable: 1,
+            value: 0
+        }
+    );
     // EL0 traps them: nothing opens.
     let mut machine = super::super::tests::machine(&[]);
     machine.cpu.pstate = Pstate::reset(0);
     machine.system_instruction(MSR_ELR_X0).unwrap();
     assert_eq!(cell(&machine.mirrors, Register::ELR_EL1), Cell::default());
+}
+
+/// A native MSR FPCR, once a plain engine write opened its cell, leaves the
+/// frame's FPCR as the engine's write does: the fields the PE holds,
+/// trap enables included, and nothing else.
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn native_fpcr_writes_keep_the_fields_the_engine_keeps() {
+    use super::super::transitions::tests::run_native;
+    use super::super::{WRITTEN, written_cell};
+    use stela_compiler::{GuestAddress, block::ExitKind};
+    const MSR_FPCR_X0: u32 = 0xd51b_4400;
+    let index = WRITTEN
+        .iter()
+        .position(|&(_, named)| named == Register::FPCR)
+        .unwrap();
+    let opened = || {
+        let mut machine = machine(&[]);
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.cpu.registers.set(Register::CPACR_EL1, 0, 3 << 20);
+        machine.derived_changed();
+        machine.system_instruction(MSR_FPCR_X0).unwrap();
+        assert_eq!(machine.mirrors[written_cell(index)].readable, 1);
+        machine
+    };
+    let (mut engine, mut native) = (opened(), opened());
+    let pc = engine.cpu.pc;
+    let thunk = native.stored_write_thunk(GuestAddress(pc), index, 0);
+    for value in [
+        0x0340_0000,
+        u64::MAX,
+        0x9f00,
+        0,
+        0x07c8_9f07,
+        1 << 32 | 0x10_0000,
+    ] {
+        for machine in [&mut engine, &mut native] {
+            machine.cpu.pc = pc;
+            machine.cpu.state.x[0] = value;
+        }
+        engine.system_instruction(MSR_FPCR_X0).unwrap();
+        let (next, kind) = run_native(&mut native, &thunk.code);
+        assert_eq!((next, kind), (pc + 4, ExitKind::Fallthrough as u64));
+        assert_eq!(native.cpu.state.fpcr, engine.cpu.state.fpcr, "{value:#x}");
+    }
 }
 
 #[test]
