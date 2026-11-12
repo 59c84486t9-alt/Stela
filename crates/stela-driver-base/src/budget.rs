@@ -7,7 +7,13 @@
 //! Nothing preempts a driver: a single register access that never
 //! completes is not bounded here.
 //!
-//! An unarmed budget costs one relaxed load per check and changes nothing.
+//! The budget belongs to the processor that armed it, the one running the
+//! start it bounds: every other processor's waits, through the same
+//! [`Clock`] or a [`Bounded`] provider, see no budget. The platform names
+//! its processors with [`on_processor`].
+//!
+//! An unarmed budget costs one relaxed load per check and changes nothing;
+//! an armed one names the processor only once it has passed.
 //! Minimum delays a device needs ([`Clock::delay`], the qualified
 //! provider's waits) are never shortened.
 //!
@@ -26,6 +32,8 @@ pub struct Expiry {
 
 #[derive(Clone, Copy)]
 struct State {
+    /// The processor that armed it.
+    owner: u64,
     start: u64,
     /// Zero while unarmed.
     ticks: u64,
@@ -35,6 +43,7 @@ struct State {
 
 #[cfg(any(test, feature = "test-support"))]
 const UNARMED: State = State {
+    owner: 0,
     start: 0,
     ticks: 0,
     ticks_per_microsecond: 0,
@@ -44,13 +53,22 @@ const UNARMED: State = State {
 #[cfg(any(test, feature = "test-support"))]
 mod state {
     //! Per thread, as the fixtures' virtual clock is: parallel tests never
-    //! see one another's budget.
+    //! see one another's budget. A test names the processor it acts as
+    //! with [`super::act_as`].
     extern crate std;
     use super::{State, UNARMED};
     use core::cell::Cell;
 
     std::thread_local! {
         static STATE: Cell<State> = const { Cell::new(UNARMED) };
+        static PROCESSOR: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn processor() -> u64 {
+        PROCESSOR.with(Cell::get)
+    }
+    pub(super) fn act_as(processor: u64) {
+        PROCESSOR.with(|current| current.set(processor));
     }
 
     pub(super) fn armed() -> bool {
@@ -66,11 +84,29 @@ mod state {
 
 #[cfg(not(any(test, feature = "test-support")))]
 mod state {
-    //! One budget for the one core that starts devices; every other core
-    //! reads it unarmed.
+    //! One budget, held by the processor that starts devices; every other
+    //! processor sees it as not its own.
     use super::State;
     use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
+    /// The [`super::on_processor`] hook: a `fn() -> u64`, null when none
+    /// is set, when every caller is processor 0.
+    static PROCESSOR: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+    pub(super) fn processor() -> u64 {
+        let hook = PROCESSOR.load(Ordering::Relaxed);
+        if hook.is_null() {
+            return 0;
+        }
+        // SAFETY: `on_processor` stored a `fn() -> u64`, the only source.
+        let hook: fn() -> u64 = unsafe { core::mem::transmute(hook) };
+        hook()
+    }
+    pub(super) fn on_processor(hook: fn() -> u64) {
+        PROCESSOR.store(hook as *mut (), Ordering::Relaxed);
+    }
+
+    static OWNER: AtomicU64 = AtomicU64::new(0);
     static START: AtomicU64 = AtomicU64::new(0);
     static TICKS: AtomicU64 = AtomicU64::new(0);
     static RATE: AtomicU64 = AtomicU64::new(0);
@@ -82,6 +118,7 @@ mod state {
     pub(super) fn get() -> State {
         let at = AT.load(Ordering::Relaxed);
         State {
+            owner: OWNER.load(Ordering::Relaxed),
             start: START.load(Ordering::Relaxed),
             ticks: TICKS.load(Ordering::Acquire),
             ticks_per_microsecond: RATE.load(Ordering::Relaxed),
@@ -90,6 +127,7 @@ mod state {
         }
     }
     pub(super) fn set(value: State) {
+        OWNER.store(value.owner, Ordering::Relaxed);
         START.store(value.start, Ordering::Relaxed);
         RATE.store(value.ticks_per_microsecond, Ordering::Relaxed);
         AT.store(
@@ -100,6 +138,24 @@ mod state {
         );
         TICKS.store(value.ticks, Ordering::Release);
     }
+}
+
+/// Name the processor each budget check runs on: any value unique to it,
+/// cheap to read, on every processor that may wait through a driver. The
+/// budget then belongs to the processor that arms it. Without one, every
+/// caller is one processor. Test builds name processors per thread with
+/// `act_as` instead, as their budgets are per thread.
+pub fn on_processor(hook: fn() -> u64) {
+    #[cfg(not(any(test, feature = "test-support")))]
+    state::on_processor(hook);
+    #[cfg(any(test, feature = "test-support"))]
+    let _ = hook;
+}
+
+/// Act as `processor` on this thread, as [`on_processor`] names one.
+#[cfg(any(test, feature = "test-support"))]
+pub fn act_as(processor: u64) {
+    state::act_as(processor);
 }
 
 /// An armed budget; dropping it restores the budget it replaced.
@@ -115,6 +171,7 @@ impl Budget {
         let deadline = clock.try_deadline(microseconds.max(1))?;
         let previous = state::get();
         state::set(State {
+            owner: state::processor(),
             start: deadline.start,
             ticks: deadline.ticks,
             ticks_per_microsecond: clock.ticks_per_microsecond,
@@ -143,8 +200,8 @@ impl Drop for Budget {
     }
 }
 
-/// Whether an armed budget has passed at `counter`. The first wait to see
-/// it passed is kept as the step the device stopped at.
+/// Whether this processor's armed budget has passed at `counter`. The
+/// first wait to see it passed is kept as the step the device stopped at.
 #[inline]
 pub(crate) fn passed_at(counter: u64, at: &'static Location<'static>) -> bool {
     if !state::armed() {
@@ -152,7 +209,10 @@ pub(crate) fn passed_at(counter: u64, at: &'static Location<'static>) -> bool {
     }
     let mut current = state::get();
     let elapsed = counter.wrapping_sub(current.start) as i64;
-    let passed = current.ticks != 0 && elapsed >= 0 && elapsed as u64 >= current.ticks;
+    let passed = current.ticks != 0
+        && elapsed >= 0
+        && elapsed as u64 >= current.ticks
+        && current.owner == state::processor();
     if passed && current.at.is_none() {
         current.at = Some(at);
         state::set(current);
@@ -263,6 +323,34 @@ mod tests {
         assert!(budget.expired().is_some());
         drop(budget);
         assert_eq!(minimum.wait_us(50_000), Ok(()));
+    }
+
+    #[test]
+    fn a_budget_bounds_only_the_processor_that_armed_it() {
+        use power::Timer;
+        let _virtual = test_clock::virtualize();
+        let minimum = Bounded(Rc::new(Instant));
+        act_as(1);
+        let budget = Budget::start(CLOCK, 1_000).unwrap();
+        assert!(!CLOCK.wait(60_000_000, || false));
+        assert!(budget.expired().is_some());
+        let first = budget.expired().unwrap().at;
+        // Processor 2, waiting while processor 1's budget has passed: its
+        // deadlines run in full and its minimum waits succeed.
+        act_as(2);
+        let deadline = CLOCK.deadline(1_000);
+        assert!(!deadline.passed());
+        let started = Clock::ticks();
+        assert!(!CLOCK.wait(5_000, || false));
+        assert!(Clock::ticks() - started >= 5_000);
+        assert_eq!(minimum.wait_us(50_000), Ok(()));
+        assert_eq!(budget.expired().unwrap().at, first);
+        // Processor 1 still sees its own budget passed.
+        act_as(1);
+        assert!(CLOCK.deadline(5_000_000).passed());
+        assert_eq!(minimum.wait_us(50_000), Err(power::Error::StartBudget));
+        drop(budget);
+        act_as(0);
     }
 
     #[test]

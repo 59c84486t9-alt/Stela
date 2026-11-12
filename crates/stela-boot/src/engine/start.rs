@@ -175,6 +175,15 @@ struct Started {
     native_processors: Option<&'static crate::native_smp::firmware::Capture>,
 }
 
+/// This processor's GS base, which names it to a device's start budget:
+/// devices start after the host record is installed, so the starting
+/// processor's base is its own record, which no other processor's base
+/// equals. Read only once an armed budget has passed.
+fn processor_gs() -> u64 {
+    // SAFETY: read-only architectural CPL0 GS context, not device MMIO.
+    unsafe { crate::cpu::msr::GS_BASE.read() }
+}
+
 /// A driver starts on `device`: the boot log names it before the start
 /// begins, so a start that never ends leaves its culprit in the record the
 /// USB log receives when it resumes, and the screen's step shows it.
@@ -236,6 +245,7 @@ fn start(handoff: u64) -> Started {
     crate::status::set_clock(handoff.tsc_hz);
     stela_drivers::on_wait(crate::status::tick);
     stela_drivers::on_work(device_starting);
+    stela_drivers::budget::on_processor(processor_gs);
     crate::status::take_screen(
         handoff
             .screen
