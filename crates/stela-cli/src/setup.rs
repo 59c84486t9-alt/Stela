@@ -65,6 +65,7 @@ mod fdr;
 mod firmware;
 mod format;
 pub(crate) mod host;
+mod inputs;
 mod installed;
 mod machines;
 mod medium;
@@ -520,6 +521,9 @@ type ImageSizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
 /// directory: the boot files (`prepare::fetch_recovery`), or the boot files
 /// of a whole image that is written onto the USB as it downloads
 /// (`medium::download::Download`).
+/// The members of an image `boot prepare` reads for a model's restore
+/// bundle (`boot::restore_inputs`).
+type InputsOf<'a> = dyn Fn(&Path, &str) -> Result<Vec<String>> + 'a;
 /// Ask the user a yes-or-no question on the terminal; None without one.
 type AskOf<'a> = dyn Fn(&str) -> Option<bool> + 'a;
 type FetchImageOf<'a> = dyn Fn(&Path, &str, &str, sources::Need) -> Result<sources::Fetched> + 'a;
@@ -552,6 +556,7 @@ struct Environment<'a> {
     image_size: &'a ImageSizeOf<'a>,
     fetch_image: &'a FetchImageOf<'a>,
     ask: &'a AskOf<'a>,
+    bundle_inputs: &'a InputsOf<'a>,
     /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
@@ -763,6 +768,7 @@ impl Request {
         let environment = Environment {
             host: &host::System,
             image_caches: &image_caches,
+            bundle_inputs: &|ipsw, model| crate::boot::restore_inputs(ipsw, model),
             ask: &|question| {
                 use std::io::IsTerminal;
                 if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {

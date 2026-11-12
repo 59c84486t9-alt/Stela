@@ -13,8 +13,9 @@
 //!    this computer: in `--download-dir`, this user's cache, the invoking
 //!    user's cache under `sudo` and root's cache when it is readable
 //!    ([`image_caches`]);
-//! 3. for boot files, the USB's own full install medium of the build, which
-//!    holds the image byte for byte (`medium::image`);
+//! 3. for boot files, the members a setup that streams the image keeps on
+//!    its USB (`inputs`), or the USB's own full install medium of the
+//!    build, which holds the image byte for byte (`medium::image`);
 //! 4. Apple's servers: the boot files alone by byte ranges (about 2.2 GB of
 //!    macOS 27.2's 27 GB), or the whole image streamed onto the USB's
 //!    pieces (`medium::download`), its size read first.
@@ -67,6 +68,8 @@ pub(super) enum Source {
     Given(PathBuf),
     /// An image or boot archive of the build on this computer.
     Cached(PathBuf),
+    /// The boot files a setup keeps on its USB (`inputs`).
+    Kept(PathBuf),
     /// The USB's full install medium of the build.
     Medium(medium::Medium),
     /// Apple's servers: `bytes` to download, of the image's `whole`.
@@ -77,14 +80,14 @@ impl Source {
     /// Whether it is a file on this computer already, which a dry run
     /// reads.
     pub(super) fn is_local(&self) -> bool {
-        matches!(self, Self::Given(_) | Self::Cached(_))
+        matches!(self, Self::Given(_) | Self::Cached(_) | Self::Kept(_))
     }
 
     /// The bytes of the whole image when it is written to the USB.
     pub(super) fn image_bytes(&self) -> Result<u64> {
         Ok(match self {
             Self::Given(path) | Self::Cached(path) => fs::metadata(path)?.len(),
-            Self::Medium(_) => 0,
+            Self::Kept(_) | Self::Medium(_) => 0,
             Self::Remote { whole, .. } => *whole,
         })
     }
@@ -170,6 +173,13 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
         return Ok(Source::Cached(path));
     }
     if lookup.need == Need::BootFiles
+        && let Some(path) = lookup
+            .medium
+            .and_then(|m| super::inputs::kept(environment, &m.volume, lookup.build, lookup.model))
+    {
+        return Ok(Source::Kept(path));
+    }
+    if lookup.need == Need::BootFiles
         && let Some(medium) = lookup
             .medium
             .filter(|m| !m.remote && m.build == lookup.build && m.problems().is_empty())
@@ -214,6 +224,10 @@ pub(super) fn describe(source: &Source, lookup: &Lookup<'_>) -> String {
     match source {
         Source::Given(path) => format!("from {}", path.display()),
         Source::Cached(path) => format!("from {}, downloaded earlier", path.display()),
+        Source::Kept(path) => format!(
+            "from the boot files kept on this USB in {}; nothing is downloaded",
+            path.display()
+        ),
         Source::Medium(medium) => format!(
             "from this USB's copy of macOS {build} in {}; nothing is downloaded",
             medium.directory().display()
@@ -268,7 +282,7 @@ pub(super) fn obtain(
     lookup: &Lookup<'_>,
 ) -> Result<Obtained> {
     match source {
-        Source::Given(path) | Source::Cached(path) => Ok(Obtained {
+        Source::Given(path) | Source::Cached(path) | Source::Kept(path) => Ok(Obtained {
             path: path.clone(),
             download: None,
             _temporary: None,

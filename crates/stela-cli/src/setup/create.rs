@@ -75,6 +75,9 @@ pub(super) struct InstallPlan {
     pub(super) build: String,
     pub(super) restore: Vec<Prepared>,
     pub(super) medium: Option<MediumPlan>,
+    /// The boot files a later update prepares its bundles from, kept on the
+    /// USB when the medium streams the image (`inputs`): their bytes.
+    pub(super) inputs: u64,
 }
 
 /// The restore bundles of both kinds for each of `ecids`.
@@ -170,7 +173,9 @@ pub(super) fn plan_install(
         }
     };
     // The medium and the bundles share the data partition.
-    let restore_bytes: u64 = restore.iter().map(|p| p.bytes).sum();
+    // The boot files a later update prepares from count with the bundles.
+    let inputs = super::inputs::needed(environment, record, build, ipsw)?;
+    let restore_bytes: u64 = restore.iter().map(|p| p.bytes).sum::<u64>() + inputs;
     let need = medium.as_ref().map_or(MARGIN, |plan| plan.need) + restore_bytes + also;
     let free = host.volume(&record.volume)?.free_bytes;
     ensure!(
@@ -194,6 +199,7 @@ pub(super) fn plan_install(
         build: build.into(),
         restore,
         medium,
+        inputs,
     })
 }
 
@@ -219,6 +225,14 @@ pub(super) fn describe_install(
             )
             .display(),
             host::bytes_text(bundle.bytes)
+        )?;
+    }
+    if plan.inputs > 0 {
+        writeln!(
+            text,
+            "  boot files     {} ({}), which later updates prepare the bundles from",
+            super::inputs::path(&record.volume, &plan.build).display(),
+            host::bytes_text(plan.inputs)
         )?;
     }
     if let Some(medium) = plan.medium.as_ref().filter(|m| m.remote) {
@@ -257,6 +271,9 @@ pub(super) fn apply_install(
     plan: InstallPlan,
 ) -> Result<()> {
     copy_bundles(record, &plan.restore)?;
+    if plan.inputs > 0 {
+        super::inputs::keep(environment, record, &plan.build, ipsw)?;
+    }
     write_record(&record.esp.clone(), record)?;
     let build = plan.build;
     let Some(plan) = plan.medium else {

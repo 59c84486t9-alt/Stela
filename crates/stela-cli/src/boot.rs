@@ -22,6 +22,7 @@ use stela_loader::trust_cache::CodeHash;
 
 mod board_firmware;
 mod disk;
+mod members;
 mod ticket;
 
 const MANIFEST_FILE: &str = "bundle.json";
@@ -533,6 +534,26 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
     line.prepare.run()
 }
 
+/// The members of `ipsw` that [`prepare`] reads for `model`'s erase
+/// restore bundle (`--restore`), the list its reads are held to.
+pub(crate) fn restore_inputs(ipsw: &std::path::Path, model: &str) -> Result<Vec<String>> {
+    let profile = components::Profile::of(model)?;
+    let report = restore::archive::manifest(ipsw, None, false)?;
+    let identity = components::identity(&report, &profile, Purpose::Erase)?;
+    Ok(members::names(
+        ipsw,
+        &members::Choice {
+            report: &report,
+            profile: &profile,
+            identity,
+            roles: &RESTORE,
+            cryptex_trust_caches: false,
+        },
+    )?
+    .into_iter()
+    .collect())
+}
+
 impl BootCommand {
     pub fn run(self) -> Result<()> {
         match self {
@@ -798,12 +819,25 @@ impl Prepare {
             None => components::identity(&report, &profile, purpose)?,
         };
         let owned = components::identities(&report, &profile);
+        // Every member read from here on is one of this list, which a
+        // setup keeps to prepare the bundle again (`members`).
+        let names = members::names(
+            &ipsw,
+            &members::Choice {
+                report: &report,
+                profile: &profile,
+                identity,
+                roles: &roles,
+                cryptex_trust_caches: self.cryptex_trust_caches,
+            },
+        )?;
+        let ipsw = members::Members::new(ipsw, names);
         let component = |name: &str, payload_type: Option<&str>, limit: u64| -> Result<Decoded> {
             // A component absent from the selected identity is taken from
             // another identity of the same profile, and named with its
             // variant.
             let (owner, entry) = components::component(&report, &profile, identity, name)?;
-            let container = restore::archive::read_member(&ipsw, &entry.path, limit)?;
+            let container = ipsw.read(&entry.path, limit)?;
             let label = if owner.variant == identity.variant {
                 name.to_owned()
             } else {
@@ -883,10 +917,10 @@ impl Prepare {
         let global_manifest = |cryptex1: bool| -> Result<Option<Decoded>> {
             let variant = identity.macos_variant.as_ref().unwrap_or(&identity.variant);
             let member = manifest_member(cryptex1, variant, &identity.device_class);
-            if !restore::archive::has_member(&ipsw, &member)? {
+            if !ipsw.has(&member) {
                 return Ok(None);
             }
-            let bytes = restore::archive::read_member(&ipsw, &member, COMPONENT_LIMIT)?;
+            let bytes = ipsw.read(&member, COMPONENT_LIMIT)?;
             let digest = stela_formats::sha256(&bytes);
             let source = Source {
                 component: if cryptex1 {
@@ -914,11 +948,7 @@ impl Prepare {
         let mut staged = None;
         let boot_manifest = match (self.restore, self.ecid) {
             (true, Some(ecid)) => {
-                let manifest = restore::archive::read_member(
-                    &ipsw,
-                    "BuildManifest.plist",
-                    BUILD_MANIFEST_LIMIT,
-                )?;
+                let manifest = ipsw.read(members::BUILD_MANIFEST, BUILD_MANIFEST_LIMIT)?;
                 eprintln!(
                     "Sending ECID {ecid:#x}, fresh nonces and the component hashes to Apple's \
                      signing service (gs.apple.com) for the restore's AP root ticket"
@@ -1156,7 +1186,7 @@ impl Prepare {
             }));
         let provenance = serde_json::json!({
             "archive": {
-                "path": ipsw.canonicalize()?.display().to_string(),
+                "path": ipsw.path().canonicalize()?.display().to_string(),
                 "build_manifest_sha256": report.manifest_sha256,
             }
         });

@@ -387,6 +387,15 @@ static TEST_CACHES: std::sync::LazyLock<[PathBuf; 1]> = std::sync::LazyLock::new
         .keep()]
 });
 
+/// What `boot prepare` reads of the synthetic images, which have no
+/// kernel: their manifest and restore ramdisk.
+fn fake_bundle_inputs(_: &Path, _: &str) -> Result<Vec<String>> {
+    Ok(vec![
+        "BuildManifest.plist".into(),
+        "stelatest-ramdisk.dmg".into(),
+    ])
+}
+
 fn offline_image_size(_: &str, _: &str) -> Result<(u64, u64)> {
     anyhow::bail!("offline")
 }
@@ -403,6 +412,7 @@ fn environment(host: &FakeHost) -> Environment<'_> {
         image_size: &offline_image_size,
         fetch_image: &offline_fetch_image,
         ask: &|_| None,
+        bundle_inputs: &fake_bundle_inputs,
         prepare_restore: &fake_prepare_restore,
         prepare_update: &fake_prepare_update,
         inventory: &fake_inventory,
@@ -2376,6 +2386,34 @@ fn network_setup(f: &mut Fixture, older: &[Box<Prepare>; 2]) {
     assert!(record(f).active_medium().unwrap().remote);
 }
 
+/// Remove the boot files a network setup keeps on its USB.
+fn drop_inputs(f: &Fixture) {
+    let record = record(f);
+    fs::remove_file(inputs::path(&record.volume, &record.build)).unwrap();
+}
+
+#[test]
+fn revision_update_of_a_network_setup_prepares_from_the_boot_files_it_keeps() {
+    let mut f = fixture(64 * GIB, false);
+    let (older, newer) = (preparers(0), preparers(1));
+    network_setup(&mut f, &older);
+    let kept = {
+        let record = record(&f);
+        inputs::path(&record.volume, &record.build)
+    };
+    assert!(kept.is_file(), "the setup keeps the boot files");
+    // No image, no cache, no network (downloads panic here).
+    let environment = environment_at(&f.host, &newer, 1);
+    let cache = f._dir.path().join("cache");
+    let mut dry = update_request(&f, &cache);
+    dry.dry_run = true;
+    let plan = dry.dispatch(&environment).unwrap();
+    assert!(plan.contains("kept on this USB"), "{plan}");
+    update_request(&f, &cache).dispatch(&environment).unwrap();
+    assert_eq!(record(&f).bundle_revision, 1);
+    assert!(kept.is_file());
+}
+
 fn update_request(f: &Fixture, cache: &Path) -> Request {
     let mut command = command(f, &stela_volume(f));
     command.action = Action::UpdateStela;
@@ -2393,6 +2431,7 @@ fn revision_update_without_any_image_fails_before_changing_anything() {
     let mut f = fixture(64 * GIB, false);
     let (older, newer) = (preparers(0), preparers(1));
     network_setup(&mut f, &older);
+    drop_inputs(&f);
     let cache = f._dir.path().join("cache");
     let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
     // No image, no cache, no network: refused with what to do, the USB
@@ -2416,6 +2455,7 @@ fn revision_update_uses_a_downloaded_image_in_any_cache() {
     let mut f = fixture(64 * GIB, false);
     let (older, newer) = (preparers(0), preparers(1));
     network_setup(&mut f, &older);
+    drop_inputs(&f);
     // The boot archive an earlier run downloaded, in a cache other than
     // --download-dir's, as root's is to a user's run.
     let other = f._dir.path().join("root-cache");
@@ -2452,6 +2492,7 @@ fn revision_update_downloads_only_the_boot_files_saying_their_size() {
     let mut f = fixture(64 * GIB, false);
     let (older, newer) = (preparers(0), preparers(1));
     network_setup(&mut f, &older);
+    drop_inputs(&f);
     let ipsw = f.ipsw.clone();
     let fetched = std::cell::Cell::new(0);
     let fetch = |directory: &Path,

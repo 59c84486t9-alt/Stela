@@ -64,24 +64,37 @@ fn restored_members<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 /// ([`components::system_volume`]).
 pub const RECOVERY_COMMENT: &[u8] = b"Stela recovery members";
 
+/// The archive comment of the boot inputs a setup keeps on its USB
+/// ([`copy_named`] of `boot::restore_inputs`): fewer members still than a
+/// recovery archive, enough to prepare restore bundles.
+pub const INPUTS_COMMENT: &[u8] = b"Stela boot inputs";
+
+/// Whether `archive` is one of the partial archives Stela writes.
+fn partial<R: Read + Seek>(archive: &ZipArchive<R>) -> bool {
+    matches!(archive.comment(), RECOVERY_COMMENT | INPUTS_COMMENT)
+}
+
 /// Whether the IPSW at `image` holds the macOS system image an erase
-/// restore installs: every IPSW but a recovery archive [`trim`] wrote.
+/// restore installs: every IPSW but a partial one Stela wrote.
 pub fn holds_system_image(image: &Path) -> Result<bool> {
     let archive = ZipArchive::new(File::open(image)?)
         .with_context(|| format!("{} is not an IPSW", image.display()))?;
-    Ok(archive.comment() != RECOVERY_COMMENT)
+    Ok(!partial(&archive))
 }
 
 fn select<R: Read + Seek>(archive: &mut ZipArchive<R>, model: &str) -> Result<Selection> {
-    let recovery = archive.comment() == RECOVERY_COMMENT;
+    let recovery = partial(archive);
     select_scope(archive, model, recovery)
 }
 
-fn select_scope<R: Read + Seek>(
+/// `archive`'s BuildManifest, its identities narrowed to `model`'s profile
+/// (and to the erase restore and installed system for a `recovery` archive).
+/// It checks no members: a partial archive holds fewer than it names.
+fn profile_manifest<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     model: &str,
     recovery: bool,
-) -> Result<Selection> {
+) -> Result<(components::Profile, manifest::RestoreManifest)> {
     let mut bytes = Vec::new();
     archive
         .by_name(BUILD_MANIFEST)?
@@ -107,6 +120,15 @@ fn select_scope<R: Read + Seek>(
         "macOS {} has no identities for {profile}",
         restore.product_build
     );
+    Ok((profile, restore))
+}
+
+fn select_scope<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    model: &str,
+    recovery: bool,
+) -> Result<Selection> {
+    let (profile, restore) = profile_manifest(archive, model, recovery)?;
     let device_class = profile.device_class.clone();
     let restored = restored_members(archive.file_names());
     let identities: Vec<IdentitySet> = restore
@@ -710,11 +732,9 @@ pub fn remote_inventory<R: Read + Seek>(
 /// `model`, from its ZIP directory and `Restore.plist` alone.
 pub fn identity(image: &Path, model: &str) -> Result<(String, String)> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
-    let selection = select(&mut archive, model)?;
-    Ok((
-        selection.restore.product_version,
-        selection.restore.product_build,
-    ))
+    let recovery = partial(&archive);
+    let (_, restore) = profile_manifest(&mut archive, model, recovery)?;
+    Ok((restore.product_version, restore.product_build))
 }
 
 /// Copy the recovery members of the IPSW `source` for `model` into a new
@@ -734,9 +754,10 @@ pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path, what: &str) -
     let progress = crate::progress::Phase::bytes(what, total);
     let part = output.with_extension("part");
     // A partial archive cannot be resumed: it is removed on any failure.
-    let written = copy_members(&mut archive, &names, &part, &progress).inspect_err(|_| {
-        let _ = fs::remove_file(&part);
-    })?;
+    let written = copy_members(&mut archive, &names, &part, RECOVERY_COMMENT, &progress)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&part);
+        })?;
     fs::rename(&part, output)?;
     progress.finish();
     Ok(written)
@@ -769,11 +790,41 @@ pub fn recovery_bytes<R: Read + Seek>(mut source: R, model: &str) -> Result<(u64
     Ok((recovery_members(&mut archive, model)?.1, whole))
 }
 
-/// Copy `names` of `archive` into a new stored archive `part`.
+/// The bytes of `names` in the IPSW `source`.
+pub fn members_bytes(source: &Path, names: &[String]) -> Result<u64> {
+    let mut archive = ZipArchive::new(File::open(source)?)?;
+    names.iter().try_fold(0u64, |total, name| -> Result<u64> {
+        total
+            .checked_add(archive.by_name(name)?.size())
+            .context("member size overflow")
+    })
+}
+
+/// Copy `names` of the IPSW `source` into a new stored archive at
+/// `output` with [`INPUTS_COMMENT`], written beside it and renamed when
+/// complete. Returns the bytes written for the members.
+pub fn copy_named(source: &Path, names: &[String], output: &Path, what: &str) -> Result<u64> {
+    let mut archive = ZipArchive::new(File::open(source)?)?;
+    let total = members_bytes(source, names)?;
+    let progress = crate::progress::Phase::bytes(what, total);
+    let part = output.with_extension("part");
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let written = copy_members(&mut archive, &names, &part, INPUTS_COMMENT, &progress)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&part);
+        })?;
+    fs::rename(&part, output)?;
+    progress.finish();
+    Ok(written)
+}
+
+/// Copy `names` of `archive` into a new stored archive `part` with
+/// `comment`.
 fn copy_members<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     names: &[&str],
     part: &Path,
+    comment: &[u8],
     progress: &crate::progress::Phase,
 ) -> Result<u64> {
     use zip::{CompressionMethod, write::SimpleFileOptions};
@@ -805,7 +856,7 @@ fn copy_members<R: Read + Seek>(
         ensure!(count == member.size(), "{name} is truncated");
         written += count;
     }
-    writer.set_raw_comment(RECOVERY_COMMENT.into());
+    writer.set_raw_comment(comment.into());
     writer.finish()?.sync_all()?;
     Ok(written)
 }

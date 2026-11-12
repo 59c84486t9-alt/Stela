@@ -285,12 +285,16 @@ pub(super) fn update_stela(
             )?;
         }
     }
+    // The image stays until the bundles and the boot files a later update
+    // prepares from are on the USB.
+    let mut obtained = None;
     let prepared = if missing_restore.is_empty() || (dry_run && !local) {
         Vec::new()
     } else {
         let source = source.as_ref().expect("missing bundles have a source");
-        let obtained = super::sources::obtain(environment, source, &lookup)?;
-        let ipsw = obtained.path.as_path();
+        let ipsw = &obtained
+            .insert(super::sources::obtain(environment, source, &lookup)?)
+            .path;
         let mut prepared: Vec<Prepared> = Vec::new();
         for kind in bundle::RESTORE_KINDS {
             let ecids: Vec<_> = missing_restore
@@ -313,6 +317,15 @@ pub(super) fn update_stela(
             }
         }
         check_space(environment.host, &record.volume, &prepared)?;
+        // Room for the boot files kept beside the bundles.
+        let inputs = super::inputs::needed(environment, &record, &record.build, ipsw)?;
+        if inputs > 0 {
+            super::inputs::check_room(
+                environment,
+                &record,
+                inputs + prepared.iter().map(|p| p.bytes).sum::<u64>(),
+            )?;
+        }
         prepared
     };
     for bundle in &prepared {
@@ -357,6 +370,9 @@ pub(super) fn update_stela(
     record.bundle_schema = to_generation.schema;
     record.bundle_revision = to_generation.revision;
     copy_bundles(&mut record, &prepared)?;
+    if let Some(obtained) = &obtained {
+        super::inputs::keep(environment, &record, &record.build, &obtained.path)?;
+    }
     write_record(&esp, &record)?;
     // A new translator must have its bounded spare before its EFI becomes
     // active. Failure leaves the old loader active.
