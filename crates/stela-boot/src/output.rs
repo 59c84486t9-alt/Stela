@@ -741,6 +741,13 @@ pub fn flush_log() {
     flush_where(|_| true, true);
 }
 
+/// Store the USB's log now, waiting for the store: what the device start
+/// does before each device's driver runs, so the line naming it is on the
+/// stick first.
+pub fn store_usb_log() {
+    flush_where(|sink| sink.kind == Log::Usb, true);
+}
+
 /// Begin storing the logs whose store is due, the machine state's every
 /// [`MACHINE_FLUSH_SECONDS`] and the USB's every [`USB_FLUSH_SECONDS`], and
 /// move every store in progress on; never waits for a device
@@ -775,7 +782,8 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
     // through a request of its own.
     if crate::engine::inside_host_drivers() {
         static SAID: AtomicBool = AtomicBool::new(false);
-        if !SAID.swap(true, Ordering::Relaxed) {
+        // The device start stores the USB's log itself between devices.
+        if !crate::engine::starting_host_devices() && !SAID.swap(true, Ordering::Relaxed) {
             arguments(format_args!(
                 "BOOT LOG not stored: this processor stopped inside the host drivers\n"
             ));

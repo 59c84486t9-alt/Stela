@@ -58,6 +58,18 @@ pub fn resume(partition: Box<dyn BlockDevice>) {
     finish(engine_file(partition));
 }
 
+/// [`resume`] from inside the device start, which keeps its step on the
+/// screen: the log only says whether the file is written on to.
+pub fn resume_quietly(partition: Box<dyn BlockDevice>) -> bool {
+    match engine_file(partition) {
+        Ok(()) => true,
+        Err(why) => {
+            output::arguments(format_args!("BOOT LOG FILE off: {why}\n"));
+            false
+        }
+    }
+}
+
 /// End the step: the log is kept, or why not, which the boot goes on
 /// without.
 fn finish<T>(opened: Result<T>) -> Option<T> {

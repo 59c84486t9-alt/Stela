@@ -1268,6 +1268,75 @@ pub unsafe fn probe_with_provider(
     services: Option<&dyn NativeServices>,
     wifi: Option<&Network>,
 ) -> Devices {
+    // SAFETY: forwarded.
+    unsafe {
+        probe_observed(
+            handoff,
+            captures,
+            dma,
+            firmware,
+            services,
+            wifi,
+            &mut Unobserved,
+        )
+    }
+}
+
+/// What the mount does around the PCI functions' starts.
+pub trait Observer {
+    /// The function to start before every other, such as the controller
+    /// of the disk Stela started from.
+    fn first(&self) -> Option<Address> {
+        None
+    }
+    /// Once [`Self::first`]'s start has ended, before any other starts.
+    fn first_started(&mut self, _devices: &mut Devices) {}
+    /// Once a function is named as starting, right before its driver runs,
+    /// between two drivers' calls.
+    fn starting(&mut self, _function: &crate::bus::pci::Identity) {}
+}
+
+/// No observer.
+pub struct Unobserved;
+impl Observer for Unobserved {}
+
+/// `scanned` with the function at `first` alone in a leading group, the
+/// others in their scan order; whether it was found.
+fn first_of(scanned: Vec<Vec<Function>>, first: Option<Address>) -> (Vec<Vec<Function>>, bool) {
+    let Some(first) = first else {
+        return (scanned, false);
+    };
+    let mut leading = Vec::new();
+    let mut rest = Vec::with_capacity(scanned.len() + 1);
+    for found in scanned {
+        let (taken, others): (Vec<_>, Vec<_>) = found
+            .into_iter()
+            .partition(|function| function.address == first);
+        leading.extend(taken);
+        rest.push(others);
+    }
+    let found = !leading.is_empty();
+    if found {
+        rest.insert(0, leading);
+    }
+    (rest, found)
+}
+
+/// [`probe_with_provider`], with `observer` told of each start.
+///
+/// # Safety
+/// As for [`probe_with_provider`]; `observer` drives no device the probe
+/// holds while it is called, beyond those [`Observer::first_started`] hands
+/// it.
+pub unsafe fn probe_observed(
+    handoff: &Handoff,
+    captures: PlatformCaptures,
+    dma: &mut dyn DmaAllocator,
+    firmware: &'static dyn crate::firmware::Provider,
+    services: Option<&dyn NativeServices>,
+    wifi: Option<&Network>,
+    observer: &mut dyn Observer,
+) -> Devices {
     let mut devices = Devices {
         bluetooth_platform: captures.bluetooth,
         native_services: services.is_some(),
@@ -1333,9 +1402,15 @@ pub unsafe fn probe_with_provider(
         }};
     }
     let mut claimed = Claimed::default();
+    let (scanned, mut first_pending) = first_of(scanned, observer.first());
+    let mut seen = 0usize;
     for found in scanned {
         for mut function in found {
             claimed.settle(recorded!(), &mut devices.failures);
+            if seen > 0 && core::mem::take(&mut first_pending) {
+                observer.first_started(&mut devices);
+            }
+            seen += 1;
             let address = function.address;
             if claims(&function) || native::Kind::of(&function).is_some() {
                 claimed.begin(address, recorded!());
@@ -1422,6 +1497,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            observer.starting(&function.identity());
             let start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
             #[cfg(feature = "native-acpi")]
             if smbus::matches(&function) {
@@ -1740,6 +1816,9 @@ pub unsafe fn probe_with_provider(
         }
     }
     claimed.settle(recorded!(), &mut devices.failures);
+    if first_pending {
+        observer.first_started(&mut devices);
+    }
     devices.abandoned = abandoned;
     let companions_released = pci_scan_complete
         && !usb_handoff_failures
@@ -2621,6 +2700,101 @@ mod tests {
         // Settled once only.
         claimed.settle(4, &mut failures);
         assert_eq!(failures.len(), 1);
+    }
+
+    /// The observer's first function starts before every other, its end is
+    /// told before any other starts, and every start is told once, after
+    /// its name and before its driver.
+    #[test]
+    fn the_observers_first_function_starts_first_and_each_start_is_told() {
+        #[derive(Default)]
+        struct Told {
+            first: Option<Address>,
+            events: Vec<(&'static str, u8)>,
+        }
+        impl Observer for Told {
+            fn first(&self) -> Option<Address> {
+                self.first
+            }
+            fn first_started(&mut self, _: &mut Devices) {
+                self.events.push(("first started", 0xff));
+            }
+            fn starting(&mut self, function: &crate::bus::pci::Identity) {
+                self.events.push(("starting", function.address.device));
+            }
+        }
+        let mut ecam = alloc::vec![u32::MAX; (1 << 20) / 4];
+        for (device, class) in [(0, 0x0108_0200), (1, 0x0200_0000), (2, 0x0c03_3000)] {
+            let start = device * (1 << 15) / 4;
+            let page = &mut ecam[start..start + 4096 / 4];
+            page.fill(0);
+            page[0] = 0x5678_1234;
+            page[2] = class;
+        }
+        let window = EcamWindow {
+            base: ecam.as_mut_ptr() as u64,
+            segment: 0,
+            start_bus: 0,
+            end_bus: 0,
+        };
+        let handoff = Handoff {
+            ecam: alloc::vec![window],
+            mapped: alloc::vec![window.range()],
+            dma: 0..0,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: None,
+        };
+        let address = |device| Address {
+            segment: 0,
+            bus: 0,
+            device,
+            function: 0,
+        };
+        for (first, expected) in [
+            (
+                Some(address(2)),
+                alloc::vec![
+                    ("starting", 2),
+                    ("first started", 0xff),
+                    ("starting", 0),
+                    ("starting", 1)
+                ],
+            ),
+            // A first function the scan did not find changes nothing.
+            (
+                Some(address(9)),
+                alloc::vec![("starting", 0), ("starting", 1), ("starting", 2)],
+            ),
+            (
+                None,
+                alloc::vec![("starting", 0), ("starting", 1), ("starting", 2)],
+            ),
+        ] {
+            let services = services::tests::Refusing::minimum_only();
+            // SAFETY: as in the EHCI fixture: no DMA pages, only the
+            // synthetic ECAM mapped, and every native grant refused.
+            let mut dma = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+            let mut told = Told {
+                first,
+                ..Told::default()
+            };
+            // SAFETY: as above.
+            let _ = unsafe {
+                probe_observed(
+                    &handoff,
+                    PlatformCaptures::default(),
+                    &mut dma,
+                    handoff_provider(&handoff),
+                    Some(&services),
+                    None,
+                    &mut told,
+                )
+            };
+            assert_eq!(told.events, expected, "{first:?}");
+        }
     }
 
     /// Every function a driver here claims ends its probe with a record:

@@ -34,8 +34,9 @@ use stela_drivers::{
         Window,
     },
     bus::dma::RegionAllocator,
+    bus::pci::Address,
     input::InputDevice,
-    probe::{NativeServices, native::usb4, probe_with_provider},
+    probe::{NativeServices, native::usb4, probe_observed},
 };
 use stela_runtime::pc::{
     failure_record,
@@ -192,6 +193,41 @@ pub(super) fn host_drivers_held_here() -> bool {
     let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
     gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs
 }
+/// The GS base of the processor starting the host's devices, zero while
+/// none does ([`starting_devices_here`]).
+static STARTING_GS: AtomicU64 = AtomicU64::new(0);
+/// The GS base of the processor at a point of the device start between two
+/// drivers' calls, zero while none is ([`between_drivers_here`]).
+static BETWEEN_GS: AtomicU64 = AtomicU64::new(0);
+
+fn this_gs() -> u64 {
+    // SAFETY: CPL0 read of this processor's own GS base.
+    unsafe { crate::cpu::msr::GS_BASE.read() }
+}
+
+/// Whether this processor is starting the host's devices.
+pub(super) fn starting_devices_here() -> bool {
+    let gs = STARTING_GS.load(Ordering::Acquire);
+    gs != 0 && gs == this_gs()
+}
+
+/// Whether this processor holds the host drivers' lock at a point of the
+/// device start between two drivers' calls, where it may drive the USB's
+/// log partition itself.
+pub(super) fn between_drivers_here() -> bool {
+    let gs = BETWEEN_GS.load(Ordering::Acquire);
+    gs != 0 && gs == this_gs() && host_drivers_held_here()
+}
+
+/// Run `between` as a point of the device start between two drivers'
+/// calls ([`between_drivers_here`]).
+fn between_drivers<T>(between: impl FnOnce() -> T) -> T {
+    BETWEEN_GS.store(this_gs(), Ordering::Release);
+    let result = between();
+    BETWEEN_GS.store(0, Ordering::Release);
+    result
+}
+
 /// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
 /// and the longest wait.
 static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
@@ -635,6 +671,140 @@ impl BlockDevice for Service {
     }
 }
 
+/// The USB's log partition opened during the device start: the processor
+/// starting the devices drives it itself between two drivers' calls, where
+/// it already holds the host drivers' lock and the loader's root; any other
+/// caller goes through [`Service`], which takes them.
+struct HeldLog(Service);
+
+impl HeldLog {
+    fn device(&mut self) -> &mut dyn BlockDevice {
+        if between_drivers_here() {
+            &mut *self.0.inner
+        } else {
+            &mut self.0
+        }
+    }
+    fn view(&self) -> &dyn BlockDevice {
+        if between_drivers_here() {
+            &*self.0.inner
+        } else {
+            &self.0
+        }
+    }
+}
+
+impl BlockDevice for HeldLog {
+    fn identity(&self) -> &Identity {
+        self.0.inner.identity()
+    }
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.device().read(lba, buffer)
+    }
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.device().write(lba, data)
+    }
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        self.device().flush_cache()
+    }
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.device().write_fua(lba, data)
+    }
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        self.device().discard(lba, blocks)
+    }
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        self.device().write_zeroes(lba, blocks, unmap)
+    }
+    fn depth(&self) -> usize {
+        self.view().depth()
+    }
+    fn room(&self) -> bool {
+        self.view().room()
+    }
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.device().start(command)
+    }
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        self.device().finish(tag)
+    }
+    fn reaps_together(&self) -> bool {
+        self.view().reaps_together()
+    }
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        self.device().finished(tag)
+    }
+    fn posted(&self) -> bool {
+        self.view().posted()
+    }
+    fn signals(&self) -> bool {
+        self.view().signals()
+    }
+}
+
+/// The device start's observer: it starts the controller of the disk Stela
+/// started from first, writes on to the USB's log as soon as that disk is
+/// up, and stores the log before each later device's driver runs, so a
+/// device that never ends its start is named on the stick.
+struct Observer {
+    /// The controller of the disk Stela started from (`pci_io::disk_location`).
+    first: Option<Address>,
+    /// The USB's log partition.
+    log: Option<Guid>,
+    root: u64,
+    /// Whether the log is written on to from the device start.
+    resumed: bool,
+}
+
+impl Observer {
+    fn new(boot_disk: Option<&str>, log: Option<Guid>, root: u64) -> Self {
+        Self {
+            first: boot_disk
+                .and_then(|location| location.split(' ').next())
+                .and_then(Address::parse),
+            log,
+            root,
+            resumed: false,
+        }
+    }
+}
+
+impl stela_drivers::probe::Observer for Observer {
+    fn first(&self) -> Option<Address> {
+        self.first.filter(|_| self.log.is_some())
+    }
+    fn first_started(&mut self, devices: &mut stela_drivers::probe::Devices) {
+        let Some(guid) = self.log else {
+            return;
+        };
+        let Ok(mut opened) = storage::open_shared(&mut devices.disks, &[Named::Host(guid)]) else {
+            output::arguments(format_args!(
+                "BOOT LOG FILE not on the boot disk's controller yet: written on once the start ends\n"
+            ));
+            return;
+        };
+        let partition = opened.pop().expect("the log partition");
+        // The disk stays for the partitions the start's end opens.
+        devices
+            .disks
+            .push(Box::new(partition.device().shared().whole()));
+        let log = HeldLog(Service {
+            inner: Box::new(partition),
+            root: self.root,
+            running: 0,
+            signals: Cell::new(None),
+            looked: Cell::new(staged_disk::LookGate::default()),
+            failures: 0,
+        });
+        self.resumed = between_drivers(|| crate::log_file::resume_quietly(Box::new(log)));
+    }
+    fn starting(&mut self, _function: &stela_drivers::bus::pci::Identity) {
+        if self.resumed {
+            between_drivers(output::store_usb_log);
+        }
+    }
+}
+
 /// The host sides of the guest's staged disks ([`stage`]).
 static STAGED: [AtomicPtr<DiskWorker>; 4] = [const { AtomicPtr::new(ptr::null_mut()) }; 4];
 /// A device call left a staged disk work: the processor that holds the
@@ -1058,9 +1228,26 @@ pub unsafe fn open(
     };
     let firmware =
         super::firmware_requests::Requests::new(stela_drivers::probe::handoff_provider(handoff));
-    // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut devices =
-        unsafe { probe_with_provider(handoff, captures, &mut dma, firmware, services, wifi) };
+    let mut observer = Observer::new(boot_disk, log, root);
+    STARTING_GS.store(this_gs(), Ordering::Release);
+    // SAFETY: the loader mapped these ranges uncached and identity-mapped;
+    // the observer drives only the log partition its first device brought,
+    // between two drivers' calls.
+    let mut devices = unsafe {
+        probe_observed(
+            handoff,
+            captures,
+            &mut dma,
+            firmware,
+            services,
+            wifi,
+            &mut observer,
+        )
+    };
+    STARTING_GS.store(0, Ordering::Release);
+    // A log the start already writes on to is not opened again.
+    let early_log = observer.resumed;
+    let log = log.filter(|_| !early_log);
     firmware.report();
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
@@ -1368,6 +1555,7 @@ pub unsafe fn open(
                 // The targets come first, so every one was found when a
                 // later partition is refused.
                 let kept = match (&log, state) {
+                    _ if early_log => Keeping::Log,
                     (Some(_), _) => Keeping::Log,
                     (None, Some(target)) if at >= targets.len() => Keeping::Record(target),
                     (None, _) => Keeping::Screen,

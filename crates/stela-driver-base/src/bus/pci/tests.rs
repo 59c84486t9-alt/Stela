@@ -3,6 +3,36 @@ use super::*;
 use crate::bus::pci::regs;
 
 #[test]
+fn an_address_reads_back_from_its_written_form_and_nothing_else() {
+    let address = Address {
+        segment: 1,
+        bus: 0x85,
+        device: 0x1f,
+        function: 7,
+    };
+    assert_eq!(Address::parse(&alloc::format!("{address}")), Some(address));
+    assert_eq!(
+        Address::parse("0000:0a:00.3"),
+        Some(Address {
+            segment: 0,
+            bus: 0x0a,
+            device: 0,
+            function: 3
+        })
+    );
+    for text in [
+        "",
+        "0000:0a:00",
+        "0000:0a:20.0",
+        "0000:0a:00.8",
+        "0a:00.0",
+        "x:0a:00.0",
+    ] {
+        assert_eq!(Address::parse(text), None, "{text}");
+    }
+}
+
+#[test]
 fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() {
     use alloc::boxed::Box;
     use core::sync::atomic::Ordering;

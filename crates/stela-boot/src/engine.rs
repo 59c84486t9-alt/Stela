@@ -1360,10 +1360,19 @@ fn machine_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     general_registers(cpu);
 }
 
-/// Whether this processor stopped inside the host drivers, whose lock it
-/// holds: storing a log from here would wait on itself.
+/// Whether this processor holds the host drivers' lock where a log store
+/// from here would wait on itself: stopped inside a driver call, or inside
+/// the device start other than between two drivers' calls
+/// ([`storage::between_drivers_here`]).
 pub(crate) fn inside_host_drivers() -> bool {
-    storage::host_drivers_held_here()
+    storage::host_drivers_held_here() && !storage::between_drivers_here()
+}
+
+/// Whether this processor is starting the host's devices, holding their
+/// lock by design rather than stopped inside a driver: the start stores
+/// the USB's log itself between two devices.
+pub(crate) fn starting_host_devices() -> bool {
+    storage::starting_devices_here()
 }
 
 /// Unload the GPUs' firmware before a fatal stop, where one can

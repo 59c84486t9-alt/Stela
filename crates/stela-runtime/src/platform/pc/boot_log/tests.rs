@@ -94,6 +94,29 @@ fn a_device_that_keeps_no_writes_fails_the_check() {
     );
 }
 
+/// What the device start's store before each device costs: its start
+/// line's tail block and the header, each made durable, and no read.
+#[test]
+fn storing_one_device_start_line_writes_two_blocks() {
+    for block in [512, 4096] {
+        let mut disk = Recorder::new(HEADER_BYTES + 8 * 4096, block);
+        let mut writer = Writer::open(&mut disk).unwrap();
+        writer.append(b"earlier lines\n");
+        writer.flush(&mut disk).unwrap();
+        for device in 0..32 {
+            disk.events.clear();
+            let reads = disk.reads;
+            writer.append(
+                alloc::format!("HOST DEVICE PCI 0000:{device:02x}:00.0 start\n").as_bytes(),
+            );
+            writer.flush(&mut disk).unwrap();
+            let writes = disk.events.iter().filter(|event| event.is_some()).count();
+            assert_eq!(writes, 2, "block {block} device {device}");
+            assert_eq!(disk.reads, reads);
+        }
+    }
+}
+
 #[test]
 fn a_resumed_log_continues_the_same_boot() {
     let mut disk = Recorder::new(HEADER_BYTES + 4 * 4096, 512);

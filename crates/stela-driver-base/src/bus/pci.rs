@@ -140,6 +140,23 @@ pub struct Address {
     pub function: u8,
 }
 
+impl Address {
+    /// The address its [`Display`](fmt::Display) form writes,
+    /// `ssss:bb:dd.f`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (segment, rest) = text.split_once(':')?;
+        let (bus, rest) = rest.split_once(':')?;
+        let (device, function) = rest.split_once('.')?;
+        let address = Self {
+            segment: u16::from_str_radix(segment, 16).ok()?,
+            bus: u8::from_str_radix(bus, 16).ok()?,
+            device: u8::from_str_radix(device, 16).ok()?,
+            function: function.parse().ok()?,
+        };
+        (address.device < 32 && address.function < 8).then_some(address)
+    }
+}
+
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
