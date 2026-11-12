@@ -72,6 +72,12 @@ save the boot log. Include `log.txt` in your GitHub Issue.
 sudo ./stela setup boot-log --output log.txt
 ```
 
+On Windows, open Terminal with Run as administrator and run:
+
+```
+.\stela.exe setup boot-log --output log.txt
+```
+
 ## Build
 
 You need [Rust](https://rustup.rs), git, Python 3.10 or newer, and LLVM 21,
