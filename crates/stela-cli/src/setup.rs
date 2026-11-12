@@ -63,6 +63,8 @@ mod fdr;
 mod firmware;
 mod format;
 pub(crate) mod host;
+#[cfg(unix)]
+mod ownership;
 mod installed;
 mod machines;
 mod medium;
@@ -711,6 +713,15 @@ impl Request {
             }
             elevation::Rights::Refuse => bail!(elevation::REFUSED),
         }
+        // Under sudo, what this run downloads into the invoking user's
+        // cache stays theirs, also when it stops with an error.
+        #[cfg(unix)]
+        let _handback = {
+            let mut caches = vec![cache_dir()];
+            caches.extend(self.download_dir.clone());
+            caches.extend(self.host_firmware_cache.clone());
+            ownership::Handback::start(&caches)
+        };
         // Without a USB, `boot-log` reads every disk.
         if boot_log && self.usb.as_os_str().is_empty() {
             let logs = crate::boot_log::scan(&host::System)?;
