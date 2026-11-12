@@ -105,6 +105,199 @@ mod tests {
         assert_eq!(scratch.0.capacity(), capacity);
     }
 
+    /// An LZ4-class block codec, for measuring only: greedy matches of at
+    /// least four bytes found by a hash of the next four, a token of literal
+    /// and match lengths, a 16-bit offset.
+    fn lz_compress(input: &[u8]) -> Vec<u8> {
+        const HASH_BITS: u32 = 13;
+        let mut table = vec![0u32; 1 << HASH_BITS];
+        let mut out = Vec::with_capacity(input.len() / 2);
+        let hash = |at: usize| {
+            let word = u32::from_le_bytes(input[at..at + 4].try_into().unwrap());
+            (word.wrapping_mul(2_654_435_761) >> (32 - HASH_BITS)) as usize
+        };
+        let length = |out: &mut Vec<u8>, mut rest: usize| {
+            while rest >= 255 {
+                out.push(255);
+                rest -= 255;
+            }
+            out.push(rest as u8);
+        };
+        let (mut at, mut anchor) = (0, 0);
+        while at + 12 <= input.len() {
+            let slot = hash(at);
+            let candidate = table[slot] as usize;
+            table[slot] = at as u32;
+            if candidate >= at
+                || at - candidate > 0xffff
+                || input[candidate..candidate + 4] != input[at..at + 4]
+            {
+                at += 1;
+                continue;
+            }
+            let mut matched = 4;
+            while at + matched < input.len() - 5
+                && input[candidate + matched] == input[at + matched]
+            {
+                matched += 1;
+            }
+            let literals = at - anchor;
+            let token_lit = literals.min(15) as u8;
+            let token_match = (matched - 4).min(15) as u8;
+            out.push(token_lit << 4 | token_match);
+            if literals >= 15 {
+                length(&mut out, literals - 15);
+            }
+            out.extend_from_slice(&input[anchor..at]);
+            out.extend_from_slice(&((at - candidate) as u16).to_le_bytes());
+            if matched - 4 >= 15 {
+                length(&mut out, matched - 4 - 15);
+            }
+            at += matched;
+            anchor = at;
+        }
+        let literals = input.len() - anchor;
+        out.push((literals.min(15) as u8) << 4);
+        if literals >= 15 {
+            length(&mut out, literals - 15);
+        }
+        out.extend_from_slice(&input[anchor..]);
+        out
+    }
+
+    fn lz_decompress(input: &[u8], out: &mut Vec<u8>) {
+        out.clear();
+        let mut at = 0;
+        let length = |at: &mut usize| {
+            let mut total = 0;
+            loop {
+                let byte = input[*at];
+                *at += 1;
+                total += usize::from(byte);
+                if byte != 255 {
+                    return total;
+                }
+            }
+        };
+        loop {
+            let token = input[at];
+            at += 1;
+            let mut literals = usize::from(token >> 4);
+            if literals == 15 {
+                literals += length(&mut at);
+            }
+            out.extend_from_slice(&input[at..at + literals]);
+            at += literals;
+            if at == input.len() {
+                return;
+            }
+            let offset = usize::from(u16::from_le_bytes([input[at], input[at + 1]]));
+            at += 2;
+            let mut matched = usize::from(token & 15);
+            if matched == 15 {
+                matched += length(&mut at);
+            }
+            matched += 4;
+            let start = out.len() - offset;
+            if offset >= matched {
+                out.extend_from_within(start..start + matched);
+            } else {
+                for index in 0..matched {
+                    out.push(out[start + index]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_measuring_codec_round_trips() {
+        let mut raw = Vec::new();
+        for n in 0u32..5000 {
+            raw.extend_from_slice(&(n % 97).to_le_bytes());
+            raw.extend_from_slice(b"mov rax, [rbp+8]");
+        }
+        let packed = lz_compress(&raw);
+        assert!(packed.len() < raw.len() / 4);
+        let mut out = Vec::new();
+        lz_decompress(&packed, &mut out);
+        assert_eq!(out, raw);
+        for raw in [&b""[..], b"abc", &[7u8; 100][..]] {
+            lz_decompress(&lz_compress(raw), &mut out);
+            assert_eq!(out, raw);
+        }
+    }
+
+    /// Records of a pack file named by `STELA_PACK_SAMPLE` (a single pack:
+    /// header, index of key, offset and length, records), compressed with
+    /// the measuring LZ codec and with DEFLATE level 1: sizes, and decode
+    /// time against the record's raw parse.
+    #[test]
+    #[ignore = "manual: opt-in"]
+    fn codec_costs() {
+        let Ok(path) = std::env::var("STELA_PACK_SAMPLE") else {
+            std::println!("STELA_PACK_SAMPLE names no pack");
+            return;
+        };
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut header = [0u8; 48];
+        file.read_exact(&mut header).unwrap();
+        let count = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+        let mut index = vec![0u8; count * 48];
+        file.read_exact(&mut index).unwrap();
+        let field = |at: usize| u64::from_le_bytes(index[at..at + 8].try_into().unwrap());
+        // Every 8th record, read one at a time: a few hundred MB stay on disk.
+        let records: Vec<Vec<u8>> = (0..count)
+            .step_by(8)
+            .map(|entry| {
+                let at = entry * 48;
+                let (offset, length) = (field(at + 32), field(at + 40) & ((1 << 56) - 1));
+                let mut record = vec![0u8; length as usize];
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                file.read_exact(&mut record).unwrap();
+                record
+            })
+            .collect();
+        let count = records.len();
+        let raw: usize = records.iter().map(Vec::len).sum();
+        let mut out = Vec::new();
+        let (mut lz, mut deflate, mut lz_ns, mut inflate_ns, mut copy_ns) =
+            (0, 0, 0u128, 0u128, 0u128);
+        let mut scratch = DecodeScratch::default();
+        for record in &records {
+            let packed = lz_compress(record);
+            lz += packed.len();
+            let started = std::time::Instant::now();
+            lz_decompress(&packed, &mut out);
+            lz_ns += started.elapsed().as_nanos();
+            assert_eq!(out, record.as_slice());
+            let started = std::time::Instant::now();
+            out.clear();
+            out.extend_from_slice(record);
+            copy_ns += started.elapsed().as_nanos();
+            let mut stored = MAGIC.to_vec();
+            stored.extend_from_slice(&(record.len() as u32).to_le_bytes());
+            stored.extend(miniz_oxide::deflate::compress_to_vec(record, 1));
+            deflate += stored.len();
+            if record.len() <= MAX_EXPANDED_BYTES && stored.len() < record.len() {
+                let started = std::time::Instant::now();
+                assert_eq!(scratch.inflate(&stored).unwrap(), record.as_slice());
+                inflate_ns += started.elapsed().as_nanos();
+            }
+        }
+        let per = |ns: u128| ns / count as u128;
+        std::println!(
+            "{count} records, {raw} bytes ({} per record): LZ {lz} bytes ({}%), decode {} ns a \
+             record; DEFLATE-1 {deflate} bytes ({}%), decode {} ns; copy {} ns",
+            raw / count,
+            lz * 100 / raw,
+            per(lz_ns),
+            deflate * 100 / raw,
+            per(inflate_ns),
+            per(copy_ns)
+        );
+    }
+
     #[test]
     fn scratch_recycler_does_not_keep_oversized_buffers() {
         let mut kept = DecodeScratch::default();
