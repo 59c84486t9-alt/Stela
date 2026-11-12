@@ -1,10 +1,11 @@
-//! Scalar FCVT between S and D over every input class against the Arm
-//! reference, compiled as blocks for every tier this host has: every
-//! inline completion matches the reference in every V register and FPSR,
-//! every exit leaves the state unchanged, D to S completes every
-//! non-NaN input inline with FZ, FIZ, AH and the trap enables clear (tiny,
-//! subnormal and overflowing results included), and both directions flush
-//! a subnormal input inline under FZ or FIZ with AH clear.
+//! Scalar FCVT and vector FCVTL and FCVTN between S and D over every input
+//! class against the Arm reference, compiled as blocks for every tier this
+//! host has: every inline completion matches the reference in every V
+//! register and FPSR, every exit leaves the state unchanged, D to S
+//! completes every non-NaN input inline with FZ, FIZ, AH and the trap
+//! enables clear (tiny, subnormal and overflowing results included), and
+//! both directions flush a subnormal input inline under FZ or FIZ with AH
+//! clear.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -191,4 +192,130 @@ fn scalar_conversions_complete_subnormal_tiny_and_flushed_inputs_inline() {
         }
     }
     assert!(inline > runs / 2, "{inline} of {runs} inline");
+}
+
+/// FCVTL, FCVTL2, FCVTN and FCVTN2 between S and D lanes over every input
+/// class, two distinct classes per vector: with the trap enables and AH
+/// clear, widening completes every vector without a NaN inline (zeros,
+/// subnormals and infinities included, a subnormal flushed under FZ or
+/// FIZ), and with FZ, FIZ and AH clear too, narrowing completes every
+/// vector without a NaN or a result exactly the Single minimum normal
+/// inline (tiny, subnormal, zero and overflowing results included). Every
+/// inline completion matches the reference, every exit leaves the state
+/// unchanged.
+#[test]
+fn vector_conversions_complete_zero_subnormal_and_tiny_lanes_inline() {
+    let mut runs = 0;
+    let mut inline = 0;
+    let registers = N << 5 | D;
+    // (word, source, destination, upper half).
+    let forms = [
+        (
+            0x0e61_7800 | registers,
+            Format::Single,
+            Format::Double,
+            false,
+        ),
+        (
+            0x4e61_7800 | registers,
+            Format::Single,
+            Format::Double,
+            true,
+        ),
+        (
+            0x0e61_6800 | registers,
+            Format::Double,
+            Format::Single,
+            false,
+        ),
+        (
+            0x4e61_6800 | registers,
+            Format::Double,
+            Format::Single,
+            true,
+        ),
+    ];
+    for target in targets() {
+        for (word, source, destination, upper) in forms {
+            let code = compile(word, target);
+            let values = floats(source);
+            for (index, &first) in values.iter().enumerate() {
+                let second = values[(index * 7 + 3) % values.len()];
+                for fpcr in controls() {
+                    let mut initial = GuestState {
+                        fpcr,
+                        fpsr: 0x0800_0000,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    initial.v[N as usize] = [0x0123_4567_89ab_cdef, 0x0fed_cba9_8765_4321];
+                    initial.v[D as usize] = [0xdead_beef_0bad_f00d, 0xfeed_face_cafe_d00d];
+                    let lanes = [first, second];
+                    if source == Format::Single {
+                        initial.v[N as usize][usize::from(upper)] = first | second << 32;
+                    } else {
+                        initial.v[N as usize] = lanes;
+                    }
+                    let label = alloc::format!("{word:08x} {lanes:x?} {fpcr:#x} {target:?}");
+                    let outcomes: Vec<_> = lanes
+                        .iter()
+                        .map(|&bits| {
+                            precision::evaluate(
+                                source,
+                                destination,
+                                PrecisionRounding::Fpcr,
+                                fpcr,
+                                bits,
+                            )
+                        })
+                        .collect();
+                    let nan = lanes
+                        .iter()
+                        .any(|&bits| bits & !source.sign_mask() > source.exponent_mask());
+                    let usable = fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0
+                        && !target.data_independent_timing()
+                        && !nan;
+                    let must_inline = usable
+                        && (source == Format::Single
+                            || fpcr & (FPCR_FZ | FPCR_FIZ) == 0
+                                && outcomes.iter().all(|outcome| {
+                                    let bits = outcome.as_ref().unwrap().bits;
+                                    bits & !Format::Single.sign_mask()
+                                        != 1 << Format::Single.fraction_bits()
+                                }));
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    runs += 1;
+                    if exit == PC.0 {
+                        assert_eq!(actual, initial, "{label}");
+                        assert!(!must_inline, "exited: {label}");
+                        continue;
+                    }
+                    assert_eq!(exit, RETURN, "{label}");
+                    inline += 1;
+                    let mut expected = initial.clone();
+                    let results: Vec<u64> = outcomes
+                        .into_iter()
+                        .map(|outcome| {
+                            let outcome = outcome.expect("completed with traps");
+                            expected.fpsr |= outcome.exceptions;
+                            outcome.bits
+                        })
+                        .collect();
+                    expected.v[D as usize] = if destination == Format::Double {
+                        [results[0], results[1]]
+                    } else {
+                        let packed = results[0] | results[1] << 32;
+                        if upper {
+                            [initial.v[D as usize][0], packed]
+                        } else {
+                            [packed, 0]
+                        }
+                    };
+                    assert_eq!(actual, expected, "{label}");
+                }
+            }
+        }
+    }
+    assert!(inline > runs / 3, "{inline} of {runs} inline");
 }

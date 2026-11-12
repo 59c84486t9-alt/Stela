@@ -340,6 +340,38 @@ fn rounded_narrow(code: &mut Code, helper: &mut Vec<usize>) -> usize {
     done
 }
 
+/// Vector D to S (FCVTN) with FPCR.FZ, FIZ and AH clear, as
+/// [`rounded_narrow`]: subnormal inputs and tiny, overflowing, zero and
+/// infinite results are exact on the host with FPSR's status; a NaN, a
+/// result exactly the minimum normal and invalid status take `helper`.
+/// Returns the jump to the commit, past the other checks.
+fn rounded_vector_narrow(code: &mut Code, helper: &mut Vec<usize>) -> usize {
+    test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+    let strict = branch(code, Condition::NotZero);
+    environment_round(code, Rounding::Fpcr);
+    code.asm().cvtpd2ps(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
+    exceptional_lane_mask(
+        code,
+        Format::Single,
+        Shape::Vector64,
+        RESULT_VECTOR,
+        EXCEPTIONAL_SCRATCH,
+        true,
+    );
+    restore_environment(code);
+    helper.push(reject_exceptional_lanes(
+        code,
+        Format::Single,
+        Shape::Vector64,
+    ));
+    helper.push(reject_invalid(code));
+    commit_rounded_status(code);
+    let done = jump(code);
+    let strict_start = code.len();
+    resolve(code, strict, strict_start);
+    done
+}
+
 /// Branch if any exponent is outside the normal IEEE half range. Keep the
 /// normal and finite lane masks for the zero and subnormal path.
 fn half_normal_widening_guard(code: &mut Code) -> usize {
@@ -532,12 +564,75 @@ fn emit_widen(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: Gues
     if upper {
         ShiftOpcode::RightBytes.emit(code, SOURCE_VECTOR, UPPER_QWORD_BYTES);
     }
+    let widened = vector_widen_with_ah_clear(code, &mut helper);
     prepare_vector_input_range(code, Format::Single);
     vector_exponent_range(code, Format::Single, Shape::Vector64, SOURCE_VECTOR);
     helper.push(branch(code, Condition::NotZero));
     code.asm().cvtps2pd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
     helper_section(code, &helper, pc);
+    let commit_start = code.len();
+    resolve(code, widened, commit_start);
     commit(code, operand.destination, RESULT_VECTOR);
+}
+
+/// Vector S to D (FCVTL) with FPCR.AH clear, for every input but a NaN
+/// (whose DN and signaling status take `helper`): FZ or FIZ flush a
+/// subnormal lane first (FZ raising IDC); zeros, infinities, normals and
+/// subnormals convert exactly with no status, a subnormal inside the
+/// private environment so that the host's denormal status stays out of
+/// the caller's MXCSR. Returns the jump to the commit; AH continues past it.
+fn vector_widen_with_ah_clear(code: &mut Code, helper: &mut Vec<usize>) -> usize {
+    const ACTIVE_LANES: i32 = 0b11;
+    const SINGLE_INFINITY: u32 = 0x7f80_0000;
+    const SINGLE_MINIMUM_NORMAL: u32 = 0x0080_0000;
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(
+        code,
+        Format::Single,
+        Shape::Vector64,
+        SOURCE_VECTOR,
+        FLUSH_SCRATCH,
+    );
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    let [magnitude, limit, lanes, zero] = FLUSH_SCRATCH;
+    packed(code, Host::EqualDword, magnitude, magnitude);
+    ShiftOpcode::RightDword.emit(code, magnitude, 1);
+    packed(code, Host::And, magnitude, SOURCE_VECTOR);
+    // NaN lanes: a magnitude above the infinity's.
+    dword_constant(code, limit, SINGLE_INFINITY);
+    packed(code, Host::MoveAligned, lanes, magnitude);
+    packed(code, Host::GreaterDword, lanes, limit);
+    Host::DwordSignMask.register(code, Rax as u8, lanes, TargetCpu::Baseline);
+    code.asm().test_imm(Size::Dword, Rax, ACTIVE_LANES);
+    helper.push(branch(code, Condition::NotZero));
+    // Subnormal lanes: a nonzero magnitude below the minimum normal's.
+    dword_constant(code, lanes, SINGLE_MINIMUM_NORMAL);
+    packed(code, Host::GreaterDword, lanes, magnitude);
+    packed(code, Host::Xor, zero, zero);
+    packed(code, Host::GreaterDword, magnitude, zero);
+    packed(code, Host::And, lanes, magnitude);
+    Host::DwordSignMask.register(code, Rax as u8, lanes, TargetCpu::Baseline);
+    code.asm().test_imm(Size::Dword, Rax, ACTIVE_LANES);
+    let ordinary = branch(code, Condition::Zero);
+    environment_round(code, Rounding::NearestEven);
+    code.asm().cvtps2pd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
+    restore_environment(code);
+    let converted = jump(code);
+    let ordinary_start = code.len();
+    resolve(code, ordinary, ordinary_start);
+    code.asm().cvtps2pd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
+    let converted_start = code.len();
+    resolve(code, converted, converted_start);
+    commit_flush_status(code);
+    let done = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    done
 }
 
 fn emit_narrow(
@@ -550,6 +645,8 @@ fn emit_narrow(
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_numerical_vector(code, Shape::Vector128, operand.source, SOURCE_VECTOR);
+    let rounded =
+        (rounding == PrecisionRounding::Fpcr).then(|| rounded_vector_narrow(code, &mut helper));
     prepare_vector_input_range(code, Format::Double);
     vector_exponent_range(code, Format::Double, Shape::Vector128, SOURCE_VECTOR);
     helper.push(branch(code, Condition::NotZero));
@@ -575,6 +672,10 @@ fn emit_narrow(
     }
     helper_section(code, &helper, pc);
     commit_inexact(code);
+    if let Some(rounded) = rounded {
+        let tail = code.len();
+        resolve(code, rounded, tail);
+    }
     if upper {
         read_vector(code, operand.destination, SOURCE_VECTOR);
         code.asm().movlhps(SOURCE_VECTOR, Rm::Xmm(RESULT_VECTOR));
