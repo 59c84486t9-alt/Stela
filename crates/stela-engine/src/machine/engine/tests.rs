@@ -748,6 +748,57 @@ fn refused_device_registers_read_zero_and_drop_writes() {
     assert_eq!(machine.take_unmodeled().len(), 2);
 }
 
+/// A device load the devices answer without their lock leaves their
+/// generation where it was, and the lines cached before it still hold: the
+/// next interrupt check asks the devices nothing. A load that took the lock
+/// moved the generation, and the next check asks again.
+#[test]
+fn a_lock_free_device_load_keeps_the_cached_lines() {
+    const PASSIVE: u64 = 0x2_3b3c_0a00;
+    const LOCKED: u64 = 0x2_3b3c_0a08;
+    #[derive(Default)]
+    struct Generations {
+        generation: u64,
+        queries: usize,
+    }
+    impl Devices for Generations {
+        fn read(&mut self, _: usize, physical: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            if physical != PASSIVE {
+                self.generation += 1;
+            }
+            Ok(7)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            self.queries += 1;
+            Lines::default()
+        }
+        fn generation(&self) -> Option<u64> {
+            Some(self.generation)
+        }
+    }
+    // ldr x2, [x1]
+    let load = 0xf940_0022;
+    let mut machine = board(&[], Generations::default(), Vec::new());
+    let pe = machine.current;
+    let now = machine.now();
+    machine.device_lines_of(pe, now);
+    assert_eq!(machine.devices.queries, 1);
+    for (address, queries) in [(PASSIVE, 1), (LOCKED, 2), (PASSIVE, 2)] {
+        machine.cpu.pc = BASE;
+        machine.write_register(Register::X(1), address);
+        machine
+            .device_access(load, address, address, false)
+            .unwrap();
+        assert_eq!(machine.read_register(Register::X(2)), 7);
+        let now = machine.now();
+        machine.device_lines_of(pe, now);
+        assert_eq!(machine.devices.queries, queries, "{address:#x}");
+    }
+}
+
 #[test]
 fn survey_substitutes_registers_but_never_dma_service_effects() {
     let mut machine = machine(&[0]);
