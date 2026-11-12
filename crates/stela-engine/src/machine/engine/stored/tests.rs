@@ -10,12 +10,15 @@ use alloc::collections::BTreeMap;
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     pub(crate) records: BTreeMap<Digest, Arc<Record>>,
+    /// Record lookups made.
+    pub(crate) lookups: usize,
     pub(crate) offers: Vec<Offer>,
     pub(crate) prepared: BTreeMap<(Digest, u64, Digest), Arc<SharedTranslation>>,
 }
 
 impl Translations for MemoryStore {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+        self.lookups += 1;
         self.records.get(key).cloned()
     }
     fn prepared(
@@ -433,6 +436,38 @@ fn a_page_let_go_and_read_again_takes_its_known_key_unless_it_changed() {
     machine.invalidate_code_page(page(0));
     assert!(machine.fetch_block(page(0) + 12, false).is_ok());
     assert_eq!(machine.statistics.known_keys, known);
+}
+
+#[test]
+fn a_page_read_again_whose_record_was_absent_is_not_looked_up_again() {
+    // A block in each of five pages: add x0, x0, #1; svc #0.
+    const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
+    let mut words = vec![0; 4 * PAGE_WORDS + 2];
+    for page in 0..5 {
+        words[page * PAGE_WORDS..page * PAGE_WORDS + 2]
+            .copy_from_slice(&[0x9100_0400, 0xd400_0001]);
+    }
+    let mut machine = machine(&words);
+    machine.host.store = Some(MemoryStore::default());
+    let page = |n: u64| BASE + n * FETCH_PAGE;
+    let lookups = |store: &Option<MemoryStore>| store.as_ref().unwrap().lookups;
+    for n in 0..5 {
+        assert!(machine.fetch_block(page(n), false).is_ok());
+    }
+    assert_eq!(lookups(&machine.host.store), 5);
+    // Page 0 was let go; read again, its absent record is not asked for.
+    assert!(!machine.pages.contains_key(&page(0)));
+    assert!(machine.fetch_block(page(0) + 4, false).is_ok());
+    assert_eq!(lookups(&machine.host.store), 5);
+    assert_eq!(machine.statistics.known_absent, 1);
+    // Its bytes changed: a new key, looked up.
+    for n in 1..5 {
+        assert!(machine.fetch_block(page(n) + 4, false).is_ok());
+    }
+    let before = lookups(&machine.host.store);
+    machine.host.ram[100] ^= 1;
+    assert!(machine.fetch_block(page(0) + 8, false).is_ok());
+    assert_eq!(lookups(&machine.host.store), before + 1);
 }
 
 #[test]

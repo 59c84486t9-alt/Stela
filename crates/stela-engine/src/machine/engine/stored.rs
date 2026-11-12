@@ -357,12 +357,15 @@ const KNOWN_PER_KEPT: usize = 8;
 
 /// The page key of a fetch page read before, and a check of the bytes it
 /// was the hash of ([`page_check`]): a page read again whose bytes give the
-/// same check takes this key instead of hashing them.
+/// same check takes this key instead of hashing them. A key the store held
+/// no record for is not looked up again: the store's records are the pack
+/// the boot read, which a boot does not change.
 #[derive(Clone, Copy)]
 pub(super) struct KnownKey {
     frame: u64,
     check: u64,
     key: Digest,
+    absent: bool,
 }
 
 /// A 64-bit check of a fetch page: four lanes, each step of which is a
@@ -445,8 +448,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.spare_pages.push(bytes);
             return None;
         }
-        let key = self.page_key(frame, &bytes);
-        let record = self.host.translations()?.record(&key);
+        let (key, absent) = self.page_key(frame, &bytes);
+        let record = match absent {
+            true => {
+                self.statistics.known_absent += 1;
+                None
+            }
+            false => self.host.translations()?.record(&key),
+        };
+        if record.is_none() {
+            self.note_absent(frame, &key);
+        }
         let ticks = self.host.counter().wrapping_sub(reading);
         if let Some(translations) = self.host.translations() {
             translations.note(StoreEvent::PageRead { ticks });
@@ -473,8 +485,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The page key of `bytes`, the fetch page at `frame`: the key it had
     /// when read last, while its bytes give the same check, else their
-    /// SHA-256, which is kept for the next read.
-    fn page_key(&mut self, frame: u64, bytes: &[u8; PAGE_BYTES]) -> Digest {
+    /// SHA-256, which is kept for the next read; and whether the store held
+    /// no record for the key it had.
+    fn page_key(&mut self, frame: u64, bytes: &[u8; PAGE_BYTES]) -> (Digest, bool) {
         let check = page_check(bytes);
         let known = (self.kept_pages * KNOWN_PER_KEPT).next_power_of_two();
         if self.known_keys.len() != known {
@@ -486,11 +499,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && held.check == check
         {
             self.statistics.known_keys += 1;
-            return held.key;
+            return (held.key, held.absent);
         }
         let key = Digest::of(bytes.as_slice());
-        *slot = Some(KnownKey { frame, check, key });
-        key
+        *slot = Some(KnownKey {
+            frame,
+            check,
+            key,
+            absent: false,
+        });
+        (key, false)
+    }
+
+    /// Note that the store holds no record for `key`, the known key of the
+    /// page at `frame`.
+    fn note_absent(&mut self, frame: u64, key: &Digest) {
+        let known = self.known_keys.len();
+        if known != 0
+            && let Some(held) = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known]
+            && held.frame == frame
+            && held.key == *key
+        {
+            held.absent = true;
+        }
     }
 
     /// Forget the known key of the page at `frame`, whose code an IC IVAU
