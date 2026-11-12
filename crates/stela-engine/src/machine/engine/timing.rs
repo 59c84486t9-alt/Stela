@@ -147,7 +147,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 } else {
                     0
                 };
-                let [access, settle, _] = written.unwrap_or_default();
+                let [access, settle, _, transfer, copies] = written.unwrap_or_default();
                 devices.add_register(step_timing::DeviceRegisterExit {
                     register: physical | write,
                     count: 1,
@@ -155,6 +155,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     waited,
                     access,
                     settle,
+                    transfer,
+                    copies,
+                    longest: spent,
                 });
             }
             if let Some(parts) = written {

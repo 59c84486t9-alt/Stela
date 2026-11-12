@@ -65,7 +65,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .is_some()
             .then(|| self.host.profile_ticks());
         if started.is_some() {
-            self.timed_write = Some([0; 3]);
+            self.timed_write = Some([0; step_timing::WRITE_PARTS]);
         }
         let work = self.work();
         let outcome = if self.serial_hold.is_some() {
@@ -82,6 +82,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     let ended = self.host.profile_ticks();
                     self.time_part(0, started, outcome.written_at);
                     self.time_part(1, outcome.written_at, ended);
+                    self.time_part(3, outcome.written_at, outcome.settled_at);
+                    self.time_part(4, outcome.unlocked_at, ended);
                 }
                 let settlement = outcome
                     .settled

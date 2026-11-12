@@ -752,7 +752,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// Under step timing, the device write being handled: the ticks of its
     /// access call, its settle (the DMA after it) and its gate call
     /// ([`step_timing::DeviceWrites`]).
-    timed_write: Option<[u64; 3]>,
+    timed_write: Option<[u64; step_timing::WRITE_PARTS]>,
     /// System exits by instruction word, with their handling time under step
     /// timing ([`Self::system_words`]).
     system_words: BTreeMap<u32, DeviceRegister>,

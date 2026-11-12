@@ -1029,7 +1029,9 @@ pub const DEVICE_PAGES: usize = 64;
 /// One device register's reads or writes the engine completed, with
 /// [`DeviceExit`]'s counts: `register` its physical address, with
 /// [`DEVICE_REGISTER_WRITE`] set for writes, whose ticks also split as
-/// [`DeviceWrites`]' do into the access and the settle after it.
+/// [`DeviceWrites`]' do into the access and the settle after it, and the
+/// settle's transfer and deferred copies; `longest` is the longest exit,
+/// which tells a few long exits (a preempted host thread) from many.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeviceRegisterExit {
     pub register: u64,
@@ -1038,6 +1040,9 @@ pub struct DeviceRegisterExit {
     pub waited: u64,
     pub access: u64,
     pub settle: u64,
+    pub transfer: u64,
+    pub copies: u64,
+    pub longest: u64,
 }
 
 impl DeviceRegisterExit {
@@ -1047,8 +1052,17 @@ impl DeviceRegisterExit {
         self.waited += other.waited;
         self.access += other.access;
         self.settle += other.settle;
+        self.transfer += other.transfer;
+        self.copies += other.copies;
+        self.longest = self.longest.max(other.longest);
     }
 }
+
+/// The parts a device write's exit is timed in: its access, its settle,
+/// its gate call, and of the settle the transfer under the devices' lock
+/// and the deferred DMA copies after the lock's release
+/// ([`DeviceWrites::add`]).
+pub const WRITE_PARTS: usize = 5;
 
 /// The bit of [`DeviceRegisterExit::register`] that says writes: physical
 /// addresses never reach it.
@@ -1072,15 +1086,19 @@ pub struct DeviceWrites {
     pub access: u64,
     pub settle: u64,
     pub call: u64,
+    pub transfer: u64,
+    pub copies: u64,
 }
 
 impl DeviceWrites {
-    pub fn add(&mut self, exit: u64, parts: [u64; 3]) {
+    pub fn add(&mut self, exit: u64, parts: [u64; WRITE_PARTS]) {
         self.count += 1;
         self.exit += exit;
         self.access += parts[0];
         self.settle += parts[1];
         self.call += parts[2];
+        self.transfer += parts[3];
+        self.copies += parts[4];
     }
 
     fn merge(&mut self, other: &Self) {
@@ -1089,6 +1107,8 @@ impl DeviceWrites {
         self.access += other.access;
         self.settle += other.settle;
         self.call += other.call;
+        self.transfer += other.transfer;
+        self.copies += other.copies;
     }
 }
 
@@ -1884,6 +1904,7 @@ mod tests {
             waited,
             access,
             settle,
+            ..DeviceRegisterExit::default()
         };
         exits.add_register(exit(REGISTER, 10, 2, 0, 0));
         exits.add_register(exit(REGISTER | DEVICE_REGISTER_WRITE, 20, 0, 6, 9));

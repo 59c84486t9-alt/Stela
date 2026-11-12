@@ -952,6 +952,7 @@ impl<D: Devices> Devices for SharedDevices<D> {
             (outcome, copies)
         });
         let mut outcome = outcome?;
+        outcome.unlocked_at = processors.native_host().profile_ticks();
         if !copies.is_empty()
             && let Some(settled) = &mut outcome.settled
         {

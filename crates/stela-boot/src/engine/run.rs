@@ -442,14 +442,21 @@ fn device_exits_report<H: Host>(
                 sum.waited += exit.waited;
                 sum.access += exit.access;
                 sum.settle += exit.settle;
+                sum.transfer += exit.transfer;
+                sum.copies += exit.copies;
+                sum.longest = sum.longest.max(exit.longest);
             }
             None => registers.push((label, *exit)),
         }
     }
     registers.sort_unstable_by_key(|(_, exit)| core::cmp::Reverse(exit.ticks));
     // A write's time also splits into its access (the lock and the model's
-    // write) and the settle after it.
-    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns[/access_ns/settle_ns]");
+    // write) and the settle after it, and the settle into the transfer under
+    // the lock and the deferred copies after its release; the longest exit
+    // ends each entry.
+    let mut line = String::from(
+        "PES DEVICE REGISTERS count/ns/lock_ns[/access_ns/settle_ns/transfer_ns/copies_ns]/longest_ns",
+    );
     for (label, exit) in registers.iter().take(REGISTERS) {
         line.push_str(&format!(
             " {label}={}/{}/{}",
@@ -458,8 +465,15 @@ fn device_exits_report<H: Host>(
             lock_nanos(exit.waited)
         ));
         if label.ends_with(":w") {
-            line.push_str(&format!("/{}/{}", nanos(exit.access), nanos(exit.settle)));
+            line.push_str(&format!(
+                "/{}/{}/{}/{}",
+                nanos(exit.access),
+                nanos(exit.settle),
+                nanos(exit.transfer),
+                nanos(exit.copies)
+            ));
         }
+        line.push_str(&format!("/{}", nanos(exit.longest)));
     }
     let other = exits.other_registers;
     if other.count != 0 {
@@ -477,11 +491,13 @@ fn device_exits_report<H: Host>(
         let each = |ticks: u64| nanos(ticks) / u128::from(writes.count);
         let parts = writes.access + writes.settle + writes.call;
         output::arguments(format_args!(
-            "PES DEVICE WRITES count={} ns_each exit={} access={} settle={} call={} rest={}\n",
+            "PES DEVICE WRITES count={} ns_each exit={} access={} settle={} transfer={} copies={} call={} rest={}\n",
             writes.count,
             each(writes.exit),
             each(writes.access),
             each(writes.settle),
+            each(writes.transfer),
+            each(writes.copies),
             each(writes.call),
             each(writes.exit.saturating_sub(parts)),
         ));

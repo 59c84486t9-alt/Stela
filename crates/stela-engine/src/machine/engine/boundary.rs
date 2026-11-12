@@ -609,9 +609,12 @@ pub trait Devices {
         let settled = written
             .is_ok()
             .then(|| self.settle_write(cpu, now, &mut processors.memory()));
+        let settled_at = processors.native_host().profile_ticks();
         Some(WriteSettled {
             written,
             written_at,
+            settled_at,
+            unlocked_at: settled_at,
             settled,
         })
     }
@@ -857,6 +860,12 @@ pub struct WriteSettled {
     /// The host's profile clock ([`Host::profile_ticks`]) once the write
     /// itself was done, before its settlement.
     pub written_at: u64,
+    /// The profile clock once the settlement's transfer was done.
+    pub settled_at: u64,
+    /// The profile clock once a shared board told the PEs whose lines
+    /// changed and released its lock, before the DMA copies the settlement
+    /// deferred ([`Self::settled_at`] for a board of one).
+    pub unlocked_at: u64,
     /// The write's settlement, when it succeeded.
     pub settled: Option<Settled>,
 }
