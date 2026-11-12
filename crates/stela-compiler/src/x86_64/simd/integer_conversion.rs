@@ -6,7 +6,7 @@ use super::numerical::{
     prepare_vector_input_range, read_numerical_vector, reject_other_status, resolve,
     restore_environment, test_control, vector_exponent_range,
 };
-use super::numerical::{commit_flush_status, flush_subnormal_lanes};
+use super::numerical::{clear_environment_status, commit_flush_status, flush_subnormal_lanes};
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size, vector_extensions};
@@ -896,7 +896,7 @@ fn to_integer_with(
         && mode == IntegerRounding::TowardZero
         && operand.frac_bits == 0;
     let mut helper_patches = Vec::new();
-    let saturated = if !packed_result || operand.frac_bits != 0 {
+    let saturated = if !packed_result {
         None
     } else if signed_single {
         Some(saturating_single(code, operand, mode))
@@ -995,12 +995,25 @@ fn to_integer_with(
     finish_integer(code, operand, packed_result);
 }
 
+/// Scale a fixed-point conversion's input by 2^fbits in the private
+/// environment, dropping its status: the product is exact, or overflows to
+/// an infinity (or the largest finite value) which converts to the integer
+/// indefinite, as the out-of-range input does, and saturates by the
+/// unscaled input's sign. NaNs stay NaNs.
+fn scale_dropping_status(code: &mut Code, operand: &IntegerConversion, shape: Shape) {
+    if operand.frac_bits != 0 {
+        scale(code, operand, shape, 1);
+        clear_environment_status(code);
+    }
+}
+
 /// MXCSR's invalid-operation status.
 const MXCSR_INVALID_STATUS: i32 = 1;
 
-/// FCVTNS, FCVTMS, FCVTPS and FCVTZS of S lanes to 32-bit integers with
-/// FPCR.AH and the trap enables clear, for every input: FZ or FIZ flush
-/// subnormal inputs first (FZ raising IDC); CVT(T)PS2DQ in the guest's
+/// FCVTNS, FCVTMS, FCVTPS and FCVTZS of S lanes to 32-bit integers (FCVTZS
+/// also with fixed-point bits, [`scale_dropping_status`]) with FPCR.AH and
+/// the trap enables clear, for every input: FZ or FIZ flush subnormal
+/// inputs first (FZ raising IDC); CVT(T)PS2DQ in the guest's
 /// rounding gives each in-range lane, and 0x80000000 for a NaN or an
 /// out-of-range lane, which becomes zero for a NaN and the largest
 /// integer for a positive input, as Arm saturates; the host's invalid
@@ -1023,6 +1036,7 @@ fn saturating_single(code: &mut Code, operand: &IntegerConversion, mode: Integer
     resolve(code, unflushed, flushed);
     packed(code, Host::MoveAligned, INPUT, RESULT_VECTOR);
     environment_round(code, rounding(mode));
+    scale_dropping_status(code, operand, shape);
     if mode == IntegerRounding::TowardZero {
         code.asm().cvttps2dq(RESULT_VECTOR, Rm::Xmm(RESULT_VECTOR));
     } else {
@@ -1076,8 +1090,8 @@ fn saturating_single(code: &mut Code, operand: &IntegerConversion, mode: Integer
 }
 
 /// Vector FCVT{N,M,P,Z}{S,U} of S lanes to unsigned 32-bit integers and of
-/// D lanes to signed or unsigned 64-bit ones with AVX-512's packed
-/// conversions, FPCR.AH and the trap enables clear, for every input: FZ
+/// D lanes to signed or unsigned 64-bit ones (FCVTZS and FCVTZU also with
+/// fixed-point bits) with AVX-512's packed conversions, FPCR.AH and the trap enables clear, for every input: FZ
 /// or FIZ flush subnormal inputs first (FZ raising IDC); each in-range lane
 /// converts in the guest's rounding. The host gives the integer
 /// indefinite (all ones unsigned, the sign bit alone signed) with invalid
@@ -1128,6 +1142,7 @@ fn saturating_packed(
     resolve(code, unflushed, flushed);
     packed(code, Host::MoveAligned, INPUT, RESULT_VECTOR);
     environment_round(code, rounding(mode));
+    scale_dropping_status(code, operand, shape);
     vector_extensions::packed_to_integer(
         code,
         RESULT_VECTOR,
