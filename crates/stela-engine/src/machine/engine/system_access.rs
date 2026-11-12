@@ -448,6 +448,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             readable: 1,
             value: self.cpu.event_storage(),
         };
+        self.mirrors.exclusive = register_read::Cell {
+            readable: u64::from(self.cpu.monitor.is_none() && !self.monitor_tracing),
+            value: self.cpu.reservation_word(),
+        };
     }
 
     /// Fill [`Mirrors::cycles`] and [`Mirrors::instructions`] as native code

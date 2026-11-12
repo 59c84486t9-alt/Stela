@@ -1393,6 +1393,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         } else if data_barrier(pc, word) {
             register_read::barrier_thunk(GuestAddress(pc), BARRIER)
+        } else if clear_exclusive(pc, word) {
+            register_read::clear_exclusive_thunk(GuestAddress(pc), CLEAR_EXCLUSIVE)
         } else if let Some(rt) = code_page_invalidation(word).filter(|&rt| rt != ZERO_REGISTER) {
             let cell = cell_place(CODE_PAGE);
             register_read::code_page_thunk(GuestAddress(pc), rt, cell)

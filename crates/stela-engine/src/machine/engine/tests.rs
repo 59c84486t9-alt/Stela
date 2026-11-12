@@ -7407,6 +7407,48 @@ fn event_instructions_complete_natively_on_the_event_register() {
     );
 }
 
+/// CLREX completes natively on the frame's monitor while the engine holds
+/// none of its own, in any state; with an engine monitor it exits for the
+/// engine to clear it.
+#[test]
+fn clrex_completes_natively_while_the_monitor_lives_in_the_frame() {
+    use crate::machine::cpu::{RESERVATION_GRANULE, Reservation};
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const CLREX: u32 = 0xd503_3f5f;
+    let mut machine = machine(&[ADD, CLREX, ADD]);
+    let base = machine.cpu.pc;
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    machine.host.exits = vec![NativeExit::Exit {
+        next_pc: base + 8,
+        kind: ExitKind::Fallthrough as u64,
+    }];
+    machine.step().unwrap();
+    let thunk = register_read::clear_exclusive_thunk(GuestAddress(base + 4), CLEAR_EXCLUSIVE);
+    assert!(machine.host.installed.contains(&thunk.code));
+    let run = |machine: &mut Machine<FakeHost, NoDevices>| {
+        super::transitions::tests::run_native(machine, &thunk.code)
+    };
+    machine.cpu.state.exclusive_bytes = 8;
+    assert_eq!(run(&mut machine), (base + 8, ExitKind::Fallthrough as u64));
+    assert_eq!(machine.cpu.state.exclusive_bytes, 0);
+    // Derived state and the PE's state decide nothing.
+    machine.derived_changed();
+    machine.cpu.pstate.el = 0;
+    machine.cpu.state.exclusive_bytes = 4;
+    assert_eq!(run(&mut machine), (base + 8, ExitKind::Fallthrough as u64));
+    assert_eq!(machine.cpu.state.exclusive_bytes, 0);
+    // The engine's own monitor: the engine clears it.
+    machine.cpu.monitor = Some(Reservation {
+        granule: 0x1000,
+        bytes: [0; RESERVATION_GRANULE as usize],
+    });
+    machine.cpu.state.exclusive_bytes = 8;
+    assert_eq!(run(&mut machine), (base + 4, ExitKind::System as u64));
+    assert_eq!(machine.cpu.state.exclusive_bytes, 8);
+    assert!(machine.cpu.monitor.is_some());
+}
+
 /// MSR and MRS of PSTATE.DIT complete natively on the word PSTATE takes
 /// back when native code returns, after the engine completed one plainly.
 #[test]

@@ -103,6 +103,14 @@ pub(super) struct Mirrors {
     /// register set clears it and completes before any trap check (Arm
     /// `Hint_WFE`); one that finds it clear exits for the engine to wait.
     pub(super) events: register_read::Cell,
+    /// What native CLREX completes on
+    /// (`x86_64::register_read::clear_exclusive_thunk`): open as native
+    /// code is entered while the engine holds no monitor of its own and
+    /// traces none ([`Machine::enter_events`]), its `value` the PE's
+    /// reservation word (`Cpu::reservation_word`), which a held canonical
+    /// reservation makes nonzero. CLREX never traps, so nothing else
+    /// decides it.
+    pub(super) exclusive: register_read::Cell,
     /// The records native GENTER and GEXIT complete from
     /// (`x86_64::transition`), indexed by `state`, which they move.
     pub(super) transitions: transition::Table,
@@ -147,6 +155,10 @@ pub(super) const BARRIER: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors
 
 /// Where native code finds [`Mirrors::events`].
 pub(super) const EVENTS: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, events));
+
+/// Where native code finds [`Mirrors::exclusive`].
+pub(super) const CLEAR_EXCLUSIVE: Place =
+    Place::new(Anchor::Mirrors, offset_of!(Mirrors, exclusive));
 
 /// MRS ISR_EL1 to Xt, Rt in bits 4:0.
 pub(super) const READ_INTERRUPT_STATUS: u32 = 0xd538_c100;
@@ -373,6 +385,7 @@ impl Default for Mirrors {
             interrupt_status: register_read::Cell::default(),
             barrier: register_read::Cell::default(),
             events: register_read::Cell::default(),
+            exclusive: register_read::Cell::default(),
             transitions: transition::Table::default(),
             lines_until: 0,
             switches: register_read::SwitchLog::default(),
@@ -773,6 +786,19 @@ pub(super) fn data_barrier(pc: u64, word: u32) -> bool {
         Some(SystemOperation::Synchronization(
             Synchronization::DataCompletion { nxs: false, .. }
         ))
+    )
+}
+
+/// Whether `word` at `pc` is CLREX.
+pub(super) fn clear_exclusive(pc: u64, word: u32) -> bool {
+    matches!(
+        block::decode_system_mode_instruction(GuestAddress(pc), word)
+            .ok()
+            .flatten()
+            .map(|instruction| instruction.operation),
+        Some(SystemOperation::Exclusive(Ok(
+            stela_compiler::aarch64::exclusive::Operand::Clear
+        )))
     )
 }
 

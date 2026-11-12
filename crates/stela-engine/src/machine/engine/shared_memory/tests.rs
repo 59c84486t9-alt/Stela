@@ -403,14 +403,15 @@ fn unregistered_native_inventory_is_never_a_stopped_conversion_receipt() {
 /// it. Its ERETs make records too: one with that reservation held exits
 /// for the engine with nothing changed, as only the shared registry clears
 /// it; one with none completes natively, setting the endpoint's event
-/// register and clearing the frame's monitor.
+/// register and clearing the frame's monitor. CLREX does the same.
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn a_pe_with_canonical_memory_completes_svc_and_eret_natively_without_a_reservation() {
-    use super::super::mirrors::TRANSITIONS;
+    use super::super::mirrors::{CLEAR_EXCLUSIVE, TRANSITIONS};
     use super::super::transitions::tests::run_native;
     use crate::machine::engine::{ExitKind, GuestAddress, Pstate};
     use crate::machine::exception::{Class, syndrome};
+    use stela_compiler::x86_64::register_read;
     use stela_compiler::x86_64::transition::{self, EXCEPTION_RETURN, SUPERVISOR_CALL};
     const VECTORS: u64 = 0x8000;
     const USER: u64 = 0x9000;
@@ -476,6 +477,10 @@ fn a_pe_with_canonical_memory_completes_svc_and_eret_natively_without_a_reservat
     };
     ready(&mut machine);
     assert!(machine.cpu.holds_exclusive());
+    // CLREX leaves a held canonical reservation to the engine too.
+    let clrex = register_read::clear_exclusive_thunk(GuestAddress(0x8800), CLEAR_EXCLUSIVE);
+    let system = ExitKind::System as u64;
+    assert_eq!(run_native(&mut machine, &clrex.code), (0x8800, system));
     let exit = run_native(&mut machine, &thunk.code);
     assert_eq!(exit, (0x8800, ExitKind::System as u64));
     assert_eq!(machine.cpu.pstate.el, 2);
@@ -485,6 +490,8 @@ fn a_pe_with_canonical_memory_completes_svc_and_eret_natively_without_a_reservat
         0
     );
     assert!(!machine.cpu.holds_exclusive());
+    let fallthrough = ExitKind::Fallthrough as u64;
+    assert_eq!(run_native(&mut machine, &clrex.code), (0x8804, fallthrough));
     ready(&mut machine);
     machine.cpu.state.exclusive_bytes = 8;
     let exit = run_native(&mut machine, &thunk.code);
