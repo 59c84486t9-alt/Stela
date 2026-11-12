@@ -283,3 +283,31 @@ fn signing_requests_are_asked_again_and_a_sign_in_page_is_named() {
     assert!(error.contains("sign in to the network"), "{error}");
     assert!(error.contains("a web page"), "{error}");
 }
+
+struct Unreachable;
+
+impl tss::Transport for Unreachable {
+    fn exchange(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: &[(&str, &str)],
+        _: &str,
+        _: &[u8],
+    ) -> restore::Result<Option<Vec<u8>>> {
+        Err(restore::Error::Transport(refuse!(
+            "this computer cannot reach the server"
+        )))
+    }
+}
+
+#[test]
+fn a_lost_signing_service_is_named_in_words() {
+    let error = personalized_with(&manifest(), 0, ECID, &mut Unreachable)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "Apple's signing service: this computer cannot reach the server"
+    );
+}

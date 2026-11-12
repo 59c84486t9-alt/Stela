@@ -21,6 +21,17 @@ use stela_runtime::restore::{
     tss,
 };
 
+/// A failure of Apple's signing service in words: a lost connection or a
+/// bad answer says its cause, a refusal its reason without the request.
+fn signing_service(error: restore::Error) -> anyhow::Error {
+    match error {
+        restore::Error::Transport(why) | restore::Error::Payload(why) => {
+            anyhow!("Apple's signing service: {why}")
+        }
+        other => anyhow!("Apple's signing service: {}", other.summary()),
+    }
+}
+
 /// How long one signing request may take.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -141,7 +152,7 @@ fn personalized_with(
     getrandom::getrandom(&mut nonces.ap).context("the system's random generator failed")?;
     getrandom::getrandom(&mut nonces.sep).context("the system's random generator failed")?;
     let request = tss::root_ticket_request(&identity, ecid, &nonces, tss::Root::Ap)
-        .map_err(|error| anyhow!("Apple's signing service: {error}"))?;
+        .map_err(signing_service)?;
     let body = plist::encode_xml(&request, Limits::default())
         .map_err(|error| anyhow!("the AP ticket request: {error}"))?;
     let response = transport
@@ -152,10 +163,9 @@ fn personalized_with(
             tss::CONTENT_TYPE,
             &body,
         )
-        .map_err(|error| anyhow!("Apple's signing service: {error}"))?
+        .map_err(signing_service)?
         .context("Apple's signing service gave no answer")?;
-    let bytes =
-        tss::ticket(&response).map_err(|error| anyhow!("Apple's signing service: {error}"))?;
+    let bytes = tss::ticket(&response).map_err(signing_service)?;
     Ticket::personalized(bytes.clone(), &identity, ecid, Some(&nonces))
         .map_err(|error| anyhow!("Apple's root ticket: {error}"))?;
     Ok(bytes)
@@ -190,7 +200,7 @@ fn staged_with(
         policy_nonce: &policy_nonce,
     }
     .stage(transport)
-    .map_err(|error| anyhow!("Apple's signing service: {error}"))?;
+    .map_err(signing_service)?;
     set.encode()
         .map_err(|error| anyhow!("the staged signing answers: {error}"))
 }
