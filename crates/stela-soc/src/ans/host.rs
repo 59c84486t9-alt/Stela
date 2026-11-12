@@ -23,7 +23,11 @@
 //! Linux's `fstrim` tells it in batches: [`Discards`] keeps them merged and
 //! sends a batch once guest transfers have paused for [`DISCARD_QUIET`]: a
 //! disk runs a large deallocation for milliseconds, and a read queued behind
-//! it waits that long. A flush that waits for discards sends them at once.
+//! it waits that long. A background batch is one command of as many ranges
+//! as the disk takes (256 on NVMe, as Linux's limit), so a read that comes
+//! while it runs waits for one command at most, and the next batch waits for
+//! the next pause. A flush that waits for discards sends them at once, up to
+//! [`DISCARD_COMMANDS`] commands together.
 //! Discards never reorder past
 //! writes. A write takes its blocks back from those waiting and waits out a
 //! batch it overlaps, and a flush waits for all of them where the guest was
@@ -42,7 +46,7 @@ const SHORTEST_POLL: u64 = 240;
 /// finds a lost completion: 1 ms.
 const LOST_SIGNAL: u64 = 24_000;
 
-/// The commands of one background discard batch.
+/// The commands of one discard batch a transfer waits for.
 const DISCARD_COMMANDS: usize = 8;
 /// How long guest transfers must have paused before a discard batch goes to
 /// the disk: 10 ms.
@@ -125,6 +129,17 @@ impl Discards {
 
     fn outstanding(&self) -> bool {
         !self.waiting.is_empty() || self.running.is_some()
+    }
+
+    /// The commands the next batch may take: one in the background, which
+    /// a guest read may come to wait behind, and [`DISCARD_COMMANDS`] while
+    /// a transfer waits for discards.
+    fn commands(&self) -> usize {
+        if self.held.is_empty() {
+            1
+        } else {
+            DISCARD_COMMANDS
+        }
     }
 
     /// When the next batch may go at counter `now`, at the earliest: at once
@@ -268,7 +283,8 @@ impl HostDisk {
             && now >= self.discards.due(now)
             && let Some(limits) = self.identity().features.discard
         {
-            let extents = self.discards.batch(limits.ranges.max(1) * DISCARD_COMMANDS);
+            let most = limits.ranges.max(1) * self.discards.commands();
+            let extents = self.discards.batch(most);
             if !extents.is_empty() {
                 let request = Request::Discard {
                     extents: extents.clone(),
