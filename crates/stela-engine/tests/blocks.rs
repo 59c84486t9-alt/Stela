@@ -79,7 +79,8 @@ mod numerical {
     /// A zero dividend over a normal divisor, and a zero widened from S to
     /// D, complete in compiled code with the exact signed zero and no
     /// status, on the full path (FPSR.IXC clear) and on the sticky one;
-    /// a zero divisor still takes the helper, which raises DZC.
+    /// a normal dividend over a zero divisor completes there too, with the
+    /// infinity and DZC.
     #[test]
     fn zero_dividends_and_zero_widenings_stay_in_compiled_code() -> Result<()> {
         use stela_compiler::aarch64::floating::{DIVIDE_BY_ZERO, FPCR_FZ};
@@ -131,7 +132,7 @@ mod numerical {
         // SAFETY: as above.
         let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(done.reason, StopReason::StopAddress);
-        assert_eq!(done.floating_point_helpers, 1);
+        assert_eq!(done.floating_point_helpers, 0);
         assert_eq!(thread.registers.fpsr, DIVIDE_BY_ZERO);
         assert_eq!(thread.registers.v[0][0], 0x7f80_0000);
         Ok(())

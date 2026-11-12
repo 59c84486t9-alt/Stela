@@ -21,12 +21,13 @@ use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, FPSR_UNDERFLOW,
     INPUT_MINIMUM_EXPONENT, Input, LEFT_VECTOR, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
     SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_high_qword, clear_scalar, commit_inexact,
-    commit_inexact_underflow, emit_opcode, environment, exponent_range, fpsr_has, jump,
-    nonfinite_lane, prepare_vector_input_range, prepare_vector_result_range, read_inputs,
-    read_numerical_right, read_numerical_vector, reject_other_status,
-    reject_other_status_but_underflow, resolve, restore_environment, scalar_ordered_range,
-    scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
-    vector_normal_or_zero_range, vector_ordered_range, zero_product_check,
+    commit_inexact_divide, commit_inexact_underflow, emit_opcode, environment, exponent_range,
+    fpsr_has, jump, nonfinite_lane, prepare_vector_input_range, prepare_vector_result_range,
+    read_inputs, read_numerical_right, read_numerical_vector, reject_other_status,
+    reject_other_status_but_divide, reject_other_status_but_underflow, resolve,
+    restore_environment, scalar_ordered_range, scalar_range_or_zero, sticky_inexact,
+    sticky_result_check, test_control, vector_exponent_range, vector_normal_or_zero_range,
+    vector_ordered_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
@@ -266,8 +267,9 @@ fn accepts_zero(operation: BinaryOperation) -> bool {
 /// zero often (a ratio, a normalized silent sample or transparent pixel, an
 /// animation's progress at its start), and each one would otherwise leave
 /// compiled code. A zero quotient from a normal
-/// dividend underflowed, which the host's status rejects; the divisor's
-/// range check still sends a zero or infinite divisor to the helper.
+/// dividend underflowed, which the host's status rejects. A zero divisor
+/// under a nonzero dividend gives the signed infinity with DZC, as the
+/// host's divide-by-zero status says; zero over zero takes the helper.
 fn zero_quotient(operand: &Operand) -> bool {
     operand.operation == BinaryOperation::Divide
         && matches!(operand.inputs, Inputs::Elementwise { .. })
@@ -467,7 +469,7 @@ fn emit_scalar(
                 source,
                 INPUT_MINIMUM_EXPONENT,
             ));
-        } else if source == LEFT_VECTOR && zero_quotient(operand) {
+        } else if zero_quotient(operand) {
             helper.push(scalar_range_or_zero(
                 code,
                 operand.format,
@@ -494,7 +496,7 @@ fn emit_scalar(
         let strict_start = code.len();
         resolve(code, *strict, strict_start);
     }
-    helper.push(reject_other_status(code));
+    helper.push(reject_status(code, operand));
     let success = if accepts_zero(operand.operation) {
         helper.push(scalar_ordered_range(
             code,
@@ -504,7 +506,8 @@ fn emit_scalar(
         ));
         jump(code)
     } else if zero_quotient(operand) {
-        helper.push(scalar_range_or_zero(
+        // A zero divisor's infinite quotient is ordered.
+        helper.push(scalar_ordered_range(
             code,
             operand.format,
             LEFT_VECTOR,
@@ -522,7 +525,7 @@ fn emit_scalar(
         resolve(code, patch, helper_start);
     }
     resolve(code, success, success_start);
-    commit_status(code, success_start, tiny);
+    commit_status(code, operand, success_start, tiny);
     result_sign(code, operand);
     if matches!(operand.inputs, Inputs::PairwiseScalar { .. }) {
         clear_scalar(code, operand.format, LEFT_VECTOR);
@@ -539,7 +542,12 @@ fn emit_scalar(
 
 /// Resolve the tiny-product successes ([`tiny_product_status`]) to
 /// `success_start`, and commit the status of the full path.
-fn commit_status(code: &mut Code, success_start: usize, tiny: Option<(Vec<usize>, usize)>) {
+fn commit_status(
+    code: &mut Code,
+    operand: &Operand,
+    success_start: usize,
+    tiny: Option<(Vec<usize>, usize)>,
+) {
     match tiny {
         Some((successes, _)) => {
             for patch in successes {
@@ -547,7 +555,20 @@ fn commit_status(code: &mut Code, success_start: usize, tiny: Option<(Vec<usize>
             }
             commit_inexact_underflow(code);
         }
+        None if zero_quotient(operand) => commit_inexact_divide(code),
         None => commit_inexact(code),
+    }
+}
+
+/// [`reject_other_status`], but an elementwise FDIV keeps divide-by-zero:
+/// a finite dividend over a zero divisor, whose infinite quotient Arm
+/// gives with DZC ([`commit_inexact_divide`]). Zero over zero raises the
+/// host's invalid and takes the helper.
+fn reject_status(code: &mut Code, operand: &Operand) -> usize {
+    if zero_quotient(operand) {
+        reject_other_status_but_divide(code)
+    } else {
+        reject_other_status(code)
     }
 }
 
@@ -587,7 +608,7 @@ fn emit_vector(
                 source,
                 ZERO_RANGE_SCRATCH,
             );
-        } else if source == LEFT_VECTOR && zero_quotient(operand) {
+        } else if zero_quotient(operand) {
             vector_normal_or_zero_range(
                 code,
                 operand.format,
@@ -626,7 +647,7 @@ fn emit_vector(
         let strict_start = code.len();
         resolve(code, *strict, strict_start);
     }
-    helper.push(reject_other_status(code));
+    helper.push(reject_status(code, operand));
     prepare_vector_result_range(code);
     if accepts_zero(operand.operation) {
         vector_ordered_range(
@@ -637,7 +658,8 @@ fn emit_vector(
             ZERO_RANGE_SCRATCH,
         );
     } else if zero_quotient(operand) {
-        vector_normal_or_zero_range(
+        // A zero divisor's infinite quotient is ordered.
+        vector_ordered_range(
             code,
             operand.format,
             operand.shape,
@@ -655,7 +677,7 @@ fn emit_vector(
         resolve(code, patch, helper_start);
     }
     resolve(code, success, success_start);
-    commit_status(code, success_start, tiny);
+    commit_status(code, operand, success_start, tiny);
     result_sign(code, operand);
     if operand.shape == Shape::Vector64 {
         clear_high_qword(code, 0);

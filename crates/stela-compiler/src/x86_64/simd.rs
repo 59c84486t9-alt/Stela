@@ -16,6 +16,12 @@ mod complex;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod conversion_costs;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod divide_compare_tests;
 pub(in crate::x86_64) mod encode;
 mod estimate;
 #[cfg(all(

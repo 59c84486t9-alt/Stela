@@ -177,7 +177,8 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     let zero = |raw| raw & !sign_mask(format) == 0;
     let allows_zero = operand.operation != BinaryOperation::Divide;
     // A quotient of a zero dividend over a normal divisor is an exact signed
-    // zero, which compiled code completes in every shape.
+    // zero, and a normal dividend over a zero divisor the signed infinity
+    // with DZC, which compiled code completes in every shape.
     let zero_quotient = operand.operation == BinaryOperation::Divide
         && matches!(operand.inputs, Inputs::Elementwise { .. });
     let tiny_product = matches!(
@@ -193,10 +194,11 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     (0..operand.shape.lane_count(format)).all(|lane| {
         let (a, b) = inputs(state, operand, lane);
         let valid = |raw| {
-            (1..maximum).contains(&exponent(raw)) || allows_zero && (zero(raw) || infinite(raw))
+            (1..maximum).contains(&exponent(raw))
+                || (allows_zero || zero_quotient) && zero(raw)
+                || allows_zero && infinite(raw)
         };
-        let zero_dividend = zero_quotient && zero(a);
-        if !(valid(a) || zero_dividend) || !valid(b) {
+        if !valid(a) || !valid(b) {
             return false;
         }
         let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
@@ -210,9 +212,15 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
         if tiny_product && outcome.exceptions & !(INEXACT | UNDERFLOW) == 0 {
             return exponent(outcome.bits) < maximum;
         }
-        outcome.exceptions & !INEXACT == 0
+        let status = if zero_quotient {
+            INEXACT | DIVIDE_BY_ZERO
+        } else {
+            INEXACT
+        };
+        outcome.exceptions & !status == 0
             && ((2..maximum).contains(&exponent(outcome.bits))
-                || (allows_zero || zero_dividend) && zero(outcome.bits))
+                || (allows_zero || zero_quotient) && zero(outcome.bits)
+                || zero_quotient && infinite(outcome.bits))
     })
 }
 

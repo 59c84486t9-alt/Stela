@@ -1059,6 +1059,39 @@ pub(super) fn reject_other_status_but_underflow(code: &mut Code) -> usize {
     branch(code, Condition::NotZero)
 }
 
+/// MXCSR's divide-by-zero status.
+const MXCSR_DIVIDE: u32 = 1 << 2;
+
+/// The status a guest-visible result rejects ([`reject_other_status`])
+/// except divide-by-zero.
+pub(super) fn reject_other_status_but_divide(code: &mut Code) -> usize {
+    code.asm().test_imm(
+        Size::Dword,
+        Rcx,
+        (MXCSR_OTHER_STATUS & !MXCSR_DIVIDE) as i32,
+    );
+    branch(code, Condition::NotZero)
+}
+
+/// Accumulate IXC and DZC from ECX's MXCSR status ([`commit_inexact`]
+/// with divide-by-zero: both move to FPSR by the same shift).
+pub(super) fn commit_inexact_divide(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        Rcx,
+        (MXCSR_INEXACT | MXCSR_DIVIDE) as i32,
+    );
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, MXCSR_TO_FPSR_INEXACT_SHIFT);
+    asm.alu(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        Rcx,
+    );
+}
+
 /// Accumulate status and leave ECX holding only fresh guest IXC (zero or INEXACT).
 pub(super) fn commit_inexact(code: &mut Code) {
     let mut asm = code.asm();
