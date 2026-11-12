@@ -541,42 +541,145 @@ pub enum Settled {
 }
 
 /// Memory outside the heap that holds the bytes of records a boot wrote to
-/// its pack file, as the pack the loader read is held: written once, each
-/// record's bytes stay until the boot ends, and laid-out segments keep only
-/// their index in the heap. Handed out from the front, never given back.
-#[derive(Debug, Default)]
+/// its pack file, as the pack the loader read is held: laid-out segments
+/// keep only their index in the heap. Handed out from the front; the bytes
+/// of records no segment keeps any more (merged anew, evicted or let go)
+/// come back when [`Arena::compact`] moves those still kept to the front.
 pub struct Arena<'a> {
-    free: &'a mut [u8],
-    used: u64,
+    /// The region, as the exclusive borrow it came from: every slice handed
+    /// out derives from this pointer.
+    base: core::ptr::NonNull<u8>,
+    capacity: usize,
+    used: usize,
+    region: core::marker::PhantomData<&'a mut [u8]>,
+}
+
+// SAFETY: the arena stands for the exclusive borrow of its region.
+unsafe impl Send for Arena<'_> {}
+// SAFETY: as above; shared access hands out nothing.
+unsafe impl Sync for Arena<'_> {}
+
+impl Default for Arena<'_> {
+    fn default() -> Self {
+        Self {
+            base: core::ptr::NonNull::dangling(),
+            capacity: 0,
+            used: 0,
+            region: core::marker::PhantomData,
+        }
+    }
+}
+
+impl core::fmt::Debug for Arena<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Arena")
+            .field("capacity", &self.capacity)
+            .field("used", &self.used)
+            .finish()
+    }
 }
 
 impl<'a> Arena<'a> {
     pub fn new(bytes: &'a mut [u8]) -> Self {
         Self {
-            free: bytes,
+            capacity: bytes.len(),
+            // A slice's pointer is never null.
+            base: core::ptr::NonNull::new(bytes.as_mut_ptr())
+                .unwrap_or(core::ptr::NonNull::dangling()),
             used: 0,
+            region: core::marker::PhantomData,
         }
     }
 
     /// The bytes handed out, and those left.
     pub fn used(&self) -> u64 {
-        self.used
+        self.used as u64
     }
 
     pub fn left(&self) -> u64 {
-        self.free.len() as u64
+        (self.capacity - self.used) as u64
     }
 
     /// `bytes`, copied into the arena: `None` when it has no room for them.
     fn keep(&mut self, bytes: &[u8]) -> Option<&'a [u8]> {
-        if bytes.len() > self.free.len() {
+        if bytes.len() > self.capacity - self.used {
             return None;
         }
-        let (kept, rest) = core::mem::take(&mut self.free).split_at_mut(bytes.len());
-        self.free = rest;
-        self.used += bytes.len() as u64;
-        kept.copy_from_slice(bytes);
+        // SAFETY: `used..used + len` lies in the region and no slice handed
+        // out covers it; `bytes` is outside the region (the heap or a pack).
+        let kept = unsafe {
+            let at = self.base.as_ptr().add(self.used);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+            core::slice::from_raw_parts(at, bytes.len())
+        };
+        self.used += bytes.len();
         Some(kept)
+    }
+
+    /// Move the records `layouts` keep in the arena to its front, in the
+    /// order they lie, and give back the bytes between them: what it gave
+    /// back. Records the arena does not hold are left as they are.
+    ///
+    /// # Safety
+    /// `layouts` hold every slice of the arena still in use: nothing else
+    /// keeps one, as a write or merge in progress would.
+    pub unsafe fn compact(&mut self, layouts: &mut [&mut Layout<'a>]) -> u64 {
+        let start = self.base.as_ptr() as usize;
+        let end = start + self.used;
+        // Each kept record: its offset and length, and where it is.
+        let mut places: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for (index, layout) in layouts.iter_mut().enumerate() {
+            for (record, (_, piece)) in layout.records.iter_mut().enumerate() {
+                if let Piece::Kept(bytes) = piece {
+                    let at = bytes.as_ptr() as usize;
+                    if !bytes.is_empty() && (start..end).contains(&at) {
+                        places.push((at - start, bytes.len(), index, record));
+                        // No slice of the arena stays while it moves.
+                        *piece = Piece::Kept(&[]);
+                    }
+                }
+            }
+        }
+        places.sort_unstable();
+        // Runs of overlapping records (one two layouts share) move together,
+        // each run to the end of the one before: (from, to, new start).
+        let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+        let mut moved = Vec::with_capacity(places.len());
+        for &(offset, bytes, _, _) in &places {
+            let front = match runs.last_mut() {
+                Some(run) if offset < run.1 => {
+                    run.1 = run.1.max(offset + bytes);
+                    None
+                }
+                Some(run) => Some(run.2 + run.1 - run.0),
+                None => Some(0),
+            };
+            if let Some(front) = front {
+                runs.push((offset, offset + bytes, front));
+            }
+            let (from, _, at) = runs[runs.len() - 1];
+            moved.push(at + offset - from);
+        }
+        for &(from, to, at) in runs.iter().filter(|run| run.0 != run.2) {
+            // SAFETY: both ranges lie in the used region, `at <= from`, and
+            // no slice of the arena is alive (the caller's contract).
+            unsafe {
+                core::ptr::copy(
+                    self.base.as_ptr().add(from),
+                    self.base.as_ptr().add(at),
+                    to - from,
+                );
+            }
+        }
+        for (&(_, bytes, index, record), &at) in places.iter().zip(&moved) {
+            // SAFETY: the record's bytes now lie at `at` in the used region.
+            let kept = unsafe { core::slice::from_raw_parts(self.base.as_ptr().add(at), bytes) };
+            layouts[index].records[record].1 = Piece::Kept(kept);
+        }
+        let front = runs.last().map_or(0, |&(from, to, at)| at + to - from);
+        let given = self.used - front;
+        self.used = front;
+        given as u64
     }
 }
 
@@ -1103,7 +1206,20 @@ impl<'a> Merge<'a> {
                 }
             }
             match merged {
-                Some(record) => Piece::New(record.encode()),
+                // A holder whose record is already the merged one (as a
+                // boot's record of a page it found holds what it read)
+                // gives its bytes: the merge copies only records it changes.
+                Some(record) => {
+                    let encoded = record.encode();
+                    let same = holders
+                        .iter()
+                        .copied()
+                        .find(|&(index, at)| *self.segments[index].record(at).bytes == encoded[..]);
+                    match same {
+                        Some((index, at)) => self.segments[index].take(at),
+                        None => Piece::New(encoded),
+                    }
+                }
                 None => return true,
             }
         };

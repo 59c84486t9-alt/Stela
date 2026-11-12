@@ -197,7 +197,8 @@ fn entry(offset: u16, fill: u8, bytes: usize) -> crate::translations::Entry {
         input: vec![0; 4],
         code: vec![fill; bytes],
         relocations: Vec::new(),
-        source_map: Vec::new(),
+        // A merge decodes what two segments hold with every check.
+        source_map: vec![(offset, 0)],
         exits: Vec::new(),
         recovery: Vec::new(),
     }
@@ -944,4 +945,175 @@ fn a_first_boot_leaves_at_most_its_share_of_the_limit_and_sheds_the_rest() {
         })
         .count();
     assert_eq!(pack_sheds, 1, "{:?}", run.events);
+}
+
+/// A second boot of 300 of the 600 pages the first left, each given
+/// `phases` more entries of `entry_bytes` (`grow`) or its first again
+/// (else), in an
+/// arena of the limit less the pack read, as a boot's: the events, the
+/// writer's stats, the arena bytes used, and the keys the file keeps.
+fn boot_over_pack(
+    grow: bool,
+    phases: u16,
+    entry_bytes: usize,
+) -> (Vec<Event>, Stats, u64, BTreeSet<Digest>, Vec<Digest>) {
+    const ENTRY: usize = 4 << 10;
+    let record_bytes = {
+        let mut record = Record::new(translator_id(), page_key(0));
+        record.insert(entry(0, 0, ENTRY));
+        record.encode().len() as u64 + 56
+    };
+    let limit = 1000 * record_bytes;
+    let mut disk = Disk::new(DATA_START + 8 * limit.div_ceil(journal::ALIGN) * journal::ALIGN);
+    disk.track = false;
+    // The first boot leaves 600 pages.
+    let mut arena = vec![0u8; limit as usize];
+    let mut file: File<'_> = load(&disk.bytes.clone(), limit);
+    file.arena = Arena::new(&mut arena);
+    let mut run = Run::new(file, 1);
+    run.boot.entry_bytes = ENTRY;
+    run.boot.bound = 200;
+    for chunk in (0..600).collect::<Vec<u32>>().chunks(50) {
+        for &page in chunk {
+            run.boot.add_page(page);
+        }
+        run.run(&mut disk, 2).unwrap();
+    }
+    run.run(&mut disk, 2 * FIRST_DELTA_SECONDS).unwrap();
+    run.stop(&mut disk).unwrap();
+    drop(run);
+    // The second uses 300 of them and compiles each anew.
+    let file = load(&disk.bytes.clone(), limit);
+    let read: u64 = file.segments.iter().map(|pack| pack.bytes() as u64).sum();
+    assert!(read > limit / 2, "{read} of {limit}");
+    let mut arena = vec![0u8; (limit - read) as usize];
+    let mut file: File<'_> = file;
+    file.arena = Arena::new(&mut arena);
+    let mut run = Run::new(file, 2);
+    let used: Vec<Digest> = (0..300).map(page_key).collect();
+    run.boot.found = used.clone();
+    run.boot.bound = 200;
+    for phase in 1..=phases {
+        compile_again(&mut run, &mut disk, |page| {
+            if grow {
+                entry(4 * phase, page as u8 ^ 0xff, entry_bytes)
+            } else {
+                entry(0, page as u8, ENTRY)
+            }
+        });
+    }
+    run.run(&mut disk, 3 * FIRST_DELTA_SECONDS).unwrap();
+    let (arena_used, _) = run.writer.arena();
+    let stats = run.writer.stats();
+    run.stop(&mut disk).unwrap();
+    (run.events, stats, arena_used, keys(&disk.bytes), used)
+}
+
+/// Offer pages 0 to 300 again, an entry each, 50 every two seconds.
+fn compile_again(
+    run: &mut Run<'_>,
+    disk: &mut Disk,
+    entry_of: impl Fn(u32) -> crate::translations::Entry,
+) {
+    for chunk in (0..300).collect::<Vec<u32>>().chunks(50) {
+        for &page in chunk {
+            let key = page_key(page);
+            let mut record = Record::new(translator_id(), key);
+            record.insert(entry_of(page));
+            run.boot.added.insert(key, record);
+            run.boot.total += 1;
+        }
+        run.run(disk, 2).unwrap();
+    }
+}
+
+/// A boot that compiles pages of the pack it read anew merges their
+/// records anew: the arena, the limit less the pack read, takes back what
+/// the merged records left behind and sheds nothing.
+#[test]
+fn records_merged_anew_leave_the_arena_room_once_compacted() {
+    let (events, stats, _, kept, used) = boot_over_pack(true, 3, 1024);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Merged { full: true, .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Shed { .. })),
+        "{events:?}"
+    );
+    assert!(stats.compactions > 0 && stats.compacted > 0, "{stats:?}");
+    assert!(used.iter().all(|key| kept.contains(key)));
+}
+
+/// A merge whose record of a page is one of its holders' takes that
+/// holder's bytes: compiled again the same, nothing is copied.
+#[test]
+fn a_merge_copies_no_record_a_holder_already_has() {
+    let (events, stats, arena_used, kept, used) = boot_over_pack(false, 1, 4);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Merged { full: true, .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Shed { .. })),
+        "{events:?}"
+    );
+    // Only the boot's segments moved to the arena, each record once.
+    assert!(arena_used <= stats.delta_bytes, "{arena_used} {stats:?}");
+    assert!(
+        used.iter().all(|key| kept.contains(key)),
+        "{} of {} kept, {} in all {events:?}",
+        used.iter().filter(|key| kept.contains(key)).count(),
+        used.len(),
+        kept.len()
+    );
+}
+
+/// Compacted, the arena holds the records the layouts given keep, at its
+/// front and the same bytes, and gives back those of the rest.
+#[test]
+fn a_compacted_arena_keeps_the_records_of_the_layouts_given() {
+    use crate::translations::pack::Settled;
+    let mut bytes = vec![0u8; 4 << 20];
+    let mut arena = Arena::new(&mut bytes);
+    let mut layouts: Vec<_> = (0..3)
+        .map(|index| {
+            let mut layout =
+                layout_of(index * 1000, 200, index as u16, 1000 + 500 * index as usize);
+            while layout.settle(&mut arena, usize::MAX) == Settled::More {}
+            assert!(layout.settled());
+            layout
+        })
+        .collect();
+    let gone = layouts.remove(1);
+    let before: Vec<_> = layouts.iter().map(Layout::to_vec).collect();
+    let used = arena.used();
+    drop(gone);
+    let mut held: Vec<&mut Layout<'_>> = layouts.iter_mut().collect();
+    // SAFETY: these layouts hold every slice of the arena still in use.
+    let given = unsafe { arena.compact(&mut held) };
+    assert!(given > 200 * 1500 && given < used, "{given} of {used}");
+    assert_eq!(arena.used(), used - given);
+    assert_eq!(
+        layouts.iter().map(Layout::to_vec).collect::<Vec<_>>(),
+        before
+    );
+    // The room given back holds new records, the kept ones unchanged.
+    let mut next = layout_of(5000, 200, 9, 1500);
+    let expected = next.to_vec();
+    while next.settle(&mut arena, usize::MAX) == Settled::More {}
+    assert!(next.settled());
+    assert_eq!(next.to_vec(), expected);
+    assert_eq!(
+        layouts.iter().map(Layout::to_vec).collect::<Vec<_>>(),
+        before
+    );
 }

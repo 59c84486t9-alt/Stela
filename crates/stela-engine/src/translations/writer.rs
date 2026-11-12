@@ -38,9 +38,10 @@
 //! ([`Arena`]) outside it, as the pack the loader read is held, a step's
 //! share ([`SETTLE_BYTES`]) at a time, whatever else it does: merges read
 //! them there, and the heap keeps each laid-out segment's index alone. A
-//! merge moves its inputs' records rather than copying them, so the arena
-//! holds each record written this boot once, and a record several segments
-//! hold, merged, once more.
+//! merge moves its inputs' records rather than copying them, and copies a
+//! record several segments hold only when merging changes it; when the
+//! arena fills, it is compacted to the records the segments keep, so it
+//! holds what this boot added, not what merges left behind.
 //!
 //! A pack the next boot reads whole converges on the code boots use: a boot
 //! leaves at most [`LEFT_EIGHTHS`] of the limit (the store sheds new entries
@@ -219,6 +220,9 @@ pub struct Stats {
     /// segments held.
     pub sheds: u64,
     pub resident_peak: u64,
+    /// Times the arena was compacted, and the bytes that gave back.
+    pub compactions: u64,
+    pub compacted: u64,
 }
 
 /// What [`Writer::stop`] wrote: the segments in the file after it, the
@@ -398,13 +402,29 @@ impl<'a> Writer<'a> {
     }
 
     /// Move a step's share of the records of a segment written to the
-    /// arena, until it has no room.
+    /// arena, until it has no room even compacted.
     fn settle(&mut self) {
         // Without an arena (none was set aside) the records stay.
         let (used, left) = self.arena();
         if self.arena_full || self.released || used + left == 0 {
             return;
         }
+        // Merges leave the records they merged anew or evicted behind in
+        // the arena: compacted, it holds what the segments keep. The rest
+        // stays in the heap until a merge or write in flight is done, and
+        // the arena is full when compacted it still has no room, until the
+        // next merge commits.
+        if self.settle_next() == Some(Settled::Full)
+            && self.compact().is_some()
+            && self.settle_next() == Some(Settled::Full)
+        {
+            self.arena_full = true;
+        }
+    }
+
+    /// Move a step's share of the first segment written with records
+    /// still in the heap: `None` when there is none.
+    fn settle_next(&mut self) -> Option<Settled> {
         for segment in &mut self.segments {
             let Segment::Laid(layout) = segment else {
                 continue;
@@ -416,11 +436,32 @@ impl<'a> Writer<'a> {
             let Some(layout) = Arc::get_mut(layout) else {
                 continue;
             };
-            if layout.settle(&mut self.arena, SETTLE_BYTES) == Settled::Full {
-                self.arena_full = true;
-            }
-            return;
+            return Some(layout.settle(&mut self.arena, SETTLE_BYTES));
         }
+        None
+    }
+
+    /// Compact the arena to the records the segments keep, unless a merge or
+    /// write in flight holds some of them: the bytes it gave back.
+    fn compact(&mut self) -> Option<u64> {
+        if matches!(self.task, Task::Merge(..) | Task::Write { .. }) {
+            return None;
+        }
+        let mut layouts = Vec::with_capacity(self.segments.len() + self.waiting.len());
+        for segment in &mut self.segments {
+            if let Segment::Laid(layout) = segment {
+                layouts.push(Arc::get_mut(layout)?);
+            }
+        }
+        for layout in &mut self.waiting {
+            layouts.push(Arc::get_mut(layout)?);
+        }
+        // SAFETY: with no merge or write in flight and every layout held
+        // here alone, the segments hold every slice of the arena in use.
+        let given = unsafe { self.arena.compact(&mut layouts) };
+        self.stats.compactions += 1;
+        self.stats.compacted += given;
+        Some(given)
     }
 
     /// Whether the store sheds new entries, and whether the writer let its
@@ -834,6 +875,8 @@ impl<'a> Writer<'a> {
             }
             Done::Merge(layout, Merging::Pair(_)) => {
                 self.stats.pairs += 1;
+                // Its inputs' records merged anew are the arena's to take back.
+                self.arena_full = false;
                 if !self.released {
                     self.segments.push(Segment::Laid(layout));
                 }
@@ -841,6 +884,7 @@ impl<'a> Writer<'a> {
             }
             Done::Merge(layout, Merging::Full) => {
                 self.stats.merges += 1;
+                self.arena_full = false;
                 self.merged_since_wait = !self.waiting.is_empty();
                 self.segments = if self.released {
                     Vec::new()

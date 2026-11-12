@@ -1304,7 +1304,7 @@ pub fn write() {
         output::arguments(format_args!(
             "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} \
              pressed={} held={} pairs={} merges={} sheds={} resident_peak={}M released={} \
-             arena={}M/{}M\n",
+             arena={}M/{}M compacted={}/{}M\n",
             held.steps,
             held.longest * 1_000_000 / super::host::COUNTER_HZ,
             stats.deltas,
@@ -1319,6 +1319,8 @@ pub fn write() {
             held.writer.shedding().1,
             held.writer.arena().0 >> 20,
             (held.writer.arena().0 + held.writer.arena().1) >> 20,
+            stats.compactions,
+            stats.compacted >> 20,
         ));
         let name = pack_name(&translations::translator_id());
         let stopped = held.writer.stop(&mut Parts, &mut |execution| {
