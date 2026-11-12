@@ -329,6 +329,76 @@ fn svc_and_eret_records_take_new_contexts_after_ttbr0_and_permission_writes() {
     }
 }
 
+/// A process switch at EL2 (TTBR0) moves the lookup contexts; at the next
+/// native entry, still at EL2, the ERET record to EL0 takes the contexts
+/// of the process switched to, where that process ran before: the ERET
+/// then continues in its run where the host switches views natively (the
+/// thunk's test past the record's `chain`: its contexts generation is the
+/// table's, and its contexts and salts are those a fetch at EL0 runs in). Switched to a process with no EL0
+/// context yet, the record stays stale and ends its run, and the first
+/// native entry at EL0 gives it the contexts the fetch there made.
+#[test]
+fn eret_records_take_the_contexts_of_the_process_switched_to_at_el2() {
+    const SWITCHED: u64 = 0x0001_0000_8000_0000;
+    const FIRST: u64 = 0x0002_0000_9000_0000;
+    const NEW: u64 = 0x0003_0000_a000_0000;
+    let switch = |machine: &mut Machine<FakeHost, NoDevices>, ttbr0: u64| {
+        machine.cpu.state.x[1] = ttbr0;
+        let pc = machine.cpu.pc;
+        machine.system_instruction(MSR_TTBR0).unwrap();
+        machine.cpu.pc = pc;
+    };
+    let mut machine = host();
+    let variant = machine.current_variant(false, false);
+    let host_contexts = machine.contexts(2, variant);
+    // The process switched to later runs once at EL0 first.
+    switch(&mut machine, SWITCHED);
+    let switched = machine.contexts(0, variant);
+    switch(&mut machine, FIRST);
+    let first = machine.contexts(0, variant);
+    assert_ne!(first, switched);
+    for _ in 0..2 {
+        prepare(&mut machine);
+        machine.system_instruction(ERET).unwrap();
+        machine.chain.set_contexts(first);
+        machine.finish_transition(1);
+        machine.system_instruction(SVC_WORD).unwrap();
+        machine.chain.set_contexts(host_contexts);
+        machine.finish_transition(1);
+    }
+    let record = |machine: &Machine<FakeHost, NoDevices>| {
+        let table = &machine.mirrors.transitions;
+        let record = table.records[2][EXCEPTION_RETURN];
+        assert_eq!(record.generation, table.generation);
+        (record.contexts_generation == table.contexts_generation).then_some(record)
+    };
+    assert_eq!(record(&machine).unwrap().contexts, first);
+    switch(&mut machine, SWITCHED);
+    assert!(record(&machine).is_none());
+    assert_eq!(machine.mirror_state(), 2);
+    machine.refresh_transition_contexts(1);
+    let refreshed = record(&machine).expect("refreshed at EL2");
+    assert_eq!(refreshed.contexts, switched);
+    let salts = machine.chain.salts_of(switched);
+    assert_eq!(
+        refreshed.salts,
+        u64::from(salts[0]) | u64::from(salts[1]) << 32
+    );
+    // A process never run at EL0: genuinely stale until EL0's entry.
+    switch(&mut machine, NEW);
+    machine.refresh_transition_contexts(1);
+    assert!(record(&machine).is_none());
+    machine.cpu.pstate = Pstate {
+        el: 0,
+        sp: false,
+        ..machine.cpu.pstate
+    };
+    let new = machine.contexts(0, variant);
+    machine.chain.set_contexts(new);
+    machine.refresh_transition_contexts(1);
+    assert_eq!(record(&machine).expect("refreshed at EL0").contexts, new);
+}
+
 /// The twin round trip where EL2 keeps every key on (APCTL) and EL0 of a
 /// process without JOP keys has only IB: after an ERET to EL0 and an SVC
 /// back, the PAC service native PAC code runs on is the engine's at each

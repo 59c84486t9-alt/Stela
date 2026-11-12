@@ -476,25 +476,55 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Native code is entered with `budget` transfers in the PE's state,
-    /// whose lookup contexts the fetch just took: records into this state
-    /// whose contexts went take these, and may continue here again.
+    /// whose lookup contexts the fetch just took: records whose contexts
+    /// went take their new state's contexts again, and may continue there.
+    /// Records into this state take these; a record into another state
+    /// takes the contexts a fetch there would run in, found by the EL and
+    /// variant of the context it named, where that context and the new one
+    /// are both live (an ERET to EL0 after a process switch, the process
+    /// having run before). Making a context is left to the fetch in its
+    /// state, which walks its pages again there: a record without one keeps
+    /// ending its run, and its state's next native entry gives it the
+    /// contexts.
     pub(super) fn refresh_transition_contexts(&mut self, budget: u64) {
         let state = self.mirror_state();
-        let table = &mut self.mirrors.transitions;
-        if budget == 0 || table.stale_contexts >> state & 1 == 0 {
+        if budget == 0 || self.mirrors.transitions.stale_contexts >> state & 1 == 0 {
             return;
         }
-        table.stale_contexts &= !(1 << state);
-        let contexts = self.chain.contexts();
-        let salts = self.chain.salts();
+        let current = self.chain.contexts();
+        let table = &self.mirrors.transitions;
         let (generation, contexts_generation) = (table.generation, table.contexts_generation);
-        for record in table.records.as_flattened_mut() {
-            if record.generation == generation && record.to == state as u64 {
-                record.contexts = contexts;
-                record.salts = u64::from(salts[0]) | u64::from(salts[1]) << 32;
-                record.contexts_generation = contexts_generation;
+        let mut stale = 0;
+        for index in 0..table.records.as_flattened().len() {
+            let record = self.mirrors.transitions.records.as_flattened()[index];
+            if record.generation != generation || record.contexts_generation == contexts_generation
+            {
+                continue;
             }
+            let contexts = if record.to == state as u64 {
+                Some(current)
+            } else {
+                (0..2)
+                    .find_map(|half| self.spaces[half].live(record.contexts[half]))
+                    .map(|space| (space.key.el, space.key.variant))
+                    .and_then(|(el, variant)| self.live_contexts(el, variant))
+            };
+            let Some(contexts) = contexts else {
+                stale |= 1 << record.to;
+                continue;
+            };
+            let salts = self.chain.salts_of(contexts);
+            let record = &mut self.mirrors.transitions.records.as_flattened_mut()[index];
+            record.contexts = contexts;
+            record.salts = u64::from(salts[0]) | u64::from(salts[1]) << 32;
+            record.contexts_generation = contexts_generation;
         }
+        // Finding live contexts makes none, so no context went meanwhile.
+        debug_assert_eq!(
+            self.mirrors.transitions.contexts_generation,
+            contexts_generation
+        );
+        self.mirrors.transitions.stale_contexts = stale;
     }
 
     /// Native code returned after transitions: PSTATE's EL, guarded level

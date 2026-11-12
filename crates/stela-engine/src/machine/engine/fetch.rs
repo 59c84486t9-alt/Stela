@@ -169,17 +169,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return recent.number;
         }
         let (controls, hcr) = self.half_inputs(half, el);
-        let key = contexts::Key {
-            ttbr0: controls.ttbr0,
-            permissions: if el & 3 == 0 {
-                controls.sprr.el0
-            } else {
-                controls.sprr.el1
-            },
-            frame: self.context_frame(controls, hcr),
-            el,
-            variant,
-        };
+        let frame = self.context_frame(controls, hcr);
+        let key = context_key(&controls, frame, el, variant);
         let number = match self.spaces[half].find(&key) {
             Some(number) => number,
             None => self.make_context(half, key, &controls),
@@ -222,11 +213,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// [`Self::context_frames`]: all but TTBR0 and the SPRR permissions.
     /// Past [`CONTEXT_FRAMES`] values every context goes with the frames
     /// they name ([`Self::contexts`] then takes both halves' anew).
-    fn context_frame(&mut self, mut controls: mmu::Controls, hcr: u64) -> u32 {
-        controls.ttbr0 = 0;
-        controls.sprr.el0 = 0;
-        controls.sprr.el1 = 0;
-        let frame = (controls, hcr);
+    fn context_frame(&mut self, controls: mmu::Controls, hcr: u64) -> u32 {
+        let frame = frame_inputs(controls, hcr);
         if let Some(at) = self.context_frames.iter().rposition(|held| *held == frame) {
             return at as u32;
         }
@@ -259,6 +247,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.salt_owners[salt] = owner;
             salt
         }) as u64
+    }
+
+    /// Both halves' contexts at `el` in `variant` as [`Self::contexts`]
+    /// would give them, where both are live already: none is made and no
+    /// frame is added, so nothing a fetch at `el` would walk again moves.
+    pub(super) fn live_contexts(&mut self, el: u8, variant: Variant) -> Option<[u64; 2]> {
+        let mut contexts = [0; 2];
+        for (half, context) in contexts.iter_mut().enumerate() {
+            let (controls, hcr) = self.half_inputs(half, el);
+            let framed = frame_inputs(controls, hcr);
+            let frame = self
+                .context_frames
+                .iter()
+                .rposition(|held| *held == framed)?;
+            let key = context_key(&controls, frame as u32, el, variant);
+            *context = self.spaces[half].find(&key)?;
+        }
+        Some(contexts)
     }
 
     /// Both halves' contexts at `el` in `variant`: of one translation
@@ -636,5 +642,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.cpu.pc,
         ));
         Ok(())
+    }
+}
+
+/// What [`Machine::context_frames`] holds of a half's inputs: all but
+/// TTBR0 and the SPRR permissions, which the key holds itself.
+fn frame_inputs(mut controls: mmu::Controls, hcr: u64) -> (mmu::Controls, u64) {
+    controls.ttbr0 = 0;
+    controls.sprr.el0 = 0;
+    controls.sprr.el1 = 0;
+    (controls, hcr)
+}
+
+/// The key of the context of a half whose inputs are `controls` in the
+/// frame numbered `frame`, fetched at `el` in `variant`.
+fn context_key(controls: &mmu::Controls, frame: u32, el: u8, variant: Variant) -> contexts::Key {
+    contexts::Key {
+        ttbr0: controls.ttbr0,
+        permissions: if el & 3 == 0 {
+            controls.sprr.el0
+        } else {
+            controls.sprr.el1
+        },
+        frame,
+        el,
+        variant,
     }
 }
