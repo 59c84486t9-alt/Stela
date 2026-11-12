@@ -2,9 +2,9 @@
 //! input class against the Arm reference, compiled as blocks for every tier
 //! this host has: every inline completion matches the reference in every V
 //! register and FPSR, every exit leaves the state unchanged, and on SSE4.1
-//! hosts with AH and the trap enables clear every lane set without a NaN
-//! completes inline, infinities and subnormals (flushed under FZ or FIZ)
-//! included.
+//! hosts with AH and the trap enables clear every lane set completes
+//! inline, infinities, NaNs (quieted, or the default NaN under DN, IOC for
+//! a signalling one) and subnormals (flushed under FZ or FIZ) included.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -167,9 +167,6 @@ fn special_lanes_round_inline() {
                         for index in 0..count {
                             set_lane(&mut n, format, index, all[(start + index * 5) % all.len()]);
                         }
-                        let nan = (0..count).any(|index| {
-                            lane(n, format, index) & !format.sign_mask() > format.exponent_mask()
-                        });
                         for fpcr in controls {
                             let mut initial = GuestState {
                                 fpcr,
@@ -182,9 +179,8 @@ fn special_lanes_round_inline() {
                             let label = alloc::format!(
                                 "{operation:?} {format:?} {lanes} {n:x?} {fpcr:#x} {target:?}"
                             );
-                            let must_inline = checked
-                                && !nan
-                                && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
+                            let must_inline =
+                                checked && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
                             let mut actual = initial.clone();
                             let exit = run(&code, &mut actual);
                             runs += 1;

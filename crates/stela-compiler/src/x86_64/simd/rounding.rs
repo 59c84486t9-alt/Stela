@@ -19,8 +19,8 @@ use crate::{
     GuestAddress, GuestState, TargetCpu,
     aarch64::{
         floating::{
-            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_SHIFT,
-            Format, INEXACT, rounding::RoundingOperation,
+            FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP,
+            FPCR_ROUNDING_SHIFT, Format, INEXACT, INVALID, rounding::RoundingOperation,
         },
         simd::{arithmetic::Shape, rounding::Operand},
     },
@@ -34,6 +34,10 @@ const MASK: u8 = 4;
 const CONSTANT: u8 = 5;
 const SAVED_HALF: u8 = 6;
 const ORIGINAL_HALF: u8 = 7;
+/// An S/D source's NaN lanes ([`checked_special_source`]).
+const NAN_LANES: u8 = 6;
+/// An S/D source before its NaN lanes became zeros.
+const ORIGINAL: u8 = 7;
 const SIGN_BITS: u32 = 1;
 const ACCUMULATOR_GPR: u8 = 0;
 const FIRST_LANE: u8 = 0;
@@ -654,8 +658,11 @@ fn checked_inexact(code: &mut Code, operand: &Operand) {
 /// their signed zeros (FZ adding IDC to R11D), and every lane but a NaN
 /// rounds on the host as on Arm: an infinity to itself, exactly, and a
 /// subnormal to its signed zero or, rounding away from it, to one, inexact.
-/// A NaN lane takes `helper`. With AH set the normal-or-zero guard
-/// ([`checked_source`]) applies. Clobbers XMM2 to XMM5 and EAX.
+/// A NaN lane rounds as a zero and takes its NaN afterwards
+/// ([`nan_results`]): NAN_LANES holds the NaN lanes and ORIGINAL the
+/// source. FRINT32 and FRINT64 send a NaN lane to `helper`. With AH set
+/// the normal-or-zero guard ([`checked_source`]) applies, and NAN_LANES is
+/// clear. Clobbers XMM2 to XMM5 and EAX.
 fn checked_special_source(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     const UNORDERED: u8 = 3;
     let format = operand.format;
@@ -673,23 +680,77 @@ fn checked_special_source(code: &mut Code, operand: &Operand, helper: &mut Vec<u
     );
     let flushed = code.len();
     resolve(code, unflushed, flushed);
-    packed(code, Host::MoveAligned, TEMP, SOURCE);
+    packed(code, Host::MoveAligned, NAN_LANES, SOURCE);
     code.asm().float_compare(
         float_lanes(format, Shape::Vector128),
-        TEMP,
+        NAN_LANES,
         Rm::Xmm(SOURCE),
         UNORDERED,
     );
-    Host::DwordSignMask.register(code, 0, TEMP, TargetCpu::Baseline);
-    code.asm()
-        .test_imm(Size::Dword, Rax, active_dwords(operand) as i32);
-    helper.push(branch(code, Condition::NotZero));
+    if operand.operation.signed_width().is_some() {
+        Host::DwordSignMask.register(code, 0, NAN_LANES, TargetCpu::Baseline);
+        code.asm()
+            .test_imm(Size::Dword, Rax, active_dwords(operand) as i32);
+        helper.push(branch(code, Condition::NotZero));
+    }
+    packed(code, Host::MoveAligned, ORIGINAL, SOURCE);
+    packed(code, Host::MoveAligned, TEMP, NAN_LANES);
+    packed(code, Host::AndNot, TEMP, SOURCE);
+    packed(code, Host::MoveAligned, SOURCE, TEMP);
     let checked = jump(code);
     let alternative_start = code.len();
     resolve(code, alternative, alternative_start);
     checked_source(code, operand, helper);
+    packed(code, Host::Xor, NAN_LANES, NAN_LANES);
     let end = code.len();
     resolve(code, checked, end);
+}
+
+/// Arm's NaN in each S/D NaN lane of NAN_LANES ([`checked_special_source`]):
+/// the source NaN quieted, or under FPCR.DN the default NaN, IOC (in R11D)
+/// for a signalling one. Clobbers XMM2, XMM3 and EAX.
+fn nan_results(code: &mut Code, operand: &Operand) {
+    /// PSHUFD selector copying each qword's high dword to both halves.
+    const HIGH_DWORDS: u8 = 0xf5;
+    let format = operand.format;
+    let quiet = 1u64 << (format.fraction_bits() - 1);
+    Host::DwordSignMask.register(code, 0, NAN_LANES, TargetCpu::Baseline);
+    code.asm()
+        .test_imm(Size::Dword, Rax, active_dwords(operand) as i32);
+    let none = branch(code, Condition::Zero);
+    // Signalling lanes: the quiet bit clear.
+    splat(code, format, TEMP, quiet);
+    packed(code, Host::And, TEMP, ORIGINAL);
+    packed(code, Host::Xor, RESIDUAL, RESIDUAL);
+    packed(code, Host::EqualDword, TEMP, RESIDUAL);
+    if format == Format::Double {
+        super::shuffle(code, TEMP, TEMP, HIGH_DWORDS);
+    }
+    packed(code, Host::And, TEMP, NAN_LANES);
+    Host::DwordSignMask.register(code, 0, TEMP, TargetCpu::Baseline);
+    code.asm()
+        .test_imm(Size::Dword, Rax, active_dwords(operand) as i32);
+    let quiet_only = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm32(Alu::Or, Size::Dword, R11, INVALID as i32);
+    let raised = code.len();
+    resolve(code, quiet_only, raised);
+    test_control(code, FPCR_DN);
+    let propagated = branch(code, Condition::Zero);
+    splat(code, format, TEMP, format.exponent_mask() | quiet);
+    let selected = jump(code);
+    let propagated_start = code.len();
+    resolve(code, propagated, propagated_start);
+    splat(code, format, TEMP, quiet);
+    packed(code, Host::Or, TEMP, ORIGINAL);
+    let selected_start = code.len();
+    resolve(code, selected, selected_start);
+    packed(code, Host::And, TEMP, NAN_LANES);
+    packed(code, Host::AndNot, NAN_LANES, RESULT);
+    packed(code, Host::Or, NAN_LANES, TEMP);
+    packed(code, Host::MoveAligned, RESULT, NAN_LANES);
+    let end = code.len();
+    resolve(code, none, end);
 }
 
 /// The DWORD sign-mask bits of the active S/D lanes.
@@ -727,6 +788,9 @@ fn checked_rounding(
     }
     checked_bounds(code, operand, helper);
     checked_inexact(code, operand);
+    if operand.format != Format::Half {
+        nan_results(code, operand);
+    }
 }
 
 /// Commit the result and fresh IXC, and with `flushed` the IDC in R11D
