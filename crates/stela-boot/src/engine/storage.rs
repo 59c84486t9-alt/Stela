@@ -38,7 +38,9 @@ use stela_drivers::{
     probe::{NativeServices, native::usb4, probe_with_provider},
 };
 use stela_runtime::pc::{
+    failure_record,
     gpt::{Guid, PartitionDevice},
+    machine_state,
     storage::{self, Named, Target},
 };
 
@@ -976,6 +978,10 @@ pub struct Selection<'a> {
     /// Where the firmware found the disk Stela started from
     /// (`Handoff::boot_disk`), for the account of a failed search.
     pub boot_disk: Option<&'a str>,
+    /// The target whose partition keeps the machine state in its tail,
+    /// where a stop the USB's log cannot keep leaves its record
+    /// (`failure_record`).
+    pub state: Option<&'a Target>,
 }
 
 /// Open the explicitly selected partitions in the loader's identity root
@@ -1009,6 +1015,7 @@ pub unsafe fn open(
         wifi,
         external,
         boot_disk,
+        state,
     } = *selection;
     if let Some(serial) = usb_disks
         .iter()
@@ -1331,18 +1338,43 @@ pub unsafe fn open(
                     })
                     .and_then(|mut opened| opened.pop())
                     .map(|partition| service(partition, " (boot log)"));
-                account(
+                let refusal = refuse!("{role}: {refusal}", role, %refusal);
+                // Without it, the chosen partition's machine state keeps the
+                // step's record for the next boot to copy into the log.
+                // The targets come first, so every one was found when a
+                // later partition is refused.
+                let kept = match (&log, state) {
+                    (Some(_), _) => Keeping::Log,
+                    (None, Some(target)) if at >= targets.len() => Keeping::Record(target),
+                    (None, _) => Keeping::Screen,
+                };
+                let lines = account(
                     &mut devices,
                     role,
                     waited.waited_us,
                     boot_disk,
                     targets.first().copied(),
-                    log.is_some(),
+                    kept,
                 );
-                return Err(Refused {
-                    refusal: refuse!("{role}: {refusal}", role, %refusal),
-                    log,
-                });
+                if let Keeping::Record(target) = kept {
+                    let mut text = String::from(
+                        "STEP Starting the PC's disks and USB devices\n\
+                         STELA FATAL host storage could not be opened: ",
+                    );
+                    text.push_str(&format!("{refusal}\n"));
+                    for line in &lines {
+                        text.push_str(&format!("HOST DISKS {line}\n"));
+                    }
+                    match leave_record(&mut devices.disks, target, &text) {
+                        Ok(()) => output::arguments(format_args!(
+                            "HOST DISKS record left on the chosen partition for the next boot's log\n"
+                        )),
+                        Err(why) => output::arguments(format_args!(
+                            "HOST DISKS no record left on the chosen partition: {why}\n"
+                        )),
+                    }
+                }
+                return Err(Refused { refusal, log });
             }
         }
     };
@@ -1467,8 +1499,8 @@ fn account(
     waited_us: u64,
     boot_disk: Option<&str>,
     chosen: Option<&Target>,
-    logged: bool,
-) {
+    kept: Keeping<'_>,
+) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(match waited_us {
         0 => format!("Not usable: {role}."),
@@ -1542,15 +1574,55 @@ fn account(
         lines.push(String::from("Disks found: none."));
     }
     lines.extend(disks.into_iter().map(|disk| format!("Disk {disk}.")));
-    lines.push(String::from(if logged {
-        "The boot log on the USB stick keeps these lines."
-    } else {
-        "The boot log on the USB stick is out of reach; this screen is this part's only record."
+    lines.push(String::from(match kept {
+        Keeping::Log => "The boot log on the USB stick keeps these lines.",
+        Keeping::Record(_) => {
+            "The boot log on the USB stick is out of reach; the chosen disk keeps these lines, \
+             and the next start copies them into it."
+        }
+        Keeping::Screen => {
+            "The boot log on the USB stick is out of reach; this screen is this part's only record."
+        }
     }));
     for line in &lines {
         output::arguments(format_args!("HOST DISKS {line}\n"));
         crate::status::info(line);
     }
+    lines
+}
+
+/// Where a failed disk search's account is kept beyond the screen.
+#[derive(Clone, Copy)]
+enum Keeping<'a> {
+    /// The USB's own log, whose disk was found.
+    Log,
+    /// The machine state of this chosen partition (`failure_record`).
+    Record(&'a Target),
+    Screen,
+}
+
+/// Leave `text` in the machine state of `target`'s partition
+/// (`failure_record`), for the next boot to copy into the USB's log.
+fn leave_record(
+    disks: &mut Vec<Box<dyn BlockDevice>>,
+    target: &Target,
+    text: &str,
+) -> core::result::Result<(), String> {
+    let mut partition = storage::open_shared(disks, &[Named::Disk(target.clone())])
+        .map_err(|(_, error)| format!("{error}"))?
+        .pop()
+        .expect("one partition was named");
+    let block = u64::from(partition.identity().block_size);
+    let split =
+        machine_state::split(partition.identity().bytes()).map_err(|error| format!("{error}"))?;
+    let at = split.state_offset() + failure_record::OFFSET;
+    if block == 0 || !at.is_multiple_of(block) {
+        return Err(format!("{block}-byte blocks do not align the record"));
+    }
+    partition
+        .write(at / block, &failure_record::encode(text))
+        .and_then(|()| partition.flush())
+        .map_err(|error| format!("{error}"))
 }
 
 /// Why [`open`] stopped, and the USB's boot log when its disk was found, so
