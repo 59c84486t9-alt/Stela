@@ -229,7 +229,6 @@ fn install_targets() -> Result<()> {
     Ok(())
 }
 
-/// Cargo with `args`.
 /// Cargo with `args`, whose build scripts compile with the chosen Clang.
 fn command<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> Command {
     let mut command = cargo();
