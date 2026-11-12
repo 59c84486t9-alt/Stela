@@ -161,7 +161,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         emit_native(code, operand, pc);
         return;
     }
-    if super::wide_half::supported(operand, target) {
+    if super::wide_half::supported(target) {
         let other = super::wide_half::emit(code, operand);
         let done = jump(code);
         let other_start = code.len();

@@ -8,8 +8,8 @@
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
-        self, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_ROUNDING_SHIFT, Format,
-        fused::FusedOperation,
+        self, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP,
+        FPCR_ROUNDING_SHIFT, Format, fused::FusedOperation,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::{asm::vector_extensions, native::run},
@@ -229,6 +229,113 @@ fn finite_half_fused_lanes_complete_inline() {
                             inline += 1;
                         }
                     }
+                }
+            }
+        }
+    }
+    assert!(inline > runs / 6, "{inline} of {runs}");
+}
+
+/// Scalar FMADD, FMSUB, FNMADD and FNMSUB of H, and FMLA and FMLS of H by
+/// element, against the reference: on AVX2 hosts with F16C every finite
+/// lane (zeros and subnormals included) completes inline unless FZ16, AH or
+/// a trap enable is set, the result alone in Vd or, under FPCR.NEP, in the
+/// addend's other bits; every exit leaves the state unchanged.
+#[test]
+fn finite_scalar_half_fused_forms_complete_inline() {
+    const A: u32 = 12;
+    let registers = M << 16 | N << 5 | D;
+    // (word, operation, addend register, right element).
+    let forms: [(u32, FusedOperation, u32, usize); 6] = [
+        (0x1fc0_0000 | A << 10 | registers, FusedOperation::Add, A, 0),
+        (
+            0x1fc0_8000 | A << 10 | registers,
+            FusedOperation::Subtract,
+            A,
+            0,
+        ),
+        (
+            0x1fe0_0000 | A << 10 | registers,
+            FusedOperation::NegatedAdd,
+            A,
+            0,
+        ),
+        (
+            0x1fe0_8000 | A << 10 | registers,
+            FusedOperation::NegatedSubtract,
+            A,
+            0,
+        ),
+        // FMLA H3, H4, V9.H[5] and FMLS H3, H4, V9.H[2].
+        (
+            0x5f00_1000 | 1 << 11 | 1 << 20 | registers,
+            FusedOperation::Add,
+            D,
+            5,
+        ),
+        (
+            0x5f00_5000 | 1 << 21 | registers,
+            FusedOperation::Subtract,
+            D,
+            2,
+        ),
+    ];
+    let all = halves();
+    let mut inline = 0usize;
+    let mut runs = 0usize;
+    for target in targets() {
+        let wide = target.supports(TargetCpu::Avx2)
+            && target.supports(TargetCpu::F16c)
+            && !target.data_independent_timing()
+            && !vector_extensions::half_supported(target);
+        for &(word, operation, addend, element) in &forms {
+            let code = compile(word, target);
+            for start in 0..all.len() {
+                let pick =
+                    |which: usize| u64::from(all[(start * (which + 1) + which * 7) % all.len()]);
+                let (a, n, m) = (pick(0), pick(1), pick(2));
+                let finite = [a, n, m].iter().all(|bits| bits & 0x7c00 != 0x7c00);
+                for fpcr in controls().into_iter().chain([FPCR_NEP]) {
+                    let mut initial = GuestState {
+                        fpcr,
+                        fpsr: 0x0800_0000,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    // Other lanes hold infinities, NaNs and subnormals.
+                    initial.v[D as usize] = [0x5a5a_a5a5_3c3c_c3c3, 0x0123_4567_89ab_cdef];
+                    initial.v[A as usize] = [0x7c01_2222_0001_4444, 0x5555_6666_7777_8888];
+                    initial.v[N as usize] = [0x7e00_7c00_0001_0000, 0x7c01_3c00_8000_7bff];
+                    initial.v[M as usize] = [0x7e00_7c00_0001_0000, 0x7c01_3c00_8000_7bff];
+                    set_lane(&mut initial.v[addend as usize], 0, a);
+                    set_lane(&mut initial.v[N as usize], 0, n);
+                    set_lane(&mut initial.v[M as usize], element, m);
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    runs += 1;
+                    let label = alloc::format!("{word:08x} {a:x} {n:x} {m:x} {fpcr:#x} {target:?}");
+                    if exit == PC.0 {
+                        assert_eq!(actual, initial, "{label}");
+                        let must_inline = wide
+                            && finite
+                            && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH | FPCR_FZ16) == 0;
+                        assert!(!must_inline, "exited: {label}");
+                        continue;
+                    }
+                    assert_eq!(exit, RETURN, "{label}");
+                    let outcome = floating::fused::evaluate(Format::Half, operation, fpcr, a, n, m)
+                        .expect("completed with enabled traps");
+                    let mut expected = initial.clone();
+                    expected.fpsr |= outcome.exceptions;
+                    let mut result = if fpcr & FPCR_NEP != 0 {
+                        initial.v[addend as usize]
+                    } else {
+                        [0; 2]
+                    };
+                    set_lane(&mut result, 0, outcome.bits);
+                    expected.v[D as usize] = result;
+                    assert_eq!(actual, expected, "{label}");
+                    inline += 1;
                 }
             }
         }

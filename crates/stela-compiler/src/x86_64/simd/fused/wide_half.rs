@@ -1,12 +1,13 @@
-//! Vector Half FMLA/FMLS for every finite input on AVX2 hosts with F16C,
-//! in Single lanes: the product of two Half values is exact in Single,
+//! Vector Half FMLA/FMLS and scalar FMADD, FMSUB, FNMADD, FNMSUB and FMLA
+//! by element for every finite input on AVX2 hosts with F16C, in Single
+//! lanes (a scalar form's status from lane 0 alone): the product of two Half values is exact in Single,
 //! TwoSum gives the sum's exact error, and the sum rounded to odd (24 bits,
 //! at least Half's 11 plus 2) rounds once more to Half exactly as the one
 //! rounding Arm's FPMulAdd makes. Zeros and subnormal inputs need nothing
 //! apart; a NaN or infinite input, FZ16, AH and enabled traps take the
 //! caller's other path.
 use super::super::numerical::{Condition, branch, jump, resolve};
-use super::super::{commit, encode::guest};
+use super::super::{commit, encode::guest, half as lanes};
 use crate::x86_64::asm::{Alu, Code, Gpr, Map, Pp, Rm, ShiftOp, Size, Vex};
 use crate::{
     GuestState, TargetCpu,
@@ -43,9 +44,8 @@ const HALF_OVERFLOW: u32 = 0x4780_0000;
 const SIGN_BITS: u8 = 31;
 
 /// Whether this recipe serves `operand` on `target`.
-pub(super) fn supported(operand: &Operand, target: TargetCpu) -> bool {
-    operand.shape != Shape::Scalar
-        && target.supports(TargetCpu::Avx2)
+pub(super) fn supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx2)
         && target.supports(TargetCpu::F16c)
         && !target.data_independent_timing()
 }
@@ -222,10 +222,10 @@ fn flag_if_active(code: &mut Code, lanes: &Lanes, xmm: u8, flag: u32) {
 pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
     let lanes = Lanes {
         wide: operand.shape == Shape::Vector128,
-        active: if operand.shape == Shape::Vector128 {
-            0xff
-        } else {
-            0xf
+        active: match operand.shape {
+            Shape::Vector128 => 0xff,
+            Shape::Vector64 => 0xf,
+            Shape::Scalar => 0x1,
         },
     };
     let lanes = &lanes;
@@ -386,6 +386,17 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
         guest(core::mem::offset_of!(GuestState, fpsr) as u32),
         Gpr::Rcx,
     );
-    commit(code, operand.destination, RESULT);
+    if operand.shape == Shape::Scalar {
+        // Lane 0 alone, or under FPCR.NEP in the unnegated Va's other bits.
+        let mut asm = code.asm();
+        asm.movd_from_xmm(Gpr::Rax, RESULT);
+        asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rax, 0xffff);
+        asm.movq_to_xmm(lanes::LEFT, Gpr::Rax);
+        super::super::read_vector(code, operand.addend, lanes::ORIGINAL_LEFT);
+        lanes::merge_scalar(code);
+        commit(code, operand.destination, lanes::LEFT);
+    } else {
+        commit(code, operand.destination, RESULT);
+    }
     other
 }
