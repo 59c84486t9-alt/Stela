@@ -1417,9 +1417,12 @@ impl Heartbeat {
             // EL0 code (idle paths, wake-ups with nothing for user code,
             // kernel threads), as shares of the interval; then its WFIs and
             // those that completed at once, its WFEs that reached the engine
-            // and those that completed at once, and its interrupts.
+            // and those that completed at once, and its interrupts; then the
+            // WFEs native code completed after spinning for the event, the
+            // spins that missed, the WFEs an exclusive monitor kept from
+            // spinning and the time spins took.
             let mut levels = String::from(
-                "PES LEVELS user%/kernel%/guarded%/irq%/before_wfi% wfi/wfi_now/wfe/wfe_now/interrupts",
+                "PES LEVELS user%/kernel%/guarded%/irq%/before_wfi% wfi/wfi_now/wfe/wfe_now/interrupts/wfe_spun/spin_miss/wfe_held/spin_ns",
             );
             let mut totals = parallel::Counts::default();
             for (pe, (now, before)) in per_pe.iter().zip(&mut self.pe_counts).enumerate() {
@@ -1562,7 +1565,7 @@ impl Heartbeat {
                 }
                 let level = now.levels.since(&before.levels);
                 levels.push_str(&format!(
-                    " {pe}:{}/{}/{}/{}/{}/{}/{}/{}/{}/{}",
+                    " {pe}:{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}",
                     tsc_percent(level.ticks[step_timing::Level::User as usize]),
                     tsc_percent(level.ticks[step_timing::Level::Kernel as usize]),
                     tsc_percent(level.ticks[step_timing::Level::Guarded as usize]),
@@ -1573,6 +1576,11 @@ impl Heartbeat {
                     level.wfe,
                     level.wfe_at_once,
                     level.interrupts,
+                    level.wfe_spun,
+                    level.wfe_spin_missed,
+                    level.wfe_held,
+                    u128::from(level.wfe_spin_counts) * 1_000_000_000
+                        / u128::from(host::COUNTER_HZ),
                 ));
                 for (total, (now, before)) in
                     exits.iter_mut().zip(now.exits.iter().zip(before.exits))

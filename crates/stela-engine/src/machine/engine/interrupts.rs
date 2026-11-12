@@ -406,7 +406,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// completes at once still yields the rest of the time slice to the
     /// other PEs (`processors`), as a spin-wait that waits for another PE
     /// would on hardware where they run at the same time; only timing
-    /// changes.
+    /// changes. A WFE that waits, with other PEs on cores of their own,
+    /// lets native WFE in the state spin briefly for its event register
+    /// before it comes here ([`EVENT_WAITS`]).
     pub(super) fn wait(&mut self, _word: u32, kind: WaitKind, register: Option<u8>) -> Step {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
@@ -495,6 +497,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
             return Ok(());
         }
+        // A WFE that waits here may spin natively while other PEs run on
+        // cores of their own to set its event register ([`EVENT_WAITS`]);
+        // serialized PEs set none while this one runs.
+        if kind == WaitKind::Event && register.is_none() && self.parallel.is_some() {
+            self.mirrors.transition(self.mirror_state());
+            self.mirrors[EVENT_WAITS].readable = 1;
+        }
         // CYC_OVRD's power-down mode turns the core off and loses its state
         // (`processors`). A WFIT's local timeout is the core's own, so it
         // could not end that wait.
@@ -529,6 +538,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.power_down();
         }
         Ok(())
+    }
+
+    /// Take what native WFEs counted of their spins
+    /// ([`Mirrors::spin`](super::mirrors::Mirrors::spin)).
+    pub(super) fn take_event_spins(&mut self) {
+        let spin = core::mem::take(&mut self.mirrors.spin);
+        if let Some(timing) = &mut self.step_timing {
+            timing.levels.event_spins(spin);
+        }
     }
 
     /// Arm `AArch64_InterruptPending` for the running PE.

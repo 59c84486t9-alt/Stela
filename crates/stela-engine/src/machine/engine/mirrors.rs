@@ -136,6 +136,10 @@ pub(super) struct Mirrors {
     /// counter read computes the count where only its cell's value went
     /// stale.
     pub(super) instructions: register_read::InstructionCounter,
+    /// What native WFEs counted of their spins since native code was
+    /// entered, which the engine takes when it returns
+    /// ([`Machine::take_event_spins`]).
+    pub(super) spin: register_read::EventSpin,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -284,8 +288,27 @@ pub(super) fn permission_write_word(word: u32) -> Option<(usize, u8)> {
     Some((kept, (word & 31) as u8))
 }
 
+/// The cell open where a WFE that finds the event register clear waits,
+/// taking no trap, and other PEs run meanwhile on cores of their own, any of
+/// which may set it: there native WFE spins for the register
+/// (`x86_64::register_read::event_wait_thunk`). A WFE that waits in the
+/// engine opens it ([`Machine::wait`]); the trap controls are System
+/// registers, whose change closes every cell.
+pub(super) const EVENT_WAITS: usize = PERMISSION_KEPT[1] + 1;
+
+/// Where native WFE finds the event register and what ends its spin.
+pub(super) const EVENT_WAIT: register_read::EventWaitPlaces = register_read::EventWaitPlaces {
+    events: EVENTS,
+    waits: cell_place(EVENT_WAITS),
+    monitor: Place::new(Anchor::Mirrors, offset_of!(Mirrors, monitor)),
+    control: Place::new(Anchor::Control, 0),
+    lines_until: Place::new(Anchor::Mirrors, offset_of!(Mirrors, lines_until)),
+    count: Place::new(Anchor::Count, 0),
+    spin: Place::new(Anchor::Mirrors, offset_of!(Mirrors, spin)),
+};
+
 /// The cell of the first of the [`STORED_WRITES`].
-const STORED_WRITE_CELLS: usize = PERMISSION_KEPT[1] + 1;
+const STORED_WRITE_CELLS: usize = EVENT_WAITS + 1;
 
 /// The IMPLEMENTATION DEFINED registers that a store completes writes of
 /// that get a cell of their own the first time code naming them is installed
@@ -394,6 +417,7 @@ impl Default for Mirrors {
             monitor: 0,
             cycles: register_read::CycleCounter::default(),
             instructions: register_read::InstructionCounter::default(),
+            spin: register_read::EventSpin::default(),
         }
     }
 }

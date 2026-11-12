@@ -1388,7 +1388,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if send {
                 register_read::send_event_thunk(GuestAddress(pc), EVENTS)
             } else {
-                register_read::event_wait_thunk(GuestAddress(pc), EVENTS)
+                register_read::event_wait_thunk(GuestAddress(pc), EVENT_WAIT)
             }
         } else if data_barrier(pc, word) {
             register_read::barrier_thunk(GuestAddress(pc), BARRIER)

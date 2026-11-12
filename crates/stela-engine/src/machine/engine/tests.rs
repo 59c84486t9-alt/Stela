@@ -7425,7 +7425,7 @@ fn event_instructions_complete_natively_on_the_event_register() {
     let send = register_read::send_event_thunk(GuestAddress(base + 4), EVENTS);
     assert_eq!(machine.host.installed.last(), Some(&send.code));
     machine.step().unwrap();
-    let wait = register_read::event_wait_thunk(GuestAddress(base + 12), EVENTS);
+    let wait = register_read::event_wait_thunk(GuestAddress(base + 12), EVENT_WAIT);
     // Then the thunk of the link the exit into its block took at its fetch.
     let installed = &machine.host.installed;
     assert_eq!(installed[installed.len() - 2], wait.code);

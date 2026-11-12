@@ -56,8 +56,8 @@
 //! into an energy accumulator's reading.
 //!
 //! A [`send_event_thunk`] sets the event register byte the cell's `value`
-//! names, and an [`event_wait_thunk`] consumes a set one; both clobber RCX
-//! and RDX.
+//! names, and an [`event_wait_thunk`] consumes a set one, spinning briefly
+//! for one another PE sets; both clobber RCX and RDX.
 //!
 //! A [`cycle_counter_thunk`] computes a cycle counter at the count where
 //! its cell went stale but the read stays plain, and opens the cell on it;
@@ -561,20 +561,180 @@ pub fn send_event_thunk(pc: GuestAddress, cell: Place) -> Thunk {
     finish(code, miss, pc)
 }
 
-/// The thunk completing WFE at `pc` while the cell at `cell` is open and the
-/// event register, the byte the cell's `value` points at, is set: it clears
-/// the register in one exchange, as another PE may set it, and completes;
-/// else it exits at `pc` for the engine to wait. It also clobbers RCX and
-/// RDX.
-pub fn event_wait_thunk(pc: GuestAddress, cell: Place) -> Thunk {
-    let (mut code, miss) = open(cell);
+/// How long an [`event_wait_thunk`] spins for the event register before it
+/// exits: 48 counts of the 24 MHz system count, 2 us. Another PE that sets
+/// the register within it saves the waiting PE an exit and a wait in the
+/// engine; a spin that misses costs this much host time.
+pub const WFE_SPIN_COUNTS: u8 = 48;
+
+/// The most turns one spin takes whatever the count does: a held count
+/// (`CountState::ceiling`) stops it, and nothing may hold a PE. A turn
+/// takes far more than 2 us / 1024 on every host, so the count ends a spin
+/// first.
+const WFE_SPIN_TURNS: i32 = 1024;
+
+/// What [`event_wait_thunk`]s count of their spins, and the spin in
+/// progress, which the engine takes when native code returns.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventSpin {
+    /// Spins that found the event register set: the WFE completed.
+    pub completed: u64,
+    /// Spins that ended otherwise, and exited.
+    pub missed: u64,
+    /// WFEs that could spin but for an exclusive monitor, and exited.
+    pub held: u64,
+    /// The system counts spent in spins.
+    pub counts: u64,
+    /// The count the spin in progress began at, and its turns left.
+    pub start: u64,
+    pub turns: u64,
+}
+
+const SPIN_COMPLETED: i8 = core::mem::offset_of!(EventSpin, completed) as i8;
+const SPIN_MISSED: i8 = core::mem::offset_of!(EventSpin, missed) as i8;
+const SPIN_HELD: i8 = core::mem::offset_of!(EventSpin, held) as i8;
+const SPIN_COUNTS: i8 = core::mem::offset_of!(EventSpin, counts) as i8;
+const SPIN_START: i8 = core::mem::offset_of!(EventSpin, start) as i8;
+const SPIN_TURNS: i8 = core::mem::offset_of!(EventSpin, turns) as i8;
+const INTERRUPT_EPOCH: i8 =
+    core::mem::offset_of!(super::chain::ChainControl, interrupt_epoch) as i8;
+const OBSERVED_INTERRUPT_EPOCH: i8 =
+    core::mem::offset_of!(super::chain::ChainControl, observed_interrupt_epoch) as i8;
+
+/// Where an [`event_wait_thunk`] finds the event register and what ends its
+/// spin: `events` a cell whose `value` is the register's byte; `waits` a
+/// cell open where a WFE that finds the register clear waits rather than
+/// traps and another PE runs meanwhile to set it; `monitor` the word nonzero
+/// while the engine holds an exclusive monitor; the control
+/// ([`super::chain::ChainControl`]), whose interrupt epoch moves when
+/// anything is posted for the PE; the count before which time alone changes
+/// no interrupt line ([`crate::x86_64::transition::Places::lines_until`]),
+/// the count reader, and the spin's counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventWaitPlaces {
+    pub events: Place,
+    pub waits: Place,
+    pub monitor: Place,
+    pub control: Place,
+    pub lines_until: Place,
+    pub count: Place,
+    pub spin: Place,
+}
+
+/// The thunk completing WFE at `pc` while the `events` cell is open and the
+/// event register is set: it clears the register in one exchange, as
+/// another PE may set it, and completes. With the register clear, where the
+/// WFE would wait (`waits` open), it spins for up to [`WFE_SPIN_COUNTS`]
+/// for the register and completes as soon as it finds it set. It spins only
+/// while nothing else would wake the WFE, all of which the engine's wait
+/// sees: no interrupt was waiting at entry ([`GuestState::pending`]),
+/// nothing was posted for the PE since the engine last looked (a device
+/// line, mail with another PE's SEV, a host call or stop: the interrupt
+/// epoch), and time changes no line (the count below `lines_until`), each
+/// looked at again every turn. Nor does it spin with an exclusive monitor
+/// held, in the frame or the engine, as another PE's store that clears it
+/// sends the event without setting this register. Else, and once the spin
+/// ends without the register, it exits at `pc` for the engine to wait. An
+/// event stream edge within a spin is the engine's to see as it waits: the
+/// spin delays it no more than a host would. It also clobbers RCX and RDX.
+pub fn event_wait_thunk(pc: GuestAddress, places: EventWaitPlaces) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Byte, Dword, Qword};
+    let spin = |offset| Mem::base_disp8(Rcx, offset);
+    let (mut code, closed) = open(places.events);
     let mut asm = Asm::new(&mut code);
-    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
-    asm.alu(Alu::Xor, Size::Dword, Gpr::Rdx, Gpr::Rdx);
-    asm.xchg(Size::Byte, Mem::base(Gpr::Rcx, 0), Gpr::Rdx);
-    asm.test(Size::Byte, Gpr::Rdx, Gpr::Rdx);
+    asm.mov_load(Qword, Rcx, Mem::base_disp8(Rax, VALUE));
+    asm.alu(Alu::Xor, Dword, Rdx, Rdx);
+    asm.xchg(Byte, Mem::base(Rcx, 0), Rdx);
+    asm.test(Byte, Rdx, Rdx);
+    let set = asm.jcc(Cond::Ne);
+    // Whether the WFE may spin.
+    asm.place(Rax, places.waits);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let traps = asm.jcc(Cond::E);
+    let pending = frame_field(core::mem::offset_of!(GuestState, pending));
+    asm.alu_imm8(Alu::Cmp, Dword, pending, 0);
+    let interrupt = asm.jcc(Cond::Ne);
+    let posted = |asm: &mut Asm<'_>| {
+        asm.place(Rcx, places.control);
+        asm.mov_load(Qword, Rdx, Mem::base_disp8(Rcx, INTERRUPT_EPOCH));
+        asm.alu_load(
+            Alu::Cmp,
+            Qword,
+            Rdx,
+            Mem::base_disp8(Rcx, OBSERVED_INTERRUPT_EPOCH),
+        );
+        asm.jcc(Cond::Ne)
+    };
+    let notified = posted(&mut asm);
+    let bytes = frame_field(core::mem::offset_of!(GuestState, exclusive_bytes));
+    asm.alu_imm8(Alu::Cmp, Dword, bytes, 0);
+    let framed = asm.jcc(Cond::Ne);
+    asm.place(Rax, places.monitor);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let monitored = asm.jcc(Cond::Ne);
+    read_count(&mut asm, places.count);
+    asm.place(Rax, places.lines_until);
+    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base(Rax, 0));
+    let due = asm.jcc(Cond::Ae);
+    asm.place(Rcx, places.spin);
+    asm.mov_store(Qword, spin(SPIN_START), Rdx);
+    asm.mov_rm_imm32(Qword, spin(SPIN_TURNS), WFE_SPIN_TURNS);
+    let top = asm.len();
+    asm.pause();
+    // Read the register shared and exchange it only once set.
+    asm.place(Rax, places.events);
+    asm.mov_load(Qword, Rcx, Mem::base_disp8(Rax, VALUE));
+    asm.movzx(Dword, Rdx, Byte, Mem::base(Rcx, 0));
+    asm.test(Dword, Rdx, Rdx);
     let clear = asm.jcc(Cond::E);
-    finish_unless(code, [miss, clear], pc)
+    asm.alu(Alu::Xor, Dword, Rdx, Rdx);
+    asm.xchg(Byte, Mem::base(Rcx, 0), Rdx);
+    asm.test(Byte, Rdx, Rdx);
+    let taken = asm.jcc(Cond::E);
+    // The counts spent into the spin's total, and the outcome's count.
+    let spent = |asm: &mut Asm<'_>, outcome: i8| {
+        read_count(asm, places.count);
+        asm.place(Rcx, places.spin);
+        asm.alu_load(Alu::Sub, Qword, Rdx, spin(SPIN_START));
+        asm.alu(Alu::Add, Qword, spin(SPIN_COUNTS), Rdx);
+        asm.alu_imm8(Alu::Add, Qword, spin(outcome), 1);
+    };
+    spent(&mut asm, SPIN_COMPLETED);
+    let found = asm.jmp();
+    asm.bind(clear);
+    asm.bind(taken);
+    let woken = posted(&mut asm);
+    asm.place(Rcx, places.spin);
+    asm.alu_imm8(Alu::Sub, Qword, spin(SPIN_TURNS), 1);
+    let turns = asm.jcc(Cond::E);
+    read_count(&mut asm, places.count);
+    asm.place(Rax, places.lines_until);
+    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base(Rax, 0));
+    let lines = asm.jcc(Cond::Ae);
+    asm.place(Rcx, places.spin);
+    asm.alu_load(Alu::Sub, Qword, Rdx, spin(SPIN_START));
+    asm.alu_imm8(Alu::Cmp, Qword, Rdx, WFE_SPIN_COUNTS as i8);
+    let again = asm.jcc(Cond::B);
+    asm.bind_back(again, top);
+    for end in [woken, turns, lines] {
+        asm.bind(end);
+    }
+    spent(&mut asm, SPIN_MISSED);
+    let missed = asm.jmp();
+    asm.bind(framed);
+    asm.bind(monitored);
+    asm.place(Rcx, places.spin);
+    asm.alu_imm8(Alu::Add, Qword, spin(SPIN_HELD), 1);
+    let held = asm.jmp();
+    asm.bind(set);
+    asm.bind(found);
+    finish_unless(
+        code,
+        [closed, traps, interrupt, notified, due, missed, held],
+        pc,
+    )
 }
 
 /// The thunk completing `write` at `pc` in the frame while the cell at
@@ -1741,28 +1901,216 @@ mod tests {
         assert_eq!((state.x, last()), (before, 500));
     }
 
+    /// What the event thunks of these tests find at [`Anchor::Mirrors`].
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[repr(C)]
+    #[derive(Default)]
+    struct Waits {
+        events: Cell,
+        waits: Cell,
+        monitor: u64,
+        lines_until: u64,
+        spin: EventSpin,
+    }
+
+    /// The event thunks of these tests, and their words: an event register,
+    /// a control and a count that `per_tsc` moves (0 holds it at 100).
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    struct Events {
+        send: Thunk,
+        wait: Thunk,
+        event: alloc::boxed::Box<core::sync::atomic::AtomicU8>,
+        waits: alloc::boxed::Box<Waits>,
+        control: alloc::boxed::Box<crate::x86_64::chain::ChainControl>,
+        _published: alloc::boxed::Box<CountState>,
+        count: alloc::boxed::Box<Count>,
+        state: crate::GuestState,
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    impl Events {
+        fn new(per_tsc: u64) -> Self {
+            use core::mem::offset_of;
+            use core::sync::atomic::Ordering::Relaxed;
+            let place = |offset: usize| Place::new(Anchor::Mirrors, offset);
+            let events = place(offset_of!(Waits, events));
+            let places = EventWaitPlaces {
+                events,
+                waits: place(offset_of!(Waits, waits)),
+                monitor: place(offset_of!(Waits, monitor)),
+                control: Place::new(Anchor::Control, 0),
+                lines_until: place(offset_of!(Waits, lines_until)),
+                count: READER,
+                spin: place(offset_of!(Waits, spin)),
+            };
+            let published = alloc::boxed::Box::new(CountState::default());
+            published.offset.store(100, Relaxed);
+            published.ceiling.store(u64::MAX, Relaxed);
+            let mut events = Self {
+                send: send_event_thunk(PC, events),
+                wait: event_wait_thunk(PC, places),
+                event: alloc::boxed::Box::default(),
+                waits: alloc::boxed::Box::default(),
+                control: alloc::boxed::Box::default(),
+                count: alloc::boxed::Box::new(Count {
+                    state: &*published as *const CountState as u64,
+                    per_tsc,
+                    ..Count::default()
+                }),
+                _published: published,
+                state: crate::GuestState::default(),
+            };
+            let anchors = &mut events.state.anchors;
+            anchors[Anchor::Mirrors] = &mut *events.waits as *mut Waits as u64;
+            anchors[Anchor::Control] =
+                &mut *events.control as *mut crate::x86_64::chain::ChainControl as u64;
+            anchors[Anchor::Count] = &mut *events.count as *mut Count as u64;
+            events
+        }
+
+        fn open(&mut self) {
+            self.waits.events = Cell {
+                readable: 1,
+                value: &*self.event as *const core::sync::atomic::AtomicU8 as u64,
+            };
+        }
+
+        fn wait(&mut self) -> Exit {
+            run(&self.wait.code, &mut self.state)
+        }
+
+        /// Run the WFE while another thread does `act` once the spin began,
+        /// if it began and that thread sees it before the WFE returns.
+        fn wait_while(&mut self, act: impl FnOnce(&Self) + Send) -> Exit {
+            use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+            self.waits.spin.turns = 0;
+            let turns = &raw const self.waits.spin.turns as usize;
+            let this = self as *mut Self as usize;
+            let returned = AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                let returned = &returned;
+                scope.spawn(move || {
+                    // SAFETY: the spin's word, which the thunk writes with
+                    // aligned stores while this thread reads it atomically.
+                    let turns = unsafe { AtomicU64::from_ptr(turns as *mut u64) };
+                    while turns.load(SeqCst) == 0 && !returned.load(SeqCst) {
+                        core::hint::spin_loop();
+                    }
+                    if !returned.load(SeqCst) {
+                        // SAFETY: the words `act` touches are atomics or
+                        // ones the thunk only reads.
+                        act(unsafe { &*(this as *const Self) });
+                    }
+                });
+                // SAFETY: `act` touches no word the thunk writes.
+                let exit = unsafe { (*(this as *mut Self)).wait() };
+                returned.store(true, SeqCst);
+                exit
+            })
+        }
+    }
+
     /// SEVL sets the event register; WFE clears a set one and completes, and
-    /// leaves a clear one, or a closed cell, to the engine.
+    /// leaves a clear one, or a closed cell, to the engine where it waits
+    /// otherwise than by spinning.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn event_thunks_set_and_consume_the_event_register() {
-        use crate::GuestState;
-        let mut event = alloc::boxed::Box::new(0u8);
-        let mut cell = alloc::boxed::Box::new(Cell::default());
-        let (send, wait) = (send_event_thunk(PC, CELL), event_wait_thunk(PC, CELL));
-        let mut state = GuestState::default();
-        state.anchors[Anchor::Mirrors] = &mut *cell as *mut Cell as u64;
-        assert_eq!(run(&send.code, &mut state), MISS);
-        *cell = Cell {
-            readable: 1,
-            value: &mut *event as *mut u8 as u64,
-        };
-        assert_eq!(run(&wait.code, &mut state), MISS);
-        assert_eq!(run(&send.code, &mut state), NEXT);
-        assert_eq!(*event, 1);
-        assert_eq!(run(&wait.code, &mut state), NEXT);
-        assert_eq!(*event, 0);
-        assert_eq!(run(&wait.code, &mut state), MISS);
+        use core::sync::atomic::Ordering::Relaxed;
+        let mut events = Events::new(0);
+        assert_eq!(run(&events.send.code, &mut events.state), MISS);
+        events.open();
+        assert_eq!(events.wait(), MISS);
+        assert_eq!(run(&events.send.code, &mut events.state), NEXT);
+        assert_eq!(events.event.load(Relaxed), 1);
+        assert_eq!(events.wait(), NEXT);
+        assert_eq!(events.event.load(Relaxed), 0);
+        assert_eq!(events.wait(), MISS);
+        assert_eq!(events.waits.spin, EventSpin::default(), "no spin");
+    }
+
+    /// Where the WFE would wait, a clear event register makes it spin: it
+    /// exits at once with an interrupt waiting, anything posted or the count
+    /// at `lines_until`, counting nothing, and with a monitor held, counting
+    /// that; a spin ends after [`WFE_SPIN_COUNTS`] of the count, or its
+    /// turns where the count holds, counting a miss and the counts spent.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn event_waits_spin_only_while_nothing_else_wakes_them() {
+        let mut events = Events::new(0);
+        events.open();
+        events.waits.waits.readable = 1;
+        events.waits.lines_until = u64::MAX;
+        let quiet = EventSpin::default();
+        events.state.pending = 0b10;
+        assert_eq!(events.wait(), MISS);
+        events.state.pending = 0;
+        events.control.interrupt_epoch = 1;
+        assert_eq!(events.wait(), MISS);
+        events.control.observed_interrupt_epoch = 1;
+        // The count holds at 100.
+        events.waits.lines_until = 100;
+        assert_eq!(events.wait(), MISS);
+        assert_eq!(events.waits.spin, quiet, "no spin");
+        events.waits.lines_until = 101;
+        events.state.exclusive_bytes = 8;
+        assert_eq!(events.wait(), MISS);
+        events.state.exclusive_bytes = 0;
+        events.waits.monitor = 1;
+        assert_eq!(events.wait(), MISS);
+        events.waits.monitor = 0;
+        assert_eq!((events.waits.spin.held, events.waits.spin.missed), (2, 0));
+        // A held count: the turns end the spin, none counted.
+        assert_eq!(events.wait(), MISS);
+        let spin = events.waits.spin;
+        assert_eq!((spin.missed, spin.counts, spin.turns), (1, 0, 0));
+        // A count at half the TSC's rate: the counts end it.
+        let mut events = Events::new(1 << 63);
+        events.open();
+        events.waits.waits.readable = 1;
+        events.waits.lines_until = u64::MAX;
+        assert_eq!(events.wait(), MISS);
+        let spin = events.waits.spin;
+        assert_eq!((spin.completed, spin.missed), (0, 1));
+        assert!(spin.counts >= u64::from(WFE_SPIN_COUNTS), "{spin:?}");
+        assert_ne!(spin.turns, 0, "{spin:?}");
+    }
+
+    /// Another PE's event during the spin completes the WFE, consuming the
+    /// register; a notification during it ends it. Each runs until the
+    /// other thread acted during a spin, which a scheduler may delay.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn event_waits_complete_on_an_event_set_during_the_spin() {
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let mut events = Events::new(0);
+        events.open();
+        events.waits.waits.readable = 1;
+        events.waits.lines_until = u64::MAX;
+        let completed = (0..100).any(|_| {
+            let exit = events.wait_while(|events| events.event.store(1, Relaxed));
+            events.event.store(0, Relaxed);
+            exit == NEXT
+        });
+        assert!(completed);
+        assert_eq!(events.waits.spin.completed, 1);
+        let missed = events.waits.spin.missed;
+        let ended = (0..100).any(|_| {
+            let before = events.waits.spin.missed;
+            let epoch = &raw const events.control.interrupt_epoch as usize;
+            assert_eq!(
+                events.wait_while(move |_| {
+                    // SAFETY: the control's epoch, which the thunk reads.
+                    unsafe { AtomicU64::from_ptr(epoch as *mut u64) }.fetch_add(1, Relaxed);
+                }),
+                MISS
+            );
+            let observed = events.control.interrupt_epoch;
+            events.control.observed_interrupt_epoch = observed;
+            events.waits.spin.missed == before + 1 && events.waits.spin.turns != 0
+        });
+        assert!(ended);
+        assert!(events.waits.spin.missed > missed);
     }
 
     /// An energy read scales the ticks of the count since the origin, none

@@ -312,6 +312,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.mirrors.switches.len != 0 {
             self.take_thread_switches();
         }
+        if self.mirrors.spin.completed | self.mirrors.spin.missed | self.mirrors.spin.held != 0 {
+            self.take_event_spins();
+        }
         let transitions = self.mirrors.transitions.take_counts();
         let transitioned = transitions != [0; transition::KINDS];
         if self.mirrors.transitions.logged != 0 {

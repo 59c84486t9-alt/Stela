@@ -1283,6 +1283,14 @@ pub struct Levels {
     /// the event register set (native code completes some itself).
     pub wfe: u64,
     pub wfe_at_once: u64,
+    /// WFEs native code completed after spinning for the event register,
+    /// spins that ended without it, WFEs that exited without a spin for an
+    /// exclusive monitor, and the system counts spins spent
+    /// (`x86_64::register_read::event_wait_thunk`).
+    pub wfe_spun: u64,
+    pub wfe_spin_missed: u64,
+    pub wfe_held: u64,
+    pub wfe_spin_counts: u64,
     /// At each WFI, the kernel ticks charged since the PE last ran EL0 code
     /// or reached a WFI: wake-ups that found nothing for user code, idle
     /// paths and kernel threads.
@@ -1326,6 +1334,14 @@ impl Levels {
         self.wfe_at_once += u64::from(at_once);
     }
 
+    /// What native WFEs counted of their spins.
+    pub(super) fn event_spins(&mut self, spin: stela_compiler::x86_64::register_read::EventSpin) {
+        self.wfe_spun += spin.completed;
+        self.wfe_spin_missed += spin.missed;
+        self.wfe_held += spin.held;
+        self.wfe_spin_counts += spin.counts;
+    }
+
     /// The counts since `earlier`; the state is this one's.
     pub fn since(&self, earlier: &Self) -> Self {
         let mut ticks = self.ticks;
@@ -1340,6 +1356,10 @@ impl Levels {
             wfi_at_once: self.wfi_at_once.wrapping_sub(earlier.wfi_at_once),
             wfe: self.wfe.wrapping_sub(earlier.wfe),
             wfe_at_once: self.wfe_at_once.wrapping_sub(earlier.wfe_at_once),
+            wfe_spun: self.wfe_spun.wrapping_sub(earlier.wfe_spun),
+            wfe_spin_missed: self.wfe_spin_missed.wrapping_sub(earlier.wfe_spin_missed),
+            wfe_held: self.wfe_held.wrapping_sub(earlier.wfe_held),
+            wfe_spin_counts: self.wfe_spin_counts.wrapping_sub(earlier.wfe_spin_counts),
             kernel_before_wfi: self
                 .kernel_before_wfi
                 .wrapping_sub(earlier.kernel_before_wfi),

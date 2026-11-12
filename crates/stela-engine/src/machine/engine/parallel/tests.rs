@@ -3254,3 +3254,72 @@ fn the_halt_poll_is_none_on_a_doorbell_and_bounded_elsewhere() {
     assert_eq!(idle_poll_after(200, 1000, most, false), 100);
     assert_eq!(idle_poll_after(50, 1000, most, false), 0);
 }
+
+/// A WFE that waits in the engine, taking no trap, opens its state's cell
+/// for native WFE to spin in, only with PEs on cores of their own; one that
+/// traps opens none, and a change of derived state closes it. What native
+/// spins counted reaches the PE's levels as native code returns.
+#[test]
+fn engine_waits_open_native_event_spins_only_where_other_pes_run() {
+    use super::super::mirrors::{EVENT_WAITS, mirror_state};
+    use super::super::tests::{BASE, machine};
+    use crate::machine::exception::Pstate;
+    use crate::machine::system::Register as SystemRegister;
+    use stela_compiler::x86_64::register_read::EventSpin;
+    const WFE: u32 = 0xd503_205f;
+    const HCR_TWE: u64 = 1 << 14;
+    let el1 = mirror_state(1, false);
+    let mut machine = machine(&[WFE]);
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    let wait = |machine: &mut Machine<_, _>| {
+        machine.waiting = None;
+        machine.cpu.pc = BASE;
+        machine.system_instruction(WFE).unwrap();
+    };
+    wait(&mut machine);
+    assert!(machine.waiting.is_some());
+    assert_eq!(
+        machine.mirrors.banks[el1][EVENT_WAITS].readable, 0,
+        "serialized"
+    );
+    let (hub, _) = hub(1);
+    machine.enter_parallel(hub).unwrap();
+    wait(&mut machine);
+    assert!(machine.waiting.is_some());
+    assert_eq!(machine.mirrors.banks[el1][EVENT_WAITS].readable, 1);
+    machine.derived_changed();
+    assert_eq!(machine.mirrors.banks[el1][EVENT_WAITS].readable, 0);
+    let hcr = machine.cpu.read(SystemRegister::HCR_EL2);
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::HCR_EL2, 0, hcr | HCR_TWE);
+    machine.derived_changed();
+    wait(&mut machine);
+    assert!(machine.waiting.is_none());
+    assert_eq!(machine.cpu.pstate.el, 2, "trapped");
+    assert_eq!(machine.mirrors.banks[el1][EVENT_WAITS].readable, 0);
+
+    machine.set_step_timing(true);
+    machine.mirrors.spin = EventSpin {
+        completed: 2,
+        missed: 3,
+        held: 1,
+        counts: 96,
+        start: 7,
+        turns: 9,
+    };
+    machine.take_event_spins();
+    let levels = machine.step_timing().unwrap().levels;
+    assert_eq!(
+        [
+            levels.wfe_spun,
+            levels.wfe_spin_missed,
+            levels.wfe_held,
+            levels.wfe_spin_counts
+        ],
+        [2, 3, 1, 96]
+    );
+    assert_eq!(machine.mirrors.spin, EventSpin::default());
+}
