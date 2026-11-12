@@ -338,6 +338,22 @@ mod tests {
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
+    /// The real rename, on whatever file system holds the temporary
+    /// directory (`TMPDIR` on a FAT or exFAT volume takes the fallback).
+    #[test]
+    fn a_new_file_is_published_on_the_temporary_directory_s_file_system() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("boot.log");
+        persist_new(temporary(temp.path(), b"new"), &path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let image = temp.path().join("fdr.img4");
+        write_atomic(&image, b"image", true).unwrap();
+        assert_eq!(fs::read(&image).unwrap(), b"image");
+        assert!(write_atomic(&image, b"other", true).is_err());
+        assert_eq!(fs::read(&image).unwrap(), b"image");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn a_failed_write_names_the_file() {
         let temp = tempfile::tempdir().unwrap();
