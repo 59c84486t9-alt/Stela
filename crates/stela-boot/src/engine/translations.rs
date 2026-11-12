@@ -42,11 +42,9 @@ use stela_engine::translations;
 use stela_engine::translations::Digest;
 use stela_engine::translations::Record;
 use stela_engine::translations::pack;
-use stela_engine::translations::pack::{
-    DecodedRecord, Delta, Layout, MAX_SEGMENTS, MAX_USED_KEYS, MAX_USED_LISTS, Merge, Pack,
-    StagedOffer, Store, UsedKeys,
-};
-use stela_formats::journal::{self, Blob, Change, Commit, DATA_START, Execution, SLOT_BYTES, Step};
+use stela_engine::translations::pack::{DecodedRecord, Pack, StagedOffer, Store, UsedKeys};
+use stela_engine::translations::writer::{self, Entries, Event, Writer};
+use stela_formats::journal::{self, Commit, DATA_START, SLOT_BYTES};
 use stela_formats::payload::pieces::Extent;
 use stela_runtime::pc::fat32::Fat32;
 use stela_runtime::pc::gpt::Guid;
@@ -895,25 +893,23 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
         used.len(),
     ));
     let readable = if segments.is_empty() { 0 } else { READ_PACK };
-    let writer = Writer {
+    let file = writer::File {
         translator,
         limit,
         file_bytes: size,
         committed,
-        extents: None,
         segments: segments.clone(),
         used,
         partial,
-        merged: false,
-        added_keys: Vec::new(),
-        task: Task::Idle,
-        queued: Queued::default(),
-        next_delta: 0,
-        delta_interval: super::host::COUNTER_HZ * FIRST_DELTA_SECONDS,
-        failed: false,
-        stats: Stats::default(),
     };
-    WRITER.holding(true, |slot| *slot = Some(writer));
+    let held = PackWriter {
+        writer: Writer::new(file, super::host::COUNTER_HZ),
+        extents: None,
+        queued: Queued::default(),
+        steps: 0,
+        longest: 0,
+    };
+    WRITER.holding(true, |slot| *slot = Some(held));
     BOOT.with(|boot| {
         for lock in &STORES {
             let old = lock.with(Option::take);
@@ -959,8 +955,8 @@ pub fn set_partition(partition: Box<dyn BlockDevice>) {
         return;
     };
     let extents = with_store_file(&pack_name(&translator), |_, extents| extents.to_vec());
-    WRITER.with(|writer| match extents {
-        Ok(extents) => writer.extents = Some(extents),
+    WRITER.with(|held| match extents {
+        Ok(extents) => held.extents = Some(extents),
         Err(error) => {
             output::arguments(format_args!(
                 "TRANSLATIONS written only at a stop: {error}\n"
@@ -1062,348 +1058,94 @@ fn report(counters: &pack::Counters) {
     ));
 }
 
-/// Segments or used-key lists at which a boot merges them.
-const MERGE_AT: usize = 4;
-/// The first new segment's delay, which doubles with each, up to the last:
-/// a boot's compiling comes in bursts, mostly early, and the segments a
-/// file holds are few ([`MAX_SEGMENTS`]).
-const FIRST_DELTA_SECONDS: u64 = 60;
-const LAST_DELTA_SECONDS: u64 = 32 * 60;
-/// How long a step may take, in microseconds, and the work it does between
-/// looks at the clock (records encoded, page keys merged, records indexed).
+/// How long a step may take, in microseconds.
 const STEP_MICROS: u64 = 1000;
-const STEP_WORK: usize = 32;
-/// The bytes a step copies of a new segment, and the most a write step
-/// queues.
-const COPY_BYTES: u64 = 1 << 20;
-const PIECE_BYTES: u64 = 512 << 10;
 
-/// The writer of the pack file while the guest runs and at a stop.
-struct Writer {
-    translator: Digest,
-    /// The bound a merged segment stays within: what this PC can read.
-    limit: u64,
-    file_bytes: u64,
-    committed: Option<Commit>,
-    /// The file's device extents, found while the drivers may be called.
+/// The pack file's writer (`translations::writer`) with what the boot adds:
+/// the file's device extents, found while the drivers may be called, the
+/// staged commands of the write in flight, and the steps it took.
+struct PackWriter {
+    writer: Writer<'static>,
     extents: Option<Vec<Extent>>,
-    /// The segments read and those this boot wrote, oldest first, and the
-    /// used-key lists read: a merge's input.
-    segments: Vec<Pack<'static>>,
-    used: Vec<UsedKeys>,
-    /// A segment was not read whole: no merge runs.
-    partial: bool,
-    /// This boot's merge ran or was tried: its segment is not in memory, so
-    /// no other follows.
-    merged: bool,
-    /// The keys of the entries this boot took for its segments: with those
-    /// it found, its used keys. More than a list names counts every key.
-    added_keys: Vec<Digest>,
-    task: Task,
-    /// The staged commands of the write in flight.
     queued: Queued,
-    /// Host counter value before which no new segment starts, and the delay
-    /// after the next.
-    next_delta: u64,
-    delta_interval: u64,
-    /// A write failed: the file is not written again this boot.
-    failed: bool,
-    stats: Stats,
-}
-
-/// What the writer did while the guest ran.
-#[derive(Default)]
-struct Stats {
     steps: u64,
     longest: u64,
-    deltas: u64,
-    delta_records: u64,
-    delta_bytes: u64,
-    merges: u64,
-    abandoned: u64,
 }
 
-/// The writer's work in progress.
-enum Task {
-    Idle,
-    /// A new segment of the entries taken, being laid out.
-    Delta(Box<Delta>),
-    /// The new segment, being copied into memory the boot keeps for a
-    /// merge.
-    Copy {
-        layout: Layout<'static>,
-        bytes: Vec<u8>,
-    },
-    Merge(Box<Merge<'static>>),
-    Write {
-        execution: Box<Execution<'static>>,
-        done: Done,
-    },
-}
+static WRITER: Held<PackWriter> = Held::new();
 
-/// What a finished write leaves.
-enum Done {
-    Segment(Pack<'static>),
-    Merge,
-}
+/// The store's parts, as the writer sees them.
+struct Parts;
 
-static WRITER: Held<Writer> = Held::new();
-
-/// The keys found valid by every part of the store, with `added`: the
-/// boot's used keys so far, as a list.
-fn used_now(added: &[Digest]) -> Vec<u8> {
-    let translator = translations::translator_id();
-    if added.len() > MAX_USED_KEYS {
-        return UsedKeys::encode_every(&translator);
-    }
-    let mut keys: Vec<Digest> = added.to_vec();
-    for lock in &STORES {
-        lock.with(|store| {
-            if let Some(store) = store {
-                keys.extend(store.used_keys().copied());
-            }
-        });
-    }
-    UsedKeys::encode(&translator, keys.iter())
-}
-
-impl Writer {
-    /// The committed blobs of `kind` of this translator.
-    fn count(&self, kind: u32) -> usize {
-        self.committed
-            .as_ref()
-            .filter(|commit| commit.key == self.translator.0)
-            .map_or(0, |commit| {
-                commit
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.kind == kind)
-                    .count()
-            })
+impl Entries for Parts {
+    fn take_added(&mut self) -> BTreeMap<Digest, Record> {
+        let mut added = BTreeMap::new();
+        for lock in &STORES {
+            let mut part =
+                lock.with(|store| store.as_mut().map(Store::take_added).unwrap_or_default());
+            added.append(&mut part);
+        }
+        added
     }
 
-    /// Note the keys of entries taken for a segment.
-    fn note_added(&mut self, added: &BTreeMap<Digest, Record>) {
-        if self.added_keys.len() <= MAX_USED_KEYS {
-            self.added_keys.extend(added.keys().copied());
+    fn found_keys(&mut self) -> Vec<Digest> {
+        let mut keys = Vec::new();
+        for lock in &STORES {
+            lock.with(|store| {
+                if let Some(store) = store {
+                    keys.extend(store.used_keys().copied());
+                }
+            });
         }
+        keys
     }
 
-    /// Start a merge when the file holds enough segments or lists, else a
-    /// segment of the entries added when its time came.
-    fn begin(&mut self, now: u64) {
-        let segments = self.count(SEGMENT);
-        if !self.merged && !self.partial && (segments >= MERGE_AT || self.count(USED) >= MERGE_AT) {
-            self.merged = true;
-            // Beside the file's content, so its commit keeps that content
-            // until the merged segment is whole.
-            let free = journal::largest_free(
-                self.committed.as_ref(),
-                DOMAIN,
-                self.translator.0,
-                self.file_bytes,
-            );
-            let protect = UsedKeys::parse(&used_now(&self.added_keys), &self.translator);
-            let mut merge = Merge::new(
-                self.translator,
-                self.segments.iter().copied().map(Into::into).collect(),
-                self.used.clone(),
-                self.limit.min(free),
-            );
-            if let Some(protect) = protect {
-                merge = merge.protect(protect);
-            }
-            self.task = Task::Merge(Box::new(merge));
-            return;
-        }
-        if self.next_delta == 0 {
-            self.next_delta = now + self.delta_interval;
-        }
-        // One segment stays free for the stop's.
-        if now < self.next_delta || segments + 1 >= MAX_SEGMENTS {
-            return;
-        }
-        let added = take_added();
-        if added.is_empty() {
-            self.next_delta = now + super::host::COUNTER_HZ * 10;
-            return;
-        }
-        self.next_delta = now + self.delta_interval;
-        self.delta_interval =
-            (self.delta_interval * 2).min(super::host::COUNTER_HZ * LAST_DELTA_SECONDS);
-        self.note_added(&added);
-        self.stats.delta_records += added.len() as u64;
-        self.task = Task::Delta(Box::new(Delta::new(self.translator, added)));
-    }
-
-    /// Plan writing `change`, which must commit once beside the file's
-    /// content: else it is left out.
-    fn plan(&mut self, change: Change<'static>, what: &str) -> Option<Box<Execution<'static>>> {
-        let plan = journal::plan(
-            self.committed.as_ref(),
-            DOMAIN,
-            self.translator.0,
-            self.file_bytes,
-            change,
-        );
-        let commits = plan
-            .steps
+    fn added(&mut self) -> u64 {
+        STORES
             .iter()
-            .filter(|step| matches!(step, Step::Commit(_)))
-            .count();
-        if !plan.dropped.is_empty() || commits > 1 {
-            output::arguments(format_args!(
-                "TRANSLATIONS {what} not written: no room beside the content of a file of {} \
-                 bytes\n",
-                self.file_bytes
-            ));
-            self.stats.abandoned += 1;
-            return None;
-        }
-        Some(Box::new(Execution::new(plan)))
+            .map(|lock| lock.with(|store| store.as_ref().map_or(0, |store| store.counters.added)))
+            .sum()
     }
 
-    /// The task that writes `change` ([`Self::plan`]) and then leaves
-    /// `done`.
-    fn write(&mut self, change: Change<'static>, done: Done, what: &str) -> Task {
-        match self.plan(change, what) {
-            Some(execution) => Task::Write { execution, done },
-            None => Task::Idle,
-        }
-    }
-
-    /// A write finished: its commit is the file's newest.
-    fn finish(&mut self, execution: &Execution<'static>, done: Done) {
-        if let Some(last) = execution.last() {
-            self.committed = Some(last);
-        }
-        match done {
-            Done::Segment(pack) => {
-                self.stats.deltas += 1;
-                self.stats.delta_bytes += pack.bytes() as u64;
-                self.segments.push(pack);
-            }
-            Done::Merge => {
-                self.stats.merges += 1;
-                self.segments.clear();
-                self.used.clear();
-            }
-        }
-    }
-
-    /// Carry the work forward until `deadline` (a host counter value), or
-    /// until a write queued its piece.
-    fn work(&mut self, now: u64, deadline: u64) -> Result<(), String> {
-        if matches!(self.task, Task::Idle) {
-            self.begin(now);
-        }
-        loop {
-            self.task = match core::mem::replace(&mut self.task, Task::Idle) {
-                Task::Idle => return Ok(()),
-                Task::Delta(mut delta) => {
-                    if delta.step(STEP_WORK) {
-                        match delta.finish() {
-                            Some(layout) => Task::Copy {
-                                bytes: Vec::with_capacity(layout.bytes() as usize),
-                                layout,
-                            },
-                            None => Task::Idle,
-                        }
-                    } else {
-                        Task::Delta(delta)
-                    }
-                }
-                Task::Copy { layout, mut bytes } => {
-                    let at = bytes.len();
-                    let take = (layout.bytes() - at as u64).min(COPY_BYTES) as usize;
-                    bytes.resize(at + take, 0);
-                    layout.read_at(at as u64, &mut bytes[at..]);
-                    if (bytes.len() as u64) < layout.bytes() {
-                        Task::Copy { layout, bytes }
-                    } else {
-                        drop(layout);
-                        // Kept for the boot: a merge reads it.
-                        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-                        match Pack::parse(bytes, &self.translator) {
-                            Ok(pack) => {
-                                let change = Change {
-                                    replace: Vec::new(),
-                                    remove: Vec::new(),
-                                    blobs: vec![Blob::new(SEGMENT, bytes)],
-                                };
-                                self.write(change, Done::Segment(pack), "segment")
-                            }
-                            Err(error) => return Err(format!("a new segment: {error:?}")),
-                        }
-                    }
-                }
-                Task::Merge(mut merge) => {
-                    if merge.step(STEP_WORK) {
-                        let merged = merge.finish();
-                        output::arguments(format_args!(
-                            "TRANSLATIONS merged records={} bytes={} evicted={} expired={} \
-                             invalid={}\n",
-                            merged.layout.records(),
-                            merged.layout.bytes(),
-                            merged.evicted,
-                            merged.expired,
-                            merged.invalid
-                        ));
-                        let change = Change {
-                            replace: vec![SEGMENT, USED],
-                            remove: Vec::new(),
-                            blobs: vec![Blob::new(SEGMENT, merged.layout)],
-                        };
-                        self.write(change, Done::Merge, "merge")
-                    } else {
-                        Task::Merge(merge)
-                    }
-                }
-                Task::Write {
-                    mut execution,
-                    done,
-                } => {
-                    let Some(extents) = self.extents.as_deref() else {
-                        return Err(String::from("no extents"));
-                    };
-                    let queued = &mut self.queued;
-                    let advanced = lend_staged_partition(|device| {
-                        let mut target = Staged {
-                            device,
-                            extents,
-                            queued,
-                        };
-                        execution.advance(&mut target, PIECE_BYTES)
-                    });
-                    match advanced {
-                        Some(Ok(true)) => self.finish(&execution, done),
-                        Some(Err(error)) => return Err(error),
-                        None | Some(Ok(false)) => self.task = Task::Write { execution, done },
-                    }
-                    return Ok(());
-                }
-            };
-            if super::host::fresh_counter() >= deadline {
-                return Ok(());
-            }
-        }
-    }
-
-    fn fail(&mut self, error: &str) {
-        output::arguments(format_args!("TRANSLATIONS not written: {error}\n"));
-        self.task = Task::Idle;
-        self.failed = true;
+    fn pressed(&mut self) -> bool {
+        STORES
+            .iter()
+            .any(|lock| lock.with(|store| store.as_ref().is_some_and(Store::added_pressed)))
     }
 }
 
-/// The entries every part of the store added since the last take.
-fn take_added() -> BTreeMap<Digest, Record> {
-    let mut added = BTreeMap::new();
-    for lock in &STORES {
-        let mut part = lock.with(|store| store.as_mut().map(Store::take_added).unwrap_or_default());
-        added.append(&mut part);
+/// Report what a writer step did.
+fn report_event(event: &Event) {
+    match event {
+        Event::Segment {
+            records,
+            bytes,
+            trigger,
+        } => output::arguments(format_args!(
+            "TRANSLATIONS segment records={records} bytes={bytes} trigger={trigger:?}\n"
+        )),
+        Event::Merged {
+            full,
+            records,
+            bytes,
+            bound,
+            evicted,
+            expired,
+            invalid,
+        } => output::arguments(format_args!(
+            "TRANSLATIONS merged full={full} records={records} bytes={bytes} bound={bound} \
+             evicted={evicted} expired={expired} invalid={invalid}\n"
+        )),
+        Event::MergeCommitted { full } => {
+            output::arguments(format_args!("TRANSLATIONS merge written full={full}\n"))
+        }
+        Event::Waiting { records } => output::arguments(format_args!(
+            "TRANSLATIONS segment of {records} records waits for a merge to make room\n"
+        )),
+        Event::Lost { records } => output::arguments(format_args!(
+            "TRANSLATIONS segment of {records} records left out: larger than the file holds\n"
+        )),
     }
-    added
 }
 
 /// While the guest runs, from a processor whose guest waits and that holds
@@ -1414,133 +1156,96 @@ pub fn step() {
         return;
     }
     let started = super::host::fresh_counter();
-    WRITER.try_with(|writer| {
-        if writer.failed || writer.extents.is_none() {
+    WRITER.try_with(|held| {
+        let Some(extents) = held.extents.as_deref() else {
+            return;
+        };
+        if held.writer.failed() {
             return;
         }
-        let idle = matches!(writer.task, Task::Idle);
+        let idle = held.writer.idle();
         let deadline = started + super::host::COUNTER_HZ * STEP_MICROS / 1_000_000;
-        if let Err(error) = writer.work(started, deadline) {
-            writer.fail(&error);
+        let queued = &mut held.queued;
+        let stepped = held.writer.step(
+            &mut super::host::fresh_counter,
+            deadline,
+            &mut Parts,
+            &mut |execution| {
+                lend_staged_partition(|device| {
+                    let mut target = Staged {
+                        device,
+                        extents,
+                        queued: &mut *queued,
+                    };
+                    execution.advance(&mut target, writer::PIECE_BYTES)
+                })
+            },
+        );
+        match stepped {
+            Ok(events) => events.iter().for_each(report_event),
+            Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error}\n")),
         }
-        if !idle || !matches!(writer.task, Task::Idle) {
+        if !idle || !held.writer.idle() {
             let took = super::host::fresh_counter().wrapping_sub(started);
-            writer.stats.steps += 1;
-            writer.stats.longest = writer.stats.longest.max(took);
+            held.steps += 1;
+            held.longest = held.longest.max(took);
         }
     });
 }
 
-/// At a quiescent point (the guest restarts or powers off): finish a new
-/// segment's write in flight, then write a segment of the entries left and
-/// this boot's used-key list. A merge not yet committed is left: its input
-/// stays in the file.
+/// At a quiescent point (the guest restarts or powers off): the writer's
+/// stop ([`Writer::stop`]), carried out on the partition directly.
 pub fn write() {
     AVAILABLE.capabilities.store(0, Ordering::SeqCst);
     AVAILABLE.shared_bound.store(0, Ordering::Release);
+    let started = output::now();
+    let held = WRITER.holding(true, Option::take).flatten();
+    let writable = BOOT.with(|boot| boot.as_ref().is_some_and(|boot| boot.partition.is_some()));
+    if let Some(mut held) = held.filter(|_| writable) {
+        let stats = held.writer.stats();
+        output::arguments(format_args!(
+            "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} \
+             pressed={} pairs={} merges={}\n",
+            held.steps,
+            held.longest * 1_000_000 / super::host::COUNTER_HZ,
+            stats.deltas,
+            stats.delta_records,
+            stats.delta_bytes,
+            stats.pressed,
+            stats.pairs,
+            stats.merges,
+        ));
+        let name = pack_name(&translations::translator_id());
+        let stopped = held.writer.stop(&mut Parts, &mut |execution| {
+            with_store_file(&name, |device, extents| {
+                let mut target = Direct { device, extents };
+                while !execution.advance(&mut target, writer::PIECE_BYTES)? {}
+                Ok::<(), String>(())
+            })
+            .and_then(|done| done)
+        });
+        match stopped {
+            Ok(stopped) => output::arguments(format_args!(
+                "TRANSLATIONS written segments={} lists={} records={} lost={} bytes={} \
+                 merge_left={} ms={}\n",
+                stopped.segments,
+                stopped.lists,
+                stopped.records,
+                stopped.lost,
+                stopped.bytes,
+                stopped.merge_left,
+                output::millis_since(started)
+            )),
+            Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error}\n")),
+        }
+    }
     let mut parts = STORES.iter().filter_map(|lock| lock.with(Option::take));
-    let store = parts.next().map(|mut store| {
+    if let Some(mut store) = parts.next() {
         for part in parts {
             store.absorb(part);
         }
-        store
-    });
-    if let Some(store) = &store {
         report(&store.counters);
-    }
-    let writer = WRITER.holding(true, Option::take).flatten();
-    if let (Some(mut store), Some(mut writer)) = (store, writer)
-        && BOOT.with(|boot| boot.as_ref().is_some_and(|boot| boot.partition.is_some()))
-        && !writer.failed
-    {
-        write_last(&mut writer, &mut store);
     }
     let boot = BOOT.with(Option::take);
     drop(boot);
-}
-
-/// The stop's writes ([`write`]).
-fn write_last(writer: &mut Writer, store: &mut Store<'static>) {
-    let started = output::now();
-    let name = pack_name(&writer.translator);
-    let run = |execution: &mut Execution<'static>| {
-        with_store_file(&name, |device, extents| {
-            let mut target = Direct { device, extents };
-            while !execution.advance(&mut target, PIECE_BYTES)? {}
-            Ok::<(), String>(())
-        })
-        .and_then(|done| done)
-    };
-    // What the run left: a segment's write is finished, one being made is
-    // written with the rest, a merge is left.
-    let mut pending: Vec<Layout<'static>> = Vec::new();
-    match core::mem::replace(&mut writer.task, Task::Idle) {
-        Task::Write {
-            mut execution,
-            done: done @ Done::Segment(_),
-        } => match run(&mut execution) {
-            Ok(()) => writer.finish(&execution, done),
-            Err(error) => return writer.fail(&error),
-        },
-        Task::Delta(delta) => pending.extend(delta.finish()),
-        Task::Copy { layout, .. } => pending.push(layout),
-        Task::Merge(_) | Task::Write { .. } => {
-            output::arguments(format_args!("TRANSLATIONS merge left for the next boot\n"));
-            writer.stats.abandoned += 1;
-        }
-        Task::Idle => {}
-    }
-    let stats = &writer.stats;
-    output::arguments(format_args!(
-        "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} merges={} \
-         abandoned={}\n",
-        stats.steps,
-        stats.longest * 1_000_000 / super::host::COUNTER_HZ,
-        stats.deltas,
-        stats.delta_records,
-        stats.delta_bytes,
-        stats.merges,
-        stats.abandoned
-    ));
-    let added = store.take_added();
-    writer.note_added(&added);
-    let records = added.len();
-    pending.extend(Delta::new(writer.translator, added).finish());
-    let mut change = Change::default();
-    let room = MAX_SEGMENTS.saturating_sub(writer.count(SEGMENT));
-    let lost: usize = pending.iter().skip(room).map(Layout::records).sum();
-    for layout in pending.into_iter().take(room) {
-        change.blobs.push(Blob::new(SEGMENT, layout));
-    }
-    let lists = writer.count(USED) < MAX_USED_LISTS;
-    if lists {
-        let list = if writer.added_keys.len() > MAX_USED_KEYS {
-            UsedKeys::encode_every(&writer.translator)
-        } else {
-            UsedKeys::encode(
-                &writer.translator,
-                store.used_keys().chain(&writer.added_keys),
-            )
-        };
-        change.blobs.push(Blob::new(USED, list));
-    }
-    let bytes: u64 = change.blobs.iter().map(Blob::length).sum();
-    let Some(mut execution) = writer.plan(change, "stop") else {
-        return;
-    };
-    match run(&mut execution) {
-        Ok(()) => {
-            if let Some(last) = execution.last() {
-                writer.committed = Some(last);
-            }
-            output::arguments(format_args!(
-                "TRANSLATIONS written segments={} lists={} records={records} lost={lost} \
-                 bytes={bytes} ms={}\n",
-                writer.count(SEGMENT),
-                writer.count(USED),
-                output::millis_since(started)
-            ));
-        }
-        Err(error) => writer.fail(&error),
-    }
 }

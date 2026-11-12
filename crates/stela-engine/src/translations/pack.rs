@@ -828,6 +828,11 @@ impl<'a> Merge<'a> {
         }
     }
 
+    /// The bound its segment stays within.
+    pub fn bound(&self) -> u64 {
+        self.bound
+    }
+
     /// Keep the records of `keys`, those the running boot used so far,
     /// whatever their age.
     pub fn protect(mut self, keys: UsedKeys) -> Self {
@@ -1720,6 +1725,12 @@ impl<'a> Store<'a> {
     /// The bytes of the entries added since the last take.
     pub fn added_bytes(&self) -> usize {
         self.added_bytes
+    }
+
+    /// Whether the entries added since the last take reached half the
+    /// bound past which new ones are not kept: time to take them.
+    pub fn added_pressed(&self) -> bool {
+        self.added_bytes != 0 && self.added_bytes.saturating_mul(2) >= self.added_bound
     }
 
     /// The page keys looked up whose records were found valid: with the
