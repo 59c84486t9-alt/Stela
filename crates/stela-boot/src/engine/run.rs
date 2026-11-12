@@ -1375,26 +1375,20 @@ impl Heartbeat {
                     &before.itlb_sources,
                 );
                 deltas(&mut transitions, pe, &now.transitions, &before.transitions);
-                for (total, (now, before)) in transition_misses
-                    .iter_mut()
-                    .zip(
-                        now.transition_misses
-                            .as_flattened()
-                            .iter()
-                            .zip(before.transition_misses.as_flattened()),
-                    )
-                {
+                for (total, (now, before)) in transition_misses.iter_mut().zip(
+                    now.transition_misses
+                        .as_flattened()
+                        .iter()
+                        .zip(before.transition_misses.as_flattened()),
+                ) {
                     *total += now.saturating_sub(*before);
                 }
-                for (total, (now, before)) in branch_misses
-                    .iter_mut()
-                    .zip(
-                        now.branch_misses
-                            .as_flattened()
-                            .iter()
-                            .zip(before.branch_misses.as_flattened()),
-                    )
-                {
+                for (total, (now, before)) in branch_misses.iter_mut().zip(
+                    now.branch_misses
+                        .as_flattened()
+                        .iter()
+                        .zip(before.branch_misses.as_flattened()),
+                ) {
                     *total += now.saturating_sub(*before);
                 }
                 let promoted = stela_compiler::x86_64::chain::STAMP_COUNTS + 1;
