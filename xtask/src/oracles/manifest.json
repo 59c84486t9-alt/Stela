@@ -4788,6 +4788,14 @@
   },
   {
     "package": "stela-engine",
+    "test": "compression_costs",
+    "source": "crates/stela-engine/src/machine/engine/compression.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-engine",
     "test": "segment_lookup_costs",
     "source": "crates/stela-engine/src/translations/pack.rs",
     "kind": "manual",

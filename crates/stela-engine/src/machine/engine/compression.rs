@@ -1,6 +1,8 @@
 //! WKDMC and WKDMD (`SystemOperation::Compression`): one 16 KiB page
 //! compressed or decompressed through translated guest memory, in this
-//! machine's format (`stela_compiler::wkdm::codec`).
+//! machine's format (`stela_compiler::wkdm::codec`), through two buffers the
+//! machine keeps: no allocation per instruction, and one translation per
+//! mapping rather than per 4 KiB.
 //!
 //! The instruction reads its whole source before it writes, and translates
 //! every destination piece before writing any, so a fault leaves memory and
@@ -12,10 +14,10 @@
 //! MTE tag checking (the 26A434 kernel disables checking around the
 //! compressor).
 use super::{Devices, FETCH_PAGE, Host, Machine, RequirementKind, Step, Stop, Translated};
-use alloc::{format, vec, vec::Vec};
+use alloc::{boxed::Box, format, vec, vec::Vec};
 use stela_compiler::wkdm::{
     self, Instruction, Operation, PAGE_BYTES, Population, Status, UNIT_BYTES,
-    codec::{self, Compressed, HEADER_BYTES},
+    codec::{self, COMPRESS_BUFFER_BYTES, Encoded, HEADER_BYTES},
 };
 use {
     crate::machine::debug, crate::machine::mmu::Access, crate::machine::mmu::MemoryType,
@@ -51,6 +53,27 @@ impl From<Stop> for Blocked {
 /// The register count of an Apple register field (31 is not established).
 const REGISTERS: u8 = 31;
 
+/// A machine's page and compressed-data buffers.
+pub(super) struct Buffers {
+    page: Box<[u8; PAGE_BYTES]>,
+    data: Box<[u8; COMPRESS_BUFFER_BYTES]>,
+}
+
+impl Buffers {
+    fn new() -> Box<Self> {
+        Box::new(Self {
+            page: vec![0; PAGE_BYTES]
+                .into_boxed_slice()
+                .try_into()
+                .expect("a page buffer"),
+            data: vec![0; COMPRESS_BUFFER_BYTES]
+                .into_boxed_slice()
+                .try_into()
+                .expect("a data buffer"),
+        })
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     fn refuse_compression(&self, word: u32, detail: &str) -> Stop {
         self.unsupported(RequirementKind::Instruction {
@@ -76,10 +99,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let source = self.cpu.state.x[usize::from(instruction.source)] & source_mask;
         let destination = self.cpu.state.x[usize::from(instruction.destination)] & destination_mask;
         let chip = self.profile.chip;
+        let mut buffers = self.wkdm_buffers.take().unwrap_or_else(Buffers::new);
         let outcome = match instruction.operation {
-            Operation::Compress => self.compress(word, source, destination, chip),
-            Operation::Decompress => self.decompress(word, source, destination, chip),
+            Operation::Compress => self.compress(word, source, destination, chip, &mut buffers),
+            Operation::Decompress => self.decompress(word, source, destination, chip, &mut buffers),
         };
+        self.wkdm_buffers = Some(buffers);
         match outcome {
             Ok(result) => {
                 self.cpu.state.x[usize::from(instruction.source)] = result;
@@ -99,25 +124,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
         source: u64,
         destination: u64,
         chip: Chip,
+        buffers: &mut Buffers,
     ) -> Result<u64, Blocked> {
-        let mut page = vec![0; PAGE_BYTES];
-        self.transfer(word, source, &mut page, false)?;
-        let page: &[u8; PAGE_BYTES] = page.as_slice().try_into().expect("one page");
+        let Buffers { page, data } = buffers;
+        self.transfer(word, source, &mut page[..], false)?;
+        let page: &[u8; PAGE_BYTES] = page;
         let uncompressed = || wkdm::population(page);
         let counted = |written: &[u8]| match population_source(chip) {
             Population::Uncompressed => uncompressed(),
             Population::Compressed => wkdm::population(written),
         };
-        Ok(match codec::compress(page) {
-            Compressed::SingleValue => wkdm::result(Status::Complete, None, true, counted(&[])),
-            Compressed::Incompressible => {
+        Ok(match codec::compress_into(page, data) {
+            Encoded::SingleValue => wkdm::result(Status::Complete, None, true, counted(&[])),
+            Encoded::Incompressible => {
                 wkdm::result(Status::Incompressible, None, false, counted(&[]))
             }
-            Compressed::Data(mut data) => {
-                self.check_disjoint(word, source, PAGE_BYTES, destination, data.len())?;
-                self.transfer(word, destination, &mut data, true)?;
-                let units = data.len() / UNIT_BYTES;
-                wkdm::result(Status::Complete, Some(units), false, counted(&data))
+            Encoded::Data(bytes) => {
+                self.check_disjoint(word, source, PAGE_BYTES, destination, bytes)?;
+                self.transfer(word, destination, &mut data[..bytes], true)?;
+                let units = bytes / UNIT_BYTES;
+                wkdm::result(
+                    Status::Complete,
+                    Some(units),
+                    false,
+                    counted(&data[..bytes]),
+                )
             }
         })
     }
@@ -128,23 +159,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         source: u64,
         destination: u64,
         chip: Chip,
+        buffers: &mut Buffers,
     ) -> Result<u64, Blocked> {
         let invalid = wkdm::result(Status::Incompressible, None, false, 0);
+        let Buffers { page, data } = buffers;
         let mut header = [0; HEADER_BYTES];
         self.transfer(word, source, &mut header, false)?;
         let Some(length) = codec::compressed_length(&header) else {
             return Ok(invalid);
         };
-        let mut data = vec![0; length];
-        self.transfer(word, source, &mut data, false)?;
-        let Some(mut page) = codec::decompress(&data) else {
+        let data = &mut data[..length];
+        self.transfer(word, source, data, false)?;
+        if !codec::decompress_into(data, page) {
             return Ok(invalid);
-        };
+        }
         self.check_disjoint(word, source, length, destination, PAGE_BYTES)?;
-        self.transfer(word, destination, &mut page, true)?;
+        self.transfer(word, destination, &mut page[..], true)?;
         let population = match population_source(chip) {
-            Population::Uncompressed => wkdm::population(&page),
-            Population::Compressed => wkdm::population(&data),
+            Population::Uncompressed => wkdm::population(&page[..]),
+            Population::Compressed => wkdm::population(data),
         };
         Ok(wkdm::result(Status::Complete, None, false, population))
     }
@@ -171,7 +204,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Read `data.len()` bytes at `address` into `data`, or write them from
-    /// it, translating every piece first.
+    /// it, translating every piece first: one translation per page or block
+    /// the transfer crosses. A write checks first that every piece is RAM,
+    /// so a failing one writes nothing; a failing read changes nothing.
     fn transfer(
         &mut self,
         word: u32,
@@ -193,15 +228,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut done = 0;
         while done < data.len() {
             let virtual_address = address.wrapping_add(done as u64);
-            let length = ((FETCH_PAGE - (virtual_address & (FETCH_PAGE - 1))) as usize)
-                .min(data.len() - done);
             match self.translate_data(virtual_address, access) {
                 Translated::Mapped(translation) if translation.memory == MemoryType::Device => {
                     return Err(self
                         .refuse_compression(word, "a transfer to Device memory")
                         .into());
                 }
-                Translated::Mapped(translation) => pieces.push((translation.physical, length)),
+                Translated::Mapped(translation) => {
+                    // The mapping's bytes from here, at least the 4 KiB
+                    // page's: physically contiguous.
+                    let size = translation.size.max(FETCH_PAGE);
+                    let length =
+                        ((size - (virtual_address & (size - 1))) as usize).min(data.len() - done);
+                    pieces.push((translation.physical, length));
+                    done += length;
+                }
                 Translated::Fault(fault) => {
                     return Err(Blocked::Exception(self.data_abort_exception(
                         virtual_address,
@@ -216,7 +257,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         .into());
                 }
             }
-            done += length;
         }
         if self.watchpoint_exception(&watched, self.cpu.pc).is_some() {
             return Err(self
@@ -232,7 +272,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .into());
         }
         let mut probe = [0u8; 1];
-        for &(physical, length) in &pieces {
+        for &(physical, length) in pieces.iter().filter(|_| write) {
             if !self.host.read_ram(physical, &mut probe)
                 || !self.host.read_ram(physical + length as u64 - 1, &mut probe)
             {
@@ -253,7 +293,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } else {
                 self.host.read_ram(physical, &mut data[range])
             };
-            debug_assert!(complete, "every piece was probed as RAM");
+            if !complete {
+                debug_assert!(!write, "every written piece was probed as RAM");
+                return Err(self
+                    .unsupported(RequirementKind::Device {
+                        physical,
+                        write,
+                        detail: "WKdm transfer outside RAM".into(),
+                    })
+                    .into());
+            }
             offset += length;
         }
         Ok(())
@@ -270,12 +319,15 @@ mod tests {
 
     const PAGE: u64 = BASE + 0x4000;
     const COMPRESSED: u64 = BASE + 0x8000;
-    const RESTORED: u64 = BASE + 0xc000;
+    /// Past the test map's table at 0xf000, which a page written below it
+    /// would overwrite.
+    const RESTORED: u64 = BASE + 0x10000;
     /// Outside the test map's one 1 GiB block.
     const UNMAPPED: u64 = BASE + 0x4000_0000;
 
     fn machine(chip: Chip) -> Machine<FakeHost, NoDevices> {
         let mut machine = machine_on(chip, &[]);
+        machine.host.ram.resize(0x14000, 0);
         normal_memory(&mut machine, false);
         machine
             .cpu
@@ -428,6 +480,107 @@ mod tests {
             machine.compression(COMPRESS_X0_X1, compress).is_err(),
             "EL0"
         );
+    }
+
+    /// Pages of each kind the compressor sees: mostly zero with some words,
+    /// pointers into a few regions, text, random, and repeated words.
+    pub(super) fn bench_pages() -> Vec<(&'static str, Vec<u8>)> {
+        let mut state = 0x2545_f491_u32;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let words = |f: &mut dyn FnMut(usize) -> u32| -> Vec<u8> {
+            (0..PAGE_BYTES / 4)
+                .flat_map(|i| f(i).to_le_bytes())
+                .collect()
+        };
+        let sparse = words(&mut |i| if i % 3 == 0 { 0x1000 + i as u32 } else { 0 });
+        let pointers = words(&mut |i| match i % 4 {
+            0 => 0x8_1234_0000u64 as u32 | ((i as u32 * 16) & 0xfff),
+            1 => 0x8_5678_0000u64 as u32 | ((i as u32 * 8) & 0x3ff),
+            2 => 0,
+            _ => i as u32 & 0xff,
+        });
+        let text: Vec<u8> = b"the quick brown fox jumps over the lazy dog; "
+            .iter()
+            .copied()
+            .cycle()
+            .take(PAGE_BYTES)
+            .collect();
+        let noise = words(&mut |_| random());
+        let repeated = words(&mut |i| [7, 7, 9, 7][i % 4]);
+        vec![
+            ("sparse", sparse),
+            ("pointers", pointers),
+            ("text", text),
+            ("random", noise),
+            ("repeated", repeated),
+        ]
+    }
+
+    /// Nanoseconds per page of the codec and of the whole instruction on a
+    /// test host, for each page kind.
+    #[test]
+    #[ignore = "manual: opt-in"]
+    fn compression_costs() {
+        const ROUNDS: u32 = 2000;
+        for (name, original) in bench_pages() {
+            let page: &[u8; PAGE_BYTES] = original.as_slice().try_into().unwrap();
+            let mut buffers = Buffers::new();
+            let started = std::time::Instant::now();
+            for _ in 0..ROUNDS {
+                core::hint::black_box(codec::compress_into(
+                    core::hint::black_box(page),
+                    &mut buffers.data,
+                ));
+            }
+            let compress = started.elapsed().as_nanos() / u128::from(ROUNDS);
+            let packed = codec::compress(page);
+            let decompress = match &packed {
+                codec::Compressed::Data(data) => {
+                    let started = std::time::Instant::now();
+                    for _ in 0..ROUNDS {
+                        assert!(codec::decompress_into(
+                            core::hint::black_box(data),
+                            &mut buffers.page
+                        ));
+                        core::hint::black_box(&buffers.page);
+                    }
+                    started.elapsed().as_nanos() / u128::from(ROUNDS)
+                }
+                _ => 0,
+            };
+            let mut machine = machine(Chip::AppleM2);
+            assert!(machine.host.write_ram(PAGE, &original));
+            let started = std::time::Instant::now();
+            for _ in 0..ROUNDS {
+                machine.cpu.pc = BASE;
+                run(&mut machine, COMPRESS_X0_X1, PAGE, COMPRESSED);
+            }
+            let instruction = started.elapsed().as_nanos() / u128::from(ROUNDS);
+            assert_eq!(machine.cpu.pc, BASE + 4, "{name} compressed");
+            let restore = if matches!(packed, codec::Compressed::Data(_)) {
+                let started = std::time::Instant::now();
+                for _ in 0..ROUNDS {
+                    machine.cpu.pc = BASE;
+                    run(&mut machine, DECOMPRESS_X0_X1, COMPRESSED, RESTORED);
+                }
+                let restore = started.elapsed().as_nanos() / u128::from(ROUNDS);
+                assert_eq!(machine.cpu.pc, BASE + 4, "{name} completed");
+                assert_eq!(machine.cpu.state.x[0] >> 12 & 3, 0, "{name} decompressed");
+                assert_eq!(ram(&mut machine, RESTORED, PAGE_BYTES), original);
+                restore
+            } else {
+                0
+            };
+            std::println!(
+                "{name}: codec compress {compress} ns, decompress {decompress} ns; \
+                 instruction compress {instruction} ns, decompress {restore} ns"
+            );
+        }
     }
 
     #[test]

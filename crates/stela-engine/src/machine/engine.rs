@@ -813,6 +813,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// The slots of the board's known page keys ([`known_keys`]), sized
     /// by the store.
     known_slots: usize,
+    /// WKDMC and WKDMD's page and data buffers, made at the first.
+    wkdm_buffers: Option<Box<compression::Buffers>>,
     /// Why blocks were installed ([`install_census`]); the census exists
     /// while step timing is on.
     install_causes: InstallCauses,
@@ -1344,6 +1346,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             successor_scratch: Vec::new(),
             successor_boxes: Default::default(),
             known_slots: known_keys::DEFAULT_SLOTS,
+            wkdm_buffers: None,
             install_causes: InstallCauses::default(),
             install_stream: board::YOUNG,
             held_places: Vec::new(),
