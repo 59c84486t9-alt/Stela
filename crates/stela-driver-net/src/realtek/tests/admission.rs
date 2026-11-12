@@ -226,3 +226,42 @@ fn firmware_catalog_binding_requires_exact_pci_xid_board_and_filename() {
          built-in parameters, as Linux does"
     );
 }
+
+/// A supplied file that fails its checks is left out like a missing one,
+/// and said once as refused.
+#[test]
+fn a_supplied_firmware_that_fails_its_checks_is_refused_and_left_out() {
+    use resources::{Catalog, Provenance, Resource, Target};
+    use sha2::{Digest, Sha256};
+    // Six bytes: no header, and not a whole number of raw commands.
+    let bytes = vec![0x00, 0x00, 0x1f, 0x80, 0x00, 0x00];
+    assert!(Script::parse(&bytes).is_err());
+    let catalog = Catalog::from_handoff(vec![Resource {
+        name: "rtl_nic/rtl8168e-3.fw",
+        target: Target {
+            driver: "realtek",
+            hardware: "10ec:8168",
+            revision: "xid-2c8",
+            board: None,
+        },
+        provenance: Provenance {
+            source: "synthetic-test",
+            revision: "1",
+            member: "rtl_nic/rtl8168e-3.fw",
+            license: "MIT",
+        },
+        expected_length: bytes.len(),
+        expected_sha256: Sha256::digest(&bytes).into(),
+        bytes,
+    }])
+    .unwrap();
+    let mut warnings = Vec::new();
+    assert!(optional_firmware(&catalog, "10ec:8168", revision(34), &mut warnings).is_none());
+    assert_eq!(
+        warnings,
+        [Warning::FirmwareSkipped {
+            name: "rtl_nic/rtl8168e-3.fw",
+            supplied: true
+        }]
+    );
+}

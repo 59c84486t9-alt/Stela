@@ -330,10 +330,7 @@ impl Realtek {
         let mac = read_station(&hardware)?;
         let identity = format!("{:04x}:{:04x}", function.vendor, function.device);
         let mut warnings = Vec::new();
-        let image = optional_firmware(provider, &identity, revision, &mut warnings);
-        let script = image
-            .as_ref()
-            .and_then(|image| Script::parse(image.bytes()).ok());
+        let script = optional_firmware(provider, &identity, revision, &mut warnings);
         warnings.extend(hardware.configure_phy(script.as_ref(), subsystem == 0xe000_1458)?);
         hardware.reset()?; // Linux resets the MAC again after PHY initialization.
         hardware.configure_mac(script.as_ref())?;
@@ -624,32 +621,26 @@ fn load_firmware<'a>(
 
 /// Linux `rtl_request_firmware`: every chip's file is optional. One that is
 /// missing or fails its checks is left out, said once in `warnings`, and
-/// the chip starts on its built-in parameters.
+/// the chip starts on its built-in parameters. A file that passes is
+/// parsed here once and its script returned.
 fn optional_firmware<'a>(
     provider: &'a dyn resources::Provider,
     hardware: &str,
     revision: Revision,
     warnings: &mut Vec<Warning>,
-) -> Option<resources::Image<'a>> {
-    let (image, supplied) = match load_firmware(provider, hardware, revision) {
-        Ok(image) => {
-            let valid = image
-                .as_ref()
-                .is_none_or(|image| Script::parse(image.bytes()).is_ok());
-            if valid {
-                return image;
-            }
-            (None, true)
-        }
-        Err(error) => (
-            None,
-            !matches!(
-                error,
-                Error::Firmware(resources::Error {
-                    kind: resources::ErrorKind::Missing,
-                    ..
-                })
-            ),
+) -> Option<Script<'a>> {
+    let supplied = match load_firmware(provider, hardware, revision) {
+        Ok(None) => return None,
+        Ok(Some(image)) => match Script::parse(image.bytes()) {
+            Ok(script) => return Some(script),
+            Err(_) => true,
+        },
+        Err(error) => !matches!(
+            error,
+            Error::Firmware(resources::Error {
+                kind: resources::ErrorKind::Missing,
+                ..
+            })
         ),
     };
     warnings.extend(
@@ -657,7 +648,7 @@ fn optional_firmware<'a>(
             .firmware
             .map(|name| Warning::FirmwareSkipped { name, supplied }),
     );
-    image
+    None
 }
 
 /// Linux `rtl_link_chg_patch`: per-speed ERI FIFO thresholds and EEE state
