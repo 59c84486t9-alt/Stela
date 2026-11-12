@@ -101,7 +101,8 @@ fn readers_take_whole_entries_while_one_writer_rewrites_them() {
     put(0, &[0x48, 0x89, 0xf0]); // mov rax,rsi
     put(3, &cell_tail);
     put(64, &[0x48, 0x89, 0xf0]);
-    let table_tail = lookup_tail(at(67), ExitKind::Return, 3, probes + PROBE_ENTRY as u64).unwrap();
+    let table_tail =
+        lookup_tail(at(67), ExitKind::Return, 3, probes + PROBE_ENTRY as u64, 0).unwrap();
     put(67, &table_tail);
     put(256, &lookup_dispatcher(0).unwrap());
     for &(offset, block) in &BLOCKS {
@@ -114,11 +115,13 @@ fn readers_take_whole_entries_while_one_writer_rewrites_them() {
     // SAFETY: inside the mapping; nothing runs it yet.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), code.0, bytes.len()) };
     let (table_address, itlb_address) = (table.address(), itlb.address());
+    let stamps = [table.new_stamps(), table.new_stamps()];
     let reader = table.reader();
     let stop = Arc::new(AtomicBool::new(false));
     let runners: Vec<_> = [0usize, 64]
         .into_iter()
-        .map(|entry| {
+        .zip(stamps)
+        .map(|(entry, stamps)| {
             let (code, stop) = (code.clone(), stop.clone());
             std::thread::spawn(move || {
                 let mut control = Box::new(ChainControl {
@@ -127,6 +130,7 @@ fn readers_take_whole_entries_while_one_writer_rewrites_them() {
                     contexts: [context; 2],
                     salts: [itlb_salt(context, itlb_mask); 2],
                     masks: [table_mask, itlb_mask],
+                    stamps,
                     ..ChainControl::default()
                 });
                 let mut frame = Box::new(GuestState::default());
@@ -136,6 +140,9 @@ fn readers_take_whole_entries_while_one_writer_rewrites_them() {
                 while !stop.load(Ordering::Acquire) {
                     control.budget = 1;
                     control.block = 0;
+                    // SAFETY: the table's stamps, which outlive the runners;
+                    // each runner's own, and nothing of its runs meanwhile.
+                    unsafe { next_jump_serial(stamps) };
                     let target = if round.is_multiple_of(2) {
                         TARGET
                     } else {

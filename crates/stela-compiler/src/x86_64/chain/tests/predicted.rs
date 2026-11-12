@@ -212,7 +212,11 @@ impl Run {
         let tail = region.at(TAIL);
         match way {
             Way::Bare => {}
-            Way::Lookup => put(&region, TAIL, &lookup_tail(tail, word, RAN, probe).unwrap()),
+            Way::Lookup => put(
+                &region,
+                TAIL,
+                &lookup_tail(tail, word, RAN, probe, 0).unwrap(),
+            ),
             Way::Unlinked | Way::Linked => put(
                 &region,
                 TAIL,
@@ -283,6 +287,9 @@ impl Run {
 
     fn run(&mut self, state: &mut GuestState, control: &mut ChainControl) -> (u64, u64) {
         state.anchors[Anchor::Control] = control as *mut ChainControl as u64;
+        // A native entry, as the engine's: the jump cache starts over.
+        // SAFETY: the control's stamps are 0 or the live table's.
+        unsafe { next_jump_serial(control.stamps) };
         state.anchors[Anchor::Memo] = self.memo.as_ptr() as u64;
         state.anchors[Anchor::Pointer] = &raw mut *self.service as u64;
         // SAFETY: the region holds the entry, the thunk, its tails and the
@@ -776,10 +783,11 @@ fn predicted_tails_hold_a_direct_exit_and_a_lookup_tail() {
         assert!(exit_ready(&tail, PREDICTED_EXIT, at, 0));
         assert!(patchable(direct_patch(at + PREDICTED_EXIT as u64)));
         let lookup = at + (PREDICTED_EXIT + DIRECT_EXIT_BYTES) as u64;
-        assert_eq!(
-            tail[PREDICTED_EXIT + DIRECT_EXIT_BYTES..],
-            lookup_tail(lookup, word, 3, probe).unwrap()
-        );
+        assert_eq!(tail[PREDICTED_EXIT + DIRECT_EXIT_BYTES..], {
+            let mut plain = Code::new();
+            super::super::tail(&mut plain, lookup, word, 3, probe).unwrap();
+            plain.into_bytes()
+        });
         // movabs r8, target; cmp rax, r8; jne over the direct exit.
         assert_eq!(tail[..2], [0x49, 0xb8]);
         assert_eq!(tail[2..10], target.0.to_le_bytes());

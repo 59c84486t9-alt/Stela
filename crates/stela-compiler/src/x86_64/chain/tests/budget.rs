@@ -577,7 +577,7 @@ fn native_interruption_gate_costs() {
                         .unwrap(),
                     ),
                     None => code.extend(
-                        lookup_tail(tail, ExitKind::Direct, 7, probes + PROBE_ENTRY as u64)
+                        lookup_tail(tail, ExitKind::Direct, 7, probes + PROBE_ENTRY as u64, 0)
                             .unwrap(),
                     ),
                 }
@@ -684,7 +684,7 @@ fn ring_costs(report: &mut fs::File) {
             code.extend(bytes);
             let own = at + EXIT_BYTES as u64;
             code.extend(
-                lookup_tail(own, ExitKind::Return, 3, probes + PROBE_ENTRY as u64).unwrap(),
+                lookup_tail(own, ExitKind::Return, 3, probes + PROBE_ENTRY as u64, 0).unwrap(),
             );
             table.set(
                 lookup_slot(pc(block), key(block)),
@@ -703,6 +703,7 @@ fn ring_costs(report: &mut fs::File) {
                 ExitKind::Return,
                 3,
                 probes + PROBE_ENTRY as u64,
+                0,
             )
             .unwrap(),
         );

@@ -263,6 +263,9 @@ fn put(pages: &Pages, offset: usize, bytes: &[u8]) {
 /// Run the stub at `region` (`mov rax, rsi`, then the tail) with `control`:
 /// what it returned.
 fn run(region: &Pages, control: &mut ChainControl, target: u64) -> (u64, u64) {
+    // A native entry, as the engine's: the jump cache starts over.
+    // SAFETY: the control's stamps are 0 or the live table's.
+    unsafe { next_jump_serial(control.stamps) };
     let mut frame = Box::new(GuestState::default());
     frame.anchors[Anchor::Control] = control as *mut ChainControl as u64;
     // SAFETY: the region holds the stub, a tail and probes with the block
@@ -297,6 +300,7 @@ fn probes_without_the_stack_transfer_as_the_probes_before_them() {
         put(&old, offset, &before);
     }
     let mut table = LookupTable::with_entries(MIN_LOOKUP_ENTRIES);
+    let stamps = table.new_stamps();
     let mut itlb = LookupTable::itlb();
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let (mut entered, mut exited) = (0u32, 0u32);
@@ -407,7 +411,7 @@ fn probes_without_the_stack_transfer_as_the_probes_before_them() {
             )
             .unwrap()
             .to_vec(),
-            false => lookup_tail(new.0 as u64 + 3, kind, ran, new.0 as u64 + probe as u64)
+            false => lookup_tail(new.0 as u64 + 3, kind, ran, new.0 as u64 + probe as u64, 0)
                 .unwrap()
                 .to_vec(),
         };
@@ -438,6 +442,7 @@ fn probes_without_the_stack_transfer_as_the_probes_before_them() {
             salts: [0; 2],
             itlb: itlb.address(),
             masks: [table.mask(), itlb.mask()],
+            stamps,
             ..ChainControl::default()
         };
         let mut base = base;

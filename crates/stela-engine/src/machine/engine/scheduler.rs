@@ -885,12 +885,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some((probe, tail)) = self.probe_and_tail(cache, site, btype, chain::TAIL_BYTES) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, site, btype, chain::LOOKUP_TAIL_BYTES)
+        else {
             return false;
         };
         let at = tail.0 as u64;
         let (Some(code), Some(jump)) = (
-            chain::lookup_tail(at, word, retired, probe + chain::PROBE_ENTRY as u64),
+            chain::lookup_tail(at, word, retired, probe + chain::PROBE_ENTRY as u64, btype),
             chain::jump(site, at),
         ) else {
             return false;

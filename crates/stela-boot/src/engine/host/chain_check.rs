@@ -199,7 +199,7 @@ fn ring_code(ring: Ring, base: u64, table: &mut LookupTable, key: u64) -> Option
             }
             Ring::Table => {
                 let probe = base + (DISPATCHER + chain::PROBE_ENTRY) as u64;
-                chain::lookup_tail(tail, word, 1, probe)?.to_vec()
+                chain::lookup_tail(tail, word, 1, probe, 0)?.to_vec()
             }
             Ring::Stamped => {
                 let current = table.find(table.slot(pc(next), key), pc(next), key);

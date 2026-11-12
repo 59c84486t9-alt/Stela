@@ -669,6 +669,56 @@ pub const STAMP_TABLE_BYTES: usize = STAMPED_CELLS * STAMP_BYTES;
 /// Bytes of the counts in front of one PE's stamps ([`StampCount`]).
 pub const STAMP_COUNTS_BYTES: usize = 64;
 
+/// Entries of a PE's jump cache, in front of its stamp counts: the
+/// targets its table probe found since the cache's serial last moved, by
+/// guest PC, which a [`lookup_tail`] takes without a probe. Bits 2-9 of
+/// the PC pick the entry.
+pub const JUMP_CACHE_ENTRIES: usize = 256;
+/// Bytes of one jump cache entry: the PC, the block's code, its index and
+/// the BTYPEs it accepts (as [`LookupEntry`]), and the serial it holds in.
+const JUMP_ENTRY_BYTES: usize = 32;
+/// Bytes in front of a PE's stamp counts: the jump cache, then a cache
+/// line whose first word is its serial.
+pub const JUMP_CACHE_BYTES: usize = JUMP_CACHE_ENTRIES * JUMP_ENTRY_BYTES + 64;
+/// Byte offset from the stamps of the jump cache's serial, which the
+/// engine moves at every native entry ([`next_jump_serial`]) and a native
+/// transition moves when it changes the lookup contexts: an entry holds
+/// only while its serial is the cache's. Never 0, which no entry holds
+/// until it is written.
+pub const JUMP_SERIAL: i32 = -((STAMP_COUNTS_BYTES + 64) as i32);
+/// Byte offset from the stamps of the jump cache's first entry.
+const JUMP_CACHE: i32 = JUMP_SERIAL - (JUMP_CACHE_ENTRIES * JUMP_ENTRY_BYTES) as i32;
+/// The PC bits that pick an entry, scaled by 4: times 8 an entry's offset.
+const JUMP_INDEX: i32 = ((JUMP_CACHE_ENTRIES - 1) << 2) as i32;
+const JUMP_PC: i32 = 0;
+const JUMP_CODE: i32 = 8;
+const JUMP_BLOCK: i32 = 16;
+const JUMP_TARGETS: i32 = 20;
+const JUMP_ENTRY_SERIAL: i32 = 24;
+const _: () = assert!(JUMP_ENTRY_BYTES == 4 * 8 && JUMP_CACHE_ENTRIES.is_power_of_two());
+
+/// Move the serial of the jump cache in front of `stamps` (0 for none):
+/// every entry it holds goes. The engine does this at every native entry,
+/// after which the ITLB, the contexts and the blocks may all be others.
+///
+/// # Safety
+///
+/// `stamps` is 0 or an address [`LookupTable::new_stamps`] returned, whose
+/// table lives, and no native code of its PE runs.
+pub unsafe fn next_jump_serial(stamps: u64) {
+    if stamps == 0 {
+        return;
+    }
+    let word = (stamps as i64 + i64::from(JUMP_SERIAL)) as *mut u64;
+    // SAFETY: the caller's: `new_stamps` made the serial as an atomic in
+    // front of `stamps`, and only this PE writes it.
+    let serial = unsafe { AtomicU64::from_ptr(word) };
+    serial.store(
+        serial.load(Ordering::Relaxed).wrapping_add(1).max(1),
+        Ordering::Relaxed,
+    );
+}
+
 /// What one PE's stamped tails and stamping cell probe count, a word each
 /// in front of its stamps, which only that PE's native code writes
 /// ([`stamp_counts`]).
@@ -937,7 +987,7 @@ impl LookupTable {
             + self.granules.len() * 2 * size_of::<(u64, u32)>()
             + self.front.len() * size_of::<(u64, u32)>()
             + self.cells.iter().map(|cells| cells.len).sum::<usize>() * size_of::<LookupEntry>()
-            + self.stamp_store.len() * (STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES)
+            + self.stamp_store.len() * (JUMP_CACHE_BYTES + STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES)
             + self.free_cells.capacity() * size_of::<u32>()
             + self.cell_counts.len() * size_of::<u32>()
             + (self.cell_pcs.len() + self.cell_frames.len() + self.cell_sites.len())
@@ -1135,14 +1185,16 @@ impl LookupTable {
     }
 
     /// New zeroed stamps for one PE ([`STAMP_TABLE_BYTES`]) after their
-    /// counts ([`STAMP_COUNTS_BYTES`]), for `ChainControl::stamps`, which
+    /// counts ([`STAMP_COUNTS_BYTES`]) and its jump cache ([`JUMP_CACHE_BYTES`]),
+    /// for `ChainControl::stamps`, which
     /// the table keeps while it lives and zeroes a cell's stamps in when
     /// the cell changes.
     pub fn new_stamps(&mut self) -> u64 {
-        let stamps: Box<[AtomicU64]> = (0..(STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES) / 8)
-            .map(|_| AtomicU64::new(0))
-            .collect();
-        let address = stamps.as_ptr() as u64 + STAMP_COUNTS_BYTES as u64;
+        let words = (JUMP_CACHE_BYTES + STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES) / 8;
+        let stamps: Box<[AtomicU64]> = (0..words).map(|_| AtomicU64::new(0)).collect();
+        let address = stamps.as_ptr() as u64 + (JUMP_CACHE_BYTES + STAMP_COUNTS_BYTES) as u64;
+        // The jump cache's serial starts at 1: its zeroed entries hold in none.
+        stamps[(JUMP_CACHE_BYTES - 64) / 8].store(1, Ordering::Relaxed);
         self.stamp_store.push(stamps);
         self.stamp_tables.push(address);
         address
@@ -2312,6 +2364,7 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
     asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
     asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
+    fill_jump_cache(&mut asm);
     entered_btype(&mut asm, R8, btype);
     asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
     found(&mut asm);
@@ -2721,21 +2774,114 @@ fn missed(asm: &mut crate::x86_64::asm::Asm) {
     asm.ret();
 }
 
+/// Bytes in a [`lookup_tail`]: the jump cache's hit, its exhausted
+/// budget's return, and the plain tail ([`TAIL_BYTES`]) of a miss.
+pub const LOOKUP_TAIL_BYTES: usize = 144;
+// The engine installs a lookup tail where a stamped tail may go.
+const _: () = assert!(LOOKUP_TAIL_BYTES <= STAMPED_TAIL_BYTES);
+
 /// The tail at host address `at` that an exit's patch point jumps to once
-/// the exit is redirected through a lookup: EDX the exit's `word` with the
-/// `ran` instructions of the block it leaves, which only a probe reads,
-/// then a jump to the probe at `probe`, which enters the block it finds or
-/// returns to the engine. `None` when `ran` exceeds its field or `probe` is
+/// the exit is redirected through a lookup, for a branch that sets
+/// `btype`: a target this PE's jump cache holds in its current serial
+/// (and that accepts `btype`) is entered from here, counted as a probe
+/// counts its transfers, by a jump of the site's own; any other takes EDX
+/// the exit's `word` with the `ran` instructions of the block it leaves,
+/// which only a probe reads, then a jump to the table probe at `probe`,
+/// which enters the block it finds, filling the cache, or returns to the
+/// engine. An interruption or a spent budget leaves as the probe would.
+/// `None` when `ran` exceeds its field, `btype` is no BTYPE or `probe` is
 /// out of a 32-bit jump's reach.
+///
+/// An entry holds only for the serial it was written in, which moves at
+/// every native entry and at every native change of the lookup contexts
+/// ([`JUMP_SERIAL`]). In one serial the PE's ITLB and contexts are what
+/// the probe that filled the entry translated through, and a block another
+/// PE releases meanwhile keeps its code until this PE's grace: the entry
+/// enters the block that probe would enter, as a direct link would. The
+/// control's stamps hold the cache: every PE's control has them before it
+/// runs (`LookupTable::new_stamps`).
 pub fn lookup_tail(
     at: u64,
     word: impl Into<ExitWord>,
     ran: u32,
     probe: u64,
-) -> Option<[u8; TAIL_BYTES]> {
+    btype: u8,
+) -> Option<[u8; LOOKUP_TAIL_BYTES]> {
+    lookup_tail_with_policy(at, word.into(), ran, probe, btype, Interruption::Epoch)
+}
+
+fn lookup_tail_with_policy(
+    at: u64,
+    word: ExitWord,
+    ran: u32,
+    probe: u64,
+    btype: u8,
+    policy: Interruption,
+) -> Option<[u8; LOOKUP_TAIL_BYTES]> {
+    if btype > 3 || ran >= 1 << (u32::BITS - ExitWord::RAN_SHIFT) {
+        return None;
+    }
+    let entry = |field: i32| Mem::indexed(R10, R9, 8, JUMP_CACHE + field);
     let mut code = Code::new();
-    tail(&mut code, at, word.into(), ran, probe)?;
+    let mut asm = code.asm();
+    asm.place(Rcx, CONTROL);
+    let mut misses: Vec<_> = gate(&mut asm, policy, R8, false).into_iter().collect();
+    // R10 = this PE's stamps, R9 = 8 times the entry's index.
+    asm.mov_load(Qword, R10, Mem::base(Rcx, STAMPS));
+    asm.mov(Dword, R9, Rax);
+    asm.alu_imm32(Alu::And, Dword, R9, JUMP_INDEX);
+    asm.alu_load(Alu::Cmp, Qword, Rax, entry(JUMP_PC));
+    misses.push(asm.jcc8(Cond::Ne));
+    asm.mov_load(Qword, R8, Mem::base(R10, JUMP_SERIAL));
+    asm.alu_load(Alu::Cmp, Qword, R8, entry(JUMP_ENTRY_SERIAL));
+    misses.push(asm.jcc8(Cond::Ne));
+    if btype != 0 {
+        asm.test_imm(Size::Byte, entry(JUMP_TARGETS), 1 << btype);
+        misses.push(asm.jcc8(Cond::E));
+    }
+    spend_budget(&mut asm, policy);
+    let exhausted = asm.jcc8(Cond::B);
+    asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), ran as i32);
+    asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
+    asm.mov_load(Dword, R8, entry(JUMP_BLOCK));
+    entered_btype(&mut asm, R8, btype);
+    asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
+    asm.jmp_rm(entry(JUMP_CODE));
+    // A spent budget returns as the probe's would, its word in EDX whole.
+    asm.bind(exhausted);
+    asm.mov_imm32(Rdx, word.encoded() | ran << ExitWord::RAN_SHIFT);
+    missed(&mut asm);
+    for miss in misses {
+        asm.bind(miss);
+    }
+    // The plain tail's jump is relative to its own end in `code`.
+    tail(&mut code, at, word, ran, probe)?;
+    let padding = LOOKUP_TAIL_BYTES.checked_sub(code.len())?;
+    for _ in 0..padding {
+        code.asm().int3();
+    }
     code.try_into().ok()
+}
+
+/// Fill this PE's jump cache entry of the target in RAX ([`lookup_tail`])
+/// with the block the table probe just entered: its code in R9, its index
+/// in R8D and its BTYPEs in R11D, as the probe read them; nothing for a
+/// control without stamps. Clobbers RDX, R10 and R11.
+fn fill_jump_cache(asm: &mut crate::x86_64::asm::Asm) {
+    let entry = |field: i32| Mem::indexed(R10, Rdx, 8, JUMP_CACHE + field);
+    asm.mov_load(Qword, R10, Mem::base(Rcx, STAMPS));
+    asm.test(Qword, R10, R10);
+    let none = asm.jcc8(Cond::E);
+    asm.alu_imm32(Alu::And, Dword, R11, META_TARGETS as i32);
+    asm.mov(Dword, Rdx, Rax);
+    asm.alu_imm32(Alu::And, Dword, Rdx, JUMP_INDEX);
+    asm.mov_store(Qword, entry(JUMP_PC), Rax);
+    asm.mov_store(Qword, entry(JUMP_CODE), R9);
+    asm.mov_store(Dword, entry(JUMP_BLOCK), R8);
+    asm.mov_store(Dword, entry(JUMP_TARGETS), R11);
+    asm.mov_load(Qword, R11, Mem::base(R10, JUMP_SERIAL));
+    asm.mov_store(Qword, entry(JUMP_ENTRY_SERIAL), R11);
+    asm.bind(none);
 }
 
 /// The tail at host address `at` of a direct exit out of its page, whose
@@ -3645,20 +3791,31 @@ mod tests {
     /// indirect jump. A probe set's pieces keep their places in every policy.
     #[test]
     fn tails_jump_to_the_probes() {
-        let tail = lookup_tail(0x1000, ExitKind::Return, 3, 0x2000).unwrap();
+        let mut plain = Code::new();
+        tail(&mut plain, 0x1000, ExitKind::Return.into(), 3, 0x2000).unwrap();
         // EDX the word with the instructions run, then the jump.
         let mut expected = vec![0xba];
         expected.extend((ExitKind::Return as u32 | 3 << ExitWord::RAN_SHIFT).to_le_bytes());
         expected.push(0xe9);
         expected.extend((0x2000i32 - 0x100a).to_le_bytes());
-        assert_eq!(tail.to_vec(), expected);
+        assert_eq!(plain.to_vec(), expected);
+        // The cached tail ends its misses in the same word and jump.
+        let cached = lookup_tail(0x1000, ExitKind::Return, 3, 0x2000, 0).unwrap();
+        let word = &expected[..5];
+        assert!(cached.windows(5).any(|bytes| bytes == word));
+        assert_eq!(cached.last(), Some(&0xcc));
+        // Every BTYPE's tail fits, the longest's both BTS included.
+        for btype in 0..4 {
+            assert!(lookup_tail(0x1000, ExitKind::Return, 3, 0x2000, btype).is_some());
+        }
+        assert!(lookup_tail(0x1000, ExitKind::Return, 3, 0x2000, 4).is_none());
         let cell = cell_tail(0x1000, 0xdead_beef_0000, ExitKind::Return, 3, 0x2000).unwrap();
         assert_eq!(&cell[..2], &[0x49, 0xb9]);
         assert_eq!(&cell[2..10], &0xdead_beef_0000u64.to_le_bytes());
         assert_eq!(&cell[10..15], &expected[..5]);
         assert_eq!(&cell[15..20], &[0xe9, 0xec, 0x0f, 0, 0]);
-        assert!(lookup_tail(0, ExitKind::Return, 0, 1 << 40).is_none());
-        assert!(lookup_tail(0, ExitKind::Return, 1 << 12, 0).is_none());
+        assert!(lookup_tail(0, ExitKind::Return, 0, 1 << 40, 0).is_none());
+        assert!(lookup_tail(0, ExitKind::Return, 1 << 12, 0, 0).is_none());
         for btype in 0..4 {
             let probes = lookup_dispatcher(btype).unwrap();
             // Each probe starts with the control's address.
@@ -3955,6 +4112,8 @@ mod tests {
     mod budget;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod differential;
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    mod jump_cache;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod patching;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]

@@ -2793,6 +2793,26 @@ fn a_parallel_pe_promotes_the_exits_its_cell_probes_made_hot() {
     assert_eq!(machine.chain.stamp_counts(), [0; chain::STAMP_COUNTS]);
 }
 
+/// Every native entry starts the PE's jump cache over (`chain::lookup_tail`):
+/// what its table probes found under the last run's ITLB, contexts and
+/// blocks holds in no later run.
+#[test]
+fn each_native_entry_moves_the_jump_cache_serial() {
+    let mut machine = super::super::tests::machine(&[0xd65f_03c0]);
+    let stamps = machine.chain.stamps().0;
+    assert_ne!(stamps, 0, "every PE's control has stamps before it runs");
+    let at = (stamps as i64 + i64::from(chain::JUMP_SERIAL)) as *const u64;
+    // SAFETY: the serial in front of the PE's live stamps; no native code
+    // runs meanwhile.
+    let serial = || unsafe { at.read() };
+    let before = serial();
+    assert_ne!(before, 0);
+    machine.chain.begin(0, 16);
+    assert_eq!(serial(), before + 1);
+    machine.chain.begin(0, 16);
+    assert_eq!(serial(), before + 2);
+}
+
 /// A PE that joins a board other than the one it was made on takes stamps
 /// of the board's table, not of its first board's, which goes.
 #[test]

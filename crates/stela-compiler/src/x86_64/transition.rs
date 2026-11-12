@@ -376,6 +376,19 @@ fn commit(
     asm.place(Rcx, Place::new(Anchor::Control, salts));
     asm.mov_load(Qword, Rax, to(offset_of!(Record, salts)));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
+    // The jump cache's entries were found in the old contexts.
+    let stamps = offset_of!(super::chain::ChainControl, stamps);
+    asm.place(Rcx, Place::new(Anchor::Control, stamps));
+    asm.mov_load(Qword, Rcx, Mem::base(Rcx, 0));
+    asm.test(Qword, Rcx, Rcx);
+    let unstamped = asm.jcc8(Cond::E);
+    asm.alu_imm8(
+        Alu::Add,
+        Qword,
+        Mem::base(Rcx, super::chain::JUMP_SERIAL),
+        1,
+    );
+    asm.bind(unstamped);
     // The host's view.
     asm.alu_imm8(Alu::Cmp, Qword, to(offset_of!(Record, cr3)), 0);
     let stays = asm.jcc(Cond::E);
@@ -942,6 +955,8 @@ mod tests {
         bank: Box<Bank>,
         clock: Box<CountState>,
         reader: Box<Count>,
+        /// The block table whose stamps hold the control's jump cache.
+        lookup: crate::x86_64::chain::LookupTable,
     }
 
     impl Rig {
@@ -954,7 +969,11 @@ mod tests {
                 bank: Box::default(),
                 clock: Box::default(),
                 reader: Box::default(),
+                lookup: crate::x86_64::chain::LookupTable::with_entries(
+                    crate::x86_64::chain::MIN_LOOKUP_ENTRIES,
+                ),
             };
+            rig.control.stamps = rig.lookup.new_stamps();
             rig.clock
                 .ceiling
                 .store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
@@ -1007,6 +1026,16 @@ mod tests {
             assert_eq!(self.state.anchors[Anchor::Cells], 0x1234_5000);
             assert_eq!(self.control.contexts, [11, 12]);
             assert_eq!(self.control.salts, [5, 7]);
+            // The jump cache's entries go with the old contexts.
+            assert_eq!(self.jump_serial(), 2);
+        }
+
+        /// The serial of the control's jump cache, 1 until a commit.
+        fn jump_serial(&self) -> u64 {
+            let at = self.control.stamps as i64 + i64::from(crate::x86_64::chain::JUMP_SERIAL);
+            // SAFETY: the serial in front of the live table's stamps, which
+            // no native code writes meanwhile.
+            unsafe { *(at as *const u64) }
         }
     }
 
@@ -1196,6 +1225,7 @@ mod tests {
             } else {
                 assert_eq!(exit, MISS, "count {count} until {until}");
                 assert_eq!((rig.words.state, rig.state.sp), (6, 0x7000));
+                assert_eq!(rig.jump_serial(), 1);
             }
         }
     }

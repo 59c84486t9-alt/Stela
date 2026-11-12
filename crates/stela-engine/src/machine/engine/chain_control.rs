@@ -223,6 +223,9 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).hits).write(0);
             core::ptr::addr_of_mut!((*control).linked).write(0);
         }
+        // SAFETY: `set_stamps` stored 0 or the board's table's stamps for
+        // this PE, and its native code does not run.
+        unsafe { chain::next_jump_serial(self.stamps().0) };
         self.budget().store(budget, Ordering::Relaxed);
         self.entered = budget;
     }
