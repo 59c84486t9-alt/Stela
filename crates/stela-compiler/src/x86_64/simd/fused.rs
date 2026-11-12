@@ -2,17 +2,18 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
-    RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_flush_status,
-    commit_inexact, commit_rounded_status, emit_fma, emit_opcode, environment,
-    exceptional_lane_mask, flush_subnormal_lanes, jump, prepare_vector_input_range,
-    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
-    reject_exceptional_lanes, reject_invalid, reject_other_status, reject_product_status, resolve,
-    restore_environment, restore_environment_with_product, save_product_status,
-    scalar_ordered_range, sticky_inexact, sticky_result_check, test_control, vector_ordered_range,
-    zero_product_check,
+    NanRegisters, RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_environment_status,
+    clear_scalar, commit_flush_status, commit_inexact, commit_invalid_lanes, commit_rounded_status,
+    emit_fma, emit_opcode, environment, float_lanes, flush_subnormal_lanes, invalid_lane_mask,
+    jump, merge_nans, minimum_normal_lanes, prepare_vector_input_range,
+    prepare_vector_result_range, quiet_lanes, read_inputs, read_numerical_right,
+    read_numerical_vector, reject_exceptional_lanes, reject_other_status, reject_product_status,
+    resolve, restore_environment, restore_environment_with_product, save_product_status,
+    scalar_ordered_range, select_input_nans, sticky_inexact, sticky_result_check, test_control,
+    vector_ordered_range, zero_product_check,
 };
 use super::{Host, commit, packed};
-use crate::x86_64::asm::{Alu, Code, Gpr, Size};
+use crate::x86_64::asm::{Alu, Code, FloatOp, Gpr, Rm, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -41,8 +42,44 @@ const ORIGINAL_ADDEND: u8 = 7;
 const ZERO_RANGE_SCRATCH: u8 = ORIGINAL_ADDEND;
 /// [`flush_subnormal_lanes`]' scratch, free before the input guards.
 const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
-/// [`exceptional_lane_mask`]'s scratch, which aliases no source.
-const EXCEPTIONAL_SCRATCH: [u8; 3] = [3, 4, 5];
+/// [`select_input_nans`]' registers, which alias no source.
+const NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 2,
+    inputs: 3,
+    invalid: 4,
+    mask: 5,
+    temporary: 7,
+};
+/// [`minimum_normal_lanes`]' scratch after [`merge_nans`].
+const MINIMUM_SCRATCH: [u8; 2] = [2, 3];
+/// The unordered compare predicate.
+const UNORDERED: u8 = 3;
+
+/// Flip the sign of the multiplicand and addend that FMLS, FMSUB, FNMADD
+/// and FNMSUB negate (Arm's FPNeg, which flips a NaN's sign too); a
+/// second call restores them. Clobbers NAN_REGISTERS.temporary.
+fn negate_operands(code: &mut Code, operand: &Operand) {
+    let negated = [
+        (operand.operation.negate_left(), LEFT),
+        (operand.operation.negate_addend(), ADDEND),
+    ];
+    if !negated.iter().any(|&(negate, _)| negate) {
+        return;
+    }
+    let sign = NAN_REGISTERS.temporary;
+    packed(code, Host::EqualDword, sign, sign);
+    let shift = if operand.format == Format::Single {
+        ShiftOpcode::LeftDword
+    } else {
+        ShiftOpcode::LeftQword
+    };
+    shift.emit(code, sign, (operand.format.bits() - 1) as u8);
+    for (negate, source) in negated {
+        if negate {
+            packed(code, Host::Xor, source, sign);
+        }
+    }
+}
 
 fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
@@ -136,28 +173,70 @@ pub(in crate::x86_64) fn emit(
     // With FMA3 and FZ, FIZ and AH clear, subnormal inputs and tiny,
     // overflowing and infinite results are exact: the host's single
     // unflushed rounding in Arm's mode is FPMulAdd's, and its status FPSR's
-    // ([`commit_rounded_status`]). A NaN result lane (from a NaN input,
-    // which Arm's NaN selection needs) and invalid status take the helper.
+    // ([`commit_rounded_status`]). NaN lanes follow FPProcessNaNs3 over
+    // the addend and the multiplicands, after FMLS, FMSUB and FNMADD negate
+    // theirs ([`select_input_nans`]), and an invalid operation gives the
+    // default NaN with IOC ([`merge_nans`]). A quiet NaN addend whose
+    // product is invalid (Arm gives the default NaN with IOC) and a minimum
+    // normal result take the helper.
     let rounded = native_fma.then(|| {
         test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
         let strict = branch(code, Condition::NotZero);
         environment(code);
-        emit_checked_fma(code, operand, target);
-        exceptional_lane_mask(
+        negate_operands(code, operand);
+        select_input_nans(
             code,
             operand.format,
             operand.shape,
-            LEFT,
-            EXCEPTIONAL_SCRATCH,
-            true,
+            &[ADDEND, LEFT, RIGHT],
+            NAN_REGISTERS,
         );
+        let [product, quiet] = [NAN_REGISTERS.mask, NAN_REGISTERS.temporary];
+        packed(code, Host::MoveAligned, product, LEFT);
+        code.asm().float(
+            FloatOp::Mul,
+            float_lanes(operand.format, Shape::Vector128),
+            product,
+            Rm::Xmm(RIGHT),
+        );
+        code.asm().float_compare(
+            float_lanes(operand.format, Shape::Vector128),
+            product,
+            Rm::Xmm(product),
+            UNORDERED,
+        );
+        quiet_lanes(code, operand.format, quiet, ADDEND);
+        packed(code, Host::And, product, quiet);
+        packed(code, Host::MoveAligned, quiet, ADDEND);
+        code.asm().float_compare(
+            float_lanes(operand.format, Shape::Vector128),
+            quiet,
+            Rm::Xmm(quiet),
+            UNORDERED,
+        );
+        packed(code, Host::And, product, quiet);
+        Host::DwordSignMask.register(code, Gpr::Rax as u8, product, TargetCpu::Baseline);
+        // The product's status is not the guest's.
+        clear_environment_status(code);
+        negate_operands(code, operand);
+        emit_checked_fma(code, operand, target);
+        merge_nans(code, operand.format, operand.shape, LEFT, NAN_REGISTERS);
+        minimum_normal_lanes(code, operand.format, LEFT, MINIMUM_SCRATCH);
+        Host::DwordSignMask.register(
+            code,
+            Gpr::Rcx as u8,
+            MINIMUM_SCRATCH[0],
+            TargetCpu::Baseline,
+        );
+        code.asm().alu(Alu::Or, Size::Dword, Gpr::Rax, Gpr::Rcx);
+        invalid_lane_mask(code, NAN_REGISTERS.invalid);
         restore_environment(code);
         helper.push(reject_exceptional_lanes(
             code,
             operand.format,
             operand.shape,
         ));
-        helper.push(reject_invalid(code));
+        commit_invalid_lanes(code, operand.format, operand.shape);
         commit_rounded_status(code);
         let done = jump(code);
         let strict_start = code.len();

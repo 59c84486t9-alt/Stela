@@ -191,21 +191,17 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     // every form that takes zeros; status of any kind (overflow, invalid)
     // still exits.
     let infinite = |raw| raw & !sign_mask(format) == exponent_mask(format);
-    let nan = |raw| raw & !sign_mask(format) > exponent_mask(format);
-    // With FZ, FIZ and AH clear, every lane completes but a NaN input, an
-    // invalid operation, FMULX's infinity times zero (an exact two, for
-    // which the host raises invalid) and a minimum normal quotient (the
-    // host may find its tininess after rounding).
+    // With FZ, FIZ and AH clear, every lane completes, NaNs and invalid
+    // operations included, but FMULX's infinity times zero (an exact two,
+    // for which the host raises invalid) and a minimum normal quotient
+    // (the host may find its tininess after rounding).
     if state.fpcr & (FPCR_FZ | FPCR_FIZ | FPCR_AH) == 0 {
         return (0..operand.shape.lane_count(format)).all(|lane| {
             let (a, b) = inputs(state, operand, lane);
             let special = |x, y| zero(x) && infinite(y);
             let extended = operand.operation == BinaryOperation::MultiplyExtended;
             let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
-            !nan(a)
-                && !nan(b)
-                && !(extended && (special(a, b) || special(b, a)))
-                && outcome.exceptions & INVALID == 0
+            !(extended && (special(a, b) || special(b, a)))
                 && (operand.operation != BinaryOperation::Divide
                     || outcome.bits & !sign_mask(format) != 1 << fraction_bits(format))
         });

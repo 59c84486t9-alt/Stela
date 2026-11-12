@@ -1117,16 +1117,10 @@ pub(super) fn exceptional_lane_mask(
     scratch: [u8; 3],
     minimum_normal: bool,
 ) {
-    const EQUAL: u8 = 0;
     const UNORDERED: u8 = 3;
     assert!(format != Format::Half);
     let [mask, magnitude, minimum] = scratch;
     let lanes = float_lanes(format, shape);
-    let (right, left) = if format == Format::Double {
-        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
-    } else {
-        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
-    };
     packed(code, Host::MoveAligned, mask, source);
     code.asm()
         .float_compare(lanes, mask, Rm::Xmm(mask), UNORDERED);
@@ -1134,28 +1128,244 @@ pub(super) fn exceptional_lane_mask(
         Host::DwordSignMask.register(code, Rax as u8, mask, crate::TargetCpu::Baseline);
         return;
     }
+    minimum_normal_lanes(code, format, source, [magnitude, minimum]);
+    packed(code, Host::Or, mask, magnitude);
+    Host::DwordSignMask.register(code, Rax as u8, mask, crate::TargetCpu::Baseline);
+}
+
+/// Set `scratch[0]` to all ones in each S/D lane of `source` that is
+/// exactly the minimum normal of either sign (see
+/// [`exceptional_lane_mask`]). Clobbers both `scratch` registers.
+pub(super) fn minimum_normal_lanes(code: &mut Code, format: Format, source: u8, scratch: [u8; 2]) {
+    const EQUAL: u8 = 0;
+    let [magnitude, minimum] = scratch;
+    let (right, left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
     packed(code, Host::EqualDword, magnitude, magnitude);
     packed(code, Host::MoveAligned, minimum, magnitude);
     right.emit(code, magnitude, SIGN_BITS);
     packed(code, Host::And, magnitude, source);
     right.emit(code, minimum, format.bits() as u8 - SIGN_BITS);
     left.emit(code, minimum, format.fraction_bits() as u8);
-    code.asm()
-        .float_compare(lanes, magnitude, Rm::Xmm(minimum), EQUAL);
-    packed(code, Host::Or, mask, magnitude);
-    Host::DwordSignMask.register(code, Rax as u8, mask, crate::TargetCpu::Baseline);
+    code.asm().float_compare(
+        float_lanes(format, Shape::Vector128),
+        magnitude,
+        Rm::Xmm(minimum),
+        EQUAL,
+    );
 }
 
-/// The branch for an active `shape` lane that [`exceptional_lane_mask`]
-/// found, after the environment is restored.
-pub(super) fn reject_exceptional_lanes(code: &mut Code, format: Format, shape: Shape) -> usize {
-    let active = match (format, shape) {
+/// Leave the dword sign mask of `lanes` in R11D, for [`commit_invalid_lanes`].
+pub(super) fn invalid_lane_mask(code: &mut Code, lanes: u8) {
+    Host::DwordSignMask.register(code, Gpr::R11 as u8, lanes, crate::TargetCpu::Baseline);
+}
+
+/// Accumulate FPSR.IOC when an active `shape` lane of [`invalid_lane_mask`]
+/// is set.
+pub(super) fn commit_invalid_lanes(code: &mut Code, format: Format, shape: Shape) {
+    code.asm().test_imm(
+        Size::Dword,
+        Gpr::R11,
+        i32::from(active_lane_bits(format, shape)),
+    );
+    let clear = branch(code, Condition::Zero);
+    code.asm().alu_imm8(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        crate::aarch64::floating::INVALID as i8,
+    );
+    let end = code.len();
+    resolve(code, clear, end);
+}
+/// PSHUFD selector copying each qword's high dword to both halves.
+const REPLICATE_HIGH_DWORDS: u8 = 0xf5;
+
+/// The registers of Arm's NaN propagation over S/D lanes
+/// ([`select_input_nans`], [`merge_nans`]).
+#[derive(Clone, Copy)]
+pub(super) struct NanRegisters {
+    /// The propagated NaN of each lane with a NaN input.
+    pub(super) selected: u8,
+    /// All ones in each active lane with a NaN input.
+    pub(super) inputs: u8,
+    /// All ones in each active lane that raises IOC.
+    pub(super) invalid: u8,
+    /// After [`merge_nans`], all ones in each active lane whose host
+    /// operation was invalid without a NaN input.
+    pub(super) mask: u8,
+    pub(super) temporary: u8,
+}
+
+/// Set `destination` to all ones in each `shape` lane the guest writes,
+/// zero elsewhere.
+fn active_lanes(code: &mut Code, shape: Shape, format: Format, destination: u8) {
+    packed(code, Host::EqualDword, destination, destination);
+    let bytes = match shape {
+        Shape::Scalar => (format.bits() / u8::BITS) as u8,
+        Shape::Vector64 => 8,
+        Shape::Vector128 => return,
+    };
+    ShiftOpcode::RightBytes.emit(code, destination, 16 - bytes);
+}
+
+/// Set `destination` to all ones in each S/D lane of `source` whose
+/// quiet bit is set.
+pub(super) fn quiet_lanes(code: &mut Code, format: Format, destination: u8, source: u8) {
+    packed(code, Host::MoveAligned, destination, source);
+    if format == Format::Double {
+        ShiftOpcode::LeftQword.emit(code, destination, (64 - format.fraction_bits()) as u8);
+        ShiftOpcode::ArithmeticDword.emit(code, destination, 31);
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            destination,
+            destination,
+            REPLICATE_HIGH_DWORDS,
+        );
+    } else {
+        ShiftOpcode::LeftDword.emit(code, destination, (32 - format.fraction_bits()) as u8);
+        ShiftOpcode::ArithmeticDword.emit(code, destination, 31);
+    }
+}
+
+/// `destination` = `destination` where `mask` is clear, `source` where it
+/// is set. Clobbers `temporary`.
+fn blend(code: &mut Code, destination: u8, source: u8, mask: u8, temporary: u8) {
+    packed(code, Host::MoveAligned, temporary, mask);
+    packed(code, Host::And, temporary, source);
+    packed(code, Host::AndNot, mask, destination);
+    packed(code, Host::Or, mask, temporary);
+    packed(code, Host::MoveAligned, destination, mask);
+}
+
+/// Arm's FPProcessNaNs (FPCR.AH clear) for the S/D `inputs` in priority
+/// order, before the host operation overwrites any of them: the first
+/// signalling NaN, else the first quiet NaN, quieted, or the default NaN
+/// under FPCR.DN; a signalling NaN raises IOC. Leaves the selection, the
+/// NaN-input lanes and the IOC lanes in `registers`. The unordered
+/// compares run in the private environment, whose status they may change.
+pub(super) fn select_input_nans(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    inputs: &[u8],
+    registers: NanRegisters,
+) {
+    const UNORDERED: u8 = 3;
+    let NanRegisters {
+        selected,
+        inputs: nan,
+        invalid,
+        mask,
+        temporary,
+    } = registers;
+    let lanes = float_lanes(format, Shape::Vector128);
+    packed(code, Host::Xor, nan, nan);
+    packed(code, Host::Xor, invalid, invalid);
+    // Quiet NaNs, lowest priority first, then signalling NaNs likewise.
+    for signalling in [false, true] {
+        for &source in inputs.iter().rev() {
+            packed(code, Host::MoveAligned, mask, source);
+            code.asm()
+                .float_compare(lanes, mask, Rm::Xmm(mask), UNORDERED);
+            if signalling {
+                quiet_lanes(code, format, temporary, source);
+                packed(code, Host::AndNot, temporary, mask);
+                packed(code, Host::MoveAligned, mask, temporary);
+                packed(code, Host::Or, invalid, mask);
+            } else {
+                packed(code, Host::Or, nan, mask);
+            }
+            blend(code, selected, source, mask, temporary);
+        }
+    }
+    // Quiet the selection, or replace it by the default NaN.
+    packed(code, Host::EqualDword, temporary, temporary);
+    let (right, left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
+    test_control(code, crate::aarch64::floating::FPCR_DN);
+    let propagate = branch(code, Condition::Zero);
+    right.emit(code, temporary, format.fraction_bits() as u8);
+    left.emit(code, temporary, format.fraction_bits() as u8 - 1);
+    packed(code, Host::MoveAligned, selected, temporary);
+    let done = jump(code);
+    let quiet = code.len();
+    resolve(code, propagate, quiet);
+    right.emit(code, temporary, format.bits() as u8 - 1);
+    left.emit(code, temporary, format.fraction_bits() as u8 - 1);
+    packed(code, Host::Or, selected, temporary);
+    let end = code.len();
+    resolve(code, done, end);
+    active_lanes(code, shape, format, temporary);
+    packed(code, Host::And, nan, temporary);
+    packed(code, Host::And, invalid, temporary);
+}
+
+/// After the host operation into `result`, in the private environment:
+/// replace each NaN-input lane by the selection of [`select_input_nans`],
+/// and each other lane the host made a NaN (an invalid operation) by the
+/// default NaN with IOC. Leaves those invalid lanes in `registers.mask`
+/// and IOC lanes in `registers.invalid`.
+pub(super) fn merge_nans(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    result: u8,
+    registers: NanRegisters,
+) {
+    const UNORDERED: u8 = 3;
+    let NanRegisters {
+        selected,
+        inputs: nan,
+        invalid,
+        mask,
+        temporary,
+    } = registers;
+    let lanes = float_lanes(format, Shape::Vector128);
+    packed(code, Host::MoveAligned, temporary, result);
+    code.asm()
+        .float_compare(lanes, temporary, Rm::Xmm(temporary), UNORDERED);
+    packed(code, Host::MoveAligned, mask, nan);
+    packed(code, Host::AndNot, mask, temporary);
+    active_lanes(code, shape, format, temporary);
+    packed(code, Host::And, mask, temporary);
+    packed(code, Host::Or, invalid, mask);
+    blend(code, result, selected, nan, temporary);
+    // The default NaN.
+    packed(code, Host::EqualDword, selected, selected);
+    let (right, left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
+    right.emit(code, selected, format.fraction_bits() as u8);
+    left.emit(code, selected, format.fraction_bits() as u8 - 1);
+    packed(code, Host::MoveAligned, nan, mask);
+    blend(code, result, selected, nan, temporary);
+}
+
+/// The dword sign-mask bits of the S/D lanes `shape` writes.
+fn active_lane_bits(format: Format, shape: Shape) -> u8 {
+    match (format, shape) {
         (Format::Single, Shape::Scalar) => SCALAR_VECTOR_MASK,
         (Format::Single, Shape::Vector64) | (Format::Double, Shape::Scalar) => {
             SINGLE_LOW_VECTOR_MASK
         }
         _ => SINGLE_VECTOR_MASK,
-    };
+    }
+}
+
+/// The branch for an active `shape` lane that [`exceptional_lane_mask`]
+/// found, after the environment is restored.
+pub(super) fn reject_exceptional_lanes(code: &mut Code, format: Format, shape: Shape) -> usize {
+    let active = active_lane_bits(format, shape);
     code.asm().test_imm(Size::Dword, Rax, i32::from(active));
     branch(code, Condition::NotZero)
 }

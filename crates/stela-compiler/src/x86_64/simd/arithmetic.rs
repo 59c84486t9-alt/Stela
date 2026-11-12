@@ -19,15 +19,16 @@ mod tiny_tests;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, FPSR_UNDERFLOW,
-    INPUT_MINIMUM_EXPONENT, Input, LEFT_VECTOR, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
-    SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_high_qword, clear_scalar,
+    INPUT_MINIMUM_EXPONENT, Input, LEFT_VECTOR, NanRegisters, RESULT_MINIMUM_EXPONENT,
+    RIGHT_VECTOR, SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_high_qword, clear_scalar,
     commit_flush_status, commit_inexact, commit_inexact_divide, commit_inexact_underflow,
-    commit_rounded_status, emit_opcode, environment, exceptional_lane_mask, exponent_range,
-    flush_subnormal_lanes, fpsr_has, jump, nonfinite_lane, prepare_vector_input_range,
-    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
-    reject_exceptional_lanes, reject_invalid, reject_other_status, reject_other_status_but_divide,
-    reject_other_status_but_underflow, resolve, restore_environment, scalar_ordered_range,
-    scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
+    commit_invalid_lanes, commit_rounded_status, emit_opcode, environment, exponent_range,
+    flush_subnormal_lanes, fpsr_has, invalid_lane_mask, jump, merge_nans, minimum_normal_lanes,
+    nonfinite_lane, prepare_vector_input_range, prepare_vector_result_range, read_inputs,
+    read_numerical_right, read_numerical_vector, reject_exceptional_lanes, reject_other_status,
+    reject_other_status_but_divide, reject_other_status_but_underflow, resolve,
+    restore_environment, scalar_ordered_range, scalar_range_or_zero, select_input_nans,
+    sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
     vector_normal_or_zero_range, vector_ordered_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
@@ -53,8 +54,16 @@ const REPLICATE_SINGLE_LANE: u8 = 0x55;
 const REPLICATE_LOW_DOUBLE: u8 = 0x44;
 const REPLICATE_HIGH_DOUBLE: u8 = 0xee;
 const SIGN_BITS: u8 = 1;
-/// [`exceptional_lane_mask`]'s scratch, which aliases no source.
-const EXCEPTIONAL_SCRATCH: [u8; 3] = [3, 4, 5];
+/// [`select_input_nans`]' registers, which alias no source.
+const NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 2,
+    inputs: 3,
+    invalid: 4,
+    mask: 5,
+    temporary: 7,
+};
+/// [`minimum_normal_lanes`]' scratch after [`merge_nans`].
+const MINIMUM_SCRATCH: [u8; 2] = [2, 3];
 /// [`flush_subnormal_lanes`]' scratch, free before the input guards.
 const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
 
@@ -448,6 +457,13 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
     test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
     let strict = branch(code, Condition::NotZero);
     environment(code);
+    select_input_nans(
+        code,
+        operand.format,
+        operand.shape,
+        &[LEFT_VECTOR, right],
+        NAN_REGISTERS,
+    );
     emit_opcode(
         code,
         operand.format,
@@ -455,23 +471,37 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
         arithmetic_opcode(operand.operation),
         right,
     );
-    exceptional_lane_mask(
+    merge_nans(
         code,
         operand.format,
         operand.shape,
         LEFT_VECTOR,
-        EXCEPTIONAL_SCRATCH,
-        // Sums are exact when tiny, and products find tininess before
-        // rounding; a quotient's is not known.
-        operand.operation == BinaryOperation::Divide,
+        NAN_REGISTERS,
     );
+    // FMULX's infinity times zero is two, not the default NaN; and sums
+    // are exact when tiny, and products find tininess before rounding,
+    // but a quotient's is not known: those lanes take the helper.
+    let checked = match operand.operation {
+        BinaryOperation::MultiplyExtended => Some(NAN_REGISTERS.mask),
+        BinaryOperation::Divide => {
+            minimum_normal_lanes(code, operand.format, LEFT_VECTOR, MINIMUM_SCRATCH);
+            Some(MINIMUM_SCRATCH[0])
+        }
+        _ => None,
+    };
+    if let Some(lanes) = checked {
+        Host::DwordSignMask.register(code, Gpr::Rax as u8, lanes, TargetCpu::Baseline);
+    }
+    invalid_lane_mask(code, NAN_REGISTERS.invalid);
     restore_environment(code);
-    helper.push(reject_exceptional_lanes(
-        code,
-        operand.format,
-        operand.shape,
-    ));
-    helper.push(reject_invalid(code));
+    if checked.is_some() {
+        helper.push(reject_exceptional_lanes(
+            code,
+            operand.format,
+            operand.shape,
+        ));
+    }
+    commit_invalid_lanes(code, operand.format, operand.shape);
     commit_rounded_status(code);
     let done = jump(code);
     let strict_start = code.len();

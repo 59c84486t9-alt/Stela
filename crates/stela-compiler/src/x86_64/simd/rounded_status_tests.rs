@@ -3,14 +3,16 @@
 //! against the Arm reference, compiled as blocks for every tier this host
 //! has: every inline completion matches the reference in every V register
 //! and FPSR, every exit leaves the state unchanged, and with FZ, FIZ, AH
-//! and the trap enables clear, every lane set without a NaN input or an
-//! invalid operation (or a minimum normal quotient or FMA result) completes
-//! inline, its subnormal inputs and results, UFC, OFC and DZC included.
+//! and the trap enables clear, every binary lane set completes inline, NaN
+//! propagation, invalid operations, subnormal inputs and results, UFC, OFC
+//! and DZC included, but for FMULX's infinity times zero and a minimum
+//! normal quotient; FMA lanes complete likewise but for a quiet NaN
+//! addend with a NaN product and a minimum normal result.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         self, BinaryOperation, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ,
-        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INVALID, fused::FusedOperation,
+        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, fused::FusedOperation,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::native::run,
@@ -164,23 +166,17 @@ fn binary_word(operation: BinaryOperation, format: Format, lanes: u32) -> Option
     Some(base | u32::from(lanes * format.bits() == 128) << 30 | registers)
 }
 
-/// Whether a lane may exit: a NaN input, an operation that raises the
-/// host's invalid (FMULX's infinity times zero, two on Arm), or a minimum
-/// normal quotient.
+/// Whether a lane may exit: FMULX's infinity times zero (two on Arm, for
+/// which the host raises invalid), or a minimum normal quotient (the host
+/// may find its tininess after rounding).
 fn exits(operation: BinaryOperation, format: Format, fpcr: u32, left: u64, right: u64) -> bool {
     let magnitude = |bits: u64| bits & !format.sign_mask();
     let special = |a: u64, b: u64| magnitude(a) == 0 && magnitude(b) == format.exponent_mask();
-    is_nan(format, left)
-        || is_nan(format, right)
-        || (operation == BinaryOperation::MultiplyExtended
-            && (special(left, right) || special(right, left)))
-        || floating::evaluate(format, operation, fpcr, left, right).is_ok_and(|outcome| {
-            // The host may find a quotient's tininess after rounding: a
-            // minimum normal quotient takes the helper.
-            outcome.exceptions & INVALID != 0
-                || operation == BinaryOperation::Divide
-                    && outcome.bits & !format.sign_mask() == 1 << format.fraction_bits()
-        })
+    (operation == BinaryOperation::MultiplyExtended
+        && (special(left, right) || special(right, left)))
+        || operation == BinaryOperation::Divide
+            && floating::evaluate(format, operation, fpcr, left, right)
+                .is_ok_and(|outcome| magnitude(outcome.bits) == 1 << format.fraction_bits())
 }
 
 #[test]
@@ -395,22 +391,26 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                         let label =
                             alloc::format!("{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}");
                         let lanes = fused_lanes(form, format, &initial);
+                        // A quiet NaN addend with a NaN product (Arm's
+                        // default NaN for infinity times zero) and a minimum
+                        // normal result (the host may find its tininess
+                        // after rounding) take the helper.
                         let must_inline = fma
                             && rounded(fpcr)
                             && lanes.iter().all(|&(operation, addend, left, right)| {
-                                !is_nan(format, addend)
-                                    && !is_nan(format, left)
-                                    && !is_nan(format, right)
+                                let magnitude = |bits: u64| bits & !format.sign_mask();
+                                let infinity = format.exponent_mask();
+                                let quiet = 1 << (format.fraction_bits() - 1);
+                                let invalid_product = is_nan(format, left)
+                                    || is_nan(format, right)
+                                    || magnitude(left) == 0 && magnitude(right) == infinity
+                                    || magnitude(left) == infinity && magnitude(right) == 0;
+                                !(is_nan(format, addend) && addend & quiet != 0 && invalid_product)
                                     && floating::fused::evaluate(
                                         format, operation, fpcr, addend, left, right,
                                     )
                                     .is_ok_and(|outcome| {
-                                        // The host may find tininess after
-                                        // rounding: a minimum normal result
-                                        // takes the helper.
-                                        outcome.exceptions & INVALID == 0
-                                            && outcome.bits & !format.sign_mask()
-                                                != 1 << format.fraction_bits()
+                                        magnitude(outcome.bits) != 1 << format.fraction_bits()
                                     })
                             });
                         let mut actual = initial.clone();
