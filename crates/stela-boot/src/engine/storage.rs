@@ -736,6 +736,14 @@ fn step(worker: &DiskWorker) -> Option<staged_disk::Step> {
 /// only queues commands and takes results, and [`serve_staged`] runs the host
 /// I/O outside it. With every slot taken the disk is left as it is.
 pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
+    try_stage(device).unwrap_or_else(|device| device)
+}
+
+/// [`stage`], answering the disk as it was (`Err`) when every slot is
+/// taken, for a caller that may only queue on a staged one.
+pub(super) fn try_stage(
+    device: Box<dyn BlockDevice>,
+) -> core::result::Result<Box<dyn BlockDevice>, Box<dyn BlockDevice>> {
     if STAGED
         .iter()
         .all(|slot| !slot.load(Ordering::Acquire).is_null())
@@ -744,7 +752,7 @@ pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
             "HOST DISK serial={} not staged: every slot is taken; its I/O runs under the devices' lock\n",
             device.identity().serial
         ));
-        return device;
+        return Err(device);
     }
     let (disk, worker) = staged_disk::stage(device, wake_staged);
     let worker: *mut DiskWorker = Box::leak(Box::new(worker));
@@ -754,7 +762,7 @@ pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
             .is_ok()
     });
     assert!(stored, "a staged disk slot was taken meanwhile");
-    Box::new(disk)
+    Ok(Box::new(disk))
 }
 
 /// Give each staged disk's host side its queued commands and take its

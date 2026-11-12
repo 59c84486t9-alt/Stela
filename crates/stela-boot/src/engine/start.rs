@@ -2858,6 +2858,8 @@ fn start_devices(
             disks.profile_callbacks(options.profile);
             if let Some(store) = store {
                 translations::set_partition(store);
+                #[cfg(feature = "nvk")]
+                super::pipelines::prepare();
             }
             fdr_device = fdr;
             if usb.firmware_missing() {

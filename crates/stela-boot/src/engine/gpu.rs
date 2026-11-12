@@ -2225,6 +2225,10 @@ pub(super) fn pump() {
         Look::No => {}
     }
     lap(PumpPart::Look);
+    // The pipelines the device added go to the store's file, queued a
+    // piece at a time.
+    #[cfg(feature = "nvk")]
+    super::pipelines::step();
     let took = host::rdtsc().wrapping_sub(started);
     PUMPS.ticks.fetch_add(took, Ordering::Relaxed);
     PUMPS.longest.fetch_max(took, Ordering::Relaxed);
