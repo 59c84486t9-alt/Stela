@@ -40,12 +40,16 @@ impl Drop for Storage {
 }
 
 fn backing(rights: AccessPermissions) -> Arc<MemoryBacking> {
-    let layout = Layout::from_size_align(STORAGE_BYTES, HOST_QUANTITY_BYTES).unwrap();
+    backing_of(rights, STORAGE_BYTES)
+}
+
+fn backing_of(rights: AccessPermissions, bytes: usize) -> Arc<MemoryBacking> {
+    let layout = Layout::from_size_align(bytes, HOST_QUANTITY_BYTES).unwrap();
     // SAFETY: nonempty valid layout kept by Storage for deallocation.
     let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let storage = Arc::new(Storage { pointer, layout });
     // SAFETY: owner pins raw coherent RAM, with no aliasing Rust references.
-    unsafe { MemoryBacking::new(pointer, STORAGE_BYTES, rights, storage) }.unwrap()
+    unsafe { MemoryBacking::new(pointer, bytes, rights, storage) }.unwrap()
 }
 
 fn system() -> Arc<MemorySystem> {
@@ -57,7 +61,7 @@ fn domain(
     backing: &Arc<MemoryBacking>,
     base: u64,
 ) -> Arc<MemoryDomain> {
-    let view = MemoryView::new(Arc::clone(backing), base, 0, STORAGE_BYTES, READONLY).unwrap();
+    let view = MemoryView::new(Arc::clone(backing), base, 0, backing.bytes(), READONLY).unwrap();
     MemoryDomain::new(
         Arc::clone(system),
         vec![(view, ATTRIBUTES)],
@@ -78,7 +82,7 @@ fn publish(
 }
 
 fn snapshot(backing: &MemoryBacking) -> Vec<u8> {
-    (0..STORAGE_BYTES)
+    (0..backing.bytes())
         .map(|offset| {
             let pointer = backing.host_pointer(offset, 1, AccessKind::Read).unwrap();
             // SAFETY: synchronous exact raw reads have pinned rights/lifetime.
@@ -421,6 +425,165 @@ fn publication_across_granules_invalidates_exactly_the_granules_it_writes() {
             assert_eq!(stored, expected, "{first}..{last} granule {granule}");
         }
     }
+}
+
+fn load_reservation(
+    system: &MemorySystem,
+    backing: &MemoryBacking,
+    domain: &MemoryDomain,
+    offset: usize,
+) -> (
+    monitor::ThreadMonitor<MemoryBacking, MemoryView, MappingAttributes>,
+    monitor::Access<MemoryBacking, MemoryView, MappingAttributes>,
+    u64,
+) {
+    let mut reservation = system.reservations.thread();
+    let access = reservation_access(domain, offset as u64);
+    let value = system
+        .reservations
+        .load(&mut reservation, &access, || {
+            let pointer = backing.host_pointer(offset, 8, AccessKind::Read).unwrap();
+            // SAFETY: reservation gate protects this live raw read.
+            unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) }
+        })
+        .unwrap() as u64;
+    (reservation, access, value)
+}
+
+/// One gate per page writes the bytes and fails exactly the reservations that
+/// publishing granule by granule, one gate each, writes and fails.
+#[test]
+fn page_publication_matches_publication_granule_by_granule() {
+    const PAGE: usize = PUBLICATION_PAGE_BYTES;
+    const ERG: usize = 64;
+    const BYTES: usize = 3 * PAGE;
+    let pattern: Vec<_> = (0..BYTES).map(|index| (index * 7 + 3) as u8).collect();
+    for (first, last) in [
+        (0, PAGE),
+        (PAGE - 40, PAGE + 40),
+        (3, BYTES - 5),
+        (100, 200),
+        (PAGE - 1, PAGE + 1),
+        (8000, 40000),
+        (2 * PAGE, BYTES),
+    ] {
+        let bytes: Vec<_> = (first..last).map(|index| (index as u8) ^ 0x5a).collect();
+        let mut outcomes = Vec::new();
+        let mut contents = Vec::new();
+        for by_granule in [false, true] {
+            let system = MemorySystem::new(ERG as u64, 64).unwrap();
+            let backing = backing_of(RIGHTS, BYTES);
+            let domain = domain(&system, &backing, GUEST_BASE);
+            publish(&system, &backing, 0, &pattern).unwrap();
+            let mut reservations: Vec<_> = (0..BYTES / ERG)
+                .map(|granule| load_reservation(&system, &backing, &domain, granule * ERG))
+                .collect();
+            if by_granule {
+                let mut at = first;
+                while at < last {
+                    let end = ((at / ERG + 1) * ERG).min(last);
+                    publish(&system, &backing, at, &bytes[at - first..end - first]).unwrap();
+                    at = end;
+                }
+            } else {
+                publish(&system, &backing, first, &bytes).unwrap();
+            }
+            contents.push(snapshot(&backing));
+            outcomes.push(
+                reservations
+                    .iter_mut()
+                    .map(|(reservation, access, _)| {
+                        system
+                            .reservations
+                            .store(reservation, access, || Ok::<_, ()>(()))
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let mut expected = pattern.clone();
+        expected[first..last].copy_from_slice(&bytes);
+        assert_eq!(contents[0], expected, "{first}..{last}");
+        assert_eq!(contents[0], contents[1], "{first}..{last}");
+        assert_eq!(outcomes[0], outcomes[1], "{first}..{last}");
+        for (granule, outcome) in outcomes[0].iter().enumerate() {
+            let written = granule * ERG < last && first < (granule + 1) * ERG;
+            assert_eq!(
+                *outcome == monitor::ConditionalWrite::Failed,
+                written,
+                "{first}..{last} granule {granule}"
+            );
+        }
+    }
+}
+
+/// An exclusive increment racing page publications never stores a value it
+/// loaded before a publication that wrote its granule.
+#[test]
+fn page_publication_fails_a_concurrent_exclusive_pair_inside_the_page() {
+    const PAGE: usize = PUBLICATION_PAGE_BYTES;
+    const BYTES: usize = 2 * PAGE;
+    const WORD: usize = PAGE + 5 * 64 + 8;
+    const PUBLICATIONS: u64 = 400;
+    let system = MemorySystem::new(64, 64).unwrap();
+    let backing = backing_of(RIGHTS, BYTES);
+    let domain = domain(&system, &backing, GUEST_BASE);
+    let image = |generation: u64| -> Vec<u8> {
+        (0..BYTES / 8)
+            .flat_map(|word| ((generation << 32) | word as u64).to_le_bytes())
+            .collect()
+    };
+    let read_word = |offset: usize| -> u64 {
+        let pointer = backing.host_pointer(offset, 8, AccessKind::Read).unwrap();
+        // SAFETY: synchronous exact raw read with pinned rights and lifetime.
+        unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) }.unwrap() as u64
+    };
+    publish(&system, &backing, 0, &image(0)).unwrap();
+    let stop = core::sync::atomic::AtomicBool::new(false);
+    let stored = std::thread::scope(|scope| {
+        let racer = scope.spawn(|| {
+            let mut stored = 0_u64;
+            while !stop.load(Ordering::Acquire) || stored == 0 {
+                let (mut reservation, access, value) =
+                    load_reservation(&system, &backing, &domain, WORD);
+                let pointer = backing.host_pointer(WORD, 8, AccessKind::Write).unwrap();
+                let outcome = system
+                    .reservations
+                    .store(&mut reservation, &access, || {
+                        // SAFETY: the reservation gate orders this live raw write.
+                        unsafe {
+                            access::write_part(
+                                pointer.as_ptr(),
+                                8,
+                                u128::from(value + 1),
+                                TargetCpu::Baseline,
+                            )
+                        }
+                    })
+                    .unwrap();
+                if outcome != monitor::ConditionalWrite::Failed {
+                    stored += 1;
+                }
+            }
+            stored
+        });
+        for generation in 1..=PUBLICATIONS {
+            publish(&system, &backing, 0, &image(generation)).unwrap();
+            assert_eq!(read_word(WORD) >> 32, generation, "stale exclusive store");
+            assert_eq!(
+                read_word(WORD - 8),
+                (generation << 32) | (WORD / 8 - 1) as u64
+            );
+            assert_eq!(
+                read_word(PAGE - 8),
+                (generation << 32) | (PAGE / 8 - 1) as u64
+            );
+        }
+        stop.store(true, Ordering::Release);
+        racer.join().unwrap()
+    });
+    assert!(stored > 0);
+    assert_eq!(read_word(WORD) >> 32, PUBLICATIONS, "stale exclusive store");
 }
 
 #[test]

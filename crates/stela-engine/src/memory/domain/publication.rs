@@ -7,6 +7,8 @@ use alloc::vec::Vec;
 use stela_compiler::TargetCpu;
 
 const HOST_QUANTITY_BYTES: usize = 8;
+/// Untracked publication takes one writer gate per page of this size.
+const PUBLICATION_PAGE_BYTES: usize = 16 * 1024;
 
 /// Failed host publication, including the prefix written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,8 +191,19 @@ impl MemorySystem {
             .host_pointer(offset, bytes.len(), AccessKind::Read)
             .map_err(map_extent_error)?;
         // The scalar read/write helpers share width and quantity validation.
-        // Preflight every recipe before the first reservation or byte effect.
-        for part in PublicationParts::new(pointer.as_ptr() as usize, bytes.len()) {
+        // Preflight every recipe before the first reservation or byte effect:
+        // the edge parts, and one aligned quadword standing for the middle.
+        let address = pointer.as_ptr() as usize;
+        let (head, middle) = quadword_middle(address, bytes.len());
+        let tail = head + middle;
+        let edges = PublicationParts::new(address, head)
+            .chain(PublicationParts::new(address + tail, bytes.len() - tail));
+        let sample = (middle != 0).then_some(PublicationPart {
+            address: address + head,
+            offset: head,
+            bytes: HOST_QUANTITY_BYTES,
+        });
+        for part in edges.chain(sample) {
             access::read_footprint(part.address, part.bytes, TargetCpu::Baseline)
                 .map_err(|_| preflight_fault(MemoryStatus::Unsupported))?;
         }
@@ -200,20 +213,16 @@ impl MemorySystem {
                 .try_reserve(PublicationParts::new(pointer.as_ptr() as usize, bytes.len()).count())
                 .map_err(|_| preflight_fault(MemoryStatus::Domain))?;
         }
-        let erg = self.reservations.erg_bytes() as usize;
-        let mut parts = PublicationParts::new(pointer.as_ptr() as usize, bytes.len()).peekable();
-        while let Some(part) = parts.next() {
-            // Untracked parts of one reservation granule share one writer
-            // gate: its reservations go before the first part as before
-            // each, and each part keeps its own scalar store.
-            if receipts.is_none() && !backing.source_mutation.enabled() {
-                let granule = (offset + part.offset) / erg;
-                let mut end = part.offset + part.bytes;
-                while let Some(next) = parts.next_if(|next| (offset + next.offset) / erg == granule)
-                {
-                    end = next.offset + next.bytes;
-                }
-                let start = part.offset;
+        if receipts.is_none() && !backing.source_mutation.enabled() {
+            // Untracked bytes of one page share one writer gate. It holds
+            // every stripe of the page's granules and invalidates their
+            // reservations before the first store, so an exclusive pair on
+            // any of them completes wholly before the page or fails, as it
+            // would against the page's granules written one by one.
+            let mut start = 0;
+            while start < bytes.len() {
+                let end = ((offset + start) / PUBLICATION_PAGE_BYTES + 1) * PUBLICATION_PAGE_BYTES;
+                let end = (end - offset).min(bytes.len());
                 let range = monitor::WriteRange::new(
                     Arc::clone(backing),
                     (offset + start) as u64,
@@ -226,23 +235,15 @@ impl MemorySystem {
                 let mut completed = start;
                 self.reservations
                     .with_writer(&range, monitor::Invalidation::BeforeAttempt, || {
-                        for part in PublicationParts::new(part.address, end - start) {
-                            let at = start + part.offset;
-                            let mut staging = [0; HOST_QUANTITY_BYTES];
-                            staging[..part.bytes].copy_from_slice(&bytes[at..at + part.bytes]);
-                            let value = u128::from(u64::from_le_bytes(staging));
-                            // SAFETY: as for a part of its own below.
-                            unsafe {
-                                access::write_part(
-                                    part.address as *mut u8,
-                                    part.bytes,
-                                    value,
-                                    TargetCpu::Baseline,
-                                )
-                            }?;
-                            completed = at + part.bytes;
+                        // SAFETY: whole host extent and scalar recipes were
+                        // checked; the caller pins rights and lifetime.
+                        unsafe {
+                            write_page(
+                                pointer.as_ptr().add(start),
+                                &bytes[start..end],
+                                &mut completed,
+                            )
                         }
-                        Ok::<_, access::AccessError>(())
                     })
                     .map_err(|error| PublicationFault {
                         status: match error {
@@ -251,8 +252,11 @@ impl MemorySystem {
                         },
                         completed,
                     })?;
-                continue;
+                start = end;
             }
+            return Ok(());
+        }
+        for part in PublicationParts::new(pointer.as_ptr() as usize, bytes.len()) {
             let mut mutation = self
                 .prepare_source_write(backing, offset + part.offset, part.bytes)
                 .map_err(|status| PublicationFault {
@@ -301,6 +305,66 @@ impl MemorySystem {
         }
         Ok(())
     }
+}
+
+/// The bytes before the first aligned host quadword of an extent, and the
+/// bytes of the whole aligned quadwords after them.
+fn quadword_middle(address: usize, bytes: usize) -> (usize, usize) {
+    let head = (address.next_multiple_of(HOST_QUANTITY_BYTES) - address).min(bytes);
+    (
+        head,
+        (bytes - head) / HOST_QUANTITY_BYTES * HOST_QUANTITY_BYTES,
+    )
+}
+
+/// Write `bytes` at `target` under the caller's writer gate: edge parts as
+/// scalar stores, the aligned middle as quadword MOVs, then one fence.
+/// `completed` advances by the bytes written, for a fault's prefix.
+///
+/// # Safety
+/// The whole extent is live, pinned, writable coherent write-back RAM whose
+/// scalar recipes were checked, and the caller holds its writer gate.
+unsafe fn write_page(
+    target: *mut u8,
+    bytes: &[u8],
+    completed: &mut usize,
+) -> Result<(), access::AccessError> {
+    let address = target as usize;
+    let (head, middle) = quadword_middle(address, bytes.len());
+    let scalars = |from: usize, to: usize, completed: &mut usize| {
+        for part in PublicationParts::new(address + from, to - from) {
+            let at = from + part.offset;
+            let mut staging = [0; HOST_QUANTITY_BYTES];
+            staging[..part.bytes].copy_from_slice(&bytes[at..at + part.bytes]);
+            let value = u128::from(u64::from_le_bytes(staging));
+            // SAFETY: inside the caller's checked extent and gate.
+            unsafe {
+                access::write_part(
+                    part.address as *mut u8,
+                    part.bytes,
+                    value,
+                    TargetCpu::Baseline,
+                )
+            }?;
+            *completed += part.bytes;
+        }
+        Ok(())
+    };
+    scalars(0, head, completed)?;
+    // SAFETY: the aligned middle lies inside the caller's extent. An aligned
+    // quadword MOV is single-copy atomic like the XCHG it replaces, and the
+    // fence below orders the page as each XCHG ordered its part.
+    let quadwords = unsafe { target.add(head) }.cast::<u64>();
+    let (whole, _) = bytes[head..head + middle].as_chunks::<HOST_QUANTITY_BYTES>();
+    for (index, quadword) in whole.iter().enumerate() {
+        let value = u64::from_le_bytes(*quadword);
+        // SAFETY: as above.
+        unsafe { core::ptr::write_volatile(quadwords.add(index), value) };
+    }
+    *completed += middle;
+    scalars(head + middle, bytes.len(), completed)?;
+    core::sync::atomic::fence(Ordering::SeqCst);
+    Ok(())
 }
 
 struct PublicationPart {
