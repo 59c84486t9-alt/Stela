@@ -14,9 +14,14 @@ use std::{
     time::Duration,
 };
 
-/// Bytes fetched per request: large enough that a member streams at the
-/// connection's speed, small enough that a retry repeats little.
+/// Bytes fetched per request while reading on from the last range: large
+/// enough that a member streams at the connection's speed, small enough that
+/// a retry repeats little.
 const CHUNK: u64 = 16 * 1024 * 1024;
+/// Bytes fetched by a read that does not continue the last range: a ZIP
+/// directory lookup reads a member's local header and nothing after it, so
+/// sizing an image's members costs kilobytes each, not a [`CHUNK`].
+const PROBE: u64 = 64 * 1024;
 /// Attempts per range before the read fails: with waits of 2, 4, 8, 16 and
 /// 30 s between them, a connection that drops for about a minute, as Wi-Fi
 /// changing access points does, pauses the download instead of ending it.
@@ -212,7 +217,14 @@ impl Read for Remote {
         let cached = self.position >= self.chunk_start
             && self.position < self.chunk_start + self.chunk.len() as u64;
         if !cached {
-            let bytes = CHUNK.min(self.len - self.position);
+            // Reading on from the last range streams; any other read probes.
+            let streaming = !self.chunk.is_empty()
+                && self.position == self.chunk_start + self.chunk.len() as u64;
+            let wanted = match streaming {
+                true => CHUNK,
+                false => PROBE.max(buffer.len() as u64).min(CHUNK),
+            };
+            let bytes = wanted.min(self.len - self.position);
             self.fetch(self.position, bytes).map_err(io::Error::other)?;
         }
         let offset = (self.position - self.chunk_start) as usize;
@@ -307,6 +319,42 @@ mod tests {
         (format!("http://{address}/Restore.ipsw"), served)
     }
 
+    /// Serve `body` with ranges, counting the body bytes sent.
+    fn serve_counting(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = sent.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut range = (0, body.len() - 1);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        let (start, end) = value.trim().split_once('-').unwrap();
+                        range = (start.parse().unwrap(), end.parse().unwrap());
+                    }
+                }
+                let (start, end) = (range.0, range.1.min(body.len() - 1));
+                count.fetch_add(end - start + 1, Ordering::SeqCst);
+                let mut reply = format!(
+                    "HTTP/1.1 206 Partial Content\r\nETag: \"e\"\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                    end - start + 1
+                )
+                .into_bytes();
+                reply.extend_from_slice(&body[start..=end]);
+                let _ = stream.write_all(&reply);
+            }
+        });
+        (format!("http://{address}/Restore.ipsw"), sent)
+    }
+
     fn body() -> Vec<u8> {
         (0..(CHUNK as usize + 1000))
             .map(|i| (i % 251) as u8)
@@ -332,6 +380,34 @@ mod tests {
         remote.read_exact(&mut head)?;
         assert_eq!(head, body[30..50]);
         assert_eq!(served.load(Ordering::SeqCst), before);
+        // Reading on past it streams the rest.
+        let mut rest = Vec::new();
+        remote.read_to_end(&mut rest)?;
+        assert_eq!(rest, body[50..]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_jump_fetches_a_probe_and_reading_on_fetches_whole_chunks() -> Result<()> {
+        let body: Vec<u8> = (0..(3 * CHUNK as usize)).map(|i| (i % 251) as u8).collect();
+        let (url, fetched) = serve_counting(body.clone());
+        let mut remote = Remote::open(Client::new(), &url)?;
+        let opened = fetched.load(Ordering::SeqCst);
+        // A ZIP local header: a few bytes after a seek.
+        let mut header = [0; 30];
+        remote.seek(SeekFrom::Start(CHUNK + 7))?;
+        remote.read_exact(&mut header)?;
+        assert_eq!(header[..], body[CHUNK as usize + 7..CHUNK as usize + 37]);
+        assert_eq!(fetched.load(Ordering::SeqCst) - opened, PROBE as usize);
+        // A member read on from there: the probe, then whole chunks.
+        remote.seek(SeekFrom::Start(CHUNK + 7))?;
+        let mut member = vec![0; CHUNK as usize];
+        remote.read_exact(&mut member)?;
+        assert_eq!(member, body[CHUNK as usize + 7..2 * CHUNK as usize + 7]);
+        assert_eq!(
+            fetched.load(Ordering::SeqCst) - opened,
+            (PROBE + CHUNK) as usize
+        );
         Ok(())
     }
 
