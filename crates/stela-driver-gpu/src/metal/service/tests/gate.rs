@@ -197,6 +197,7 @@ fn commit_shared(shared: &Shared, connection: NonZeroU64) {
 
 const HOST: ServiceHost = ServiceHost {
     relax: || panic!("nothing waits"),
+    relax_within: || panic!("nothing waits"),
     stack: 0x4000,
     run: |_, call| call(),
     report: |_| {},
@@ -719,7 +720,9 @@ fn a_call_that_waits_past_the_bound_for_the_turn_runs_nothing_and_is_answered_pe
     static TICKS: AtomicU64 = AtomicU64::new(0);
     static GAVE_UP: AtomicBool = AtomicBool::new(false);
     let host = ServiceHost {
-        relax: || {},
+        // A bounded wait never does the unbounded wait's work.
+        relax: || panic!("a bounded wait relaxed without a bound"),
+        relax_within: || true,
         ticks: || TICKS.fetch_add(1, Ordering::Relaxed),
         served: |served| {
             if served.gave_up {
@@ -745,6 +748,40 @@ fn a_call_that_waits_past_the_bound_for_the_turn_runs_nothing_and_is_answered_pe
     assert!(response.iter().all(|&byte| byte == 0), "nothing answered");
     assert!(GAVE_UP.load(Ordering::Relaxed));
     // Made again once the holder has left, it runs.
+    drop(held);
+    let again = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, again, &mut memory).unwrap();
+    assert_eq!(completed(&mut memory, again).status, Status::Ok.raw());
+}
+
+/// The platform ends a bounded wait at once when the holder waits for its
+/// processor: the call is answered `Pending` before the bound passes, after
+/// a single relax.
+#[test]
+fn a_bounded_wait_the_platform_ends_is_answered_pending_before_the_bound() {
+    use core::sync::atomic::AtomicU64;
+    static RELAXED: AtomicU64 = AtomicU64::new(0);
+    let host = ServiceHost {
+        relax: || panic!("a bounded wait relaxed without a bound"),
+        relax_within: || {
+            RELAXED.fetch_add(1, Ordering::Relaxed);
+            false
+        },
+        ticks: || 0,
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    shared.set_wait_bound(u64::MAX);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let held = shared.try_turn().unwrap();
+    let waiting = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, waiting, &mut memory).unwrap();
+    assert_eq!(
+        completed(&mut memory, waiting).status,
+        Status::Pending.raw()
+    );
+    assert_eq!(RELAXED.load(Ordering::Relaxed), 1);
     drop(held);
     let again = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
     GateService::serve(&shared, connection, again, &mut memory).unwrap();

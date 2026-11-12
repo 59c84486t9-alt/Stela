@@ -46,6 +46,10 @@ static BACKEND_PENDING: AtomicU64 = AtomicU64::new(0);
 const fn host(served: fn(Served)) -> ServiceHost {
     ServiceHost {
         relax: core::hint::spin_loop,
+        relax_within: || {
+            core::hint::spin_loop();
+            true
+        },
         stack: 1,
         run: |_, call| call(),
         report: |_| {},

@@ -90,6 +90,9 @@ fn run(stack: u64, body: &mut dyn FnMut()) {
     }
 }
 
+/// A moment of a wait with no bound: on the boot processor it pumps, as the
+/// holder may wait for Linux, which only runs there; one Linux step can take
+/// tens of milliseconds.
 pub(super) fn relax() {
     // What this waits for may be retiring a mapping, which waits for this.
     crate::native_mmio::shootdown::service();
@@ -97,6 +100,20 @@ pub(super) fn relax() {
         pump_waiting();
     }
     hint::spin_loop();
+}
+
+/// A moment of a frontend call's bounded wait for the turn
+/// (`ServiceHost::relax_within`): it never pumps, as one Linux step can
+/// outlast the bound many times over. On the boot processor, while a call is
+/// posted to Linux, the wait ends at once: the holder may wait for that call,
+/// which the boot processor serves only once it returns to its run loop.
+fn relax_within() -> bool {
+    crate::native_mmio::shootdown::service();
+    if host::processor() == BOOT_CPU.load(Ordering::Relaxed) && client::posted_waiting() {
+        return false;
+    }
+    hint::spin_loop();
+    true
 }
 
 /// A table of the texts a log line has shown, and a count of the distinct
@@ -1041,6 +1058,7 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
         service,
         ServiceHost {
             relax,
+            relax_within,
             stack,
             run,
             report,

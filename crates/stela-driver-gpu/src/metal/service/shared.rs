@@ -299,8 +299,14 @@ fn waited_value(waited: &AtomicU64, timeline: &AtomicU64) -> Option<u64> {
 /// What the platform does for the shared service.
 #[derive(Clone, Copy)]
 pub struct ServiceHost {
-    /// Waits a moment for the turn's holder.
+    /// Waits a moment for the turn's holder, in a wait with no bound: it may
+    /// do the platform's work the holder waits for, however long that takes.
     pub relax: fn(),
+    /// Waits a moment for the turn's holder, in a wait the wait bound ends
+    /// ([`SharedService::set_wait_bound`]): it does nothing that can outlast
+    /// the bound, and answers false when the wait should end at once, as the
+    /// holder waits for work only this processor does once it stops waiting.
+    pub relax_within: fn() -> bool,
     /// What `run` takes first: this service's stack.
     pub stack: u64,
     /// Calls its argument on a stack a compile fits on. Only a turn's holder
@@ -1138,17 +1144,22 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     }
 
     /// The turn, unless the wait bound ([`Self::set_wait_bound`]) passes
-    /// first, counted from `rang`.
+    /// first, counted from `rang`, or the platform ends the wait
+    /// ([`ServiceHost::relax_within`]). Without a bound it waits as
+    /// [`Self::turn`] does.
     fn turn_within(&self, rang: u64) -> Option<Turn<'_, B, C>> {
         let bound = self.wait_bound.load(Ordering::Acquire);
         loop {
             if let Some(turn) = self.try_turn() {
                 return Some(turn);
             }
-            if bound != 0 && (self.host.ticks)().wrapping_sub(rang) >= bound {
+            if bound == 0 {
+                (self.host.relax)();
+                continue;
+            }
+            if (self.host.ticks)().wrapping_sub(rang) >= bound || !(self.host.relax_within)() {
                 return None;
             }
-            (self.host.relax)();
         }
     }
 
@@ -1593,6 +1604,7 @@ mod tests {
 
     const HOST: ServiceHost = ServiceHost {
         relax: || panic!("nothing waits"),
+        relax_within: || panic!("nothing waits"),
         stack: 0x4000,
         run: |_, call| call(),
         report: |_| {},

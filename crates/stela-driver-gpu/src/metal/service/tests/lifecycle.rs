@@ -134,6 +134,7 @@ fn shared_quiesce_uses_the_serialized_service_stack() {
         service(),
         ServiceHost {
             relax: || panic!("nothing waits"),
+            relax_within: || panic!("nothing waits"),
             stack: 0x4000,
             run: |stack, call| {
                 assert_eq!(stack, 0x4000);
