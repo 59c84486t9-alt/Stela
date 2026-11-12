@@ -1188,3 +1188,31 @@ fn only_the_first_namespace_carries_the_bare_controller_serial() {
     // A controller whose only active namespace is not the first ID.
     assert_eq!(super::namespace_serial("S1", 3, Some(3)), "S1");
 }
+
+/// A command's start and finish count in their parts: the start and its
+/// doorbell, and the look at the completion queue with its status read and
+/// completion doorbell. Other tests run commands too, so counts only grow.
+#[test]
+fn a_command_counts_its_start_and_finish_parts() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    parts::take();
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut controller = disk.controller.borrow_mut();
+        let id = running_id(&controller, read);
+        post(&mut controller, id, 0);
+    }
+    assert!(matches!(disk.finish(read), Some(Ok(Some(_)))));
+    let counted = parts::take();
+    let calls = |part: parts::Part| counted[part as usize][0];
+    for part in [
+        parts::Part::Start,
+        parts::Part::Doorbell,
+        parts::Part::Advance,
+        parts::Part::Status,
+        parts::Part::Ring,
+    ] {
+        assert!(calls(part) >= 1, "{part:?}");
+    }
+}

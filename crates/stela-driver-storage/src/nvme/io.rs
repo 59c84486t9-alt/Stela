@@ -113,10 +113,17 @@ impl Controller {
         queue.submissions.give()?;
         queue.tail = queue.next(queue.tail);
         fence(Ordering::SeqCst);
-        registers.write32(
-            DOORBELLS + 2 * usize::from(queue.id) * stride,
-            u32::from(queue.tail),
-        )?;
+        let doorbell = || {
+            registers.write32(
+                DOORBELLS + 2 * usize::from(queue.id) * stride,
+                u32::from(queue.tail),
+            )
+        };
+        if io {
+            parts::timed(parts::Part::Doorbell, doorbell)?;
+        } else {
+            doorbell()?;
+        }
         Ok(id)
     }
 
@@ -394,7 +401,11 @@ impl Controller {
         self.advance_into(None);
     }
 
-    fn advance_into(&mut self, mut destination: Option<ReadDestination<'_>>) {
+    fn advance_into(&mut self, destination: Option<ReadDestination<'_>>) {
+        parts::timed(parts::Part::Advance, || self.advance_timed(destination));
+    }
+
+    fn advance_timed(&mut self, mut destination: Option<ReadDestination<'_>>) {
         if self.fault.is_some() {
             self.fail_all();
             return;
@@ -428,7 +439,10 @@ impl Controller {
             match self.posted(true) {
                 Ok(None) => break,
                 Ok(Some((id, _, status, sq_head))) => {
-                    if !reaped && let Err(error) = self.trust_completion() {
+                    if !reaped
+                        && let Err(error) =
+                            parts::timed(parts::Part::Status, || self.trust_completion())
+                    {
                         (self.io.head, self.io.phase, self.io.consumed) = (head, phase, consumed);
                         self.poison(error);
                         self.fail_all();
@@ -452,7 +466,8 @@ impl Controller {
                 }
             }
         }
-        if reaped && let Err(error) = self.ring_completion(true) {
+        if reaped && let Err(error) = parts::timed(parts::Part::Ring, || self.ring_completion(true))
+        {
             self.poison(error);
             self.fail_all();
             return;

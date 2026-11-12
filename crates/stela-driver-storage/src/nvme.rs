@@ -28,6 +28,7 @@ mod admin;
 mod features;
 mod io;
 pub mod owned;
+pub mod parts;
 mod recovery;
 pub mod vmd;
 use core::{
@@ -1303,13 +1304,15 @@ impl BlockDevice for Namespace {
         let controller = self.controller.clone();
         let mut controller = controller.borrow_mut();
         if !controller.busy() {
-            self.rescan(&mut controller)?;
+            parts::timed(parts::Part::Rescan, || self.rescan(&mut controller))?;
         } else if let Some(error) = &self.removed {
             return Err(error.clone());
         }
         let command = command.within(&self.identity, 0)?;
         let block = self.identity.block_size as usize;
-        controller.start(self.namespace, block, command)
+        parts::timed(parts::Part::Start, || {
+            controller.start(self.namespace, block, command)
+        })
     }
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {

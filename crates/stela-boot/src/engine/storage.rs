@@ -1159,6 +1159,20 @@ impl HostDisks {
                 Self::report_callback(serial, callbacks, tsc_hz, "periodic");
             }
         }
+        // Where NVMe commands' starts and finishes went on the host: each
+        // part's calls and microseconds since the last report
+        // (`stela_drivers::storage::nvme::parts`); a start holds its doorbell,
+        // an advance its status read and completion doorbell.
+        let nvme = stela_drivers::storage::nvme::parts::take();
+        if nvme.iter().any(|[calls, _]| *calls != 0) {
+            let mut line = String::from("HOST NVME PARTS calls/us");
+            for (name, [calls, ticks]) in
+                stela_drivers::storage::nvme::parts::PARTS.iter().zip(nvme)
+            {
+                line.push_str(&format!(" {name}={calls}/{}", micros(ticks)));
+            }
+            output::arguments(format_args!("{line}\n"));
+        }
         // The longest of each part of a host disk call: the drivers' lock
         // and root change for any caller, a disk's calls inside them, and a
         // staged disk's step.
