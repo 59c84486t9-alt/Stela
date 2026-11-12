@@ -1,5 +1,8 @@
-//! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
-use super::numerical::{emit_opcode_to, float_lanes, helper_section, jump};
+//! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked (S/D
+//! infinities and subnormals included with FPCR.AH clear).
+use super::numerical::{
+    commit_flush_status, emit_opcode_to, float_lanes, flush_subnormal_lanes, helper_section, jump,
+};
 use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
 use crate::x86_64::simd::encode::guest;
@@ -16,8 +19,8 @@ use crate::{
     GuestAddress, GuestState, TargetCpu,
     aarch64::{
         floating::{
-            FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT,
-            rounding::RoundingOperation,
+            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_SHIFT,
+            Format, INEXACT, rounding::RoundingOperation,
         },
         simd::{arithmetic::Shape, rounding::Operand},
     },
@@ -425,13 +428,7 @@ fn checked_source(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
         (1u32 << (lanes(operand) * (format.bits() / BITS_PER_BYTE))) - 1
     } else {
         Host::DwordSignMask.register(code, 0, EXPONENT_VECTOR, TargetCpu::Baseline);
-        match (format, operand.shape) {
-            (_, Shape::Scalar) => 1,
-            (Format::Single, Shape::Vector64) => SINGLE_LOW_MASK,
-            (Format::Single, Shape::Vector128) => SINGLE_FULL_MASK,
-            (Format::Double, Shape::Vector128) => DOUBLE_FULL_MASK,
-            _ => unreachable!("decoded checked round arrangement"),
-        }
+        active_dwords(operand)
     };
     all_bits(code, mask);
     helper.push(branch(code, Condition::NotZero));
@@ -653,13 +650,70 @@ fn checked_inexact(code: &mut Code, operand: &Operand) {
     code.asm().setcc(Cond::Ne, R10);
 }
 
+/// S/D sources with FPCR.AH clear: FZ or FIZ flush subnormal lanes to
+/// their signed zeros (FZ adding IDC to R11D), and every lane but a NaN
+/// rounds on the host as on Arm: an infinity to itself, exactly, and a
+/// subnormal to its signed zero or, rounding away from it, to one, inexact.
+/// A NaN lane takes `helper`. With AH set the normal-or-zero guard
+/// ([`checked_source`]) applies. Clobbers XMM2 to XMM5 and EAX.
+fn checked_special_source(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
+    const UNORDERED: u8 = 3;
+    let format = operand.format;
+    code.asm().alu(Alu::Xor, Size::Dword, R11, R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(
+        code,
+        format,
+        operand.shape,
+        SOURCE,
+        [TEMP, RESIDUAL, MASK, CONSTANT],
+    );
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    packed(code, Host::MoveAligned, TEMP, SOURCE);
+    code.asm().float_compare(
+        float_lanes(format, Shape::Vector128),
+        TEMP,
+        Rm::Xmm(SOURCE),
+        UNORDERED,
+    );
+    Host::DwordSignMask.register(code, 0, TEMP, TargetCpu::Baseline);
+    code.asm()
+        .test_imm(Size::Dword, Rax, active_dwords(operand) as i32);
+    helper.push(branch(code, Condition::NotZero));
+    let checked = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    checked_source(code, operand, helper);
+    let end = code.len();
+    resolve(code, checked, end);
+}
+
+/// The DWORD sign-mask bits of the active S/D lanes.
+fn active_dwords(operand: &Operand) -> u32 {
+    match (operand.format, operand.shape) {
+        (_, Shape::Scalar) => 1,
+        (Format::Single, Shape::Vector64) => SINGLE_LOW_MASK,
+        (Format::Single, Shape::Vector128) => SINGLE_FULL_MASK,
+        (Format::Double, Shape::Vector128) => DOUBLE_FULL_MASK,
+        _ => unreachable!("decoded checked round arrangement"),
+    }
+}
+
 fn checked_rounding(
     code: &mut Code,
     operand: &Operand,
     helper: &mut Vec<usize>,
     target: TargetCpu,
 ) {
-    checked_source(code, operand, helper);
+    if operand.format == Format::Half {
+        checked_source(code, operand, helper);
+    } else {
+        checked_special_source(code, operand, helper);
+    }
     if operand.format == Format::Half {
         checked_half(code, operand, target);
     } else {
@@ -675,7 +729,12 @@ fn checked_rounding(
     checked_inexact(code, operand);
 }
 
-fn commit_result(code: &mut Code, operand: &Operand) {
+/// Commit the result and fresh IXC, and with `flushed` the IDC in R11D
+/// ([`checked_special_source`]).
+fn commit_result(code: &mut Code, operand: &Operand, flushed: bool) {
+    if flushed {
+        commit_flush_status(code);
+    }
     if operand.operation.exact() {
         let mut asm = code.asm();
         asm.shift_imm(ShiftOp::Shl, Size::Dword, R10, INEXACT_SHIFT);
@@ -728,11 +787,12 @@ pub(in crate::x86_64) fn emit(
     // Scalar Half widening and packing cost more than compact integer rounding.
     // Packed Half and S/D still benefit from capability-checked ROUND.
     let scalar_half = operand.format == Format::Half && operand.shape == Shape::Scalar;
-    if target.supports(TargetCpu::Sse41) && !scalar_half {
+    let checked = target.supports(TargetCpu::Sse41) && !scalar_half;
+    if checked {
         checked_rounding(code, operand, &mut helper, target);
     } else {
         integer_rounding(code, operand, &mut helper);
     }
     helper_section(code, &helper, pc);
-    commit_result(code, operand);
+    commit_result(code, operand, checked && operand.format != Format::Half);
 }

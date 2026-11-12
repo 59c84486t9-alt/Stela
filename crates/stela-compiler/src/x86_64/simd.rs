@@ -104,6 +104,12 @@ mod rounding;
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
+mod rounding_tests;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
 mod scalar_precision_tests;
 #[cfg(all(
     test,
