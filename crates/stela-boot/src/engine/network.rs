@@ -233,7 +233,14 @@ impl HostNetwork {
                 }
                 Err(error) => {
                     output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
-                    failures.push(format!("{location}: {error}"));
+                    failures.push(match error {
+                        // A started adapter with no cable reports no link.
+                        stela_runtime::net::NetError::NoCarrier => format!(
+                            "{location}: no link. Check that a network cable is plugged in and \
+                             that the other end is on."
+                        ),
+                        error => format!("{location}: no address ({error})."),
+                    });
                     // Its driver stops it, in the loader's root (`RootLink`).
                     drop(stack);
                     output::arguments(format_args!("NETWORK adapter {location} released\n"));

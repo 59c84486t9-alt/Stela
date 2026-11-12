@@ -719,7 +719,9 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Link for Ethernet<R, D> {
         }
         self.check().map_err(|e| self.error(e))?;
         if !self.update_link().map_err(|e| self.error(e))? {
-            return Err(LinkError::Adapter("PCH Ethernet link is down".into()));
+            // No cable, or nothing on its other end: the adapter runs and
+            // waits for a link, as `e1000_watchdog_task` waits.
+            return Err(LinkError::NoCarrier);
         }
         let mut space = self.reclaim();
         for _ in 0..1000 {

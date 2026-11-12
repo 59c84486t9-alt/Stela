@@ -1604,9 +1604,42 @@ fn an_i219_left_in_ulp_without_a_cable_starts_with_its_link_down() {
     let controller = unsafe { Controller::new_i219(0x15b8, io, timer) }.unwrap();
     let mut net = open(controller, &mut memory);
     assert!(!net.carrier());
-    assert!(matches!(
-        net.transmit(&[0; 60]),
-        Err(LinkError::Adapter(ref why)) if why.contains("link is down")
-    ));
+    assert_eq!(net.transmit(&[0; 60]), Err(LinkError::NoCarrier));
     assert!(!net.controller.is_poisoned());
+}
+
+/// An adapter started with no cable runs and reports no link, on every PCH
+/// cohort: it neither fails its start nor poisons itself, a frame meets "no
+/// carrier", and a cable plugged in later brings the link up.
+#[test]
+fn an_adapter_without_a_cable_starts_and_reports_no_link() {
+    let cohorts: [fn() -> Setup; 2] = [setup, || setup_lpt(0x153a, 0)];
+    for (cohort, setup) in cohorts.into_iter().enumerate() {
+        let (state, released, controller) = setup();
+        let status = state.borrow().mac[&super::super::STATUS];
+        {
+            let mut m = state.borrow_mut();
+            m.mac.insert(super::super::STATUS, 0);
+            m.phy.insert((2, 0, 1), 0);
+        }
+        let mut memory = Memory::new();
+        let mut net = open(controller, &mut memory);
+        for _ in 0..3 {
+            assert!(!net.carrier(), "cohort {cohort}");
+        }
+        assert_eq!(net.transmit(&[0; 60]), Err(LinkError::NoCarrier));
+        assert!(!net.controller.is_poisoned());
+        assert!(net.failure().is_none());
+        // The cable goes in.
+        {
+            let mut m = state.borrow_mut();
+            m.mac.insert(super::super::STATUS, status);
+            m.mac.insert(super::super::ICR, LINK_EVENT);
+            m.phy.insert((2, 0, 1), PHY_LINK_READY);
+        }
+        assert!(net.carrier(), "cohort {cohort}");
+        net.shutdown().unwrap();
+        drop(net);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
 }
