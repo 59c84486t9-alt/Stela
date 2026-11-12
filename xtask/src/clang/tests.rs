@@ -145,6 +145,11 @@ fn debian_takes_the_newest_supported_install() {
     let toolset = select(&host).unwrap();
     assert_eq!(toolset.version.major, 22);
     assert_eq!(toolset.clang, path("/usr/lib/llvm-22/bin/clang"));
+    // Debian's clang++ links to clang, which acts as the C++ driver only
+    // under a C++ name.
+    let host = host.link("/usr/lib/llvm-22/bin/clang++", "/usr/lib/llvm-22/bin/clang");
+    let toolset = select(&host).unwrap();
+    assert_eq!(toolset.clangxx, path("/usr/lib/llvm-22/bin/clang++"));
     assert_eq!(toolset.clangxx, path("/usr/lib/llvm-22/bin/clang++"));
     assert_eq!(toolset.linker, path("/usr/lib/llvm-22/bin/ld.lld"));
     assert_eq!(toolset.archiver, path("/usr/lib/llvm-22/bin/llvm-ar"));
