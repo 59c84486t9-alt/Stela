@@ -121,8 +121,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 self.nvram_word(0x80, false, 4096)?,
             );
         }
-        if !valid_mac(mac) || mac == crate::Mac([0, 0x10, 0x18, 0, 0, 0]) {
-            return Err(Error::InvalidMac);
+        if !super::board::usable_mac(mac) {
+            mac = self.fallback_mac()?;
         }
         Ok(Board {
             mac,

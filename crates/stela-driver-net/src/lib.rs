@@ -64,6 +64,29 @@ impl Mac {
     }
 }
 
+impl Mac {
+    /// Linux `is_valid_ether_addr`: neither multicast nor all zeros.
+    pub fn is_valid(&self) -> bool {
+        !self.is_multicast() && self.0 != [0; 6]
+    }
+
+    /// Linux `eth_random_addr`, for an adapter whose programmed address is
+    /// missing or invalid (`eth_hw_addr_random`): a locally administered
+    /// unicast address, mixed from the time-stamp counter and `seed` (the
+    /// adapter's location), so two such adapters get different ones.
+    pub fn random(seed: &[u8]) -> Self {
+        let mut mixed = Clock::ticks() ^ 0x9e37_79b9_7f4a_7c15;
+        for &byte in seed {
+            mixed = (mixed ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^= mixed >> 31;
+        let [a, b, c, d, e, f, _, _] = mixed.to_le_bytes();
+        Self([(a & !1) | 2, b, c, d, e, f])
+    }
+}
+
 impl fmt::Display for Mac {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let [a, b, c, d, e, g] = self.0;
@@ -133,3 +156,20 @@ pub trait Link {
 }
 
 mod timing;
+
+#[cfg(test)]
+mod mac_tests {
+    use super::Mac;
+
+    #[test]
+    fn a_random_address_is_locally_administered_unicast_and_differs_by_adapter() {
+        let one = Mac::random(b"0000:03:00.0");
+        let other = Mac::random(b"0000:04:00.0");
+        for mac in [one, other] {
+            assert!(mac.is_valid());
+            assert_eq!(mac.0[0] & 3, 2, "{mac}");
+        }
+        assert_ne!(one, other);
+        assert!(!Mac([0; 6]).is_valid() && !Mac([1, 0, 0, 0, 0, 1]).is_valid());
+    }
+}

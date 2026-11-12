@@ -303,21 +303,23 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             }
             self.wait(0x360, 1000, 10000, |v| v != 0)?;
             self.wait(0x334, 1000, 100000, |v| v != 0)?;
+            // aq_fw2x_get_mac_permanent: no efuse leaves the address zero.
             let efuse = self.read(0x364)?;
-            let address = efuse
-                .checked_add(160)
-                .filter(|_| efuse != 0)
-                .ok_or(Error::Unsupported("AQtion no programmed efuse address"))?;
-            let mut mac = [0; 2];
-            self.ram_read(address, &mut mac)?;
-            let low = mac[0].to_be_bytes();
-            let high = mac[1].to_be_bytes();
-            fw.mac = Mac([low[0], low[1], low[2], low[3], high[0], high[1]]);
+            if efuse != 0 {
+                let address = efuse
+                    .checked_add(160)
+                    .ok_or(Error::Unsupported("AQtion efuse address overflow"))?;
+                let mut mac = [0; 2];
+                self.ram_read(address, &mut mac)?;
+                let low = mac[0].to_be_bytes();
+                let high = mac[1].to_be_bytes();
+                fw.mac = Mac([low[0], low[1], low[2], low[3], high[0], high[1]]);
+            }
         }
-        if fw.mac.is_multicast() || fw.mac.0 == [0; 6] {
-            return Err(Error::Unsupported(
-                "AQtion invalid permanent station address",
-            ));
+        // aq_nic_ndev_register: an invalid address, or an engineering
+        // sample's partial one (zero OUI), is replaced by a random one.
+        if !fw.mac.is_valid() || fw.mac.0[..3] == [0; 3] {
+            fw.mac = Mac::random(&profile.device.to_le_bytes());
         }
         Ok(fw)
     }

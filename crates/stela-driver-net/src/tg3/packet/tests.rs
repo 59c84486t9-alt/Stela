@@ -1242,6 +1242,39 @@ fn nvm_fallback_uses_internal_port_and_exact_read_protocol() {
     assert!(packet.retire().is_ok());
 }
 #[test]
+fn an_unprogrammed_address_falls_back_to_the_mac_registers_then_a_random_one() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
+    for registers in [Some((0x0000_0234, 0x5678_9abc)), None] {
+        let (hardware, pages, domain, peer) = parts();
+        {
+            let mut p = peer.lock().unwrap();
+            // Neither the bootcode mailbox nor NVRAM holds an address.
+            p.sram.insert(0xc14, 0);
+            p.sram.insert(0xe00, 0x8000_362c);
+            if let Some((high, low)) = registers {
+                p.mac.insert(0x410, high);
+                p.mac.insert(0x414, low);
+            }
+        }
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
+        let packet = match unsafe { Packet::attach(hardware, &pages, domain) } {
+            Ok(p) => p,
+            Err((e, _)) => panic!("{e:?}"),
+        };
+        let mac = packet.mac();
+        match registers {
+            // tg3_get_device_address: MAC_ADDR_0 as the bootcode left it.
+            Some(_) => assert_eq!(mac, Mac([2, 0x34, 0x56, 0x78, 0x9a, 0xbc])),
+            // tg3_init_one: eth_hw_addr_random.
+            None => assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}"),
+        }
+        assert!(packet.retire().is_ok());
+    }
+}
+#[test]
 fn live_status_with_future_completion_cannot_retire_unsubmitted_buffer() {
     if crate::test_process::isolate_model() {
         return;

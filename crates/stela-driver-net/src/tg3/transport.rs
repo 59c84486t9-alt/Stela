@@ -74,6 +74,9 @@ pub struct Hardware<R: Registers, D: Delay> {
     // Source invariant captured once from this endpoint's initial
     // Link Control. A later 10/100 workaround clear must not erase that fact.
     clkreq_bug: Option<bool>,
+    /// The address `tg3_get_device_address`'s fallback chose, kept so the
+    /// board read again after the core reset finds the same one.
+    fallback_mac: Option<crate::Mac>,
 }
 impl<R: Registers, D: Delay> Drop for Hardware<R, D> {
     fn drop(&mut self) {
@@ -103,6 +106,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             stopped: false,
             core_reset_complete: false,
             clkreq_bug: None,
+            fallback_mac: None,
         }
     }
     /// Stop inherited packet engines while the original configuration/root

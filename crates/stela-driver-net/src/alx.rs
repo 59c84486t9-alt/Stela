@@ -277,7 +277,10 @@ impl<R: Registers> Alx<R> {
         if !configured {
             hardware.setup_speed_duplex()?;
         }
-        let mac = hardware.permanent_mac()?;
+        // Without a programmed address Linux uses a random one.
+        let mac = hardware
+            .permanent_mac()?
+            .unwrap_or_else(|| Mac::random(location.as_bytes()));
         let phy = hardware.phy_identity()?;
         hardware.read_ext(3, MDIO_DEVS1)?;
         hardware.read_ext(3, MDIO_DEVS2)?;

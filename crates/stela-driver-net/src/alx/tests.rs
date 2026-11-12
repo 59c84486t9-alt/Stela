@@ -355,7 +355,7 @@ fn fast_ethernet_parts_do_not_advertise_gigabit() {
 }
 
 #[test]
-fn the_station_address_falls_back_to_the_efuse_and_otherwise_refuses() {
+fn the_station_address_falls_back_to_the_efuse_and_otherwise_is_random() {
     let mut fixture = Fixture::new();
     {
         let mut model = fixture.model.borrow_mut();
@@ -374,10 +374,14 @@ fn the_station_address_falls_back_to_the_efuse_and_otherwise_refuses() {
         model.registers.insert(STAD0, 0);
         model.registers.insert(STAD1, 0);
     }
-    assert!(matches!(
-        fixture.attach(Fixture::chip(0x10a1, 0)),
-        Err(BlockError::Unsupported(_))
-    ));
+    // alx_probe: "Invalid permanent address programmed, using random one".
+    let adapter = fixture.attach(Fixture::chip(0x10a1, 0)).unwrap();
+    let mac = adapter.mac();
+    assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}");
+    let [a, b, c, d, e, f] = mac.0;
+    let model = fixture.model.borrow();
+    assert_eq!(model.get(STAD0), u32::from_be_bytes([c, d, e, f]));
+    assert_eq!(model.get(STAD1), u32::from(u16::from_be_bytes([a, b])));
 }
 
 #[test]

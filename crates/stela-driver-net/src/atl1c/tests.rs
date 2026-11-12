@@ -461,7 +461,7 @@ fn l1d_2_disables_eee_slows_its_clocks_and_uses_the_slow_mdio_clock_while_down()
 }
 
 #[test]
-fn the_station_address_comes_from_the_eeprom_load_or_the_adapter_is_refused() {
+fn the_station_address_comes_from_the_eeprom_load_or_is_random() {
     let mut fixture = Fixture::new();
     {
         let mut model = fixture.model.borrow_mut();
@@ -507,10 +507,18 @@ fn the_station_address_comes_from_the_eeprom_load_or_the_adapter_is_refused() {
         model.registers.insert(MAC_STA_ADDR, 0);
         model.registers.insert(MAC_STA_ADDR + 4, 0);
     }
-    assert!(matches!(
-        fixture.attach(0x1063),
-        Err(BlockError::Unsupported(_))
-    ));
+    // atl1c_probe: no valid permanent address, so eth_hw_addr_random; the
+    // adapter starts and is programmed with it.
+    let adapter = fixture.attach(0x1063).unwrap();
+    let mac = adapter.mac();
+    assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}");
+    let [a, b, c, d, e, f] = mac.0;
+    let model = fixture.model.borrow();
+    assert_eq!(model.get(MAC_STA_ADDR), u32::from_be_bytes([c, d, e, f]));
+    assert_eq!(
+        model.get(MAC_STA_ADDR + 4),
+        u32::from(u16::from_be_bytes([a, b]))
+    );
 }
 
 #[test]

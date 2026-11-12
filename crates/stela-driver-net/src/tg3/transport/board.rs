@@ -171,8 +171,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             let low = self.nvram_word(offset + 4, atmel && matches!(page, 264 | 528), page)?;
             mac = decode_mac(high, low);
         }
-        if !valid_mac(mac) || mac == Mac([0, 0x10, 0x18, 0, 0, 0]) {
-            return Err(Error::InvalidMac);
+        if !usable_mac(mac) {
+            mac = self.fallback_mac()?;
         }
         let led = super::board::decode_led(cfg2)?;
         Ok(Board {
@@ -269,6 +269,31 @@ pub(super) fn decode_mac(high: u32, low: u32) -> Mac {
 }
 pub(super) fn valid_mac(mac: Mac) -> bool {
     mac.0 != [0; 6] && !mac.is_multicast()
+}
+/// A valid address other than the bare Broadcom OUI an unprogrammed part
+/// reports.
+pub(super) fn usable_mac(mac: Mac) -> bool {
+    valid_mac(mac) && mac != Mac([0, 0x10, 0x18, 0, 0, 0])
+}
+
+impl<R: Registers, D: Delay> Hardware<R, D> {
+    /// The end of `tg3_get_device_address` when neither the bootcode
+    /// mailbox nor NVRAM holds an address: the MAC address registers, then
+    /// a random address (`eth_hw_addr_random` in `tg3_init_one`).
+    /// The choice is kept for this epoch's later board reads.
+    pub(super) fn fallback_mac(&mut self) -> Result<Mac, Error> {
+        if let Some(mac) = self.fallback_mac {
+            return Ok(mac);
+        }
+        let mut mac = decode_mac(self.read(MAC_ADDR_0_HIGH)?, self.read(MAC_ADDR_0_LOW)?);
+        if !usable_mac(mac) {
+            let identity = self.identity.ok_or(Error::NotIdentified)?;
+            let [low, high] = identity.device.to_le_bytes();
+            mac = Mac::random(&[low, high, identity.bdf_function, identity.function]);
+        }
+        self.fallback_mac = Some(mac);
+        Ok(mac)
+    }
 }
 
 pub(super) fn decode_led(cfg2: u32) -> Result<u32, Error> {

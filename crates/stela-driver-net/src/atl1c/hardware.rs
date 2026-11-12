@@ -415,11 +415,11 @@ impl<R: Registers> Hardware<R> {
     }
 
     /// `atl1c_get_permanent_address`: what firmware left in the station
-    /// registers, otherwise the EEPROM or OTP load. Linux falls back to a
-    /// random address; this port refuses the adapter instead.
-    pub(super) fn permanent_mac(&self) -> Result<crate::Mac, BlockError> {
+    /// registers, otherwise the EEPROM or OTP load; `None` when neither
+    /// holds a valid address.
+    pub(super) fn permanent_mac(&self) -> Result<Option<crate::Mac>, BlockError> {
         if let Some(mac) = self.station() {
-            return Ok(mac);
+            return Ok(Some(mac));
         }
         let kind = self.chip.kind;
         let mut otp = self.read(OTP_CTRL);
@@ -467,9 +467,7 @@ impl<R: Registers> Hardware<R> {
             self.write_dbg(MIIDBG_VOLT_CTRL, value & !VOLT_CTRL_SWLOWEST)?;
             self.delay(20)?;
         }
-        self.station().ok_or(BlockError::Unsupported(
-            "atl1c without a valid station address",
-        ))
+        Ok(self.station())
     }
 
     /// `atl1c_hw_set_mac_addr`.

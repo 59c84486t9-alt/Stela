@@ -19,7 +19,7 @@
 //! enables memory decoding and bus mastering and disables INTx for this
 //! polled driver) and the AER severity mask; the AR8151 v2.0 multi-queue
 //! variant that answers `MT_MAGIC` is refused; an adapter without a
-//! valid station address is refused instead of given a random one; a
+//! valid station address gets a random one, as in Linux; a
 //! received frame spread over several free descriptors is dropped (the
 //! 1522-byte buffers hold every standard frame). Jumbo frames,
 //! Wake-on-LAN and suspend are outside this port. DMA buffers live until
@@ -302,7 +302,10 @@ impl<R: Registers> Atl1c<R> {
         hardware.reset_phy()?;
         hardware.reset_mac()?;
         let phy = hardware.init_phy()?;
-        let mac = hardware.permanent_mac()?;
+        // Without a programmed address Linux uses a random one.
+        let mac = hardware
+            .permanent_mac()?
+            .unwrap_or_else(|| Mac::random(location.as_bytes()));
         hardware.set_mac(mac);
         let queues = Queues::new(dma)?;
         let mut adapter = Self {

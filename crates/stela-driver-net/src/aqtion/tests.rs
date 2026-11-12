@@ -795,6 +795,32 @@ fn b1_and_antigua_rings_transfer_and_wrap() {
     }
 }
 #[test]
+fn a_missing_or_invalid_permanent_address_is_replaced_by_a_random_one() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
+    // aq_fw2x_get_mac_permanent without an efuse, an engineering sample's
+    // zero OUI, and Antigua's zero address: aq_nic_ndev_register's random.
+    for (id, unprogram) in [
+        (0x07b1, (|peer: &Peer| peer.set(0x364, 0)) as fn(&Peer)),
+        (0x07b1, |peer: &Peer| {
+            peer.ram.borrow_mut().insert(0x100a0, 0x0000_0012);
+        }),
+        (0x04c0, |peer: &Peer| {
+            peer.set(0x12008, 0);
+            peer.set(0x1200c, 0);
+        }),
+    ] {
+        let (mut net, peer, _, _) = setup(id);
+        unprogram(&peer);
+        net.start().unwrap();
+        let mac = net.mac();
+        assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{id:04x}: {mac}");
+        assert_ne!(mac.0[..3], [0; 3]);
+        net.retire().unwrap();
+    }
+}
+#[test]
 fn bad_rx_metadata_and_fragment_chains_are_not_invented_as_frames() {
     if crate::test_process::isolate_model() {
         return;

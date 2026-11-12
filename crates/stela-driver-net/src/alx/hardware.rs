@@ -253,10 +253,11 @@ impl<R: Registers> Hardware<R> {
     }
 
     /// `alx_get_perm_macaddr`: the station registers, then the eFuse, then
-    /// a flash or EEPROM when one is present.
-    pub(super) fn permanent_mac(&self) -> Result<crate::Mac, BlockError> {
+    /// a flash or EEPROM when one is present; `None` when none holds a
+    /// valid address.
+    pub(super) fn permanent_mac(&self) -> Result<Option<crate::Mac>, BlockError> {
         if let Some(mac) = self.station() {
-            return Ok(mac);
+            return Ok(Some(mac));
         }
         let failed = BlockError::Unsupported("alx station address load timed out");
         let value = self
@@ -265,7 +266,7 @@ impl<R: Registers> Hardware<R> {
         self.write(SLD, value | SLD_START);
         self.wait_clear(SLD, SLD_START)?.ok_or(failed.clone())?;
         if let Some(mac) = self.station() {
-            return Ok(mac);
+            return Ok(Some(mac));
         }
         if self.read(EFLD) & (EFLD_F_EXIST | EFLD_E_EXIST) != 0 {
             let value = self
@@ -274,12 +275,10 @@ impl<R: Registers> Hardware<R> {
             self.write(EFLD, value | EFLD_START);
             self.wait_clear(EFLD, EFLD_START)?.ok_or(failed)?;
             if let Some(mac) = self.station() {
-                return Ok(mac);
+                return Ok(Some(mac));
             }
         }
-        Err(BlockError::Unsupported(
-            "alx without a valid station address",
-        ))
+        Ok(None)
     }
 
     /// `alx_set_macaddr`.

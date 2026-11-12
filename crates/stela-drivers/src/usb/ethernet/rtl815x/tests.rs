@@ -271,16 +271,39 @@ fn revision01_reads_idr_preserves_station_and_masks_only_led_mode() {
         assert!(chip.carrier().unwrap());
         chip.stop().unwrap();
     }
-    for case in 0..4 {
+    for case in 0..3 {
         let model = Rc::new(RefCell::new(Model::new(0x4c00)));
         match case {
             0 => model.borrow_mut().stuck_reset = true,
             1 => model.borrow_mut().stuck_phy = true,
-            2 => model.borrow_mut().stuck_list = true,
-            _ => model.borrow_mut().set(PLA, PLA_IDR, 4, 0x05040303),
+            _ => model.borrow_mut().stuck_list = true,
         }
         assert!(Chip::attach(Io(model), Revision(0x4c00), false).is_err());
     }
+}
+
+#[test]
+fn an_invalid_station_address_is_replaced_by_a_programmed_random_one() {
+    // determine_ethernet_addr: an invalid address gets eth_hw_addr_random;
+    // set_ethernet_addr writes it to IDR on every revision but 01.
+    let model = Rc::new(RefCell::new(Model::new(0x4c00)));
+    model.borrow_mut().set(PLA, PLA_IDR, 4, 0x05040303);
+    let (_, mac) = Chip::attach(Io(model), Revision(0x4c00), false).unwrap();
+    assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}");
+    let model = Rc::new(RefCell::new(Model::new(0x4c10)));
+    model.borrow_mut().set(PLA, PLA_BACKUP, 4, 0);
+    model.borrow_mut().set(PLA, PLA_BACKUP + 4, 4, 0);
+    let (_, mac) = Chip::attach(Io(model.clone()), Revision(0x4c10), false).unwrap();
+    assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}");
+    let [a, b, c, d, e, f] = mac.0;
+    assert_eq!(
+        model.borrow().get(PLA, PLA_IDR, 4),
+        u32::from_le_bytes([a, b, c, d])
+    );
+    assert_eq!(
+        model.borrow().get(PLA, PLA_IDR + 4, 2),
+        u32::from(u16::from_le_bytes([e, f]))
+    );
 }
 
 #[test]
@@ -398,8 +421,10 @@ fn backup_station_address_is_validated_then_restored_with_write_gate() {
         let model = Rc::new(RefCell::new(Model::new(0x4c10)));
         model.borrow_mut().set(PLA, PLA_BACKUP, 4, first);
         model.borrow_mut().set(PLA, PLA_BACKUP + 4, 4, 0);
-        assert!(Chip::attach(Io(model.clone()), Revision(0x4c10), false).is_err());
-        assert_eq!(model.borrow().trace.len(), 3);
+        // Invalid (zero, multicast, all ones): a random address instead.
+        let (_chip, mac) = Chip::attach(Io(model.clone()), Revision(0x4c10), false).unwrap();
+        assert!(mac.is_valid() && mac.0[0] & 2 != 0, "{mac}");
+        assert_ne!(model.borrow().get(PLA, PLA_IDR, 4), first);
     }
 }
 
