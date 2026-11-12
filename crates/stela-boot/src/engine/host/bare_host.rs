@@ -750,6 +750,10 @@ impl Host for BareHost<'_> {
         core::hint::spin_loop();
     }
 
+    fn halts_on_doorbell(&self) -> bool {
+        crate::native_idle::waits_on_doorbell(state().ring)
+    }
+
     fn poll_interrupt(&mut self) -> bool {
         crate::native_mmio::shootdown::service();
         crate::output::send_queued();

@@ -232,6 +232,19 @@ impl Ring {
     }
 }
 
+/// Whether every [`wait_with`] on `ring`'s CPU monitors its doorbell, so that
+/// another core's [`Doorbell::ring`] ends it with a store, not an interrupt:
+/// the CPU has a doorbell, and it either admitted no states (a C1 MWAIT on
+/// the doorbell) or admitted MWAIT states alone. Such a wake costs the waker
+/// a store and the sleeper its state's exit, so a waiting PE need not poll
+/// before it halts.
+pub(crate) fn waits_on_doorbell(ring: Option<Ring>) -> bool {
+    ring.is_some_and(|ring| {
+        admission(Some(ring.apic))
+            .is_none_or(|admission| processor::waits_with_mwait(&admission.states))
+    })
+}
+
 /// [`wait`], on this CPU's doorbell when it has one: a wait in an admitted
 /// MWAIT state, or with no admitted state at all, monitors the doorbell, so
 /// that a [`Doorbell::ring`] ends it as an interrupt would.

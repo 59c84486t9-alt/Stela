@@ -2844,3 +2844,20 @@ fn released_host_work_goes_to_a_pe_that_sleeps_waiting_for_an_interrupt() {
     assert_eq!(*work.kicked.lock().unwrap(), [2]);
     assert!(hub.take_service());
 }
+
+/// A core whose halt waits on a doorbell never polls before it halts; any
+/// other polls as Linux's haltpoll governor fits it, at most `most`.
+#[test]
+fn the_halt_poll_is_none_on_a_doorbell_and_bounded_elsewhere() {
+    let most = 200;
+    for (poll, blocked) in [(0, 10), (200, 10), (100, 1000), (0, 1000)] {
+        assert_eq!(idle_poll_after(poll, blocked, most, true), 0);
+    }
+    // A short wait that halted doubles the poll, to at least a quarter.
+    assert_eq!(idle_poll_after(0, 10, most, false), 50);
+    assert_eq!(idle_poll_after(50, 10, most, false), 100);
+    assert_eq!(idle_poll_after(200, 10, most, false), 200);
+    // Long waits halve it, and below a quarter it stops.
+    assert_eq!(idle_poll_after(200, 1000, most, false), 100);
+    assert_eq!(idle_poll_after(50, 1000, most, false), 0);
+}

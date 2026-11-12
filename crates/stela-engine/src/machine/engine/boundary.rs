@@ -387,6 +387,16 @@ pub trait Host {
     fn arm_timer(&mut self, deadline: Option<u64>);
     /// Block until a host interrupt arrives.
     fn wait_for_interrupt(&mut self);
+    /// Whether [`Self::wait_for_interrupt`] waits on a doorbell another core
+    /// rings with a store (an MWAIT on a monitored line), as well as for an
+    /// interrupt: a wake then costs the waker a store and this core its
+    /// state's exit, so a waiting PE halts at once instead of polling first
+    /// (`Machine::tune_idle_poll`). A halt an interrupt alone ends polls
+    /// briefly first: under a hypervisor the halt, its timer and the wake
+    /// each take an exit to it.
+    fn halts_on_doorbell(&self) -> bool {
+        false
+    }
     /// Take a pending host interrupt without blocking; whether one came
     /// since the last look.
     fn poll_interrupt(&mut self) -> bool {

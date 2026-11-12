@@ -83,6 +83,22 @@ pub trait Kick: Send + Sync {
     }
 }
 
+/// The halt-poll after a wait that took `blocked` counts, from `poll`, at
+/// most `most`: none on a core whose halt waits on a doorbell
+/// ([`Host::halts_on_doorbell`]), where a wake is a store; elsewhere as
+/// Linux's haltpoll governor fits it: halved once waits outlast the longest
+/// poll (and none below a quarter of it), doubled to at least that quarter
+/// when a short one had to halt.
+pub(super) fn idle_poll_after(poll: u64, blocked: u64, most: u64, doorbell: bool) -> u64 {
+    if doorbell {
+        0
+    } else if blocked > most {
+        Some(poll / 2).filter(|poll| *poll >= most / 4).unwrap_or(0)
+    } else {
+        (poll * 2).clamp(most / 4, most)
+    }
+}
+
 /// A PE that may use any context's translations ([`Inbox::translating`]).
 const ANY_CONTEXT: u32 = u32::MAX;
 
@@ -1744,18 +1760,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Fit [`Self::idle_poll`] to a wait that took `blocked` counts as
-    /// Linux's haltpoll governor does: halve it once waits outlast the
-    /// longest poll, double it when a short one had to halt.
+    /// Fit [`Self::idle_poll`] to a wait that took `blocked` counts
+    /// ([`idle_poll_after`]).
     pub(super) fn tune_idle_poll(&mut self, blocked: u64) {
         let most = self.profile.counter_frequency / super::processors::IDLE_POLL_HZ;
-        self.idle_poll = if blocked > most {
-            Some(self.idle_poll / 2)
-                .filter(|poll| *poll >= most / 4)
-                .unwrap_or(0)
-        } else {
-            (self.idle_poll * 2).clamp(most / 4, most)
-        };
+        self.idle_poll =
+            idle_poll_after(self.idle_poll, blocked, most, self.host.halts_on_doorbell());
     }
 
     /// Complete a short WFE inside the scheduler's entry, without its wait

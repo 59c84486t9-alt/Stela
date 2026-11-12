@@ -434,6 +434,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         }
         self.local.wait_for_interrupt();
     }
+    fn halts_on_doorbell(&self) -> bool {
+        self.local.halts_on_doorbell()
+    }
     fn poll_interrupt(&mut self) -> bool {
         if self.source_service() {
             self.transport

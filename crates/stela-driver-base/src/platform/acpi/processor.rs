@@ -469,6 +469,16 @@ impl IdleHistory {
 
 /// The deepest of `states` whose target residency fits `budget_us`
 /// microseconds (any when None), or the first.
+/// Whether every wait in `states` ([`select`]'s choices) is an MWAIT, so a
+/// store to the line it monitors ends it as an interrupt would: none is a
+/// HLT, and there is a state to choose.
+pub fn waits_with_mwait(states: &[Admitted]) -> bool {
+    !states.is_empty()
+        && states
+            .iter()
+            .all(|state| matches!(state.enter, Enter::Mwait(_)))
+}
+
 pub fn select(states: &[Admitted], budget_us: Option<u64>) -> Option<&Admitted> {
     states
         .iter()

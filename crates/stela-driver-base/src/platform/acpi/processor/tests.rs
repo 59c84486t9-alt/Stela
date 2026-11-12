@@ -264,3 +264,22 @@ fn idle_history_finds_the_typical_interval_as_the_menu_governor_does() {
         3
     );
 }
+
+#[test]
+fn only_mwait_states_wait_with_mwait() {
+    let state = |enter| Admitted {
+        kind: 1,
+        latency_us: 1,
+        residency_us: 2,
+        enter,
+    };
+    assert!(!waits_with_mwait(&[]), "no state to choose halts");
+    assert!(waits_with_mwait(&[
+        state(Enter::Mwait(0)),
+        state(Enter::Mwait(0x20))
+    ]));
+    assert!(!waits_with_mwait(&[
+        state(Enter::Halt),
+        state(Enter::Mwait(0x20))
+    ]));
+}
