@@ -3,31 +3,33 @@
 //! A PAC instruction ends its block with an exit to the engine, which
 //! computes the result (Arm `AddPAC`, `Auth`) and remembers it in a memo of
 //! [`MemoEntry`]s at a fixed host address: the operands, a tag and the
-//! result. A [`thunk`] the engine installs over that exit first reads the
-//! tag word `tags` holds for the instruction's key: zero, it takes the
-//! original exit. Otherwise it looks the operands up in the memo and, on an
-//! entry with that tag and the result's kind, completes the instruction
-//! natively: it writes the result register and leaves through a direct exit
-//! to the next instruction, or, for a branch, takes it through the exit the
-//! branch form takes. On a memo miss it calls the engine's [`Service`]
-//! routine, which computes the result under the same keys, version and
-//! layout and remembers it ([`Completion`]); a result it does not complete
-//! (an authentication that fails) takes the original exit.
+//! result. A [`thunk`] the engine installs over that exit reads the tag
+//! word `tags` holds for the instruction's key and looks the operands up in
+//! the memo: on an entry with that tag and the result's kind, it completes
+//! the instruction natively: it writes the result register and leaves
+//! through a direct exit to the next instruction, or, for a branch, takes
+//! it through the exit the branch form takes. On a memo miss it calls the
+//! engine's [`ServiceRoutine`], which computes the result under the same
+//! keys, version and layout and remembers it ([`Completion`]); a result it
+//! does not complete (a key that is not open, an authentication that
+//! fails) takes the original exit.
 //!
 //! PACGA completes the same way under a tag word of its own, as a signing
 //! with the generic key whose result goes to another register.
 //!
 //! A key whose SCTLR enable is clear has the tag word [`DISABLED`]: the
-//! thunk completes with the pointer unchanged, as Arm `AddPAC` and `Auth`
-//! return it, so BRA*, BLRA* and RETA* branch to it.
+//! service completes with the pointer unchanged, as Arm `AddPAC` and `Auth`
+//! return it, so BRA*, BLRA* and RETA* branch to it, and remembers that
+//! under the tag word, whose entries then answer as any other.
 //!
 //! The engine keeps a key's tag word zero while the key's result is not the
-//! memo's to give (the key's use trapped, or the memo's keys,
-//! PAC version or TCR stale), so no entry matches it and the service is
-//! never asked: entry tags are at least [`tag`] of generation 1. A memo hit
-//! clobbers RAX, RCX, RDX, R8, R9 and flags; a service call every register
-//! the SysV ABI lets a call clobber, which no block keeps live across its
-//! exit. The call aligns the stack to 16 bytes itself.
+//! memo's to give (the key's use trapped, or the memo's keys, PAC version or
+//! TCR stale), so no entry matches it and the service refuses: entry tags
+//! are [`tag`]s of generation 1 or more, or [`DISABLED`]'s, and none is a
+//! bare kind. The memo is always there to read. A memo hit clobbers RAX,
+//! RCX, RDX, R8, R9 and flags; a service call every register the SysV ABI
+//! lets a call clobber, which no block keeps live across its exit. The call
+//! aligns the stack to 16 bytes itself.
 use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Mem, Patch, ShiftOp, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
@@ -50,10 +52,12 @@ pub const GENERIC_KEY: u8 = 4;
 pub const TAG_WORDS: usize = 5;
 /// The tag word of a key whose SCTLR enable is clear, so that every
 /// signing and authentication with it returns its pointer unchanged (Arm
-/// `AddPAC`, `Auth`, which test the enable before any trap): a thunk then
-/// completes the instruction with the pointer itself, without the memo.
-/// No open tag word, at least [`tag`] of generation 1, equals it.
-pub const DISABLED: u64 = 1;
+/// `AddPAC`, `Auth`, which test the enable before any trap): the service
+/// completes the instruction with the pointer itself and remembers it
+/// under this word, whatever the key. No [`tag`] of any generation equals
+/// it or a result's tag under it: its key field is past every key's.
+pub const DISABLED: u64 = 0x80;
+const _: () = assert!(DISABLED >> 4 > GENERIC_KEY as u64 && DISABLED & 0xf == 0);
 /// A signing result.
 pub const SIGNED: u64 = 1;
 /// A successful authentication, which answers both the plain and the
@@ -121,9 +125,11 @@ const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 const SLOT_SHIFT: u8 = 50;
 const _: () = assert!(1 << (64 - SLOT_SHIFT) == MEMO_ENTRIES);
 
-/// The memo slot of a PAC operation's operands, which never depends on a key.
+/// The memo slot of a PAC operation's operands, which never depends on a
+/// key: their sum's multiplicative hash, one LEA of both registers before
+/// the multiply.
 pub fn slot(pointer: u64, modifier: u64) -> usize {
-    ((pointer ^ modifier.rotate_left(29)).wrapping_mul(MIX) >> SLOT_SHIFT) as usize
+    (pointer.wrapping_add(modifier).wrapping_mul(MIX) >> SLOT_SHIFT) as usize
 }
 
 /// The index of `key`'s word in the engine's tags.
@@ -273,17 +279,12 @@ impl Thunk {
     }
 }
 
-/// Where a memo lookup goes besides its hit, which leaves the result in RAX:
-/// to its rare path ([`rare`]) while the key is not open or disabled, and
-/// to the service on a miss.
-struct Lookup {
-    rare: Patch,
-    misses: Vec<Patch>,
-}
-
 /// The memo lookup of `form`'s operands, the pointer in RAX and the modifier
-/// in RDX, under the tag words at `tags`. Clobbers RCX, R8, R9 and flags.
-fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
+/// in RDX, under the tag words at `tags`: the jumps of its misses, to the
+/// service; a hit leaves the result in RAX. A key that is not open misses
+/// (no entry's tag is a bare kind), and so does a disabled key's first use
+/// of each operand pair. Clobbers RCX, R8, R9 and flags.
+fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Vec<Patch> {
     use Gpr::{R8, R9, Rax, Rcx, Rdx};
     use Size::{Dword, Qword};
     let pointer = asm.guest(Register::X(form.pointer)).expect("X0..X30");
@@ -303,13 +304,7 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
     asm.place(R8, Place::new(tags.anchor, 0));
     let word = i32::try_from(tags.offset + usize::from(form.key) * 8).expect("a tag word offset");
     asm.mov_load(Qword, R8, Mem::base(R8, word));
-    // Not open (0) or disabled (DISABLED, 1): every open tag word is above.
-    const _: () = assert!(DISABLED == 1);
-    asm.alu_imm8(Alu::Cmp, Qword, R8, DISABLED as i8);
-    let rare = asm.jcc(Cond::Be);
-    asm.mov(Qword, Rcx, Rdx);
-    asm.shift_imm(ShiftOp::Rol, Qword, Rcx, 29);
-    asm.alu(Alu::Xor, Qword, Rcx, Rax);
+    asm.lea(Qword, Rcx, Mem::indexed(Rax, Rdx, 1, 0));
     asm.mov_imm64(R9, MIX);
     asm.imul(Qword, Rcx, R9);
     asm.shift_imm(ShiftOp::Shr, Qword, Rcx, SLOT_SHIFT);
@@ -327,17 +322,7 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rcx, TAG));
     misses.push(asm.jcc(Cond::Ne));
     asm.mov_load(Qword, Rax, Mem::base(Rcx, VALUE));
-    Lookup { rare, misses }
-}
-
-/// A lookup's rare path, out of line, with the tag word in R8: the branch
-/// taken while the key is not open, then the jump to bind to the completion
-/// while it is disabled, where the result is the pointer in RAX.
-fn rare(asm: &mut Asm, rare: Patch) -> (Patch, Patch) {
-    asm.bind(rare);
-    asm.test(Size::Qword, Gpr::R8, Gpr::R8);
-    let closed = asm.jcc(Cond::E);
-    (closed, asm.jmp())
+    misses
 }
 
 /// How native code reaches the service routine.
@@ -396,10 +381,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     use Size::Qword;
     let mut code = Code::pinned();
     let mut asm = code.asm();
-    let Lookup {
-        rare: unusual,
-        misses,
-    } = lookup(&mut asm, form, tags);
+    let misses = lookup(&mut asm, form, tags);
     let complete = asm.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
@@ -435,12 +417,9 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     }
     let failed = call_service(&mut asm, form, Routine::Address(service));
     let back = asm.jmp();
-    let (closed, identity) = rare(&mut asm, unusual);
-    asm.bind(closed);
     asm.bind(failed);
     super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
     resolve(&mut code, back, complete);
-    resolve(&mut code, identity, complete);
     Thunk::new(code.into_bytes(), next, dynamic)
 }
 

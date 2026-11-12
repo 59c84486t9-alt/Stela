@@ -145,8 +145,29 @@ extern "sysv64" fn service(state: u64, request: u32, pointer: u64, modifier: u64
     service.calls += 1;
     let key = (request & 7) as u8;
     let word = service.tags[usize::from(key)];
-    if word <= DISABLED {
+    if word == 0 {
         return Completion::default();
+    }
+    // SAFETY: the memo has MEMO_ENTRIES entries and outlives the run.
+    let entry =
+        unsafe { &mut *(service.memo as *mut MemoEntry).add(pointer::slot(pointer, modifier)) };
+    if word == DISABLED {
+        // The pointer unchanged, remembered under the disabled word.
+        let kind = if request & pointer::REQUEST_AUTHENTICATE != 0 {
+            AUTHENTICATED
+        } else {
+            pointer::SIGNED
+        };
+        *entry = MemoEntry {
+            pointer,
+            modifier,
+            tag: DISABLED | kind,
+            value: pointer,
+        };
+        return Completion {
+            completed: 1,
+            value: pointer,
+        };
     }
     let generation = word >> 8;
     let secret = service.secrets[generation as usize];
@@ -161,10 +182,7 @@ extern "sysv64" fn service(state: u64, request: u32, pointer: u64, modifier: u64
     } else {
         (pointer::SIGNED, sign(pointer, modifier, secret))
     };
-    // SAFETY: the memo has MEMO_ENTRIES entries and outlives the run.
-    let memo =
-        unsafe { &mut *(service.memo as *mut MemoEntry).add(pointer::slot(pointer, modifier)) };
-    *memo = MemoEntry {
+    *entry = MemoEntry {
         pointer,
         modifier,
         tag: pointer::tag(generation, key, kind),

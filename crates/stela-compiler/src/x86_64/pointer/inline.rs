@@ -6,8 +6,8 @@
 //! ([`inlines`]): it completes the instruction as the engine's thunk would
 //! (`x86_64::pointer`), from the memo, through the service on a miss, or
 //! from the strip cell. What the thunk would leave through the original
-//! exit, a key or cell that is not open or an authentication the service
-//! does not complete, leaves the block at the instruction with a PAC exit
+//! exit, a key the service finds not open, a cell that is not open or an
+//! authentication the service does not complete, leaves the block at the instruction with a PAC exit
 //! that retires the instructions before it, as a numerical FP exit does.
 //! Those paths lie out of line ([`place`]), before the terminal, as a
 //! block's direct exits end its code. The service call clobbers what a SysV
@@ -15,7 +15,7 @@
 //! keeps nothing else live but the pinned registers, which the call
 //! preserves. The branch forms (BRA*, BLRA* and RETA*) still end their
 //! block, whose thunk completes them.
-use super::{Finish, Form, Lookup, Routine, call_service, lookup, rare};
+use super::{Finish, Form, Routine, call_service, lookup};
 use crate::x86_64::asm::{Code, Gpr, Patch, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
@@ -49,9 +49,8 @@ pub fn inlines(operation: Operation) -> bool {
 /// What [`emit`] leaves to [`place`] out of line.
 pub(crate) struct Slow {
     pc: GuestAddress,
-    /// The service call of a memo miss, which returns to the completion,
-    /// and the lookup's rare path.
-    service: Option<(Form, Vec<Patch>, usize, Patch)>,
+    /// The service call of a memo miss, which returns to the completion.
+    service: Option<(Form, Vec<Patch>, usize)>,
     /// The jumps to the exit at the instruction.
     exits: Vec<Patch>,
 }
@@ -80,10 +79,7 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
     let form = Form::of(operation)
         .filter(|form| form.completion == Finish::Register)
         .expect("a form that completes into its register");
-    let Lookup {
-        rare: unusual,
-        misses,
-    } = lookup(
+    let misses = lookup(
         &mut asm,
         form,
         Place::new(Anchor::Pointer, cells.tags as usize),
@@ -93,7 +89,7 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
     asm.mov_store(Size::Qword, result, Gpr::Rax);
     Slow {
         pc,
-        service: Some((form, misses, complete, unusual)),
+        service: Some((form, misses, complete)),
         exits: vec![],
     }
 }
@@ -103,15 +99,12 @@ pub(crate) fn place(code: &mut Code, slow: Slow, cells: Cells) {
     let mut asm = code.asm();
     let mut exits = slow.exits;
     let mut back = vec![];
-    if let Some((form, misses, complete, unusual)) = slow.service {
+    if let Some((form, misses, complete)) = slow.service {
         for miss in misses {
             asm.bind(miss);
         }
         exits.push(call_service(&mut asm, form, Routine::Cell(cells.routine)));
         back.push((asm.jmp(), complete));
-        let (closed, identity) = rare(&mut asm, unusual);
-        exits.push(closed);
-        back.push((identity, complete));
     }
     for exit in exits {
         asm.bind(exit);
@@ -239,6 +232,12 @@ mod tests {
             modifier: u64,
         ) -> Completion {
             CALLS.fetch_add(1, SeqCst);
+            // SAFETY: `state` is the service's address, its tag words first.
+            let tags = unsafe { &*(state as *const [u64; TAG_WORDS]) };
+            // As the engine's, a key whose tag word is zero is refused.
+            if tags[(request & 7) as usize] == 0 {
+                return Completion::default();
+            }
             for (argument, value) in
                 ARGUMENTS
                     .iter()
@@ -313,7 +312,8 @@ mod tests {
         );
         assert_eq!(state.x[4], 0x0000_0034_5678_9abc);
         assert_eq!((state.x[5], state.x[6]), (0x500, 0x600));
-        assert_eq!(CALLS.load(SeqCst), 1);
+        // AUTDA's miss, then PACDZB's refusal.
+        assert_eq!(CALLS.load(SeqCst), 2);
         assert_eq!(
             ARGUMENTS.each_ref().map(|argument| argument.load(SeqCst)),
             [

@@ -73,14 +73,25 @@ fn forms_name_their_key_kind_operands_and_completion() {
 #[test]
 fn tags_keep_generation_key_and_kind_apart() {
     assert_eq!(tag(1, 3, AUTHENTICATED), 0x132);
-    // A zero tag word matches no entry of any generation.
-    assert!(tag(1, 0, SIGNED) > AUTHENTICATED);
+    // A zero tag word matches no entry of any generation, nor of the
+    // disabled word; the disabled word's entries no tag's.
+    for kind in [SIGNED, AUTHENTICATED] {
+        assert!(tag(1, 0, SIGNED) > kind && DISABLED | SIGNED > kind);
+        for generation in [0, 1, u64::MAX >> 8] {
+            for key in 0..=GENERIC_KEY {
+                assert_ne!(tag(generation, key, 0), DISABLED);
+                assert_ne!(tag(generation, key, kind), DISABLED | kind);
+            }
+        }
+    }
     assert!(slot(u64::MAX, u64::MAX) < MEMO_ENTRIES);
+    assert_eq!(slot(1, 2), slot(2, 1));
 }
 
 /// Thunks run on the host: hits complete each form without the service,
 /// misses ask it on an aligned stack and complete what it completes, and
-/// a cleared tag word or a refusal exits with no write.
+/// a refusal (as of a cleared tag word, which no entry matches) exits with
+/// no write.
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn thunks_complete_hits_and_computed_misses_natively() {
@@ -207,14 +218,14 @@ fn thunks_complete_hits_and_computed_misses_natively() {
         kind: ExitKind::PointerAuthentication as u64,
     };
     assert_eq!(run(&sign.code, &mut state, false), miss, "a zero tag word");
-    assert_eq!((state.x[30], CALLS.load(SeqCst)), (pointer, 0));
+    assert_eq!((state.x[30], CALLS.load(SeqCst)), (pointer, 1));
     set_tag(ib, tag(1, ib, 0));
     let next = Exit {
         pc: pc.0 + 4,
         kind: ExitKind::Fallthrough as u64,
     };
     assert_eq!(run(&sign.code, &mut state, false), next);
-    assert_eq!((state.x[30], CALLS.load(SeqCst)), (value, 0));
+    assert_eq!((state.x[30], CALLS.load(SeqCst)), (value, 1));
     // Another modifier misses the memo: the service refuses, then
     // completes, on either stack alignment.
     state.x[30] = pointer;
@@ -237,7 +248,7 @@ fn thunks_complete_hits_and_computed_misses_natively() {
         assert_eq!(run(&sign.code, &mut state, misaligned), next);
         assert_eq!(state.x[30], 0x1357);
     }
-    assert_eq!((CALLS.load(SeqCst), MISALIGNED.load(SeqCst)), (3, 0));
+    assert_eq!((CALLS.load(SeqCst), MISALIGNED.load(SeqCst)), (4, 0));
     // An authentication of the memo's signing operands misses too.
     state.x[30] = pointer;
     state.sp = modifier;
@@ -286,15 +297,29 @@ fn thunks_complete_hits_and_computed_misses_natively() {
         REQUEST.load(SeqCst),
         u64::from(u32::from(ia) | REQUEST_AUTHENTICATE | REQUEST_COMBINED)
     );
-    // A disabled key returns every pointer unchanged, without the memo
-    // or the service: PACIBSP leaves X30, BLRAA branches to X8 itself.
+    // A disabled key's results, the pointers unchanged, are the memo's
+    // under its tag word as the service remembers them, whatever the key:
+    // PACIBSP leaves X30, BLRAA branches to X8 itself.
     let calls = CALLS.load(SeqCst);
     set_tag(ib, DISABLED);
     state.x[30] = pointer;
     state.sp = modifier + 32;
+    *entry(slot(pointer, modifier + 32)) = MemoEntry {
+        pointer,
+        modifier: modifier + 32,
+        tag: DISABLED | SIGNED,
+        value: pointer,
+    };
     assert_eq!(run(&sign.code, &mut state, false), next);
     assert_eq!(state.x[30], pointer);
     set_tag(ia, DISABLED);
+    state.x[16] = modifier;
+    *entry(slot(pointer, modifier)) = MemoEntry {
+        pointer,
+        modifier,
+        tag: DISABLED | AUTHENTICATED,
+        value: pointer,
+    };
     state.x[30] = 0;
     assert_eq!(
         run(&call.code, &mut state, false),
@@ -306,11 +331,9 @@ fn thunks_complete_hits_and_computed_misses_natively() {
 
 /// `mov [rdi+disp32],rax`.
 const REGISTER_WRITE_BYTES: usize = 7;
-/// The second opcode bytes of `jz`, `jnz` and `jbe` with a 32-bit
-/// displacement.
+/// The second opcode bytes of `jz` and `jnz` with a 32-bit displacement.
 const JZ: u8 = 0x84;
 const JNZ: u8 = 0x85;
-const JBE: u8 = 0x86;
 
 #[test]
 fn register_completions_chain_onward_and_misses_exit_unchanged() {
@@ -328,35 +351,27 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
         thunk.code[next..next + DIRECT_EXIT_BYTES],
         super::super::chain::direct_exit(GuestAddress(0x4004), ExitKind::Fallthrough)
     );
-    // The closed key and the refused service land on the exit; the
-    // three memo misses on the service call, just after the completion.
-    // One JBE takes a closed or disabled key to the rare path before the
-    // exit: TEST R8,R8, the closed key's JZ, and the disabled key's JMP to
-    // the completion's register write.
+    // The refused service lands on the exit; the three memo misses on
+    // the service call, just after the completion, whose JMP back to the
+    // register write precedes the exit. No branch tests the tag word.
     let complete = next - REGISTER_WRITE_BYTES;
-    let rare = end - DIRECT_EXIT_BYTES - 5 - 6 - 3;
-    let (mut exits, mut calls, mut rares) = (0, 0, 0);
+    let (mut exits, mut calls) = (0, 0);
     for at in 0..end - 6 {
-        if thunk.code[at] == 0x0f && [JZ, JNZ, JBE].contains(&thunk.code[at + 1]) {
+        if thunk.code[at] == 0x0f && [JZ, JNZ].contains(&thunk.code[at + 1]) {
             let relative =
                 i32::from_le_bytes(thunk.code[at + 2..at + 6].try_into().unwrap()) as usize;
             match at + 6 + relative {
                 target if target == end - DIRECT_EXIT_BYTES => exits += 1,
                 target if target == next + DIRECT_EXIT_BYTES => calls += 1,
-                target if target == rare && thunk.code[at + 1] == JBE => rares += 1,
                 target => panic!("a jump to {target}"),
             }
         }
     }
-    assert_eq!((exits, calls, rares), (2, 3, 1));
-    assert_eq!(thunk.code[rare..rare + 3], [0x4d, 0x85, 0xc0]);
-    let identity = end - DIRECT_EXIT_BYTES - 5;
-    assert_eq!(thunk.code[identity], 0xe9);
-    let relative = i32::from_le_bytes(thunk.code[identity + 1..identity + 5].try_into().unwrap());
-    assert_eq!(
-        (identity as i64 + 5 + i64::from(relative)) as usize,
-        complete
-    );
+    assert_eq!((exits, calls), (1, 3));
+    let back = end - DIRECT_EXIT_BYTES - 5;
+    assert_eq!(thunk.code[back], 0xe9);
+    let relative = i32::from_le_bytes(thunk.code[back + 1..back + 5].try_into().unwrap());
+    assert_eq!((back as i64 + 5 + i64::from(relative)) as usize, complete);
     assert_eq!(thunk.dynamic, None);
     // A return completes at its exit to the target in RAX, which the
     // service path reaches too.
@@ -369,7 +384,7 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
         &ret.code[returns..returns + DYNAMIC_EXIT_BYTES],
         ExitKind::Return
     ));
-    // The disabled key's `jmp complete` precedes the final exit.
+    // The service's `jmp complete` precedes the final exit.
     let back = ret.code.len() - DIRECT_EXIT_BYTES - 5;
     assert_eq!(ret.code[back], 0xe9);
     let relative = i32::from_le_bytes(ret.code[back + 1..back + 5].try_into().unwrap());

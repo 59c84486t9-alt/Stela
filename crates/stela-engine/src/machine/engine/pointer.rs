@@ -10,11 +10,20 @@
 //! exit would ([`PointerService::result`]) without leaving native code.
 //! A key's tag word is nonzero only while the service is open and the key
 //! was found enabled and untrapped under the current derived state, which
-//! is what both paths require.
+//! is what both paths require, or [`pointer::DISABLED`] while it was found
+//! disabled, whose results [`complete`] gives and remembers under that word.
+//! Native code reads a memo whatever the tag words: an empty one shared by
+//! every service until a service needs its own.
 use crate::pauth;
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::mem::offset_of;
 use stela_compiler::{Anchor, Place, block::PointerAuthenticationKey, x86_64::pointer};
+
+/// The memo native code reads while its service has none: no entry's tag
+/// matches a tag word, so every lookup misses ([`pointer::DISABLED`]).
+/// Only read, through its address.
+static EMPTY_MEMO: [core::sync::atomic::AtomicU64; pointer::MEMO_ENTRIES * 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; pointer::MEMO_ENTRIES * 4];
 
 /// The distinct PAC inputs whose memo generations are kept.
 pub(super) const POINTER_INPUTS_SEEN: usize = 16;
@@ -281,12 +290,36 @@ impl PointerService {
     }
 
     /// What native code finds through [`Anchor::Pointer`] and
-    /// [`Anchor::Memo`] on its next entry.
+    /// [`Anchor::Memo`] on its next entry: the memo, or the empty one.
     pub(super) fn anchors(&self) -> (u64, u64) {
         (
             self as *const Self as u64,
-            self.memo.as_ref().map_or(0, |memo| memo.as_ptr() as u64),
+            self.memo
+                .as_ref()
+                .map_or(EMPTY_MEMO.as_ptr() as u64, |memo| memo.as_ptr() as u64),
         )
+    }
+
+    /// A disabled key's result, `pointer` unchanged (Arm `AddPAC`, `Auth`),
+    /// remembered under [`pointer::DISABLED`] for native code, whatever the
+    /// key: a signing's for signings, a success for both authentications.
+    fn disabled(&mut self, authenticate: bool, pointer: u64, modifier: u64) -> u64 {
+        if self.memo.is_none() {
+            self.allocate_memo();
+        }
+        let kind = if authenticate {
+            pointer::AUTHENTICATED
+        } else {
+            pointer::SIGNED
+        };
+        let memo = self.memo.as_mut().expect("memo allocated");
+        memo[pointer::slot(pointer, modifier)] = pointer::MemoEntry {
+            pointer,
+            modifier,
+            tag: pointer::DISABLED | kind,
+            value: pointer,
+        };
+        pointer
     }
 
     /// One signing or authentication with the open context, remembered
@@ -427,7 +460,8 @@ impl PointerService {
 translated_callee! {
 /// A PAC thunk's memo miss (`x86_64::pointer::ServiceRoutine`): the result
 /// of `request` on these operands while the requested key's tag word is
-/// open, completed when it is a signing or a successful authentication.
+/// open, completed when it is a signing or a successful authentication,
+/// and the pointer itself while the key is disabled.
 /// A failed authentication is remembered for the exit the thunk then takes.
 pub(super) fn complete(
     service: u64,
@@ -453,8 +487,15 @@ pub(super) fn complete(
     }
     let (key, authenticate, combined) = pointer::requested(request);
     let key = key_of(key);
-    if service.tags[usize::from(memo_key(key))] == 0 {
-        return pointer::Completion::default();
+    match service.tags[usize::from(memo_key(key))] {
+        0 => return pointer::Completion::default(),
+        pointer::DISABLED => {
+            return pointer::Completion {
+                completed: 1,
+                value: service.disabled(authenticate, pointer, modifier),
+            };
+        }
+        _ => {}
     }
     let operation = if authenticate {
         PointerOperation::Authenticate { combined }
@@ -481,7 +522,8 @@ mod tests {
 
         let mut owner = Box::new(PointerService::new());
         let (service, memo) = owner.anchors();
-        assert_eq!(memo, 0);
+        let empty = EMPTY_MEMO.as_ptr() as u64;
+        assert_eq!(memo, empty);
         let first = inputs(pauth::Version::Classic, 25 | 25 << 16);
         let mut unavailable = first;
         unavailable.keys = [None; 5];
@@ -494,15 +536,15 @@ mod tests {
         assert_eq!(owner.strips[1].enabled, 1);
         assert_eq!(owner.result(PointerOperation::Sign, Key::Ib, 4, 8), None);
         assert_eq!(owner.generic_code(4, 8), None);
-        assert_eq!(owner.anchors(), (service, 0));
+        assert_eq!(owner.anchors(), (service, empty));
 
         owner.revalidate(first);
         owner.reopen(Key::Ia, true, true);
         owner.reopen_generic(true);
-        assert_eq!(owner.anchors(), (service, 0));
+        assert_eq!(owner.anchors(), (service, empty));
         owner.reopen(Key::Ia, true, false);
         let memo = owner.anchors().1;
-        assert_ne!(memo, 0);
+        assert_ne!(memo, empty);
         let tag = owner.tags[0];
         let result = owner.result(PointerOperation::Sign, Key::Ia, 4, 8).unwrap();
         owner.close();
@@ -519,10 +561,59 @@ mod tests {
 
         let mut other = Box::new(PointerService::new());
         other.open(first);
-        assert_eq!(other.anchors().1, 0);
+        assert_eq!(other.anchors().1, empty);
         other.reopen_generic(false);
-        assert_ne!(other.anchors().1, 0);
+        assert_ne!(other.anchors().1, empty);
         assert_ne!(other.anchors().1, memo);
+    }
+
+    /// A disabled key's request completes with its pointer, from no key
+    /// and no cipher, and is remembered under the disabled word, which no
+    /// open or closed word's lookup takes; a closed key's is refused.
+    #[test]
+    fn disabled_keys_complete_with_their_pointer_for_native_code() {
+        use stela_contracts::pauth::Key;
+
+        let mut service = Box::new(PointerService::new());
+        let state = service.anchors().0;
+        let (data, modifier) = (0xffff_fe00_1234_5678, 0xffff_fe00_0000_8000);
+        let ib = u32::from(memo_key(Key::Ib));
+        let authenticate = ib | pointer::REQUEST_AUTHENTICATE | pointer::REQUEST_COMBINED;
+        assert_eq!(
+            complete(state, ib, data, modifier),
+            pointer::Completion::default()
+        );
+        service.reopen(Key::Ib, false, true);
+        assert_eq!(
+            service.tags[usize::from(memo_key(Key::Ib))],
+            pointer::DISABLED
+        );
+        for (request, kind) in [
+            (ib, pointer::SIGNED),
+            (authenticate, pointer::AUTHENTICATED),
+        ] {
+            assert_eq!(
+                complete(state, request, data, modifier),
+                pointer::Completion {
+                    completed: 1,
+                    value: data,
+                }
+            );
+            assert_eq!(
+                service.memo.as_ref().unwrap()[pointer::slot(data, modifier)],
+                pointer::MemoEntry {
+                    pointer: data,
+                    modifier,
+                    tag: pointer::DISABLED | kind,
+                    value: data,
+                }
+            );
+        }
+        assert_eq!(service.fills, 0);
+        assert_eq!(
+            service.anchors().1,
+            service.memo.as_ref().unwrap().as_ptr() as u64
+        );
     }
 
     #[test]
