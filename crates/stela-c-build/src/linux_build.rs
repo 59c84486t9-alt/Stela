@@ -70,6 +70,11 @@ pub fn upstream_warnings(build: &mut cc::Build) {
     ] {
         build.flag(format!("-Wno-{warning}"));
     }
+    // SYSCALL_DEFINE aliases each entry point to a wrapper of another type.
+    // Linux silences this with __diag pragmas keyed to the compiler's
+    // version, which a compiler numbered apart from LLVM (Apple's) misses.
+    // Compilers without the warning reject its name, so it is probed.
+    build.flag_if_supported("-Wno-attribute-alias");
 }
 
 /// Clang reports nothing from system headers, not even a call to a service no

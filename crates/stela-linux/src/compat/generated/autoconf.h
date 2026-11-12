@@ -7,6 +7,12 @@
 #define CONFIG_64BIT 1
 /* Select native architecture ownership hooks in the shared Linux sources. */
 #define CONFIG_STELA 1
+/* The compiler building this unit, as Kconfig records it: Linux keys its
+ * clang diagnostic pragmas (__diag_clang_NN) to this version. */
+#ifdef __clang__
+#define CONFIG_CLANG_VERSION \
+	(__clang_major__ * 10000 + __clang_minor__ * 100 + __clang_patchlevel__)
+#endif
 #define CONFIG_DEFAULT_HOSTNAME "(none)"
 #define CONFIG_MMU 1
 #define CONFIG_PCI 1
