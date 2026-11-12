@@ -607,7 +607,8 @@ impl FloatingWord {
             .sum()
     }
 
-    fn merge(&mut self, other: &Self) {
+    /// Add every exit `other` counts.
+    pub fn merge(&mut self, other: &Self) {
         for (count, more) in self.reasons.iter_mut().zip(other.reasons) {
             *count = count.saturating_add(more);
         }

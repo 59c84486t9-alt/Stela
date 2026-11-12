@@ -114,6 +114,9 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     for exit in keys.iter().take(SHOWN) {
         line.push_str(&item(&step_timing::system_key_name(exit.key), exit));
     }
+    if let Some(rest) = rest(&keys, SHOWN) {
+        line.push_str(&item("rest", &rest));
+    }
     line.push_str(" by_time");
     keys.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.ticks));
     for exit in keys.iter().take(SHOWN_BY_TIME) {
@@ -131,18 +134,32 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
         for exit in pointer.iter().take(SHOWN) {
             line.push_str(&item(&step_timing::system_key_name(exit.key), exit));
         }
+        if let Some(rest) = rest(&pointer, SHOWN) {
+            line.push_str(&item("rest", &rest));
+        }
         output::arguments(format_args!("{line}\n"));
     }
     numerical_exits_report(numerical, &exits.floating, tsc_hz);
     numerical_causes_report(&exits.floating_words);
 }
 
+/// The exits of `exits` past the first `shown`, summed, if any.
+fn rest(exits: &[step_timing::SystemExit], shown: usize) -> Option<step_timing::SystemExit> {
+    let rest = exits.get(shown..).filter(|rest| !rest.is_empty())?;
+    Some(step_timing::SystemExit {
+        key: 0,
+        count: rest.iter().map(|exit| exit.count).sum(),
+        ticks: rest.iter().map(|exit| exit.ticks).sum(),
+        closes: rest.iter().map(|exit| exit.closes).sum(),
+    })
+}
+
 /// `PES FLOATING CAUSES`: the sixteen floating-point exit words with the
 /// most exits since the last beat, each with its exits by reason
 /// (`step_timing::FloatingReason`, `mode` overlapping the others), how many
 /// found FPSR.IXC clear, and its exits by the classes their operands
-/// showed (`step_timing::Operands`, overlapping); nothing when there were
-/// none.
+/// showed (`step_timing::Operands`, overlapping), then the other words'
+/// summed as `rest`; nothing when there were none.
 fn numerical_causes_report(words: &step_timing::FloatingWords) {
     const SHOWN: usize = 16;
     if words.is_empty() {
@@ -162,12 +179,17 @@ fn numerical_causes_report(words: &step_timing::FloatingWords) {
         step_timing::FloatingReason::NAMES.join("/"),
         step_timing::Operands::NAMES.join("/")
     );
+    let mut rest = step_timing::FloatingWord::default();
+    for word in counted.iter().skip(SHOWN) {
+        rest.merge(word);
+    }
+    let rest = (rest.count() != 0).then_some(("rest".into(), &rest));
     let other = (words.other.count() != 0).then(|| ("other".into(), &words.other));
     let named = counted
         .into_iter()
         .take(SHOWN)
         .map(|word| (step_timing::system_key_name(word.key), word));
-    for (name, word) in named.chain(other) {
+    for (name, word) in named.chain(rest).chain(other) {
         line.push_str(&format!(
             " {name}={}:{}:{}",
             join(&word.reasons),
@@ -181,7 +203,8 @@ fn numerical_causes_report(words: &step_timing::FloatingWords) {
 /// `PES FLOATING count/ns`: every PE's floating-point exits since the last
 /// beat by what their completion found (`step_timing::FloatingReason`), then
 /// by instruction word, the sixteen most frequent, each with its total
-/// handling time; nothing when there were none.
+/// handling time, and the other words' as `rest`; nothing when there were
+/// none.
 fn numerical_exits_report(
     mut words: Vec<step_timing::SystemExit>,
     reasons: &[u64; step_timing::FloatingReason::COUNT],
@@ -206,6 +229,9 @@ fn numerical_exits_report(
             exit.count,
             nanos(exit.ticks)
         ));
+    }
+    if let Some(rest) = rest(&words, SHOWN) {
+        line.push_str(&format!(" rest={}/{}", rest.count, nanos(rest.ticks)));
     }
     output::arguments(format_args!("{line}\n"));
 }
