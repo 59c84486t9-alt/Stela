@@ -31,7 +31,7 @@ use super::{
     CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Reported, Request, apply_install,
     bundle, check_bundle_revision, describe_install, ecid::Ecid, fix, host::Host, host::bytes_text,
     installed, interrupted_text, machines, plan_install, publish, read_record, revision_mismatch,
-    state, update, write_record,
+    sources, state, update, write_record,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -285,15 +285,20 @@ fn firmware_status(record: &Record, report: &mut Report) {
     }
 }
 
-/// The command that puts back the active build's restore files: `--fetch`
-/// downloads that build, the whole image when the medium holds it.
-fn image_fix(report: &Report) -> String {
-    report.fix("repair --fetch")
+/// The command that puts back the active build's restore files: `repair`,
+/// which finds or downloads what it needs of the image itself
+/// (`sources`), or first `update stela` when the bundles are of another
+/// revision than this stela prepares, which repair refuses to mix.
+fn image_fix(environment: &Environment<'_>, record: &Record, report: &Report) -> String {
+    match revision_mismatch(environment, record) {
+        Some(_) => report.fix("update stela"),
+        None => report.fix("repair"),
+    }
 }
 
 fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
     let repair = report.fix("repair");
-    let image = image_fix(report);
+    let image = image_fix(environment, record, report);
     for kept in &record.bundles {
         let directory = kept.directory(&record.volume);
         let role = if kept.build == record.build && kept.generation() == record.generation() {
@@ -328,7 +333,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         }
         for problem in problems {
             report.problem(format!(
-                "{problem}: {image} (or --ipsw with the macOS {} restore image)",
+                "{problem}: {image} puts it right (--ipsw FILE names a macOS {} image to use)",
                 kept.build
             ));
         }
@@ -391,7 +396,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         );
         for problem in problems {
             report.problem(format!(
-                "{problem}: {image} (or --ipsw with the macOS {} restore image)",
+                "{problem}: {image} puts it right (--ipsw FILE names a macOS {} image to use)",
                 medium.build
             ));
         }
@@ -717,17 +722,54 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     update::check_firmware_support(&esp, &tool)?;
     // The firmware the last boot asked for and the USB lacks.
     let requested = super::firmware::requested(&esp, &tool)?;
+    record.install_image = command.install_image.or(record.install_image);
+    // With --ipsw or --fetch every restore bundle is prepared again and
+    // machines without an ECID get one; else the damaged and missing
+    // bundles and medium are put back. What that needs of the restore image,
+    // and where it comes from, is decided before anything is downloaded.
+    let rebuild = command.ipsw.is_some() || command.fetch;
+    let has_media = record.installs_media();
+    let damaged_bundles = has_media
+        && super::restore_bundles(&record.install_machines())
+            .into_iter()
+            .any(|(kind, ecid)| !bundle_intact(&record, kind, ecid));
+    let bundles = rebuild || damaged_bundles;
+    let need = has_media
+        .then(|| sources::need(&record, &record.build, bundles))
+        .flatten();
+    let (build, model, active) = (
+        record.build.clone(),
+        record.model.clone(),
+        record.active_medium().cloned(),
+    );
+    let lookup = sources::Lookup {
+        need: need.unwrap_or(sources::Need::BootFiles),
+        build: &build,
+        model: &model,
+        ipsw: command.ipsw.as_deref(),
+        download_dir: command.download_dir.as_deref(),
+        medium: active.as_ref(),
+    };
+    let source = match need {
+        None => None,
+        Some(need) => {
+            if bundles {
+                check_bundle_revision(environment, &record)?;
+            }
+            let source = sources::locate(environment, &lookup).map_err(|error| {
+                anyhow::anyhow!("repair needs the macOS {build} restore image; but {error:#}")
+            })?;
+            if need == sources::Need::WholeImage {
+                sources::check_room(environment, &record, &build, &source)?;
+            }
+            Some(source)
+        }
+    };
     // Every missing bundle file goes into the cache before the stick
     // changes; a failed download leaves it as it was.
     if !command.dry_run {
         super::firmware::prefetch_bundle(&tool, Some(&record.volume))?;
     }
-    // Machines without an ECID get one; their bundles are prepared again.
-    let ipsw = command.optional_image()?;
-    if ipsw.is_some() {
-        check_bundle_revision(environment, &record)?;
-    }
-    record.install_image = command.install_image.or(record.install_image);
     let mut notes = Vec::new();
     // Disk names change with plug order and reboots: each install's
     // partitions are found again by their GUIDs and serials, and recorded
@@ -765,7 +807,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
         }
     }
     let mut assigned: Vec<(String, Ecid)> = Vec::new();
-    if ipsw.is_some() {
+    if rebuild {
         for index in 0..record.installs.len() {
             if record.installs[index].ecid.is_some() {
                 continue;
@@ -837,65 +879,57 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     // The install's restore bundles and medium: all again with an image.
     // A setup that has written media needs the active build's: it is put
     // back when damaged or missing.
-    let has_media = record.installs_media();
-    let damaged_medium = has_media
-        && record
-            .active_medium()
-            .is_none_or(|medium| !medium.problems().is_empty());
+    let damaged_medium = has_media && !sources::medium_ready(&record, &record.build);
     let mut restore: Vec<(bundle::Kind, Option<Ecid>)> = Vec::new();
     if has_media {
         for (kind, ecid) in super::restore_bundles(&record.install_machines()) {
-            let intact = record.restore_bundle(kind, ecid).is_some_and(|b| {
-                bundle::verify(
-                    &bundle::in_place(&b.directory(&record.volume)),
-                    &b.manifest_sha256,
-                )
-                .is_empty()
-            });
-            if ipsw.is_some() || !intact {
+            if rebuild || !bundle_intact(&record, kind, ecid) {
                 restore.push((kind, ecid));
             }
         }
     }
-    let install = match (&ipsw, restore.is_empty() && !damaged_medium) {
+    let install = match (&source, restore.is_empty() && !damaged_medium) {
         (_, true) => None,
-        (Some(ipsw), false) => {
-            let plan = plan_install(
-                environment,
-                &record,
-                super::create::InstallOptions {
-                    build: &record.build,
-                    ipsw,
-                    bundles: &restore,
-                    additional_bytes: 0,
-                },
-            )?;
-            describe_install(&record, &plan, &mut text)?;
-            Some(plan)
-        }
-        (None, false) => {
+        (Some(source), false) => {
             writeln!(
                 text,
-                "  install        {} restore bundles of macOS {} are damaged or missing{}",
-                restore.len(),
-                record.build,
-                if damaged_medium {
-                    ", and so is the install medium"
-                } else {
-                    ""
-                }
+                "  restore image  {}",
+                sources::describe(source, &lookup)
             )?;
-            return Err(Reported {
-                report: text,
-                summary: format!(
-                    "repair needs the macOS {} restore image: run {} (or --ipsw FILE in place \
-                     of --fetch)",
-                    record.build,
-                    fix(usb, "repair --fetch")
-                ),
+            if command.dry_run && !source.is_local() {
+                // Nothing is read or downloaded to prepare the plan.
+                writeln!(
+                    text,
+                    "  install        {} restore bundles of macOS {build}{}",
+                    restore.len(),
+                    if damaged_medium {
+                        " and its install medium"
+                    } else {
+                        ""
+                    }
+                )?;
+                None
+            } else {
+                let obtained = sources::obtain(environment, source, &lookup)?;
+                let environment = Environment {
+                    download: obtained.download.as_ref(),
+                    ..*environment
+                };
+                let plan = plan_install(
+                    &environment,
+                    &record,
+                    super::create::InstallOptions {
+                        build: &record.build,
+                        ipsw: &obtained.path,
+                        bundles: &restore,
+                        additional_bytes: 0,
+                    },
+                )?;
+                describe_install(&record, &plan, &mut text)?;
+                Some((plan, obtained))
             }
-            .into());
         }
+        (None, false) => bail!("repair found nothing to prepare its restore files from"),
     };
     writeln!(
         text,
@@ -1005,8 +1039,12 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             fresh.area.describe()
         );
     }
-    if let (Some(plan), Some(ipsw)) = (install, &ipsw) {
-        apply_install(environment, &mut record, ipsw, plan)?;
+    if let Some((plan, obtained)) = install {
+        let environment = Environment {
+            download: obtained.download.as_ref(),
+            ..*environment
+        };
+        apply_install(&environment, &mut record, &obtained.path, plan)?;
     }
     publish(&mut record)?;
     write_record(&esp, &record)?;
@@ -1024,6 +1062,18 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     }
     writeln!(text, "Done. Check it with {}", fix(usb, "status"))?;
     Ok(text)
+}
+
+/// Whether `record`'s restore bundle of `kind` for `ecid` reads back as
+/// written, judged where an interrupted copy set it aside.
+fn bundle_intact(record: &Record, kind: bundle::Kind, ecid: Option<Ecid>) -> bool {
+    record.restore_bundle(kind, ecid).is_some_and(|b| {
+        bundle::verify(
+            &bundle::in_place(&b.directory(&record.volume)),
+            &b.manifest_sha256,
+        )
+        .is_empty()
+    })
 }
 
 /// Why an install's disk was left alone.

@@ -383,11 +383,11 @@ static TEST_CACHES: std::sync::LazyLock<[PathBuf; 1]> = std::sync::LazyLock::new
         .keep()]
 });
 
-fn offline_recovery_size(_: &str, _: &str) -> Result<(u64, u64)> {
+fn offline_image_size(_: &str, _: &str) -> Result<(u64, u64)> {
     anyhow::bail!("offline")
 }
 
-fn offline_fetch_recovery(_: &Path, _: &str, _: &str) -> Result<PathBuf> {
+fn offline_fetch_image(_: &Path, _: &str, _: &str, _: sources::Need) -> Result<sources::Fetched> {
     panic!("tests never download")
 }
 
@@ -396,8 +396,8 @@ fn environment(host: &FakeHost) -> Environment<'_> {
         host,
         download: None,
         image_caches: &*TEST_CACHES,
-        recovery_size: &offline_recovery_size,
-        fetch_recovery: &offline_fetch_recovery,
+        image_size: &offline_image_size,
+        fetch_image: &offline_fetch_image,
         prepare_restore: &fake_prepare_restore,
         prepare_update: &fake_prepare_update,
         inventory: &fake_inventory,
@@ -1750,14 +1750,12 @@ fn additional_disk_gets_separate_machine_identity() {
             c.dry_run = dry_run;
         })
     };
-    // The second is a new machine and needs its own bundle, which it
-    // restores with from the IPSW.
-    let error = add(REGION2, NOR2, false, false).unwrap_err().to_string();
-    assert!(
-        error.contains("needs a restore bundle of its own"),
-        "{error}"
-    );
+    // The second is a new machine and needs its own bundle, prepared from
+    // the USB's own copy of the image without --ipsw, or from --ipsw.
     let before = snapshot(&f.esp);
+    let plan = add(REGION2, NOR2, false, true).unwrap();
+    assert!(plan.contains("from this USB's copy of macOS"), "{plan}");
+    assert_eq!(snapshot(&f.esp), before);
     assert!(add(REGION2, NOR2, true, true).unwrap().contains("Dry run"));
     assert_eq!(snapshot(&f.esp), before);
     add(REGION2, NOR2, true, false).unwrap();
@@ -2369,7 +2367,7 @@ fn revision_update_without_any_image_fails_before_changing_anything() {
         "{error}"
     );
     assert!(error.contains("--ipsw FILE"), "{error}");
-    assert!(error.contains("streams the image"), "{error}");
+    assert!(error.contains("streams it from Apple"), "{error}");
     assert!(error.contains(&cache.display().to_string()), "{error}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
 }
@@ -2417,21 +2415,31 @@ fn revision_update_downloads_only_the_boot_files_saying_their_size() {
     network_setup(&mut f, &older);
     let ipsw = f.ipsw.clone();
     let fetched = std::cell::Cell::new(0);
-    let fetch = |directory: &Path, build: &str, model: &str| -> Result<PathBuf> {
+    let fetch = |directory: &Path,
+                 build: &str,
+                 model: &str,
+                 need: sources::Need|
+     -> Result<sources::Fetched> {
         fetched.set(fetched.get() + 1);
-        assert_eq!(build, restore::payload::SYNTHETIC_BUILD);
+        assert_eq!(
+            (build, need),
+            (restore::payload::SYNTHETIC_BUILD, sources::Need::BootFiles)
+        );
         fs::create_dir_all(directory)?;
-        let path = directory.join(format!("Recovery_{build}_{}.ipsw", model.replace(',', "_")));
+        let path = directory.join(prepare::recovery_name(build, model));
         restore::payload::trim(fs::File::open(&ipsw)?, model, &path, "Copying boot files")?;
-        Ok(path)
+        Ok(sources::Fetched {
+            path,
+            download: None,
+        })
     };
     let size = |build: &str, _: &str| -> Result<(u64, u64)> {
         assert_eq!(build, restore::payload::SYNTHETIC_BUILD);
         Ok((2_200_000_000, 27_000_000_000))
     };
     let environment = Environment {
-        recovery_size: &size,
-        fetch_recovery: &fetch,
+        image_size: &size,
+        fetch_image: &fetch,
         ..environment_at(&f.host, &newer, 1)
     };
     let cache = f._dir.path().join("cache");
@@ -2450,12 +2458,99 @@ fn revision_update_downloads_only_the_boot_files_saying_their_size() {
     // The next update finds that download and fetches nothing.
     let newest = preparers(2);
     let environment = Environment {
-        recovery_size: &size,
-        fetch_recovery: &fetch,
+        image_size: &size,
+        fetch_image: &fetch,
         ..environment_at(&f.host, &newest, 2)
     };
     update_request(&f, &cache).dispatch(&environment).unwrap();
     assert_eq!((fetched.get(), record(&f).bundle_revision), (1, 2));
+}
+
+#[test]
+fn repair_puts_a_damaged_bundle_back_from_the_usbs_own_image() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let ecid = record(&f).installs[0].ecid;
+    let ramdisk = bundle_of(&f, ecid).join("ramdisk.img");
+    fs::write(&ramdisk, b"damaged").unwrap();
+    // Status names the command that works: repair, no flag.
+    let problems = rerun(&f, |c| c.action = Action::Status)
+        .unwrap_err()
+        .to_string();
+    assert!(problems.contains("stela setup repair --usb"), "{problems}");
+    assert!(!problems.contains("--fetch"), "{problems}");
+    // No image, no network: the USB holds the image.
+    let plan = rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.dry_run = true;
+    })
+    .unwrap();
+    assert!(plan.contains("from this USB's copy of macOS"), "{plan}");
+    rerun(&f, |c| c.action = Action::Repair).unwrap();
+    assert!(
+        rerun(&f, |c| c.action = Action::Status)
+            .unwrap()
+            .contains("No problems found.")
+    );
+}
+
+#[test]
+fn status_advises_update_stela_while_bundles_are_of_another_revision() {
+    let mut f = fixture(64 * GIB, false);
+    let (older, newer) = (preparers(0), preparers(1));
+    network_setup(&mut f, &older);
+    let ecid = record(&f).installs[0].ecid;
+    fs::write(bundle_of(&f, ecid).join("ramdisk.img"), b"damaged").unwrap();
+    let environment = environment_at(&f.host, &newer, 1);
+    let mut status = update_request(&f, &f._dir.path().join("cache"));
+    status.action = Action::Status;
+    let problems = status.dispatch(&environment).unwrap_err().to_string();
+    assert!(
+        problems.contains("stela setup update stela --usb"),
+        "{problems}"
+    );
+    assert!(!problems.contains("repair --usb"), "{problems}");
+    // Repair refuses before downloading anything (downloads panic here).
+    let mut repair = update_request(&f, &f._dir.path().join("cache"));
+    repair.action = Action::Repair;
+    let error = repair.dispatch(&environment).unwrap_err().to_string();
+    assert!(error.contains("update stela"), "{error}");
+}
+
+#[test]
+fn os_update_checks_everything_before_any_download() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let os = |build: &str, environment: &Environment<'_>| {
+        let mut request = update_request(&f, &f._dir.path().join("cache"));
+        request.action = Action::UpdateOs;
+        request.build = build.into();
+        request.dispatch(environment)
+    };
+    // The setup's own build: refused without a download (they panic).
+    let error = os(restore::payload::SYNTHETIC_BUILD, &environment(&f.host))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("already the build"), "{error}");
+    // Another build, offline and nowhere on this computer: refused with
+    // what to do.
+    let error = os("STELA2", &environment(&f.host)).unwrap_err().to_string();
+    assert!(error.contains("--ipsw FILE"), "{error}");
+    assert!(error.contains("the whole image"), "{error}");
+    // A whole image larger than the USB's free space: refused before the
+    // download, with the sizes.
+    let huge = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((GIB, 1000 * GIB)) };
+    let environment = Environment {
+        image_size: &huge,
+        ..environment(&f.host)
+    };
+    let error = format!("{:#}", os("STELA2", &environment).unwrap_err());
+    assert!(error.contains("GB free"), "{error}");
+    assert!(error.contains("keeps macOS"), "{error}");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
 }
 
 #[test]
@@ -3121,7 +3216,7 @@ fn interrupted_disk_add_is_finished_by_repair_initialize_nor() {
         "{problems}"
     );
     assert!(!problems.contains("state restore"), "{problems}");
-    assert!(problems.contains("repair --fetch"), "{problems}");
+    assert!(problems.contains("stela setup repair --usb"), "{problems}");
     // Without the flag, repair names it and leaves the partition alone.
     let repair = |initialize: bool, dry_run: bool| {
         rerun(&f, |c| {
@@ -3181,7 +3276,7 @@ fn records_with_the_retired_signing_opt_in_are_still_read() {
     let problems = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(problems.contains("repair --fetch"), "{problems}");
+    assert!(problems.contains("stela setup repair --usb"), "{problems}");
     rerun(&f, |c| {
         c.action = Action::Repair;
         c.ipsw = Some(f.ipsw.clone());
@@ -3300,12 +3395,16 @@ fn repair_restores_recorded_state() {
     })
     .unwrap();
     fs::write(f.esp.join("EFI/stela/stela.cfg"), b"--system\n").unwrap();
-    // ... and the bundle needs the restore image to be repaired.
-    let error = rerun(&f, |c| c.action = Action::Repair)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("--ipsw"), "{error}");
+    // ... and the bundle is prepared again from the USB's own copy of the
+    // image, or from --ipsw.
     let damaged = snapshot(&f.esp);
+    let plan = rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.dry_run = true;
+    })
+    .unwrap();
+    assert!(plan.contains("from this USB's copy of macOS"), "{plan}");
+    assert_eq!(snapshot(&f.esp), damaged);
     rerun(&f, |c| {
         c.action = Action::Repair;
         c.ipsw = Some(f.ipsw.clone());
@@ -4500,10 +4599,15 @@ fn every_maintenance_hint_names_the_usb() {
     let problems = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(problems.contains("repair --fetch"), "{problems}");
+    assert!(problems.contains("stela setup repair --usb"), "{problems}");
     assert_hints_name_the_usb(&problems);
-    let report = rerun(&f, |c| c.action = Action::Repair).unwrap_err();
-    assert_hints_name_the_usb(&report.to_string());
+    let report = rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.dry_run = true;
+    })
+    .unwrap();
+    assert!(report.contains("--initialize-nor"), "{report}");
+    assert_hints_name_the_usb(&report);
 }
 
 /// Move the partition `from` to `to` on disk `disk`, as a PC that numbers

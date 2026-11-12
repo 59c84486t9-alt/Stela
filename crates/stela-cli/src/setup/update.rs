@@ -140,6 +140,7 @@ pub(super) fn update_stela(
         false => next.missing_restore_bundles(),
     };
     let lookup = super::sources::Lookup {
+        need: super::sources::Need::BootFiles,
         build: &record.build,
         model: &record.model,
         ipsw,
@@ -256,15 +257,14 @@ pub(super) fn update_stela(
         writeln!(
             text,
             "  restore image  {}",
-            super::sources::describe(source, &record.build)
+            super::sources::describe(source, &lookup)
         )?;
     }
     // A dry run prepares only from an image already on this computer: it
     // reads nothing from the USB and downloads nothing.
-    let local = matches!(
-        source,
-        Some(super::sources::Source::Given(_) | super::sources::Source::Cached(_))
-    );
+    let local = source
+        .as_ref()
+        .is_some_and(super::sources::Source::is_local);
     if dry_run && !local {
         for &(kind, ecid) in &missing_restore {
             writeln!(
@@ -393,24 +393,56 @@ fn activate(record: &mut Record, to: String) -> Result<()> {
     write_record(&record.esp.clone(), record)
 }
 
-/// Add `ipsw`'s install medium and every machine's restore bundles, and
-/// make its build the one Install macOS restores.
+/// Image source and write policy for a macOS update.
+pub(super) struct OsOptions<'a> {
+    pub(super) usb: &'a Path,
+    /// The new build's image; its build is the new one.
+    pub(super) ipsw: Option<&'a Path>,
+    /// The new build without `ipsw` (`--build`).
+    pub(super) build: &'a str,
+    pub(super) download_dir: Option<&'a Path>,
+    pub(super) dry_run: bool,
+}
+
+/// Add the new build's install medium and every machine's restore bundles,
+/// and make it the build Install macOS restores.
 pub(super) fn update_os(
     environment: &Environment<'_>,
     mut record: Record,
-    ipsw: &Path,
-    usb: &Path,
-    dry_run: bool,
+    options: OsOptions<'_>,
 ) -> Result<String> {
+    let OsOptions {
+        usb,
+        ipsw,
+        build,
+        download_dir,
+        dry_run,
+    } = options;
+    // Everything that can refuse the update comes before any download.
     check_bundle_revision(environment, &record)?;
-    let (product_version, build) = crate::restore::payload::identity(ipsw, &record.model)?;
-    super::supported(environment, ipsw, &build)?;
+    let build = match ipsw {
+        Some(ipsw) => {
+            let (_, build) = crate::restore::payload::identity(ipsw, &record.model)?;
+            super::supported(environment, ipsw, &build)?;
+            build
+        }
+        None => {
+            let entry = stela_formats::builds::find_in(environment.builds, build)
+                .map_err(|error| anyhow::anyhow!("macOS {build}: {error}"))?;
+            ensure!(
+                entry.build == build,
+                "macOS {build} is not a build Stela was tested with; pass its image with --ipsw \
+                 to use it"
+            );
+            build.to_owned()
+        }
+    };
     ready(&record, usb)?;
     let from = record.build.clone();
     if build == from && record.has_leftovers() {
         // Stopped after the new build became the active one: remove what it
         // replaces.
-        let mut text = format!("macOS {product_version} ({build}) install files:\n");
+        let mut text = format!("macOS {build} install files:\n");
         writeln!(
             text,
             "  remove         the restore files of earlier builds and generations"
@@ -429,20 +461,68 @@ pub(super) fn update_os(
         "macOS {build} is already the build this setup installs"
     );
     // The build's install medium and restore bundles, so Install macOS
-    // restores the new build.
-    let install = plan_install(
-        environment,
-        &record,
-        super::create::InstallOptions {
-            build: &build,
-            ipsw,
-            bundles: &restore_bundles(&record.install_machines()),
-            additional_bytes: 0,
-        },
-    )?;
+    // restores the new build: what that needs of its image, where it comes
+    // from and whether the USB has room, before anything is downloaded.
+    let need =
+        super::sources::need(&record, &build, true).unwrap_or(super::sources::Need::BootFiles);
+    let lookup = super::sources::Lookup {
+        need,
+        build: &build,
+        model: &record.model,
+        ipsw,
+        download_dir,
+        medium: record.medium_of(&build),
+    };
+    let source = super::sources::locate(environment, &lookup).map_err(|error| {
+        anyhow::anyhow!("updating to macOS {build} needs its restore image; but {error:#}")
+    })?;
+    if need == super::sources::Need::WholeImage {
+        super::sources::check_room(environment, &record, &build, &source).map_err(|error| {
+            anyhow::anyhow!(
+                "{error:#} The USB keeps macOS {from}'s copy until the new one is complete, so \
+                 an interrupted update leaves it able to install"
+            )
+        })?;
+    }
     let mut text = String::new();
-    writeln!(text, "macOS {product_version} ({build}) install files:")?;
-    describe_install(&record, &install, &mut text)?;
+    writeln!(text, "macOS {build} install files:")?;
+    writeln!(
+        text,
+        "  restore image  {}",
+        super::sources::describe(&source, &lookup)
+    )?;
+    // A dry run reads and downloads nothing to prepare its plan.
+    let obtained = match dry_run && !source.is_local() {
+        true => None,
+        false => Some(super::sources::obtain(environment, &source, &lookup)?),
+    };
+    let install = match &obtained {
+        Some(obtained) => {
+            let environment = Environment {
+                download: obtained.download.as_ref(),
+                ..*environment
+            };
+            let plan = plan_install(
+                &environment,
+                &record,
+                super::create::InstallOptions {
+                    build: &build,
+                    ipsw: &obtained.path,
+                    bundles: &restore_bundles(&record.install_machines()),
+                    additional_bytes: 0,
+                },
+            )?;
+            describe_install(&record, &plan, &mut text)?;
+            Some(plan)
+        }
+        None => {
+            writeln!(
+                text,
+                "  install        its install medium and every machine's restore bundle"
+            )?;
+            None
+        }
+    };
     if let Some(medium) = record.active_medium() {
         writeln!(
             text,
@@ -454,6 +534,14 @@ pub(super) fn update_os(
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
+    let (Some(install), Some(obtained)) = (install, obtained) else {
+        unreachable!("a change has its plan");
+    };
+    let environment = &Environment {
+        download: obtained.download.as_ref(),
+        ..*environment
+    };
+    let ipsw = obtained.path.as_path();
     apply_install(environment, &mut record, ipsw, install)?;
     activate_build(&mut record, &build)?;
     // The record names the new build before the old one's files go, so a

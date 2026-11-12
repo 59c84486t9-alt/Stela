@@ -294,6 +294,12 @@ pub(super) fn fetch(command: &Request) -> Result<PathBuf> {
     }
 }
 
+/// The file name of `build`'s boot archive for `model` in a download
+/// directory.
+pub(super) fn recovery_name(build: &str, model: &str) -> String {
+    format!("Recovery_{build}_{}.ipsw", model.replace(',', "_"))
+}
+
 /// Copy `build`'s recovery members for `model` from Apple's servers into
 /// `directory` (`restore::fetch_recovery`), or reuse an earlier complete
 /// copy: setup's install medium needs no more of the image.
@@ -305,7 +311,7 @@ pub(super) fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Resu
                 .all(|c| c.is_ascii_alphanumeric() || c == b','),
         "unexpected build or model identifier"
     );
-    let path = directory.join(format!("Recovery_{build}_{}.ipsw", model.replace(',', "_")));
+    let path = directory.join(recovery_name(build, model));
     if path.is_file() {
         let archive = zip::ZipArchive::new(fs::File::open(&path)?)
             .with_context(|| format!("{} is not a complete archive", path.display()))?;

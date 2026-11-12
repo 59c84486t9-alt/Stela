@@ -486,12 +486,14 @@ type Prepare = dyn for<'a> Fn(prepare::RamdiskOptions<'a>) -> Result<()>;
 
 /// An IPSW's restore inventory for a model.
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
-/// The bytes of a build's boot members for a model on Apple's servers, and
+/// The bytes of a build's boot files for a model on Apple's servers, and
 /// of its whole image (`restore::recovery_size`).
-type RecoverySizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
-/// Download a build's boot members for a model into a directory
-/// (`prepare::fetch_recovery`).
-type FetchRecoveryOf<'a> = dyn Fn(&Path, &str, &str) -> Result<PathBuf> + 'a;
+type ImageSizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
+/// Fetch what a command needs of a build's image for a model into a
+/// directory: the boot files (`prepare::fetch_recovery`), or the boot files
+/// of a whole image that is written onto the USB as it downloads
+/// (`medium::download::Download`).
+type FetchImageOf<'a> = dyn Fn(&Path, &str, &str, sources::Need) -> Result<sources::Fetched> + 'a;
 
 /// Inputs that the command line fixes and tests replace.
 #[derive(Clone, Copy)]
@@ -518,8 +520,8 @@ struct Environment<'a> {
     /// Where downloaded images may be, this user's cache first
     /// (`sources::image_caches`).
     image_caches: &'a [PathBuf],
-    recovery_size: &'a RecoverySizeOf<'a>,
-    fetch_recovery: &'a FetchRecoveryOf<'a>,
+    image_size: &'a ImageSizeOf<'a>,
+    fetch_image: &'a FetchImageOf<'a>,
     /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
@@ -704,12 +706,24 @@ impl Request {
         let environment = Environment {
             host: &host::System,
             image_caches: &image_caches,
-            recovery_size: &|build, model| {
+            image_size: &|build, model| {
                 let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
                 restore::recovery_size(&image, model)
             },
-            fetch_recovery: &|directory, build, model| {
-                prepare::fetch_recovery(directory, build, model)
+            fetch_image: &|directory, build, model, need| match need {
+                sources::Need::BootFiles => Ok(sources::Fetched {
+                    path: prepare::fetch_recovery(directory, build, model)?,
+                    download: None,
+                }),
+                sources::Need::WholeImage => {
+                    let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
+                    let path = directory.join("boot.ipsw");
+                    let download = medium::download::Download::prepare(image, model, &path)?;
+                    Ok(sources::Fetched {
+                        path,
+                        download: Some(download),
+                    })
+                }
             },
             download: None,
             prepare_restore: &prepare_restore,
@@ -840,8 +854,17 @@ impl Request {
             Action::UpdateOs => {
                 check_installed_efi(environment, &record)?;
                 record.install_image = self.install_image.or(record.install_image);
-                let ipsw = self.image()?;
-                update::update_os(environment, record, &ipsw, &self.usb, self.dry_run)
+                update::update_os(
+                    environment,
+                    record,
+                    update::OsOptions {
+                        usb: &self.usb,
+                        ipsw: self.ipsw.as_deref(),
+                        build: &self.build,
+                        download_dir: self.download_dir.as_deref(),
+                        dry_run: self.dry_run,
+                    },
+                )
             }
             Action::NextBoot(next) => self.next_boot(environment, &record, next),
             Action::Configure => {
@@ -1014,13 +1037,6 @@ impl Request {
             (None, true) => fetch(self),
             _ => bail!("pass --ipsw IPSW, or --fetch to download macOS 27 from Apple"),
         }
-    }
-
-    /// The restore image when the command names one.
-    fn optional_image(&self) -> Result<Option<PathBuf>> {
-        (self.ipsw.is_some() || self.fetch)
-            .then(|| self.image())
-            .transpose()
     }
 }
 

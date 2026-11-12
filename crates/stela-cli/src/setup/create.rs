@@ -129,10 +129,9 @@ pub(super) fn plan_install(
             restore.extend(prepared);
         }
     }
-    let remote = environment.download.is_none() && record.remote_install(ipsw)?;
-    let intact = record
-        .medium_of(build)
-        .is_some_and(|m| m.remote == remote && m.problems().is_empty());
+    // A medium that stays needs nothing of the image but its boot files.
+    let intact = super::sources::medium_ready(record, build);
+    let remote = !intact && environment.download.is_none() && record.remote_install(ipsw)?;
     let medium = match intact {
         true => None,
         false if remote => Some(MediumPlan {

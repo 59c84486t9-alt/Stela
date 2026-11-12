@@ -14,7 +14,8 @@
 //! prepared from the active build's restore image.
 use super::{
     Environment, Request, apply_install, bundle, check_bundle_revision, check_installed_efi,
-    describe_install, ecid::Ecid, installed, plan_install, publish, read_record, write_record,
+    describe_install, ecid::Ecid, installed, plan_install, publish, read_record, sources,
+    write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -243,28 +244,53 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     next.install_image = command.install_image.or(next.install_image);
     let stale = next.drop_stale_bundles();
     // Every install restores from the medium with its own restore bundle.
-    let Some(ipsw) = command.optional_image()? else {
-        bail!(
-            "install \"{name}\" (ECID {ecid}) needs a restore bundle of its own, prepared from \
-             the macOS {} restore image: leave out --ipsw to download it, or pass --ipsw FILE",
-            record.build
-        );
+    let need = sources::need(&next, &next.build, true).unwrap_or(sources::Need::BootFiles);
+    let active = next.active_medium().cloned();
+    let lookup = sources::Lookup {
+        need,
+        build: &record.build,
+        model: &record.model,
+        ipsw: command.ipsw.as_deref(),
+        download_dir: command.download_dir.as_deref(),
+        medium: active.as_ref(),
     };
+    let source = sources::locate(environment, &lookup).map_err(|error| {
+        anyhow::anyhow!(
+            "install \"{name}\" (ECID {ecid}) needs a restore bundle of its own, prepared from \
+             the macOS {} restore image; but {error:#}",
+            record.build
+        )
+    })?;
+    if need == sources::Need::WholeImage {
+        sources::check_room(environment, &next, &next.build, &source)?;
+    }
     let restore: Vec<(bundle::Kind, Option<Ecid>)> =
         super::restore_bundles(&next.install_machines())
             .into_iter()
             .filter(|&(kind, ecid)| next.restore_bundle(kind, ecid).is_none())
             .collect();
-    let install_plan = plan_install(
-        environment,
-        &next,
-        super::create::InstallOptions {
-            build: &next.build,
-            ipsw: &ipsw,
-            bundles: &restore,
-            additional_bytes: 0,
-        },
-    )?;
+    // A dry run reads and downloads nothing to prepare its plan.
+    let install_plan = match command.dry_run && !source.is_local() {
+        true => None,
+        false => {
+            let obtained = sources::obtain(environment, &source, &lookup)?;
+            let environment = Environment {
+                download: obtained.download.as_ref(),
+                ..*environment
+            };
+            let plan = plan_install(
+                &environment,
+                &next,
+                super::create::InstallOptions {
+                    build: &next.build,
+                    ipsw: &obtained.path,
+                    bundles: &restore,
+                    additional_bytes: 0,
+                },
+            )?;
+            Some((plan, obtained))
+        }
+    };
     let mut text = String::new();
     writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
     writeln!(text, "  ECID           {ecid}")?;
@@ -275,7 +301,18 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
         disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
     )?;
     writeln!(text, "  {}", super::state_line(disk))?;
-    describe_install(&next, &install_plan, &mut text)?;
+    writeln!(
+        text,
+        "  restore image  {}",
+        sources::describe(&source, &lookup)
+    )?;
+    match &install_plan {
+        Some((plan, _)) => describe_install(&next, plan, &mut text)?,
+        None => writeln!(
+            text,
+            "  install        its restore bundle, prepared from that image"
+        )?,
+    }
     writeln!(
         text,
         "  choices.cfg    adds \"{name}\" and its Install macOS"
@@ -302,7 +339,12 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
         return Ok(text);
     }
     write_record(&next.esp.clone(), &next)?;
-    apply_install(environment, &mut next, &ipsw, install_plan)?;
+    let (plan, obtained) = install_plan.expect("a change has its plan");
+    let environment = &Environment {
+        download: obtained.download.as_ref(),
+        ..*environment
+    };
+    apply_install(environment, &mut next, &obtained.path, plan)?;
     if let Some(region) = &checked.foreign {
         installed::erase_foreign(host, region)?;
     }

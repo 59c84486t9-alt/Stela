@@ -37,9 +37,10 @@ enum Command {
     /// fails when something needs fixing.
     Status(Found),
     /// Put back what the setup record says (stela.cfg, the startup choices,
-    /// damaged boot files); with `--fetch` or `--ipsw`, also prepare the
-    /// active build's restore bundles again and put back a damaged install
-    /// medium.
+    /// damaged boot files and install medium, from `--ipsw`, an image
+    /// already downloaded, the USB's own copy or Apple's servers); with
+    /// `--fetch` or `--ipsw`, also prepare every restore bundle again and
+    /// give a machine without an ECID one.
     Repair(Repair),
     /// Update an existing setup in place.
     #[command(subcommand)]
@@ -440,8 +441,8 @@ struct Repair {
     usb: Found,
     #[command(flatten)]
     image: Image,
-    /// Download the restore image from Apple to prepare the restore files
-    /// again.
+    /// Prepare every restore bundle again, and give a machine without an
+    /// ECID one, from wherever the image is found.
     #[arg(long, conflicts_with = "ipsw")]
     fetch: bool,
     /// Erase the other file system an install's SSD partition holds: the
@@ -489,7 +490,7 @@ enum Update {
     /// already downloaded, the USB's own copy of macOS, or else the image's
     /// boot files downloaded alone.
     Stela(UpdateStela),
-    /// Replace Install macOS's build with a new one (`--fetch` or `--ipsw`):
+    /// Replace Install macOS's build with a new one (`--build` or `--ipsw`):
     /// its install medium and restore bundles replace the old build's.
     Os(UpdateOs),
 }
