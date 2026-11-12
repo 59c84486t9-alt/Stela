@@ -267,9 +267,30 @@ impl Drop for InternalKernelCode {
     fn drop(&mut self) {
         for code in self.code.into_iter().filter(|code| code.0 != 0) {
             // SAFETY: the service built the shader, which is released once.
-            unsafe { (self.release)(code.0 as usize as *mut c_void) }
+            unsafe { release_nir(self.release, code) }
         }
     }
+}
+
+/// How many NIR shaders the compilers released: while it stands, a
+/// [`ShaderCode`] still names the shader it named, since only a release
+/// frees an address another shader may take ([`nir_releases`]).
+static NIR_RELEASES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The count of NIR releases, which a holder of a [`ShaderCode`] compares
+/// later to know that the code still names the same shader.
+pub fn nir_releases() -> u64 {
+    NIR_RELEASES.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Releases `code` through the service's `release`, counting it first.
+///
+/// # Safety
+/// `code` is NIR the service built, released once, which nothing uses.
+unsafe fn release_nir(release: unsafe extern "C" fn(*mut c_void), code: ShaderCode) {
+    NIR_RELEASES.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    // SAFETY: the caller's.
+    unsafe { release(code.0 as usize as *mut c_void) }
 }
 
 /// Loaded libraries by id: ids that share bytes hold one copy.
@@ -340,7 +361,7 @@ impl Drop for AirCompiler {
         for code in codes.into_iter().flatten() {
             // SAFETY: a cached shader no one holds; the service outlives
             // the compiler.
-            unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+            unsafe { release_nir(self.service.release, code) };
         }
     }
 }
@@ -512,7 +533,7 @@ impl AirCompiler {
         let Some(nir) = self.nir.as_mut() else {
             if let Ok((shader, _)) = result {
                 // SAFETY: the job's NIR, which nothing else holds.
-                unsafe { (self.service.release)(shader.code.0 as usize as *mut c_void) };
+                unsafe { release_nir(self.service.release, shader.code) };
             }
             return;
         };
@@ -521,7 +542,7 @@ impl AirCompiler {
                 let code = shader.code;
                 if nir.insert(key, shader, bytes, false) == Returned::Release {
                     // SAFETY: as above.
-                    unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+                    unsafe { release_nir(self.service.release, code) };
                 }
             }
             Err(()) => {
@@ -589,7 +610,7 @@ impl AirCompiler {
         let doomed = self.nir.as_mut().map(NirCache::take_doomed);
         for code in doomed.into_iter().flatten() {
             // SAFETY: an evicted shader no one holds.
-            unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+            unsafe { release_nir(self.service.release, code) };
         }
     }
 
@@ -1228,7 +1249,7 @@ impl Compiler for AirCompiler {
         }
         // SAFETY: the code is NIR this compiler's service compiled, which the
         // device releases once.
-        unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
+        unsafe { release_nir(self.service.release, code) }
     }
 }
 

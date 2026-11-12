@@ -19,18 +19,15 @@
 //! when it is dropped unadopted, when newer images push it out, and when
 //! the backend is dropped. A job never runs on a destroyed device
 //! ([`super::deferral`]).
-use super::{memory, objects};
+use super::{
+    kept::{Kept, Taken},
+    memory, objects,
+};
 use crate::metal::{
     deferred::{Job, Made, Owner},
     vulkan::object::{ImageInfo, MemoryRequest},
 };
-use alloc::{
-    boxed::Box,
-    collections::{BTreeSet, VecDeque},
-    format,
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{boxed::Box, collections::BTreeSet, format, sync::Arc, vec::Vec};
 use ash::vk;
 use core::{
     ptr::NonNull,
@@ -47,16 +44,24 @@ const KEPT: usize = 8;
 const REMEMBERED: usize = 1 << 10;
 
 /// What memory jobs made for later turns.
-#[derive(Default)]
 pub(super) struct Premade {
-    /// Images made for calls not yet run again, oldest first.
-    images: VecDeque<Image>,
+    /// Images made for calls not yet run again. Their keys are values, so
+    /// one generation serves.
+    images: Kept<Image>,
     failed: BTreeSet<[u8; 32]>,
+}
+
+impl Default for Premade {
+    fn default() -> Self {
+        Self {
+            images: Kept::new(KEPT),
+            failed: BTreeSet::new(),
+        }
+    }
 }
 
 /// An image a job created and bound to memory of its own.
 pub(super) struct Image {
-    pub key: [u8; 32],
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
     pub memory_type: u32,
@@ -123,8 +128,10 @@ pub(super) fn destroy(device: &ash::Device, made: Kind) {
 impl Premade {
     /// The image made for the call that wants `key`.
     pub(super) fn take(&mut self, key: &[u8; 32]) -> Option<Image> {
-        let at = self.images.iter().position(|image| image.key == *key)?;
-        self.images.remove(at)
+        match self.images.take(key, 0) {
+            Taken::Fresh(image) | Taken::Stale(image) => Some(image),
+            Taken::Missing => None,
+        }
     }
 
     /// Whether `key`'s job failed, so that its call allocates itself.
@@ -141,13 +148,7 @@ impl Premade {
         made: Option<Kind>,
     ) -> (Option<Block>, Option<Image>) {
         match made {
-            Some(Kind::Image(image)) => {
-                self.images.push_back(image);
-                let evicted = (self.images.len() > KEPT)
-                    .then(|| self.images.pop_front())
-                    .flatten();
-                (None, evicted)
-            }
+            Some(Kind::Image(image)) => (None, self.images.keep(key, 0, image)),
             Some(Kind::Block(block)) => (Some(block), None),
             None => {
                 if self.failed.len() >= REMEMBERED {
@@ -161,7 +162,7 @@ impl Premade {
 
     /// Every image kept, for the backend's drop.
     pub(super) fn drain(&mut self) -> impl Iterator<Item = Image> + '_ {
-        self.images.drain(..)
+        self.images.drain()
     }
 }
 
@@ -189,7 +190,7 @@ pub(super) fn image_job(
     let device = device.clone();
     Job::new(key, Owner::Backend, move || {
         let made = (!gone.load(Ordering::Acquire))
-            .then(|| make_image(&device, key, &info, &memory_types, mapped))
+            .then(|| make_image(&device, &info, &memory_types, mapped))
             .flatten()
             .map(Kind::Image);
         Box::new(Making { made, gone, device }) as Made
@@ -231,7 +232,6 @@ pub(super) fn block_job(
 /// buffers, as images are cleared.
 fn make_image(
     device: &ash::Device,
-    key: [u8; 32],
     info: &ImageInfo,
     memory_types: &[u32],
     mapped: bool,
@@ -260,7 +260,6 @@ fn make_image(
             break;
         }
         return Some(Image {
-            key,
             image,
             memory,
             memory_type,
