@@ -347,9 +347,12 @@ pub(super) fn remove_replaced(
 struct Resume {
     name: String,
     ecid: Ecid,
-    /// Its restore bundles, when every one is intact; else empty, and
-    /// they are prepared again.
+    /// Its restore bundles, when every one is intact and of the generation
+    /// this stela prepares; else empty, and they are prepared again.
     bundles: Vec<bundle::Bundle>,
+    /// Its bundles of another generation, which an older stela prepared:
+    /// removed before the new ones are copied.
+    stale: Vec<bundle::Bundle>,
     /// Its install medium of the build: `plan_install` keeps it when intact
     /// and `medium::write` keeps each piece whose hash matches.
     media: Vec<medium::Medium>,
@@ -430,13 +433,9 @@ impl Resume {
                 install.name
             ));
         }
+        // Bundles an older stela prepared are prepared again, as damaged
+        // ones are; the rest of the setup is kept.
         let generation = environment.generation();
-        if previous.generation() != generation {
-            differences.push(format!(
-                "boot bundles {} (this stela prepares {generation})",
-                previous.generation()
-            ));
-        }
         let Some(ecid) = install.ecid else {
             bail!(
                 "the interrupted setup on {} names no ECID; remove it with {} first",
@@ -454,15 +453,17 @@ impl Resume {
                 super::fix(&command.usb, "uninstall")
             );
         }
-        // Every restore bundle intact, or all prepared again.
-        let intact = bundle::RESTORE_KINDS.into_iter().all(|kind| {
-            previous
-                .restore_bundle(kind, Some(ecid))
-                .is_some_and(|kept| {
-                    bundle::verify(&kept.directory(&previous.volume), &kept.manifest_sha256)
-                        .is_empty()
-                })
-        });
+        // Every restore bundle intact and current, or all prepared again.
+        let current = previous.generation() == generation;
+        let intact = current
+            && bundle::RESTORE_KINDS.into_iter().all(|kind| {
+                previous
+                    .restore_bundle(kind, Some(ecid))
+                    .is_some_and(|kept| {
+                        bundle::verify(&kept.directory(&previous.volume), &kept.manifest_sha256)
+                            .is_empty()
+                    })
+            });
         let bundles = match intact {
             true => previous
                 .bundles
@@ -476,6 +477,12 @@ impl Resume {
             name: install.name.clone(),
             ecid,
             bundles,
+            stale: previous
+                .bundles
+                .iter()
+                .filter(|b| b.generation() != generation)
+                .cloned()
+                .collect(),
             media: previous
                 .media
                 .iter()
@@ -571,6 +578,9 @@ pub(super) struct Plan {
     pub(super) notes: Vec<String>,
     /// The key file's passphrase, for `--wifi`.
     pub(super) wifi_passphrase: Option<String>,
+    /// The bundles an older stela prepared for the interrupted setup this
+    /// one resumes, which its own replace.
+    pub(super) stale_bundles: Vec<bundle::Bundle>,
 }
 
 pub(super) fn plan(
@@ -728,6 +738,7 @@ pub(super) fn plan(
     // What the interrupted setup wrote and this one keeps: its intact
     // bundles, its medium (kept whole when intact, else piece by piece by
     // its hashes), its translation store and the directories it created.
+    let mut stale_bundles = Vec::new();
     if let Some(resume) = resume {
         notes.push(format!(
             "resumes the setup interrupted on {}",
@@ -735,7 +746,16 @@ pub(super) fn plan(
         ));
         if let Some(previous) = &previous {
             notes.push(previous.resume_summary());
+            if !resume.stale.is_empty() {
+                notes.push(format!(
+                    "the interrupted setup's boot files are an older stela's ({}); this stela \
+                     prepares its own ({}) and removes those",
+                    previous.generation(),
+                    environment.generation()
+                ));
+            }
         }
+        stale_bundles = resume.stale;
         record.bundles = resume.bundles;
         record.media = resume.media;
         record.translations = resume.translations;
@@ -806,6 +826,7 @@ pub(super) fn plan(
         install,
         notes,
         wifi_passphrase: command.wifi_passphrase.clone(),
+        stale_bundles,
     })
 }
 
@@ -1202,6 +1223,9 @@ pub(super) fn missing_directories(root: &Path, path: &Path) -> Vec<PathBuf> {
 pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     let mut record = plan.record;
     let esp = record.esp.clone();
+    // An older stela's bundles go while the record on the USB still names
+    // them, so a stop here leaves nothing it does not name.
+    super::record::remove_bundles(&record, &plan.stale_bundles)?;
     // Recorded before the first write, so an interrupted setup can be undone.
     write_record(&esp, &record)?;
     copy_bundles(&mut record, &plan.prepared)?;

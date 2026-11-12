@@ -2944,6 +2944,44 @@ fn an_interrupted_full_setup_resumes_as_a_full_install_and_keeps_its_pieces() {
 }
 
 #[test]
+fn an_older_stelas_interrupted_setup_is_resumed_with_new_bundles_and_its_pieces() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    let (older, newer) = (preparers(0), preparers(1));
+    setup(&environment_at(&f.host, &older, 0), installed_command(&f)).unwrap();
+    let (_, last) = interrupt_setup(&f);
+    let stopped = record(&f);
+    let ecid = stopped.installs[0].ecid;
+    let old_bundle = bundle_of(&f, ecid);
+    assert!(old_bundle.is_dir());
+    let pieces = medium_pieces(&f);
+    for piece in &pieces {
+        set_old(piece);
+    }
+    // A later stela prepares revision 1: the same command finishes it.
+    let new = environment_at(&f.host, &newer, 1);
+    let mut again = installed_command(&f);
+    again.install_image = None;
+    let report = setup(&new, again).unwrap();
+    assert!(report.contains("Done."), "{report}");
+    assert!(report.contains("an older stela's"), "{report}");
+    let resumed = record(&f);
+    assert!(resumed.complete);
+    assert_eq!(resumed.bundle_revision, 1);
+    assert!(resumed.bundles.iter().all(|b| b.revision == 1));
+    assert!(!old_bundle.exists());
+    assert!(bundle_of(&f, ecid).is_dir());
+    assert_eq!(resumed.installs[0].ecid, ecid);
+    for piece in &pieces {
+        assert_eq!(is_old(piece), *piece != last, "{}", piece.display());
+    }
+    let mut status = installed_command(&f);
+    status.action = Action::Status;
+    let status = status.dispatch(&new).unwrap();
+    assert!(status.contains("No problems found."), "{status}");
+}
+
+#[test]
 fn a_resumed_full_setup_writes_again_only_its_damaged_piece() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
