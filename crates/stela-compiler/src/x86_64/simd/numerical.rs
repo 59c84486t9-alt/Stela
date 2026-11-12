@@ -1256,7 +1256,7 @@ pub(super) struct NanRegisters {
 
 /// Set `destination` to all ones in each `shape` lane the guest writes,
 /// zero elsewhere.
-fn active_lanes(code: &mut Code, shape: Shape, format: Format, destination: u8) {
+pub(super) fn active_lanes(code: &mut Code, shape: Shape, format: Format, destination: u8) {
     packed(code, Host::EqualDword, destination, destination);
     let bytes = match shape {
         Shape::Scalar => (format.bits() / u8::BITS) as u8,
@@ -1264,6 +1264,47 @@ fn active_lanes(code: &mut Code, shape: Shape, format: Format, destination: u8) 
         Shape::Vector128 => return,
     };
     ShiftOpcode::RightBytes.emit(code, destination, 16 - bytes);
+}
+
+/// Set `destination` to all ones in each S/D lane of `source` whose
+/// exponent is all ones (an infinity or a NaN): its magnitude (a Double's
+/// high dword's) is above the largest finite's. Integer compares alone, so
+/// no host status. Clobbers `scratch` and EAX.
+pub(super) fn special_lanes(
+    code: &mut Code,
+    format: Format,
+    destination: u8,
+    source: u8,
+    scratch: u8,
+) {
+    const BROADCAST_LOW_DWORD: u8 = 0;
+    packed(code, Host::EqualDword, destination, destination);
+    ShiftOpcode::RightDword.emit(code, destination, 1);
+    packed(code, Host::And, destination, source);
+    let largest_finite = if format == Format::Double {
+        0x7fef_ffff
+    } else {
+        0x7f7f_ffff
+    };
+    code.asm().mov_imm32(Rax, largest_finite);
+    code.asm().movd_to_xmm(scratch, Rax);
+    packed_imm(
+        code,
+        Host::ShuffleDword,
+        scratch,
+        scratch,
+        BROADCAST_LOW_DWORD,
+    );
+    packed(code, Host::GreaterDword, destination, scratch);
+    if format == Format::Double {
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            destination,
+            destination,
+            REPLICATE_HIGH_DWORDS,
+        );
+    }
 }
 
 /// Set `destination` to all ones in each S/D lane of `source` whose

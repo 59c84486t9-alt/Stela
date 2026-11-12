@@ -1,5 +1,5 @@
-//! S/D FADD, FSUB, FMUL, FDIV, FABD, FMULX, FNMUL and (with FMA3) FMLA,
-//! FMLS and FMADD over subnormal, tiny, overflowing and special inputs
+//! S/D FADD, FSUB, FMUL, FDIV, FABD, FMULX, FNMUL, FMLA, FMLS and FMADD
+//! over subnormal, tiny, overflowing and special inputs
 //! against the Arm reference, compiled as blocks for every tier this host
 //! has: every inline completion matches the reference in every V register
 //! and FPSR, every exit leaves the state unchanged, and with FZ, FIZ, AH
@@ -7,8 +7,9 @@
 //! binary lane set completes inline, NaN
 //! propagation, invalid operations, subnormal inputs and results, UFC, OFC
 //! and DZC included, but for FMULX's infinity times zero and a minimum
-//! normal quotient; FMA lanes complete likewise but for a quiet NaN
-//! addend beside an infinity times a zero and a minimum normal result.
+//! normal quotient; FMA lanes complete likewise with FMA3 but for a
+//! minimum normal result, and on every tier a lane with an infinite or NaN
+//! operand completes inline beside lanes the exact product completes.
 //! Under FZ a fused result Arm flushes to zero takes the helper.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
@@ -127,10 +128,6 @@ fn floats(format: Format) -> Vec<u64> {
         values.push(values[index] | format.sign_mask());
     }
     values
-}
-
-fn is_nan(format: Format, bits: u64) -> bool {
-    bits & !format.sign_mask() > format.exponent_mask()
 }
 
 fn lane(vector: [u64; 2], format: Format, index: usize) -> u64 {
@@ -416,27 +413,28 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                         let label =
                             alloc::format!("{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}");
                         let lanes = fused_lanes(form, format, &initial);
-                        // A quiet NaN addend beside an infinity times a
-                        // zero (Arm's default NaN) and a minimum normal
-                        // result (the host may find its tininess after
-                        // rounding) take the helper.
-                        let must_inline = fma
+                        // Without FMA3, lanes each with an infinite or NaN
+                        // operand complete inline.
+                        let special =
+                            |bits: u64| bits & format.exponent_mask() == format.exponent_mask();
+                        let all_special = !target.data_independent_timing()
                             && rounded(fpcr)
-                            && lanes.iter().all(|&(operation, addend, left, right)| {
-                                let magnitude = |bits: u64| bits & !format.sign_mask();
-                                let infinity = format.exponent_mask();
-                                let quiet = 1 << (format.fraction_bits() - 1);
-                                let invalid_product = magnitude(left) == 0
-                                    && magnitude(right) == infinity
-                                    || magnitude(left) == infinity && magnitude(right) == 0;
-                                !(is_nan(format, addend) && addend & quiet != 0 && invalid_product)
-                                    && floating::fused::evaluate(
+                            && lanes.iter().all(|&(_, addend, left, right)| {
+                                special(addend) || special(left) || special(right)
+                            });
+                        // A minimum normal result (the host may find its
+                        // tininess after rounding) takes the helper.
+                        let must_inline = all_special
+                            || fma
+                                && rounded(fpcr)
+                                && lanes.iter().all(|&(operation, addend, left, right)| {
+                                    let magnitude = |bits: u64| bits & !format.sign_mask();
+                                    floating::fused::evaluate(
                                         format, operation, fpcr, addend, left, right,
                                     )
                                     .is_ok_and(|outcome| {
                                         magnitude(outcome.bits) != 1 << format.fraction_bits()
-                                    })
-                                    && !flushed_output(
+                                    }) && !flushed_output(
                                         format,
                                         fpcr,
                                         floating::fused::evaluate(
@@ -453,7 +451,7 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                                         )
                                         .map_or(0, |outcome| outcome.bits),
                                     )
-                            });
+                                });
                         let mut actual = initial.clone();
                         let exit = run(&code, &mut actual);
                         runs += 1;
@@ -589,12 +587,13 @@ fn run_lanes(
 /// Arm negates the product operand Vn of FMLS, FMSUB and FNMADD and the
 /// addend of FNMADD and FNMSUB before FPProcessNaNs, so a NaN there
 /// propagates with its sign flipped (quieted, or the default NaN under DN),
-/// in the order addend, Vn, Vm with signaling NaNs first. On an FMA tier
-/// every NaN lane completes inline.
+/// in the order addend, Vn, Vm with signaling NaNs first; an infinity times
+/// a zero gives the default NaN with IOC even beside a quiet NaN addend. On
+/// every tier every NaN lane completes inline.
 #[test]
 fn fused_nan_operands_keep_arm_negation_signs() {
     for target in targets() {
-        if !target.supports(TargetCpu::Fma) || target.data_independent_timing() {
+        if target.data_independent_timing() {
             continue;
         }
         for format in [Format::Single, Format::Double] {
@@ -657,6 +656,20 @@ fn fused_nan_operands_keep_arm_negation_signs() {
                     }
                 }
             }
+            // An infinity times a zero beside a quiet NaN addend: the
+            // default NaN with IOC, not the addend.
+            for case in cases {
+                for fpcr in [0, FPCR_DN] {
+                    for factors in [[infinity, 0], [sign, infinity | sign]] {
+                        let inputs = [factors[0], factors[1], nans[0]];
+                        let (exit, _, actual, expected) =
+                            run_lanes(target, case, format, fpcr, inputs);
+                        let label = alloc::format!("{case:x?} {format:?} {inputs:x?} {fpcr:#x}");
+                        assert_eq!(exit, RETURN, "{label}");
+                        assert_eq!(actual, expected, "{label}");
+                    }
+                }
+            }
             // The flipped sign itself, apart from the reference: FMSUB of a
             // positive quiet NaN Vn gives the negative NaN.
             let (exit, _, actual, _) =
@@ -665,6 +678,127 @@ fn fused_nan_operands_keep_arm_negation_signs() {
             assert_eq!(lane(actual.v[D as usize], format, 0), nans[0] | sign);
         }
     }
+}
+
+/// FMLA and FMLS by vector and by element, and FMADD, FMSUB, FNMADD and
+/// FNMSUB, with an infinity, a zero or a NaN (quiet, signalling, either
+/// sign, with payloads) in lane 0 and the last lane of one operand or two,
+/// beside ordinary lanes whose results are exact (or, with FMA3, round): on
+/// every tier
+/// with AH and the trap enables clear, each vector completes inline (but
+/// for a lane rounding to the minimum normal, which no input here gives),
+/// matching the reference in every lane and FPSR, FZ, FIZ and DN included.
+#[test]
+fn fused_special_lanes_complete_inline_beside_ordinary_lanes() {
+    let controls = [
+        0,
+        FPCR_DN,
+        FPCR_FZ,
+        FPCR_FZ | FPCR_DN,
+        FPCR_FIZ,
+        FPCR_FZ | FPCR_DN | 2 << FPCR_ROUNDING_SHIFT,
+        3 << FPCR_ROUNDING_SHIFT,
+    ];
+    let mut runs = 0;
+    for target in targets() {
+        if target.data_independent_timing() {
+            continue;
+        }
+        for format in [Format::Single, Format::Double] {
+            let fraction_bits = format.fraction_bits();
+            let infinity = format.exponent_mask();
+            let quiet = 1u64 << (fraction_bits - 1);
+            let sign = format.sign_mask();
+            let bias = u64::from(format.exponent_bias());
+            let specials = [
+                infinity,
+                infinity | sign,
+                0,
+                sign,
+                infinity | quiet,
+                infinity | quiet | 0x15,
+                sign | infinity | quiet | 3,
+                infinity | 0x11,
+                sign | infinity | 1,
+            ];
+            // 1.5, -3, 2.25 and 1/3-like values: exact and inexact lanes.
+            let ordinary = [
+                bias << fraction_bits | quiet,
+                sign | (bias + 1) << fraction_bits | quiet,
+                (bias + 1) << fraction_bits | quiet >> 3,
+                // Without FMA3 an inexact product takes the helper.
+                if target.supports(TargetCpu::Fma) {
+                    ((bias - 2) << fraction_bits) | ((quiet * 2 - 1) / 3 * 2)
+                } else {
+                    (bias - 1) << fraction_bits | quiet
+                },
+            ];
+            let lanes = if format == Format::Double { 2 } else { 4 };
+            let last = lanes as usize - 1;
+            let forms = [
+                Form::Vector(false, lanes),
+                Form::Vector(true, lanes),
+                Form::Element(lanes),
+                Form::Scalar,
+            ];
+            for form in forms {
+                let code = compile(fused_word(form, format), target);
+                for (first, &special) in specials.iter().enumerate() {
+                    let other = specials[(first * 5 + 2) % specials.len()];
+                    for (operand, second) in
+                        [(0, None), (1, None), (2, None), (0, Some(2)), (2, Some(1))]
+                    {
+                        let mut vectors = [[0u64; 2]; 3];
+                        for (which, vector) in vectors.iter_mut().enumerate() {
+                            for index in 0..lanes as usize {
+                                set_lane(vector, format, index, ordinary[(index + which) % 4]);
+                            }
+                        }
+                        for index in [0, last] {
+                            set_lane(&mut vectors[operand], format, index, special);
+                            if let Some(second) = second {
+                                set_lane(&mut vectors[second], format, index, other);
+                            }
+                        }
+                        for fpcr in controls {
+                            let mut initial = GuestState {
+                                fpcr,
+                                fpsr: 0x0800_0000,
+                                ..GuestState::default()
+                            };
+                            initial.x[30] = RETURN;
+                            initial.v[D as usize] = vectors[0];
+                            initial.v[A as usize] = vectors[0];
+                            initial.v[N as usize] = vectors[1];
+                            initial.v[M as usize] = vectors[2];
+                            let label = alloc::format!(
+                                "{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}"
+                            );
+                            let mut actual = initial.clone();
+                            let exit = run(&code, &mut actual);
+                            runs += 1;
+                            assert_eq!(exit, RETURN, "exited: {label}");
+                            let mut expected = initial.clone();
+                            let mut result = [0; 2];
+                            for (index, (operation, addend, left, right)) in
+                                fused_lanes(form, format, &initial).into_iter().enumerate()
+                            {
+                                let outcome = floating::fused::evaluate(
+                                    format, operation, fpcr, addend, left, right,
+                                )
+                                .unwrap();
+                                expected.fpsr |= outcome.exceptions;
+                                set_lane(&mut result, format, index, outcome.bits);
+                            }
+                            expected.v[D as usize] = result;
+                            assert_eq!(actual, expected, "{label}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 0);
 }
 
 /// FZ (with IDC) and FIZ (without) flush subnormal inputs inline, ahead of
