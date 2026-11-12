@@ -3,14 +3,21 @@
 //! `udisksctl` mounts and unmounts where it runs, `mount` and `umount`
 //! otherwise. Partitions are read and written through `/dev`, and a USB is
 //! erased by writing setup's own layout to its whole disk.
-use super::{Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume};
+use super::{
+    Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Removal, Volume,
+};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Once,
 };
+use system_disks::{Blocks, SystemDevices};
+
+mod system_disks;
 
 /// How setup gets the rights its raw reads and writes need.
 pub(crate) const ADMIN: &str = "sudo";
@@ -23,15 +30,26 @@ const ESP_TYPES: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 /// `lsblk`'s columns, for [`Device`].
 const COLUMNS: &str =
     "NAME,TYPE,SIZE,MODEL,TRAN,RM,RO,MOUNTPOINT,MOUNTPOINTS,PARTTYPE,PARTUUID,PKNAME";
-/// The mount points of the running system's volumes, and swap's.
-const SYSTEM_MOUNTS: [&str; 8] = [
+/// The mount points of the running system's volumes, and swap's: with
+/// OSTree's physical root, Nix's and Guix's stores, and the media live
+/// systems run from (dracut, archiso, casper, live-boot).
+const SYSTEM_MOUNTS: [&str; 17] = [
     "/",
+    "/sysroot",
     "/boot",
     "/boot/efi",
     "/efi",
     "/usr",
     "/var",
     "/home",
+    "/nix",
+    "/nix/store",
+    "/gnu/store",
+    "/run/initramfs/live",
+    "/run/archiso/bootmnt",
+    "/cdrom",
+    "/run/live/medium",
+    "/run/rootfsbase",
     "[SWAP]",
 ];
 /// The `BLKRRPART` ioctl: reread the partition table.
@@ -91,6 +109,11 @@ impl Device {
     fn holds_system(&self) -> bool {
         self.mounts().any(|mount| SYSTEM_MOUNTS.contains(&mount))
             || self.children.iter().any(Device::holds_system)
+    }
+
+    /// Whether it, or a device on it, is one of `names`, by kernel name.
+    fn holds_any(&self, names: &BTreeSet<String>) -> bool {
+        names.contains(&self.name) || self.children.iter().any(|child| child.holds_any(names))
     }
 
     /// What decides whether setup may erase this whole disk.
@@ -218,12 +241,139 @@ fn run(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn require_system_device(devices: &[Device]) -> Result<()> {
-    ensure!(
-        devices.iter().any(Device::holds_root),
-        "cannot identify the block devices holding the running Linux installation"
-    );
-    Ok(())
+/// sysfs, and the ZFS pool labels `lsblk` reads.
+struct Sysfs;
+
+impl Blocks for Sysfs {
+    fn by_number(&self, major: u32, minor: u32) -> Option<String> {
+        let sys = fs::canonicalize(format!("/sys/dev/block/{major}:{minor}")).ok()?;
+        Some(sys.file_name()?.to_str()?.to_owned())
+    }
+
+    fn by_node(&self, node: &str) -> Option<String> {
+        let node = fs::canonicalize(node).ok()?;
+        let name = node.strip_prefix("/dev").ok()?.to_str()?.to_owned();
+        Path::new("/sys/class/block")
+            .join(&name)
+            .exists()
+            .then_some(name)
+    }
+
+    fn members(&self, name: &str) -> Vec<String> {
+        names_in(&Path::new("/sys/class/block").join(name).join("slaves"))
+    }
+
+    fn backing_file(&self, name: &str) -> Option<String> {
+        read_trimmed(
+            &Path::new("/sys/class/block")
+                .join(name)
+                .join("loop/backing_file"),
+        )
+    }
+
+    fn btrfs_devices(&self, name: &str) -> Vec<String> {
+        names_in(Path::new("/sys/fs/btrfs"))
+            .into_iter()
+            .map(|uuid| names_in(&Path::new("/sys/fs/btrfs").join(uuid).join("devices")))
+            .find(|devices| devices.iter().any(|device| device == name))
+            .unwrap_or_default()
+    }
+
+    fn zfs_members(&self, pool: &str) -> Vec<String> {
+        let Ok(output) = Command::new("lsblk")
+            .args(["--json", "--list", "--output", "KNAME,FSTYPE,LABEL"])
+            .output()
+        else {
+            return Vec::new();
+        };
+        zfs_members(&String::from_utf8_lossy(&output.stdout), pool)
+    }
+}
+
+/// The names of the entries of `directory`.
+fn names_in(directory: &Path) -> Vec<String> {
+    fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
+/// The devices `lsblk --json --list --output KNAME,FSTYPE,LABEL` labels as
+/// members of ZFS pool `pool`.
+fn zfs_members(listing: &str, pool: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Member {
+        kname: String,
+        fstype: Option<String>,
+        label: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Members {
+        blockdevices: Vec<Member>,
+    }
+    serde_json::from_str::<Members>(listing)
+        .map(|listing| listing.blockdevices)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.fstype.as_deref() == Some("zfs_member") && m.label.as_deref() == Some(pool))
+        .map(|m| m.kname)
+        .collect()
+}
+
+/// The devices the running system stands on, from the mount table and sysfs.
+fn system_devices() -> SystemDevices {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let points: Vec<&str> = SYSTEM_MOUNTS
+        .into_iter()
+        .filter(|point| point.starts_with('/'))
+        .collect();
+    system_disks::system_devices(&system_disks::mounts(&mountinfo), &Sysfs, &points)
+}
+
+/// Whether setup knows which disks hold `/`: from the mount table and sysfs,
+/// or from lsblk's mount points.
+fn root_known(devices: &[Device], system: &SystemDevices) -> bool {
+    system.unknown_root.is_none() || devices.iter().any(Device::holds_root)
+}
+
+/// Setup's view of the whole disks `devices`. A disk holding part of the
+/// running system is `system`. When setup cannot tell which disks hold `/`,
+/// a USB is erased only once its model or size is typed back, since it may
+/// be the disk this computer runs from.
+fn whole_disks(devices: Vec<Device>, system: &SystemDevices) -> Vec<Disk> {
+    let root_known = root_known(&devices, system);
+    devices
+        .into_iter()
+        // A loop device stands in for a USB, as a disk image does on a
+        // Mac; read-only ones hold snaps and images, never a USB.
+        .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
+        .map(|d| Disk {
+            removal: match d.facts().removal() {
+                Removal::Usb if !root_known => Removal::Typed,
+                removal => removal,
+            },
+            system: d.holds_system() || d.holds_any(&system.names),
+            bytes: d.size,
+            name: match d.model.as_deref().map(str::trim) {
+                Some(model) if !model.is_empty() => model.to_owned(),
+                _ if d.kind == "loop" => "loop device".into(),
+                _ => String::new(),
+            },
+            partitions: d
+                .children
+                .iter()
+                .filter(|p| p.kind == "part")
+                .map(|p| Partition {
+                    identifier: p.name.clone(),
+                    content: p.content(),
+                    mount: p.mount(),
+                })
+                .collect(),
+            identifier: d.name,
+        })
+        .collect()
 }
 
 /// The vendor and device IDs of this computer's PCI devices of base class
@@ -304,34 +454,19 @@ impl Host for System {
 
     fn disks(&self) -> Result<Vec<Disk>> {
         let devices = lsblk(None)?;
-        require_system_device(&devices)?;
-        Ok(devices
-            .into_iter()
-            // A loop device stands in for a USB, as a disk image does on a
-            // Mac; read-only ones hold snaps and images, never a USB.
-            .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
-            .map(|d| Disk {
-                removal: d.facts().removal(),
-                system: d.holds_system(),
-                bytes: d.size,
-                name: match d.model.as_deref().map(str::trim) {
-                    Some(model) if !model.is_empty() => model.to_owned(),
-                    _ if d.kind == "loop" => "loop device".into(),
-                    _ => String::new(),
-                },
-                partitions: d
-                    .children
-                    .iter()
-                    .filter(|p| p.kind == "part")
-                    .map(|p| Partition {
-                        identifier: p.name.clone(),
-                        content: p.content(),
-                        mount: p.mount(),
-                    })
-                    .collect(),
-                identifier: d.name,
-            })
-            .collect())
+        let system = system_devices();
+        if let Some(reason) = &system.unknown_root
+            && !root_known(&devices, &system)
+        {
+            static NOTED: Once = Once::new();
+            NOTED.call_once(|| {
+                eprintln!(
+                    "Note: setup cannot tell which disk this computer runs from ({reason}). It \
+                     erases a USB only once its model or size is typed back."
+                );
+            });
+        }
+        Ok(whole_disks(devices, &system))
     }
 
     fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
@@ -616,6 +751,20 @@ mod tests {
         assert_eq!(ssd.facts().removal(), Removal::Fixed);
     }
 
+    fn known(names: &[&str]) -> SystemDevices {
+        SystemDevices {
+            names: names.iter().map(|name| name.to_string()).collect(),
+            unknown_root: None,
+        }
+    }
+
+    fn unknown() -> SystemDevices {
+        SystemDevices {
+            names: BTreeSet::new(),
+            unknown_root: Some("/ is tmpfs none".into()),
+        }
+    }
+
     #[test]
     fn root_guard_uses_all_mounts() {
         let source = r#"{"blockdevices": [
@@ -624,12 +773,64 @@ mod tests {
             {"name":"sdb","type":"disk","model":"USB target","tran":"usb",
              "mountpoint":null,"mountpoints":null}]}"#;
         let mut listing: Listing = serde_json::from_str(source).unwrap();
-        assert!(require_system_device(&listing.blockdevices).is_ok());
+        assert!(root_known(&listing.blockdevices, &unknown()));
         assert!(listing.blockdevices[0].holds_root());
         assert!(!listing.blockdevices[1].holds_root());
         listing.blockdevices[0].mountpoints = None;
-        assert!(require_system_device(&listing.blockdevices).is_err());
-        assert!(require_system_device(&[]).is_err());
+        assert!(!root_known(&listing.blockdevices, &unknown()));
+        assert!(!root_known(&[], &unknown()));
+        assert!(root_known(&[], &known(&[])));
+    }
+
+    #[test]
+    fn a_disk_under_a_system_mount_is_never_offered() {
+        // lsblk lists device-mapper devices under the partitions they stand
+        // on, by their mapper names; sysfs names them dm-N.
+        let source = r#"{"blockdevices": [
+            {"name":"nvme0n1","type":"disk","tran":"nvme","children":[
+                {"name":"nvme0n1p3","type":"part","children":[
+                    {"name":"luks-root","type":"crypt"}]}]},
+            {"name":"sdb","type":"disk","model":"Stick","tran":"usb","rm":true,"size":64000000000,
+             "children":[{"name":"sdb1","type":"part"}]},
+            {"name":"sdc","type":"disk","model":"Target","tran":"usb","rm":true,"size":64000000000}]}"#;
+        let disks = |system: &SystemDevices| {
+            let listing: Listing = serde_json::from_str(source).unwrap();
+            whole_disks(listing.blockdevices, system)
+                .into_iter()
+                .map(|d| (d.identifier, d.system, d.removal))
+                .collect::<Vec<_>>()
+        };
+        // A composefs root over /sysroot on the NVMe disk, and a live
+        // system's squashfs looped from the stick.
+        assert_eq!(
+            disks(&known(&["dm-0", "nvme0n1p3", "loop0", "sdb1"])),
+            [
+                ("nvme0n1".into(), true, Removal::Fixed),
+                ("sdb".into(), true, Removal::Usb),
+                ("sdc".into(), false, Removal::Usb),
+            ]
+        );
+        // Nothing found under /: every USB needs its model or size typed
+        // back, and an internal disk stays fixed.
+        assert_eq!(
+            disks(&unknown()),
+            [
+                ("nvme0n1".into(), false, Removal::Fixed),
+                ("sdb".into(), false, Removal::Typed),
+                ("sdc".into(), false, Removal::Typed),
+            ]
+        );
+    }
+
+    #[test]
+    fn zfs_members_by_pool_label() {
+        let listing = r#"{"blockdevices": [
+            {"kname":"nvme0n1","fstype":null,"label":null},
+            {"kname":"nvme0n1p4","fstype":"zfs_member","label":"rpool"},
+            {"kname":"nvme0n1p3","fstype":"zfs_member","label":"bpool"},
+            {"kname":"sdb1","fstype":"vfat","label":"rpool"}]}"#;
+        assert_eq!(zfs_members(listing, "rpool"), ["nvme0n1p4"]);
+        assert!(zfs_members("not json", "rpool").is_empty());
     }
 
     #[test]

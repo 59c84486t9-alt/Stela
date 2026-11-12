@@ -65,10 +65,12 @@ impl Usb {
         format!("{} · {} · {}", self.name, self.size(), self.id)
     }
 
-    /// Its model or size, typed back to erase a disk other than a USB.
+    /// Its model or size, typed back to erase a disk other than a USB, or
+    /// any disk when setup cannot tell which one this computer runs from.
     fn typed_back(&self) -> Result<String> {
         cliclack::log::warning(format!(
-            "{} ({}, {}) is not a USB disk.",
+            "{} ({}, {}) is not a USB disk, or setup cannot tell which disk this computer \
+             runs from.",
             self.name,
             self.size(),
             self.id
