@@ -1354,13 +1354,16 @@ pub(crate) mod execution {
             };
             Self { page, bytes }
         }
-        pub(crate) fn run(&self, state: &mut GuestState, context: &mut ExecutionContext) {
+        /// Run the block; returns the next guest PC it leaves with.
+        pub(crate) fn run(&self, state: &mut GuestState, context: &mut ExecutionContext) -> u64 {
             // SAFETY: callers supply a complete generated function using the
             // state/context ABI, with every requested host feature available.
             unsafe {
-                let entry: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) =
-                    core::mem::transmute(self.page);
-                entry(state, context);
+                let entry: unsafe extern "sysv64" fn(
+                    *mut GuestState,
+                    *mut ExecutionContext,
+                ) -> u64 = core::mem::transmute(self.page);
+                entry(state, context)
             }
         }
     }
@@ -2295,8 +2298,16 @@ mod tests {
                 state.x[1] = state.v[1][0];
                 state.fpcr = (sample as u32 % 4) << 22;
                 let mut expected = state.clone();
-                baseline.run(&mut expected, &mut ExecutionContext::default());
-                extended.run(&mut state, &mut ExecutionContext::default());
+                let initial = state.clone();
+                let baseline_exit = baseline.run(&mut expected, &mut ExecutionContext::default());
+                let extended_exit = extended.run(&mut state, &mut ExecutionContext::default());
+                if baseline_exit == 0x1000 && extended_exit != 0x1000 {
+                    // The AVX-512 saturating vector conversions complete
+                    // lanes the V3 recipe sends to the helper (checked
+                    // against the reference in simd::vector_conversion_tests).
+                    assert_eq!(expected, initial, "{word:#010x} sample={sample}");
+                    continue;
+                }
                 assert_eq!(state, expected, "{word:#010x} sample={sample}");
             }
         }

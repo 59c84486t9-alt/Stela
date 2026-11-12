@@ -896,8 +896,15 @@ fn to_integer_with(
         && mode == IntegerRounding::TowardZero
         && operand.frac_bits == 0;
     let mut helper_patches = Vec::new();
-    let saturated = (signed_single && packed_result && operand.frac_bits == 0)
-        .then(|| saturating_single(code, operand, mode));
+    let saturated = if !packed_result || operand.frac_bits != 0 {
+        None
+    } else if signed_single {
+        Some(saturating_single(code, operand, mode))
+    } else if operand.format != Format::Half {
+        Some(saturating_packed(code, operand, mode, target))
+    } else {
+        None
+    };
     let other_controls = if packed_truncate {
         read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
         // With input flushing disabled, CVTTPS2DQ reports inexact for
@@ -1051,6 +1058,115 @@ fn saturating_single(code: &mut Code, operand: &IntegerConversion, mode: Integer
     packed(code, Host::Or, positive, nan);
     packed(code, Host::AndNot, positive, indefinite);
     packed(code, Host::Xor, RESULT_VECTOR, positive);
+    code.asm().test_imm(Size::Dword, Rcx, MXCSR_INVALID_STATUS);
+    let valid = branch(code, Condition::Zero);
+    code.asm().alu_imm8(
+        Alu::Or,
+        Size::Dword,
+        super::numerical::state(core::mem::offset_of!(crate::GuestState, fpsr)),
+        INVALID as i8,
+    );
+    let end = code.len();
+    resolve(code, valid, end);
+    commit_flush_status(code);
+    let done = jump(code);
+    let other_start = code.len();
+    resolve(code, other, other_start);
+    done
+}
+
+/// Vector FCVT{N,M,P,Z}{S,U} of S lanes to unsigned 32-bit integers and of
+/// D lanes to signed or unsigned 64-bit ones with AVX-512's packed
+/// conversions, FPCR.AH and the trap enables clear, for every input: FZ
+/// or FIZ flush subnormal inputs first (FZ raising IDC); each in-range lane
+/// converts in the guest's rounding. The host gives the integer
+/// indefinite (all ones unsigned, the sign bit alone signed) with invalid
+/// status for a NaN or an out-of-range lane, which Arm saturates: a NaN to
+/// zero, a negative input to zero (unsigned; an in-range negative input
+/// already gives zero) or the minimum (signed), a positive one to the
+/// maximum. The host's invalid status is FPSR.IOC exactly where Arm raises
+/// it, and its inexact IXC (no lane raises both). Reads the input from
+/// RESULT_VECTOR and leaves the result there and the status in ECX.
+/// Returns the jump to the commit; other controls continue past it.
+fn saturating_packed(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    mode: IntegerRounding,
+    target: TargetCpu,
+) -> usize {
+    const INPUT: u8 = 6;
+    const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+    let shape = operand.integer.shape();
+    let format = operand.format;
+    let integer = operand.integer.format();
+    let double = format == Format::Double;
+    let (equal, greater, left, right) = if double {
+        (
+            Host::EqualQword,
+            Host::GreaterQword,
+            ShiftOpcode::LeftQword,
+            ShiftOpcode::RightQword,
+        )
+    } else {
+        (
+            Host::EqualDword,
+            Host::GreaterDword,
+            ShiftOpcode::LeftDword,
+            ShiftOpcode::RightDword,
+        )
+    };
+    let bits = format.bits() as u8;
+    let exponent_bits = (format.bits() - format.fraction_bits() - 1) as u8;
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH);
+    let other = branch(code, Condition::NotZero);
+    read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(code, format, shape, RESULT_VECTOR, FLUSH_SCRATCH);
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    packed(code, Host::MoveAligned, INPUT, RESULT_VECTOR);
+    environment_round(code, rounding(mode));
+    vector_extensions::packed_to_integer(
+        code,
+        RESULT_VECTOR,
+        format,
+        integer,
+        mode == IntegerRounding::TowardZero,
+        target,
+    );
+    restore_environment(code);
+    let [nan, infinity, negative, indefinite] = FLUSH_SCRATCH;
+    // NaN lanes: a magnitude above the infinity's.
+    equal.register(code, nan, nan, target);
+    right.emit(code, nan, 1);
+    packed(code, Host::And, nan, INPUT);
+    equal.register(code, infinity, infinity, target);
+    right.emit(code, infinity, bits - exponent_bits);
+    left.emit(code, infinity, format.fraction_bits() as u8);
+    greater.register(code, nan, infinity, target);
+    // Negative lanes: the sign bit set.
+    packed(code, Host::Xor, negative, negative);
+    greater.register(code, negative, INPUT, target);
+    if integer.signed {
+        // Indefinite lanes: a NaN converts to zero, a positive input to the
+        // maximum (the indefinite with every other bit set).
+        equal.register(code, indefinite, indefinite, target);
+        left.emit(code, indefinite, bits - 1);
+        equal.register(code, indefinite, RESULT_VECTOR, target);
+        packed(code, Host::MoveAligned, infinity, indefinite);
+        packed(code, Host::And, infinity, nan);
+        packed(code, Host::AndNot, infinity, RESULT_VECTOR);
+        packed(code, Host::MoveAligned, RESULT_VECTOR, infinity);
+        packed(code, Host::Or, negative, nan);
+        packed(code, Host::AndNot, negative, indefinite);
+        packed(code, Host::Xor, RESULT_VECTOR, negative);
+    } else {
+        packed(code, Host::Or, negative, nan);
+        packed(code, Host::AndNot, negative, RESULT_VECTOR);
+        packed(code, Host::MoveAligned, RESULT_VECTOR, negative);
+    }
     code.asm().test_imm(Size::Dword, Rcx, MXCSR_INVALID_STATUS);
     let valid = branch(code, Condition::Zero);
     code.asm().alu_imm8(
