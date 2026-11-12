@@ -764,7 +764,7 @@ fn status_polls_and_the_outbox_head_read_plainly() {
     use crate::plain_reads::{Op, check};
     check(
         || Box::new(Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap()),
-        WRAPPER_BYTES,
+        0..WRAPPER_BYTES,
         &[
             (CPU_CONTROL, Width::Word),
             (IDLE_STATUS, Width::Word),

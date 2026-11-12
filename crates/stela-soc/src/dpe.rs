@@ -115,6 +115,11 @@ impl MmioDevice for Dpe {
     fn name(&self) -> &'static str {
         NAME
     }
+    /// Every read returns what writes and the lifecycle left, or refuses,
+    /// and changes nothing.
+    fn plain_read(&self, _: u64, _: Width) -> bool {
+        true
+    }
     fn read(&mut self, o: u64, w: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         if !self.lifecycle.clocked {
             return Err(refuse(
@@ -163,6 +168,27 @@ impl MmioDevice for Dpe {
 mod tests {
     use super::*;
     use stela_contracts::interrupt::InterruptLatch;
+
+    #[test]
+    fn every_read_is_plain() {
+        use crate::plain_reads::{Op, check};
+        let control = ENGINES[0] + CONTROLS[1];
+        check(
+            || alloc::boxed::Box::new(Dpe::new(&[(0x200, false), (0x2708, true)]).unwrap()),
+            0..0x4000,
+            &[
+                (control, Width::Word),
+                (0x200, Width::Word),
+                (0x2708, Width::Double),
+                (0x270c, Width::Word),
+            ],
+            &[
+                Op::Write(control, Width::Word, &[0, 0x123 | 1]),
+                Op::Write(0x2708, Width::Double, &[5, 7 << 32 | 9]),
+                Op::Write(0x200, Width::Double, &[1]),
+            ],
+        );
+    }
     #[test]
     fn restore_slots_and_dt_reporting_samples_are_independent_address_sources() {
         let mut sink = InterruptLatch::new();

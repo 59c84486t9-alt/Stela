@@ -197,6 +197,12 @@ impl Pmgr {
 
     /// Drain completed lifecycle requests in guest write order. No event is
     /// emitted for a rejected write or a write that leaves state unchanged.
+    /// Whether lifecycle transitions wait to be taken
+    /// ([`Self::take_transitions`]).
+    pub fn has_transitions(&self) -> bool {
+        !self.transitions.is_empty()
+    }
+
     pub fn take_transitions(&mut self) -> Vec<DomainTransition> {
         core::mem::take(&mut self.transitions)
     }
@@ -286,6 +292,11 @@ impl MmioDevice for Pmgr {
     fn name(&self) -> &'static str {
         NAME
     }
+    /// Every read returns a power state register as writes left it, or
+    /// refuses, and changes nothing.
+    fn plain_read(&self, _: u64, _: Width) -> bool {
+        true
+    }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         let fail = |reason: Refusal| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
@@ -331,6 +342,25 @@ mod tests {
     const PMGR: u64 = 0x2_3b70_0000;
     const UART0: u64 = PMGR + 0x260;
     const AIC: u64 = PMGR + 0x108;
+
+    #[test]
+    fn every_read_is_plain() {
+        use crate::plain_reads::{Op, check};
+        check(
+            || {
+                let mut pmgr = pmgr();
+                pmgr.bind_lifecycle(AIC).unwrap();
+                alloc::boxed::Box::new(pmgr)
+            },
+            PMGR..PMGR + 0x1000,
+            &[(AIC, Width::Word), (UART0, Width::Word)],
+            &[
+                Op::Write(AIC, Width::Word, &[0xf, 0x3f0, 0, 0x8000_000f]),
+                Op::Write(UART0, Width::Word, &[0xf, 0]),
+                Op::Read(UART0, Width::Double),
+            ],
+        );
+    }
 
     fn pmgr() -> Pmgr {
         Pmgr::new([

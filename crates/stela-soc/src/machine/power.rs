@@ -600,6 +600,15 @@ impl AppleDevices {
         let Some(pmgr) = self.pmgr else {
             return;
         };
+        // Taking none would move PMGR's epoch at every entry for nothing
+        // (`Bus::plain_epoch`).
+        if !self
+            .bus
+            .device::<Pmgr>(pmgr)
+            .is_some_and(Pmgr::has_transitions)
+        {
+            return;
+        }
         let transitions = self
             .bus
             .device_mut::<Pmgr>(pmgr)

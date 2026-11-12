@@ -267,6 +267,11 @@ impl MmioDevice for Cluster {
         NAME
     }
 
+    /// Every read returns what writes left, or refuses, and changes nothing.
+    fn plain_read(&self, _: u64, _: Width) -> bool {
+        true
+    }
+
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         if !self.described(offset, width) {
             return Err(refuse(
@@ -324,6 +329,36 @@ impl MmioDevice for Cluster {
 mod tests {
     use super::*;
     use stela_contracts::interrupt::InterruptLatch;
+
+    #[test]
+    fn every_read_is_plain() {
+        use crate::plain_reads::{Op, check};
+        check(
+            || {
+                alloc::boxed::Box::new(
+                    Cluster::new(&[], 18)
+                        .unwrap()
+                        .with_counters(16, true, &[])
+                        .unwrap(),
+                )
+            },
+            0..0x8_0000,
+            &[
+                (COMMAND, Width::Double),
+                (SNOOZE, Width::Double),
+                (THROTTLER, Width::Double),
+                (SCRATCH[0], Width::Double),
+                (COUNTER_BASE, Width::Double),
+            ],
+            &[
+                Op::Write(COMMAND, Width::Double, &[SET | 3, 3, SET | 5, 1 << 40]),
+                Op::Write(SCRATCH[0], Width::Double, &[1, 2]),
+                Op::Write(THROTTLER, Width::Double, &[0, 1 << 63]),
+                Op::Write(COUNTER_BASE, Width::Double, &[0, 5]),
+                Op::Read(SCRATCH[1], Width::Double),
+            ],
+        );
+    }
 
     #[test]
     fn cpu_commands_complete_against_the_same_state_table_and_scratch_holds_copies() {

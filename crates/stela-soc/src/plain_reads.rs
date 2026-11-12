@@ -27,19 +27,22 @@ pub(crate) enum Op {
 /// and the other none: their every other result and wire stay the same. A
 /// plain read's value while the model's epoch holds the count it held at an
 /// earlier plain read of the same register is that earlier value, whatever
-/// the reading PE and the time.
+/// the reading PE and the time. `window` is the model's offsets the bus
+/// maps.
 pub(crate) fn check(
     make: impl Fn() -> Box<dyn MmioDevice>,
-    len: u64,
+    window: core::ops::Range<u64>,
     plain: &[(u64, Width)],
     ops: &[Op],
 ) {
     let bus = || {
         let mut bus = Bus::new();
         let device = bus.add(make());
-        bus.map(device, BASE, len, 0).unwrap();
+        bus.map(device, BASE, window.end - window.start, window.start)
+            .unwrap();
         bus
     };
+    let at = |offset: u64| BASE + offset - window.start;
     let mut served = 0;
     for seed in 1..=32u64 {
         let (mut read, mut left) = (bus(), bus());
@@ -55,11 +58,11 @@ pub(crate) fn check(
             if let Some(index) = pick.checked_sub(ops.len()) {
                 let (offset, width) = plain[index];
                 let (epoch, seen) = read
-                    .plain_epoch(BASE + offset, width)
+                    .plain_epoch(at(offset), width)
                     .unwrap_or_else(|| panic!("{offset:#x} {width:?} is not plain"));
                 let cpu = value % 4;
                 let got = read.read(
-                    BASE + offset,
+                    at(offset),
                     width,
                     &mut Access::new(cpu, now, &mut read_wires),
                 );
@@ -82,14 +85,14 @@ pub(crate) fn check(
                     let data = values[value % values.len()];
                     (
                         read.write(
-                            BASE + offset,
+                            at(offset),
                             width,
                             data,
                             &mut Access::new(0, now, &mut read_wires),
                         )
                         .map(|()| 0),
                         left.write(
-                            BASE + offset,
+                            at(offset),
                             width,
                             data,
                             &mut Access::new(0, now, &mut left_wires),
@@ -98,16 +101,8 @@ pub(crate) fn check(
                     )
                 }
                 Op::Read(offset, width) => (
-                    read.read(
-                        BASE + offset,
-                        width,
-                        &mut Access::new(0, now, &mut read_wires),
-                    ),
-                    left.read(
-                        BASE + offset,
-                        width,
-                        &mut Access::new(0, now, &mut left_wires),
-                    ),
+                    read.read(at(offset), width, &mut Access::new(0, now, &mut read_wires)),
+                    left.read(at(offset), width, &mut Access::new(0, now, &mut left_wires)),
                 ),
                 Op::Advance => (
                     read.advance(&mut Access::new(0, now, &mut read_wires))
