@@ -80,7 +80,7 @@ pub fn build() {
     sources.push(base.join("libc.c"));
     let mut build = cc::Build::new();
     if !selected("CC") {
-        build.compiler("clang");
+        build.compiler(stela_c_build::clang());
     }
     build
         .std("c11")

@@ -570,8 +570,19 @@ pub struct Import<'a> {
 pub enum ImportError {
     Input(String),
     Schema(&'static str),
-    Identity { index: usize, field: &'static str },
-    Path { index: usize, field: &'static str },
+    Identity {
+        index: usize,
+        field: &'static str,
+    },
+    Path {
+        index: usize,
+        field: &'static str,
+    },
+    /// The producer compiled with another compiler than this build's.
+    Compiler {
+        recorded: PathBuf,
+        selected: PathBuf,
+    },
 }
 impl fmt::Display for ImportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -584,6 +595,14 @@ impl fmt::Display for ImportError {
             Self::Path { index, field } => {
                 write!(f, "captured unit {index} leaves reviewed {field}")
             }
+            Self::Compiler { recorded, selected } => write!(
+                f,
+                "the shared units were compiled with {} but this build compiles with {}; build \
+                 through cargo xtask, which gives every build script one compiler, or set CLANG \
+                 to one of them",
+                recorded.display(),
+                selected.display()
+            ),
         }
     }
 }
@@ -1202,9 +1221,9 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
             });
         }
         if unit.compiler != selected.compiler {
-            return Err(ImportError::Path {
-                index,
-                field: "compiler",
+            return Err(ImportError::Compiler {
+                recorded: unit.compiler.clone(),
+                selected: selected.compiler.clone(),
             });
         }
         if unit.dependencies.is_empty()

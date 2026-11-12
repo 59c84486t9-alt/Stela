@@ -63,7 +63,7 @@ pub fn tables() -> PathBuf {
     .iter()
     .any(|name| env::var_os(name).is_some());
     if !chosen {
-        build.compiler("clang");
+        build.compiler(stela_c_build::clang());
     }
     run(build
         .host(&host)

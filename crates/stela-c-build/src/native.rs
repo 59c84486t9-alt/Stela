@@ -58,11 +58,11 @@ pub fn hosted() -> Option<cc::Build> {
 
 /// Clang for every target, unless the caller chose a compiler: the
 /// upstream sources' warning profile (`-Wno-everything`) is clang's, and
-/// GCC holds their headers to Stela's warnings.
+/// GCC holds their headers to Stela's warnings. [`crate::clang`] names it.
 pub fn compiler() -> cc::Build {
     let mut build = cc::Build::new();
     if !selected("CC") {
-        build.compiler("clang");
+        build.compiler(crate::clang());
     }
     build.std("gnu11").warnings_into_errors(true);
     for warning in WARNINGS {

@@ -191,8 +191,22 @@ fn metadata_cannot_select_object_source_compiler_or_dependency_roots() {
             "dependency roots" => changed[0].dependencies = vec![path],
             _ => unreachable!(),
         }
+        let result = decode(&encode(&changed), &fixture.boundary);
+        if field == "compiler" {
+            // Both compilers are named, so the refusal says what changed.
+            let Err(error @ ImportError::Compiler { .. }) = result else {
+                panic!("compiler change accepted");
+            };
+            let text = error.to_string();
+            assert!(text.contains("other-clang"), "{text}");
+            assert!(
+                text.contains(&fixture.boundary.compiler.display().to_string()),
+                "{text}"
+            );
+            continue;
+        }
         assert!(
-            matches!(decode(&encode(&changed), &fixture.boundary),
+            matches!(result,
             Err(ImportError::Path { index: 0, field: rejected }) if rejected == field),
             "{field}"
         );

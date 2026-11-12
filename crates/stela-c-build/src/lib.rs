@@ -34,6 +34,19 @@ pub fn selected(tool: &str) -> bool {
     names.iter().any(|name| env::var_os(name).is_some())
 }
 
+/// The Clang to compile with when the caller chose no compiler: `CLANG`,
+/// which `cargo xtask` sets to the one it chose, else `clang` on PATH. The
+/// build reruns when either changes, so objects never mix compilers.
+pub fn clang() -> std::ffi::OsString {
+    println!("cargo:rerun-if-env-changed=CLANG");
+    env::var_os("CLANG")
+        .filter(|clang| !clang.is_empty())
+        .unwrap_or_else(|| {
+            println!("cargo:rerun-if-env-changed=PATH");
+            "clang".into()
+        })
+}
+
 /// Apple's ar produces a BSD archive even for COFF inputs; the active Rust
 /// toolchain's LLVM archiver does not.
 pub fn rust_archiver() -> PathBuf {

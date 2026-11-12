@@ -28,7 +28,7 @@ fn main() {
     let config = Path::new(".");
     let mut build = cc::Build::new();
     build
-        .compiler("clang")
+        .compiler(stela_c_build::clang())
         .include(upstream.join("include"))
         .include(upstream.join("library"))
         .include(config)
