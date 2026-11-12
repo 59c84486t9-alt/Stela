@@ -539,7 +539,7 @@ pub(super) fn run<H: Host>(
             // this PE's guest waits, so the count need not wait for it.
             #[cfg(feature = "nvk")]
             if idle {
-                super::gpu::gate::run_job(true);
+                super::gpu::gate::run_job(super::gpu::gate::Taker::Boot);
             }
             service.parts.lap(ServiceParts::SERVICE, host::rdtsc());
             (waiting, quiet)

@@ -127,9 +127,6 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// The longest a frontend call waits for the turn before it is answered
     /// `Pending`, in ticks; 0 waits for as long as the holder holds it.
     wait_bound: AtomicU64,
-    /// Ticks a job may wait for a waiting processor before its caller's
-    /// runs it ([`Self::set_force_after`]).
-    force_after: AtomicU64,
     job_lock: JobLock,
     jobs: Spin<Jobs>,
     /// The guest RAM the latest imports named, by a hash of their ranges.
@@ -197,9 +194,6 @@ pub struct JobReport {
     /// Calls answered `Pending`, with a turn and without one.
     pub deferred: u64,
     pub repeated: u64,
-    /// Jobs no waiting processor took within the bound, which their
-    /// caller's processor ran when it asked again.
-    pub forced: u64,
 }
 
 /// The operation [`Served`] names for the kext's import of wired memory,
@@ -636,7 +630,6 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             early: [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PENDING],
             compile_stack: AtomicU64::new(0),
             wait_bound: AtomicU64::new(0),
-            force_after: AtomicU64::new(u64::MAX),
             job_lock: JobLock {
                 lock: compile_lock.unwrap_or_default(),
                 relax: host.relax,
@@ -796,28 +789,12 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         done
     }
 
-    /// Bounds how long a job waits for a processor whose guest waits: once
-    /// it has waited `ticks`, the processor of the call that waits for it
-    /// runs it when the call is made again, busy or not, so that with every
-    /// processor busy no call waits forever.
-    pub fn set_force_after(&self, ticks: u64) {
-        self.force_after.store(ticks, Ordering::Release);
-    }
-
     /// Runs the oldest deferred job, when one has waited `older_than` ticks
     /// and no other runs: the platform calls it where long host work is
-    /// allowed, as a job runs whole, the compilers having no point to stop
-    /// at. Whether one ran.
+    /// allowed, between guest slices and never inside a guest's call, as a
+    /// job runs whole, the compilers having no point to stop at. Whether
+    /// one ran.
     pub fn run_job(&self, older_than: u64) -> bool {
-        self.run_queued(|jobs, now| {
-            let &(_, queued) = jobs.queued.front()?;
-            (now.wrapping_sub(queued) >= older_than).then_some(0)
-        })
-    }
-
-    /// Runs the queued job `pick` chooses, by its place in the queue, unless
-    /// another runs. Whether one ran.
-    fn run_queued(&self, pick: impl FnOnce(&Jobs, u64) -> Option<usize>) -> bool {
         let stack = self.compile_stack.load(Ordering::Acquire);
         if stack == 0 {
             return false;
@@ -827,8 +804,11 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         };
         let now = (self.host.ticks)();
         let taken = self.jobs.with(|jobs| {
-            let at = pick(jobs, now)?;
-            let (job, queued) = jobs.queued.remove(at)?;
+            let &(_, queued) = jobs.queued.front()?;
+            if now.wrapping_sub(queued) < older_than {
+                return None;
+            }
+            let (job, queued) = jobs.queued.pop_front()?;
             jobs.running = Some(job.key);
             Some((job, queued))
         });
@@ -876,9 +856,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     }
 
     /// Answers the call at `record` `Pending` without a turn when it was
-    /// answered so before and its job has not run. A job that has waited
-    /// past the bound for a waiting processor runs here first, outside the
-    /// lock, and the call then goes on to its turn.
+    /// answered so before and its job has not run. The job never runs here:
+    /// a guest's call stays short however long its job waits, and the job
+    /// runs where [`Self::run_job`] is called.
     fn still_pending(
         &self,
         connection: NonZeroU64,
@@ -910,23 +890,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             } else {
                 jobs.parked.remove(at);
             }
-            Some((waits, key))
+            Some(waits)
         });
-        let Some((true, key)) = pending else {
-            return false;
-        };
-        let force_after = self.force_after.load(Ordering::Acquire);
-        let forced = self.run_queued(|jobs, now| {
-            let at = jobs.queued.iter().position(|(job, _)| job.key == key)?;
-            (now.wrapping_sub(jobs.queued[at].1) >= force_after).then_some(at)
-        });
-        if forced {
-            self.jobs.with(|jobs| {
-                jobs.report.forced += 1;
-                jobs.report.repeated = jobs.report.repeated.saturating_sub(1);
-                jobs.parked
-                    .retain(|parked| parked.key != key || parked.record != record);
-            });
+        if pending != Some(true) {
             return false;
         }
         answer_pending(record, call, caller).is_ok()

@@ -153,10 +153,17 @@ impl core::fmt::Display for Unheld {
 const BOOT_JOB_MILLIS: u64 = 100;
 
 /// How long a deferred compilation waits for a processor whose guest waits
-/// before the processor of the call that needs it runs it, busy or not
-/// (`SharedService::set_force_after`): with every guest CPU busy, as in a
-/// benchmark, no call waits forever.
-const FORCE_JOB_MILLIS: u64 = 30;
+/// before a busy processor takes it between two slices of user code: with
+/// every guest CPU busy, as in a benchmark, no call waits forever, and no
+/// guest call or kernel code waits for a compile.
+const BUSY_JOB_MILLIS: u64 = 100;
+
+/// The least time between two jobs busy processors take, so that a queue of
+/// jobs costs busy guests one compile at a time, not one on every processor.
+const BUSY_SPACING_MILLIS: u64 = 25;
+
+/// The time stamp before which no busy processor takes a job.
+static NEXT_BUSY_JOB: AtomicU64 = AtomicU64::new(0);
 
 /// How long a frontend call waits for the turn before it is answered
 /// `Pending` and made again (`SharedService::set_wait_bound`): its PE takes
@@ -185,32 +192,49 @@ static GAVE_UP: AtomicU64 = AtomicU64::new(0);
 /// phase: no turn should come near it.
 const LONG_TURN_MILLIS: u64 = 50;
 
-/// Runs one deferred compilation, on a processor whose guest waits for an
-/// interrupt: a job runs whole, as the compilers have no point to stop at,
-/// so only a processor with no guest work to do takes it, and its guest's
-/// next interrupt waits for the job (a few to hundreds of milliseconds, a
-/// very large kernel seconds). Other processors' guests run meanwhile, and
-/// the guest clock does not wait for a processor whose guest waits. Off the
-/// boot processor the job runs with interrupts on; on it, and in a call
-/// that forces its job, with only the doorbell and the TLB shootdown open
-/// ([`run`]), so a shootdown another processor sends is acknowledged at once
-/// rather than after the job. The boot processor, whose Linux work the job
-/// would hold up, takes one only after [`BOOT_JOB_MILLIS`]. Whether one ran.
-pub(in crate::engine) fn run_job(boot: bool) -> bool {
+/// Which processor offers to run a deferred compilation ([`run_job`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::engine) enum Taker {
+    /// A processor other than the boot one whose guest waits for an
+    /// interrupt: it takes any job.
+    Waiting,
+    /// The boot processor while its guest waits: it takes a job no other
+    /// took within [`BOOT_JOB_MILLIS`].
+    Boot,
+    /// A processor other than the boot one between two slices of guest user
+    /// code: it takes a job no other took within [`BUSY_JOB_MILLIS`], at most
+    /// one every [`BUSY_SPACING_MILLIS`] among all busy processors.
+    Busy,
+}
+
+/// Runs one deferred compilation, between two slices of a processor's guest
+/// and never inside a guest's call: a job runs whole, as the compilers have
+/// no point to stop at, so a processor with no guest work to do takes it
+/// first, and its guest's next interrupt waits for the job (a few to
+/// hundreds of milliseconds, a very large kernel seconds). Other processors'
+/// guests run meanwhile, and the guest clock does not wait for a processor
+/// whose guest waits. Off the boot processor the job runs with interrupts
+/// on; on it with only the doorbell and the TLB shootdown open ([`run`]), so
+/// a shootdown another processor sends is acknowledged at once rather than
+/// after the job. Whether one ran.
+pub(in crate::engine) fn run_job(taker: Taker) -> bool {
     let Some(gpu) = installed() else {
         return false;
     };
-    let older = if boot {
-        gpu.tsc_hz / 1000 * BOOT_JOB_MILLIS
-    } else {
-        0
+    let millis = gpu.tsc_hz / 1000;
+    let now = host::rdtsc();
+    let older = match taker {
+        Taker::Waiting => 0,
+        Taker::Boot => millis * BOOT_JOB_MILLIS,
+        Taker::Busy if now < NEXT_BUSY_JOB.load(Ordering::Relaxed) => return false,
+        Taker::Busy => millis * BUSY_JOB_MILLIS,
     };
-    shared().iter().any(|service| {
+    let ran = shared().iter().any(|service| {
         if !service.jobs_waiting() {
             return false;
         }
         let run = || {
-            if boot {
+            if taker == Taker::Boot {
                 service.run_job(older)
             } else {
                 // SAFETY: an AP's host work between slices, which holds nothing
@@ -219,7 +243,22 @@ pub(in crate::engine) fn run_job(boot: bool) -> bool {
             }
         };
         measured_job(run)
-    })
+    });
+    if taker == Taker::Busy {
+        // Busy processors look again only after the spacing, whether one ran
+        // or none was due.
+        NEXT_BUSY_JOB.store(
+            host::rdtsc().wrapping_add(millis * BUSY_SPACING_MILLIS),
+            Ordering::Relaxed,
+        );
+    }
+    ran
+}
+
+/// Whether a busy processor may look for a job ([`Taker::Busy`]) now: a
+/// load, so that a busy processor's slice pays for no more.
+pub(in crate::engine) fn busy_job_due() -> bool {
+    host::rdtsc() >= NEXT_BUSY_JOB.load(Ordering::Relaxed)
 }
 
 /// The most the heap's carved bytes rose during one job since the last
@@ -763,14 +802,13 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         if jobs.ran != 0 || jobs.deferred != 0 {
             output::arguments(format_args!(
                 "GPU JOBS ran={} total_us={} longest_us={} longest_queued_us={} deferred={} \
-                 repeated={} forced={} waiting={} heap_rise={}M from={}M\n",
+                 repeated={} waiting={} heap_rise={}M from={}M\n",
                 jobs.ran,
                 micros(jobs.ticks),
                 micros(jobs.longest),
                 micros(jobs.longest_queued),
                 jobs.deferred,
                 jobs.repeated,
-                jobs.forced,
                 service.jobs_waiting(),
                 JOB_RISE.swap(0, Ordering::Relaxed) >> 20,
                 JOB_RISE_FROM.load(Ordering::Relaxed) >> 20,
@@ -1090,7 +1128,6 @@ fn open_gpu(
             service.set_wait_bound(gpu.tsc_hz / 1000 * WAIT_BOUND_MILLIS);
             service.set_look_budget(gpu.tsc_hz / 1_000_000 * LOOK_MICROS);
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
-                service.set_force_after(gpu.tsc_hz / 1000 * FORCE_JOB_MILLIS);
                 if let Some(free) = COMPILE_STACKS
                     .iter()
                     .find(|compile| compile.load(Ordering::Relaxed) == 0)

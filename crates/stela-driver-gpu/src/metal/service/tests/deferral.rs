@@ -272,30 +272,34 @@ fn a_commit_whose_pipeline_creation_compiles_waits_outside_the_turn() {
 }
 
 #[test]
-fn a_job_no_waiting_processor_takes_runs_on_its_callers() {
+fn a_job_never_runs_inside_its_callers_call_however_long_it_waits() {
     let mut service = service();
     let a = connect(&mut service);
     let (pipeline, buffer) = pipeline(&mut service, a);
     let compiler = service.device().compiler_mut();
     compiler.defer_next = true;
-    // Every processor is busy: none runs jobs.
     compiler.job_gate = Some(Arc::new(AtomicBool::new(true)));
     let shared = SharedService::new(service, host(|_| {}));
     shared.set_compile_stack(1);
-    shared.set_force_after(1_000_000);
     let mut memory = Memory::default();
     let commit = dispatching(&mut memory, pipeline, buffer);
     shared.serve(a, commit, &mut memory).unwrap();
     assert_eq!(status(&mut memory, commit), Status::Pending);
-    // Within the bound the call waits; past it, the caller runs the job,
-    // then its commit.
-    shared.serve(a, commit, &mut memory).unwrap();
-    assert_eq!(status(&mut memory, commit), Status::Pending);
-    std::thread::sleep(Duration::from_millis(2));
+    // Every processor is busy: the call is asked again and again, long
+    // after it was deferred, and stays a short `Pending` answer.
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(2));
+        shared.serve(a, commit, &mut memory).unwrap();
+        assert_eq!(status(&mut memory, commit), Status::Pending);
+    }
+    assert_eq!(shared.take_job_report().ran, 0);
+    assert!(shared.jobs_waiting());
+    // Host work between guest slices runs it; the call then completes.
+    assert!(shared.run_job(0));
     shared.serve(a, commit, &mut memory).unwrap();
     assert_eq!(status(&mut memory, commit), Status::Ok);
     let report = shared.take_job_report();
-    assert_eq!((report.ran, report.forced, report.repeated), (1, 1, 1));
+    assert_eq!((report.ran, report.repeated), (1, 0));
     assert!(!shared.jobs_waiting());
 }
 

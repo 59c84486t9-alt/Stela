@@ -254,7 +254,7 @@ impl Pe {
                         }
                         // A GPU compilation a guest call deferred.
                         #[cfg(feature = "nvk")]
-                        super::gpu::gate::run_job(false);
+                        super::gpu::gate::run_job(super::gpu::gate::Taker::Waiting);
                     })
                 }
                 // A busy PE gives the screen one bounded step within its
@@ -266,6 +266,17 @@ impl Pe {
                             super::display::flush(super::display::Turn::Busy)
                         });
                         screen.spent(spent, now.wrapping_add(spent));
+                    }
+                    // A GPU compilation no waiting PE took for long, with
+                    // every guest CPU busy: taken between two slices of user
+                    // code, where the guest holds no lock and no kernel
+                    // watchdog counts, rather than inside the guest call that
+                    // waits for it.
+                    #[cfg(feature = "nvk")]
+                    if machine.cpu.pstate.el == 0 && super::gpu::gate::busy_job_due() {
+                        super::run::host_work(&mut machine, |_| {
+                            super::gpu::gate::run_job(super::gpu::gate::Taker::Busy)
+                        });
                     }
                 }
                 stop => stopped(pe, stop),
