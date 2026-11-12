@@ -1,11 +1,12 @@
 //! Download straight into FAT32 pieces; no complete IPSW is cached on the PC.
 //!
 //! Each piece is synced before the next starts, and [`RESUME_FILE`] beside
-//! the pieces records those done. A download that stopped goes on after the
-//! last recorded piece when the image on the server is the same one (URL,
-//! entity tag, size) and the piece size is too: the done pieces are read
-//! back from the USB to rebuild the whole image's hashes, and the rest is
-//! asked for by range. The catalog's SHA-1 of the whole image still decides.
+//! the pieces records those done. A download that stopped goes on when the
+//! image on the server is the same one (URL, entity tag, size) and the piece
+//! size is too: each recorded piece is read back from the USB, in order, to
+//! rebuild the whole image's hashes, and kept when it matches its recorded
+//! hash; every missing or damaged piece is asked for again by range. The
+//! catalog's SHA-1 of the whole image still decides.
 use super::*;
 use std::io;
 
@@ -112,19 +113,12 @@ pub(in super::super) fn pieces_on_usb(directory: &Path) -> (usize, Option<usize>
     (present, None)
 }
 
-/// The pieces a stopped download of the same object finished, read back to
-/// rebuild their hashes into `whole_sha256`/`whole_sha1`, and their block
-/// hashes. Stops at the first piece that is missing or reads back
-/// otherwise; an unreadable or different record resumes nothing.
-fn resumed(
-    directory: &Path,
-    record: &Resume,
-    sizes: &[u64],
-    whole_sha256: &mut Sha256,
-    whole_sha1: &mut Sha1,
-) -> (Vec<Piece>, Vec<u8>) {
+/// The pieces a stopped download of the same object recorded as synced;
+/// an unreadable or different record resumes nothing. Each is checked
+/// against its hash when the download reaches it ([`kept_piece`]).
+fn recorded(directory: &Path, record: &Resume) -> Vec<Piece> {
     let Ok(previous) = stela_engine::read_json::<Resume>(&directory.join(RESUME_FILE)) else {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     };
     if (
         &previous.url,
@@ -133,38 +127,50 @@ fn resumed(
         previous.piece_bytes,
     ) != (&record.url, &record.etag, record.total, record.piece_bytes)
     {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
-    let offset: u64 = previous.done.iter().map(|piece| piece.bytes).sum();
-    let progress = crate::progress::Phase::bytes("Checking pieces already on the USB", offset);
-    let (mut pieces, mut blocks) = (Vec::new(), Vec::new());
-    for (index, piece) in previous.done.into_iter().enumerate() {
-        if sizes.get(index) != Some(&piece.bytes) {
-            break;
-        }
-        let partial = partial_path(directory, index);
-        // The partial is not longer than its piece, or its tail would sit
-        // where the next piece's first bytes go.
-        if fs::metadata(&partial).map(|meta| meta.len()).ok() != Some(piece.bytes) {
-            break;
-        }
-        let (mut hashes, mut sha256, mut sha1) =
-            (Hashes::default(), whole_sha256.clone(), whole_sha1.clone());
-        let read = stream_file(&partial, piece.bytes, &progress, |bytes| {
-            hashes.update(bytes);
-            sha256.update(bytes);
-            sha1.update(bytes);
-        });
-        let (digest, digests) = hashes.finish();
-        if read.is_err() || digest != piece.sha256 {
-            break;
-        }
-        (*whole_sha256, *whole_sha1) = (sha256, sha1);
-        pieces.push(piece);
-        blocks.extend(digests);
+    previous.done
+}
+
+/// Whether the piece `index` a stopped download recorded is on the USB as
+/// recorded: read back once, its bytes go into the whole image's hashes and
+/// its block hashes into `blocks`. A piece already promoted by a stop
+/// during publication becomes a partial again. A missing, short or
+/// damaged piece leaves the hashes as they were.
+fn kept_piece(
+    directory: &Path,
+    index: usize,
+    piece: &Piece,
+    wholes: (&mut Sha256, &mut Sha1),
+    blocks: &mut Vec<u8>,
+    progress: &crate::progress::Phase,
+) -> bool {
+    let partial = partial_path(directory, index);
+    let at_size = |path: &Path| fs::metadata(path).is_ok_and(|meta| meta.len() == piece.bytes);
+    let promoted = directory.join(piece_name(index));
+    if !partial.exists() && at_size(&promoted) && fs::rename(&promoted, &partial).is_err() {
+        return false;
     }
-    progress.finish();
-    (pieces, blocks)
+    // The partial is not longer than its piece, or its tail would sit
+    // where the next piece's first bytes go.
+    if !at_size(&partial) {
+        return false;
+    }
+    let (whole_sha256, whole_sha1) = wholes;
+    let (mut hashes, mut sha256, mut sha1) =
+        (Hashes::default(), whole_sha256.clone(), whole_sha1.clone());
+    let read = stream_file(&partial, piece.bytes, progress, |bytes| {
+        hashes.update(bytes);
+        sha256.update(bytes);
+        sha1.update(bytes);
+    });
+    let (digest, digests) = hashes.finish();
+    if read.is_err() || digest != piece.sha256 {
+        return false;
+    }
+    (*whole_sha256, *whole_sha1) = (sha256, sha1);
+    blocks.extend(digests);
+    true
 }
 
 fn write_from(
@@ -203,25 +209,43 @@ fn write_from(
         done: Vec::new(),
     };
     let resume_path = directory.join(RESUME_FILE);
-    let (mut pieces, mut piece_blocks) = resumed(
-        &directory,
-        &record,
-        &sizes,
-        &mut whole_sha256,
-        &mut whole_sha1,
-    );
-    let offset: u64 = pieces.iter().map(|piece| piece.bytes).sum();
-    if offset > 0 {
+    // The record keeps every piece a stopped download synced, also those
+    // after a damaged one, until each is checked or downloaded again.
+    record.done = recorded(&directory, &record);
+    if !record.done.is_empty() {
         eprintln!(
-            "note: going on with the macOS download at {:.1} of {:.1} GB",
-            offset as f64 / 1e9,
-            total as f64 / 1e9
+            "note: checking the {} of {} pieces already on the USB; only missing or damaged \
+             pieces are downloaded again",
+            record.done.len().min(sizes.len()),
+            sizes.len()
         );
-        source.seek(SeekFrom::Start(offset))?;
     }
     let progress = crate::progress::Phase::bytes("Downloading macOS onto USB", total);
-    progress.position(offset);
-    for (index, &size) in sizes.iter().enumerate().skip(pieces.len()) {
+    let (mut pieces, mut piece_blocks) = (Vec::new(), Vec::new());
+    let (mut kept, mut position) = (0, 0);
+    let mut offset = 0;
+    for (index, &size) in sizes.iter().enumerate() {
+        let previous = record.done.get(index).filter(|piece| piece.bytes == size);
+        if let Some(piece) = previous
+            && kept_piece(
+                &directory,
+                index,
+                piece,
+                (&mut whole_sha256, &mut whole_sha1),
+                &mut piece_blocks,
+                &progress,
+            )
+        {
+            pieces.push(piece.clone());
+            kept += 1;
+            offset += size;
+            continue;
+        }
+        // A damaged piece's check counts no progress.
+        progress.position(offset);
+        if position != offset {
+            source.seek(SeekFrom::Start(offset))?;
+        }
         let mut file = fs::File::create(partial_path(&directory, index))?;
         let mut hashes = Hashes::default();
         stream(&mut source, size, |bytes| {
@@ -234,14 +258,23 @@ fn write_from(
         })?;
         file.sync_all()?;
         crate::progress::drop_cached(&file);
+        offset += size;
+        position = offset;
         let (sha256, blocks) = hashes.finish();
-        pieces.push(Piece {
+        let piece = Piece {
             bytes: size,
             sha256,
-        });
+        };
+        match record.done.get_mut(index) {
+            Some(recorded) => *recorded = piece.clone(),
+            None => record.done.push(piece.clone()),
+        }
+        pieces.push(piece);
         piece_blocks.extend(blocks);
-        record.done.clone_from(&pieces);
         efi::write_atomic(&resume_path, &serde_json::to_vec(&record)?, false)?;
+    }
+    if position != total {
+        source.seek(SeekFrom::Start(total))?;
     }
     ensure!(
         source.read(&mut [0])? == 0,
@@ -317,8 +350,8 @@ fn write_from(
         _ => {}
     }
     Ok(Written {
-        wrote: sizes.len(),
-        kept: 0,
+        wrote: sizes.len() - kept,
+        kept,
         manifest_sha256: stela_formats::sha256(json.as_bytes()),
     })
 }
@@ -598,6 +631,81 @@ mod tests {
         assert!(!path.join(RESUME_FILE).exists());
         let manifest = fs::read(path.join(MANIFEST_FILE))?;
         assert_eq!(written.manifest_sha256, stela_formats::sha256(&manifest));
+        for (index, part) in bytes.chunks(piece as usize).enumerate() {
+            assert_eq!(fs::read(path.join(piece_name(index)))?, part);
+        }
+        Ok(())
+    }
+
+    /// [`synthetic`] with a stored member of `padding` bytes added, so the
+    /// image takes more pieces.
+    fn padded(temp: &Path, padding: usize) -> Result<(Vec<u8>, restore::Image)> {
+        let ipsw = temp.join("padded.ipsw");
+        crate::efi::synthetic_ipsw(&ipsw)?;
+        let file = fs::File::options().read(true).write(true).open(&ipsw)?;
+        let mut zip = zip::ZipWriter::new_append(file)?;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("Padding.bin", options)?;
+        let fill: Vec<u8> = (0..padding).map(|at| (at % 251) as u8).collect();
+        zip.write_all(&fill)?;
+        zip.finish()?;
+        let bytes = fs::read(&ipsw)?;
+        let (_, mut image) = synthetic(temp)?;
+        image.sha1 = Some(hex::encode(Sha1::digest(&bytes)));
+        Ok((bytes, image))
+    }
+
+    #[test]
+    fn only_a_damaged_piece_is_downloaded_again_and_promoted_pieces_are_kept() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (bytes, image) = padded(temp.path(), 4 * HASH_BLOCK_BYTES as usize)?;
+        let piece = HASH_BLOCK_BYTES;
+        assert!(
+            bytes.len() as u64 > 3 * piece + 100,
+            "the fixture needs pieces"
+        );
+        let volume = temp.path().join("usb");
+        let path = directory(&volume, &image.build);
+        // Stopped in the fourth piece: three are synced and recorded.
+        let mut stopped = Tracked::new(&bytes, Some(3 * piece + 100));
+        assert!(write(&volume, &image, ETAG, &mut stopped).is_err());
+        // The second no longer reads back as recorded, and the first was
+        // promoted by a stop while the download was being published.
+        fs::write(partial_path(&path, 1), vec![0; piece as usize])?;
+        fs::rename(partial_path(&path, 0), path.join(piece_name(0)))?;
+        let mut again = Tracked::new(&bytes, None);
+        let written = write(&volume, &image, ETAG, &mut again)?;
+        assert_eq!(again.seeks, [piece, 3 * piece]);
+        assert_eq!(again.read, bytes.len() as u64 - 2 * piece);
+        assert_eq!(written.kept, 2);
+        assert_eq!(written.wrote, bytes.len().div_ceil(piece as usize) - 2);
+        assert!(!path.join(RESUME_FILE).exists());
+        for (index, part) in bytes.chunks(piece as usize).enumerate() {
+            assert_eq!(fs::read(path.join(piece_name(index)))?, part);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_stop_after_a_damaged_piece_is_fetched_again_keeps_the_later_pieces() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (bytes, image) = padded(temp.path(), 4 * HASH_BLOCK_BYTES as usize)?;
+        let piece = HASH_BLOCK_BYTES;
+        let volume = temp.path().join("usb");
+        let path = directory(&volume, &image.build);
+        let mut stopped = Tracked::new(&bytes, Some(3 * piece + 100));
+        assert!(write(&volume, &image, ETAG, &mut stopped).is_err());
+        fs::write(partial_path(&path, 0), vec![0; piece as usize])?;
+        // Stopped again once the first was fetched again: the second and
+        // third are still recorded.
+        let mut again = Tracked::new(&bytes, Some(piece + 1));
+        assert!(write(&volume, &image, ETAG, &mut again).is_err());
+        assert_eq!(pieces_on_usb(&path).0, 3);
+        let mut last = Tracked::new(&bytes, None);
+        let written = write(&volume, &image, ETAG, &mut last)?;
+        assert_eq!(last.seeks, [3 * piece]);
+        assert_eq!(written.kept, 3);
         for (index, part) in bytes.chunks(piece as usize).enumerate() {
             assert_eq!(fs::read(path.join(piece_name(index)))?, part);
         }
