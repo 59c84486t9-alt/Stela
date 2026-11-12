@@ -2877,32 +2877,146 @@ fn an_interrupted_setup_follows_the_usb_to_where_it_is_mounted_now() {
     assert_eq!(snapshot(&old), decoy);
 }
 
+/// The install medium's pieces in the active build's directory, in order.
+fn medium_pieces(f: &Fixture) -> Vec<PathBuf> {
+    let directory = record(f).active_medium().unwrap().directory();
+    let mut pieces: Vec<PathBuf> = fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            name.starts_with("ipsw.") && !name.ends_with(".partial")
+        })
+        .collect();
+    pieces.sort();
+    pieces
+}
+
+/// Run the interrupted setup again as `stela setup` run again does: no
+/// installer choice, which comes from the record.
+fn resume_setup(f: &Fixture) -> String {
+    let mut again = installed_command(f);
+    again.install_image = None;
+    setup(&environment(&f.host), again).unwrap()
+}
+
 #[test]
-fn an_interrupted_whole_image_setup_resumes_as_a_network_install() {
+fn an_interrupted_full_setup_resumes_as_a_full_install_and_keeps_its_pieces() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     // An older stela's setup that copied the whole image and stopped part
     // way; its record names the image choice by its first name.
     setup(&environment(&f.host), installed_command(&f)).unwrap();
-    let (first, _) = interrupt_setup(&f);
+    let (first, last) = interrupt_setup(&f);
     let path = f.esp.join(RECORD);
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("\"install_image\": \"full\""), "{text}");
     fs::write(&path, text.replace("\"full\"", "\"offline\"")).unwrap();
-    // The same setup run again, as this stela runs it: no image choice.
-    let mut again = installed_command(&f);
-    again.install_image = None;
-    let report = setup(&environment(&f.host), again).unwrap();
+    let pieces = medium_pieces(&f);
+    for piece in &pieces {
+        set_old(piece);
+    }
+    let report = resume_setup(&f);
     assert!(report.contains("Done."), "{report}");
+    // The last piece is short, so it is not counted as on the USB.
+    let found = format!(
+        "continuing the full installer: {} pieces already on the USB",
+        pieces.len() - 1
+    );
+    assert!(report.contains(&found), "{report}");
     let resumed = record(&f);
     assert!(resumed.complete);
-    assert_eq!(resumed.install_image, None);
+    assert_eq!(resumed.install_image, Some(InstallImage::Full));
     let medium = resumed.active_medium().unwrap();
-    assert!(medium.remote && medium.problems().is_empty(), "{medium:?}");
-    // The whole image's pieces are gone, and the setup is sound.
-    assert!(!first.exists());
+    assert!(!medium.remote && medium.problems().is_empty(), "{medium:?}");
+    // Every whole piece is kept; only the short one is written again.
+    assert_eq!(medium_pieces(&f), pieces);
+    for piece in &pieces {
+        assert_eq!(is_old(piece), *piece != last, "{}", piece.display());
+    }
+    assert!(first.exists());
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(status.contains("No problems found."), "{status}");
+}
+
+#[test]
+fn a_resumed_full_setup_writes_again_only_its_damaged_piece() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let (first, last) = interrupt_setup(&f);
+    let pieces = medium_pieces(&f);
+    // The first piece keeps its size but not its bytes.
+    let bytes = fs::read(&first).unwrap();
+    fs::write(&first, vec![0xa5; bytes.len()]).unwrap();
+    for piece in &pieces {
+        set_old(piece);
+    }
+    let report = resume_setup(&f);
+    assert!(report.contains("Done."), "{report}");
+    assert_eq!(fs::read(&first).unwrap(), bytes);
+    for piece in &pieces {
+        let written = *piece == first || *piece == last;
+        assert_eq!(is_old(piece), !written, "{}", piece.display());
+    }
+    assert!(record(&f).active_medium().unwrap().problems().is_empty());
+}
+
+#[test]
+fn an_interrupted_setup_from_before_the_choice_was_recorded_resumes_by_its_medium() {
+    for remote in [false, true] {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let mut first = installed_command(&f);
+        if remote {
+            first.install_image = Some(InstallImage::Network);
+        }
+        setup(&environment(&f.host), first).unwrap();
+        let mut stopped = record(&f);
+        stopped.complete = false;
+        stopped.install_image = None;
+        write_record(&f.esp, &stopped).unwrap();
+        for path in [efi::LOADER, efi::OPTIONS, CHOICES_PATH] {
+            fs::remove_file(f.esp.join(path)).unwrap();
+        }
+        let text = fs::read_to_string(f.esp.join(RECORD)).unwrap();
+        assert!(!text.contains("install_image"), "{text}");
+        let report = resume_setup(&f);
+        assert!(report.contains("Done."), "{report}");
+        let resumed = record(&f);
+        let kind = match remote {
+            true => InstallImage::Network,
+            false => InstallImage::Full,
+        };
+        assert_eq!(resumed.install_image, Some(kind));
+        let medium = resumed.active_medium().unwrap();
+        assert!(medium.remote == remote && medium.problems().is_empty());
+    }
+}
+
+#[test]
+fn an_interrupted_network_setup_resumes_as_a_network_install() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    let mut network = installed_command(&f);
+    network.install_image = Some(InstallImage::Network);
+    setup(&environment(&f.host), network).unwrap();
+    let mut stopped = record(&f);
+    stopped.complete = false;
+    write_record(&f.esp, &stopped).unwrap();
+    for path in [efi::LOADER, efi::OPTIONS, CHOICES_PATH] {
+        fs::remove_file(f.esp.join(path)).unwrap();
+    }
+    assert_eq!(stopped.resume_summary(), "continuing the network installer");
+    let report = resume_setup(&f);
+    assert!(
+        report.contains("continuing the network installer"),
+        "{report}"
+    );
+    let resumed = record(&f);
+    assert!(resumed.complete);
+    assert_eq!(resumed.install_image, Some(InstallImage::Network));
+    assert!(resumed.active_medium().unwrap().remote);
 }
 
 #[test]
@@ -4503,9 +4617,19 @@ fn the_wizard_resumes_an_interrupted_setup_on_the_chosen_usb() {
     // recorded inputs.
     let mut command = command(&f, Path::new("disk5"));
     command.ipsw = None;
+    command.install_image = Some(InstallImage::Network);
     wizard::resume(&mut command, esp, &found);
     assert_eq!(command.usb, f.esp);
     assert!(command.fetch);
+    // The full installer it was making goes on.
+    assert_eq!(command.install_image, Some(InstallImage::Full));
+    assert!(
+        found
+            .resume_summary()
+            .starts_with("continuing the full installer: "),
+        "{}",
+        found.resume_summary()
+    );
     assert_eq!(command.build, found.build);
     assert_eq!(command.model.as_deref(), Some(found.model.as_str()));
 }

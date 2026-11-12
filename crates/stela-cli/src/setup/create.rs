@@ -733,6 +733,9 @@ pub(super) fn plan(
             "resumes the setup interrupted on {}",
             esp.join(RECORD).display()
         ));
+        if let Some(previous) = &previous {
+            notes.push(previous.resume_summary());
+        }
         record.bundles = resume.bundles;
         record.media = resume.media;
         record.translations = resume.translations;
@@ -959,14 +962,24 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             command.install_image = Some(default_image(found.bytes, command.ipsw.as_deref())?);
         }
         erase = Some((disk, found.name, found.bytes, identity));
-    } else if command.install_image.is_none() && command.target.is_none() {
-        // A USB named by one of its mounted volumes is set up as the same
-        // USB erased by setup would be: macOS goes on it when it is large
-        // enough. An interrupted setup it holds keeps its own choice.
-        let esp = super::locate_esp(host, &command.usb)?;
-        if !esp.join(RECORD).exists() {
-            let capacity = usb_capacity(host, &command.usb)?;
-            command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
+    } else if command.install_image.is_none() {
+        // An interrupted setup the USB holds keeps its own choice: a full
+        // installer goes on from the pieces already on the USB.
+        let esp = super::locate_esp(host, &command.usb);
+        let interrupted = esp
+            .as_ref()
+            .ok()
+            .and_then(|esp| super::record::interrupted(host, esp, &command.usb));
+        if let Some(record) = interrupted {
+            command.install_image = Some(record.install_kind());
+        } else if command.target.is_none() {
+            // A USB named by one of its mounted volumes is set up as the
+            // same USB erased by setup would be: macOS goes on it when it
+            // is large enough.
+            if !esp?.join(RECORD).exists() {
+                let capacity = usb_capacity(host, &command.usb)?;
+                command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
+            }
         }
     }
     // Downloaded boot archives are kept in one place until setup finishes,

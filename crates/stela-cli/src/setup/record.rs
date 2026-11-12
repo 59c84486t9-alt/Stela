@@ -119,6 +119,39 @@ impl Record {
         image_is_remote(ipsw, self.install_image)
     }
 
+    /// The installer this setup was made as: its recorded choice, else (a
+    /// record from before the choice was recorded) whole when it has a
+    /// medium that holds the image, else streamed.
+    pub(super) fn install_kind(&self) -> InstallImage {
+        match self.install_image {
+            Some(kind) => kind,
+            None if self.media.iter().any(|medium| !medium.remote) => InstallImage::Full,
+            None => InstallImage::Network,
+        }
+    }
+
+    /// What resuming this interrupted setup continues, after the medium the
+    /// stopped setup left on the USB: "continuing the full installer: 3 of
+    /// 6 pieces already on the USB".
+    pub(super) fn resume_summary(&self) -> String {
+        if self.install_kind() == InstallImage::Network {
+            return "continuing the network installer".into();
+        }
+        let found = self
+            .medium_of(&self.build)
+            .filter(|medium| !medium.remote)
+            .map(|medium| medium::download::pieces_on_usb(&medium.directory()));
+        match found {
+            Some((present, Some(total))) => format!(
+                "continuing the full installer: {present} of {total} pieces already on the USB"
+            ),
+            Some((present, None)) if present > 0 => {
+                format!("continuing the full installer: {present} pieces already on the USB")
+            }
+            _ => "continuing the full installer: no pieces on the USB yet".into(),
+        }
+    }
+
     /// Bring an older schema's record to one `uninstall` reads: its
     /// install medium is listed and its installed disk becomes the first
     /// install.

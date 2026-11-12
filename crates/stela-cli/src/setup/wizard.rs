@@ -150,10 +150,9 @@ pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
     command.usb = esp;
     command.build = record.build.clone();
     command.model = Some(record.model.clone());
-    // A resumed setup is a new one, and streams the install as every new
-    // setup does, also when an older stela began it with the whole image
-    // (`stela setup` run again does the same).
-    command.install_image = Some(InstallImage::Network);
+    // The installer the stopped setup was making: a full one goes on from
+    // the pieces already on the USB (`stela setup` run again does the same).
+    command.install_image = Some(record.install_kind());
     if command.ipsw.is_none() {
         command.fetch = true;
     }
@@ -238,8 +237,16 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         // erased and begun again.
         let disk = disks.iter().find(|d| d.identifier == usb.id);
         if let Some((esp, record)) = disk.and_then(|disk| interrupted(host, disk)) {
-            let choice = cliclack::select("This USB holds a setup that was interrupted")
-                .item(0, "Resume it", "Keeps what it wrote and finishes the rest")
+            cliclack::log::info(format!(
+                "This USB holds a setup that was interrupted: {}",
+                record.resume_summary()
+            ))?;
+            let choice = cliclack::select("Resume it or start over?")
+                .item(
+                    0,
+                    "Resume it",
+                    "Keeps what it wrote, checks each piece and finishes the rest",
+                )
                 .item(1, "Start over", "Erases the USB")
                 .initial_value(0)
                 .interact()?;

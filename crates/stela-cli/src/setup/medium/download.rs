@@ -80,6 +80,38 @@ struct Resume {
     done: Vec<Piece>,
 }
 
+/// The pieces of the image a stopped setup left in its build's
+/// `directory`: how many are there at their recorded size, and of how many
+/// pieces the image is when a stopped download records it. Their bytes are
+/// checked against their recorded hashes when the setup goes on.
+pub(in super::super) fn pieces_on_usb(directory: &Path) -> (usize, Option<usize>) {
+    let at_size = |path: PathBuf, bytes: u64| fs::metadata(path).is_ok_and(|m| m.len() == bytes);
+    if let Ok(record) = stela_engine::read_json::<Resume>(&directory.join(RESUME_FILE)) {
+        let total = piece_sizes(record.total, record.piece_bytes).len();
+        let present = record
+            .done
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| {
+                at_size(partial_path(directory, *index), piece.bytes)
+                    || at_size(directory.join(piece_name(*index)), piece.bytes)
+            })
+            .count();
+        return (present, Some(total));
+    }
+    // Pieces copied from a local IPSW, without a download record: every
+    // whole one has the first one's size.
+    let size = |index| fs::metadata(directory.join(piece_name(index))).map(|m| m.len());
+    let Ok(first) = size(0) else {
+        return (0, None);
+    };
+    let present = (0..MAX_PIECES)
+        .take_while(|&index| size(index).is_ok())
+        .filter(|&index| size(index).ok() == Some(first))
+        .count();
+    (present, None)
+}
+
 /// The pieces a stopped download of the same object finished, read back to
 /// rebuild their hashes into `whole_sha256`/`whole_sha1`, and their block
 /// hashes. Stops at the first piece that is missing or reads back
@@ -557,6 +589,8 @@ mod tests {
         let mut stopped = Tracked::new(&bytes, Some(piece + 100));
         assert!(write(&volume, &image, ETAG, &mut stopped).is_err());
         assert!(path.join(RESUME_FILE).exists());
+        let count = bytes.len().div_ceil(piece as usize);
+        assert_eq!(pieces_on_usb(&path), (1, Some(count)));
         let mut resumed = Tracked::new(&bytes, None);
         let written = write(&volume, &image, ETAG, &mut resumed)?;
         assert_eq!(resumed.seeks, [piece]);
