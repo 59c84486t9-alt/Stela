@@ -864,6 +864,24 @@ impl DeviceExit {
 /// The device pages [`DeviceExits`] holds apart.
 pub const DEVICE_PAGES: usize = 64;
 
+/// One device register's reads or writes the engine completed, with
+/// [`DeviceExit`]'s counts: `register` its physical address, with
+/// [`DEVICE_REGISTER_WRITE`] set for writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceRegisterExit {
+    pub register: u64,
+    pub count: u64,
+    pub ticks: u64,
+    pub waited: u64,
+}
+
+/// The bit of [`DeviceRegisterExit::register`] that says writes: physical
+/// addresses never reach it.
+pub const DEVICE_REGISTER_WRITE: u64 = 1 << 63;
+
+/// The registers and directions [`DeviceExits`] holds apart.
+pub const DEVICE_REGISTERS: usize = 128;
+
 /// Device writes the engine completed, and the ticks of their exits split:
 /// the whole exit; the access, up to the model's write done (the devices'
 /// lock and the write); the settle after it (in the same locked call every
@@ -910,6 +928,10 @@ pub struct DeviceExits {
     pub forwarded: u64,
     pub forwarded_ticks: u64,
     pub writes: DeviceWrites,
+    /// The same accesses by register and direction, an open-addressed
+    /// table too, with the rest in `other_registers`.
+    pub registers: [DeviceRegisterExit; DEVICE_REGISTERS],
+    pub other_registers: DeviceRegisterExit,
 }
 
 impl Default for DeviceExits {
@@ -920,6 +942,8 @@ impl Default for DeviceExits {
             forwarded: 0,
             forwarded_ticks: 0,
             writes: DeviceWrites::default(),
+            registers: [DeviceRegisterExit::default(); DEVICE_REGISTERS],
+            other_registers: DeviceRegisterExit::default(),
         }
     }
 }
@@ -941,10 +965,44 @@ impl DeviceExits {
         self.other.add(count, ticks, waited);
     }
 
+    /// Count `count` accesses of `register` ([`DeviceRegisterExit`]) as
+    /// [`Self::add`] counts its page's.
+    pub fn add_register(&mut self, register: u64, count: u64, ticks: u64, waited: u64) {
+        let hash = (register ^ register >> 32).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let start = (hash >> (u64::BITS - DEVICE_REGISTERS.ilog2())) as usize;
+        let add = |entry: &mut DeviceRegisterExit| {
+            entry.count += count;
+            entry.ticks += ticks;
+            entry.waited += waited;
+        };
+        for probe in 0..DEVICE_REGISTERS {
+            let entry = &mut self.registers[(start + probe) % DEVICE_REGISTERS];
+            if entry.count == 0 {
+                entry.register = register;
+            }
+            if entry.register == register {
+                return add(entry);
+            }
+        }
+        add(&mut self.other_registers);
+    }
+
+    /// The registers with accesses.
+    pub fn counted_registers(&self) -> impl Iterator<Item = &DeviceRegisterExit> {
+        self.registers.iter().filter(|entry| entry.count != 0)
+    }
+
     pub fn merge(&mut self, exits: &Self) {
         for entry in exits.counted() {
             self.add(entry.page, entry.count, entry.ticks, entry.waited);
         }
+        for entry in exits.counted_registers() {
+            self.add_register(entry.register, entry.count, entry.ticks, entry.waited);
+        }
+        let others = exits.other_registers;
+        self.other_registers.count += others.count;
+        self.other_registers.ticks += others.ticks;
+        self.other_registers.waited += others.waited;
         let other = exits.other;
         self.other.add(other.count, other.ticks, other.waited);
         self.forwarded += exits.forwarded;
@@ -1643,6 +1701,41 @@ mod tests {
         let first = merged.counted().find(|exit| exit.key == 0).unwrap();
         assert_eq!((first.count, first.closes), (4, 2));
         assert_eq!(merged.other.count, 4);
+    }
+
+    /// Registers count apart by address and direction, the ones past the
+    /// table in `other_registers`, and merge.
+    #[test]
+    fn device_exits_count_by_register_and_direction() {
+        let mut exits = DeviceExits::default();
+        const REGISTER: u64 = 0x2_3b0c_8000;
+        exits.add_register(REGISTER, 1, 10, 2);
+        exits.add_register(REGISTER | DEVICE_REGISTER_WRITE, 1, 20, 0);
+        exits.add_register(REGISTER, 1, 5, 1);
+        for index in 0..DEVICE_REGISTERS as u64 {
+            exits.add_register(0x1000 + index * 4, 1, 1, 0);
+        }
+        let count = |exits: &DeviceExits, register| {
+            exits
+                .counted_registers()
+                .find(|exit| exit.register == register)
+                .map(|exit| (exit.count, exit.ticks, exit.waited))
+        };
+        assert_eq!(count(&exits, REGISTER), Some((2, 15, 3)));
+        assert_eq!(
+            count(&exits, REGISTER | DEVICE_REGISTER_WRITE),
+            Some((1, 20, 0))
+        );
+        assert_eq!(exits.other_registers.count, 2);
+        let mut merged = DeviceExits::default();
+        merged.merge(&exits);
+        merged.merge(&exits);
+        assert_eq!(count(&merged, REGISTER), Some((4, 30, 6)));
+        let total: u64 = merged.counted_registers().map(|exit| exit.count).sum();
+        assert_eq!(
+            total + merged.other_registers.count,
+            2 * (3 + DEVICE_REGISTERS as u64)
+        );
     }
 
     #[test]

@@ -135,6 +135,13 @@ fn a_device_sites_exits_are_timed_apart_from_system_instructions() {
         .map(|exit| (exit.page, exit.count, exit.waited))
         .collect();
     assert_eq!(pages, [(step_timing::device_page(DEVICE), 1, 0)]);
+    // And to its register, as a read.
+    let registers: Vec<_> = exits
+        .devices
+        .counted_registers()
+        .map(|exit| (exit.register, exit.count))
+        .collect();
+    assert_eq!(registers, [(DEVICE, 1)]);
     assert_eq!(exits.devices.forwarded, 0);
 }
 

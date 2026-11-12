@@ -263,7 +263,9 @@ fn numerical_exits_report(
 /// named by the model mapped there (`name@page`) with its total handling
 /// time and the part of it spent waiting for the board's lock; `other`
 /// holds pages past the table's, and `forwarded` the accesses sent to the
-/// home machine with their PEs' wait for its answer.
+/// home machine with their PEs' wait for its answer. `PES DEVICE MODELS`
+/// sums the pages by model, and `PES DEVICE REGISTERS` gives the sixteen
+/// costliest registers by direction (`name@address:r` or `:w`).
 fn device_exits_report<H: Host>(
     machine: &Machine<H, parallel::Board>,
     exits: &step_timing::DeviceExits,
@@ -326,6 +328,41 @@ fn device_exits_report<H: Host>(
     let mut line = String::from("PES DEVICE MODELS count/ns");
     for &(name, count, ticks) in models.iter().take(SHOWN) {
         line.push_str(&format!(" {name}={count}/{}", nanos(ticks)));
+    }
+    output::arguments(format_args!("{line}\n"));
+    // The same accesses by register and direction, the sixteen costliest:
+    // which registers translated code could complete itself.
+    const REGISTERS: usize = 16;
+    let mut registers: Vec<step_timing::DeviceRegisterExit> =
+        exits.counted_registers().copied().collect();
+    registers.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.ticks));
+    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns");
+    for exit in registers.iter().take(REGISTERS) {
+        let physical = exit.register & !step_timing::DEVICE_REGISTER_WRITE;
+        let direction = if exit.register & step_timing::DEVICE_REGISTER_WRITE != 0 {
+            'w'
+        } else {
+            'r'
+        };
+        let name = machine
+            .devices
+            .with(|devices| stela_engine::machine::Devices::device_name(devices, physical));
+        line.push_str(&format!(
+            " {}@{physical:#x}:{direction}={}/{}/{}",
+            name.unwrap_or("unmapped"),
+            exit.count,
+            nanos(exit.ticks),
+            lock_nanos(exit.waited)
+        ));
+    }
+    let other = exits.other_registers;
+    if other.count != 0 {
+        line.push_str(&format!(
+            " other={}/{}/{}",
+            other.count,
+            nanos(other.ticks),
+            lock_nanos(other.waited)
+        ));
     }
     output::arguments(format_args!("{line}\n"));
     // A device write's exit, split ([`step_timing::DeviceWrites`]).
