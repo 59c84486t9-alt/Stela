@@ -1061,6 +1061,104 @@ pub(super) fn reject_other_status_but_underflow(code: &mut Code) -> usize {
 
 /// MXCSR's divide-by-zero status.
 const MXCSR_DIVIDE: u32 = 1 << 2;
+/// MXCSR's invalid-operation status.
+const MXCSR_INVALID: u32 = 1;
+/// MXCSR's overflow status.
+const MXCSR_OVERFLOW: u32 = 1 << 3;
+
+/// The branch for MXCSR invalid in ECX: a NaN result of zero times
+/// infinity, infinity minus infinity, zero over zero, infinity over
+/// infinity or a signalling NaN input, which Arm's NaN rules give.
+pub(super) fn reject_invalid(code: &mut Code) -> usize {
+    code.asm().test_imm(Size::Dword, Rcx, MXCSR_INVALID as i32);
+    branch(code, Condition::NotZero)
+}
+
+/// Accumulate IXC, UFC, OFC and DZC from ECX's MXCSR status, which all
+/// move to FPSR by one shift. With FPCR.FZ, FIZ and AH clear, the host's
+/// unflushed result in Arm's rounding mode is the guest's, and its status
+/// is FPSR's: both detect tininess before rounding and report underflow
+/// for an inexact tiny result, and overflow with inexact. Denormal-operand
+/// status has no FPSR flag there.
+pub(super) fn commit_rounded_status(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        Rcx,
+        (MXCSR_INEXACT | MXCSR_UNDERFLOW | MXCSR_OVERFLOW | MXCSR_DIVIDE) as i32,
+    );
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, MXCSR_TO_FPSR_INEXACT_SHIFT);
+    asm.alu(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        Rcx,
+    );
+}
+
+/// Leave in EAX the dword sign mask of the lanes of `source` that are a
+/// NaN, or with `minimum_normal` exactly the minimum normal of either
+/// sign, for [`reject_exceptional_lanes`]. A NaN needs Arm's NaN
+/// selection. SSE products find tininess before rounding, as Arm with AH
+/// clear does (`arithmetic::tiny_tests`), but a host may find it after for
+/// other operations, which differs only for an inexact result rounded to
+/// the minimum normal (measured on an x86-64 host: FMA of the Single
+/// minimum normal minus its square, and CVTSD2SS of a Double just below
+/// it, raise no underflow). It runs in the private environment, whose
+/// status the compares may change. A scalar compares its low lane only.
+/// Clobbers the `scratch` registers, the last two only with
+/// `minimum_normal`.
+pub(super) fn exceptional_lane_mask(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    scratch: [u8; 3],
+    minimum_normal: bool,
+) {
+    const EQUAL: u8 = 0;
+    const UNORDERED: u8 = 3;
+    assert!(format != Format::Half);
+    let [mask, magnitude, minimum] = scratch;
+    let lanes = float_lanes(format, shape);
+    let (right, left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
+    packed(code, Host::MoveAligned, mask, source);
+    code.asm()
+        .float_compare(lanes, mask, Rm::Xmm(mask), UNORDERED);
+    if !minimum_normal {
+        Host::DwordSignMask.register(code, Rax as u8, mask, crate::TargetCpu::Baseline);
+        return;
+    }
+    packed(code, Host::EqualDword, magnitude, magnitude);
+    packed(code, Host::MoveAligned, minimum, magnitude);
+    right.emit(code, magnitude, SIGN_BITS);
+    packed(code, Host::And, magnitude, source);
+    right.emit(code, minimum, format.bits() as u8 - SIGN_BITS);
+    left.emit(code, minimum, format.fraction_bits() as u8);
+    code.asm()
+        .float_compare(lanes, magnitude, Rm::Xmm(minimum), EQUAL);
+    packed(code, Host::Or, mask, magnitude);
+    Host::DwordSignMask.register(code, Rax as u8, mask, crate::TargetCpu::Baseline);
+}
+
+/// The branch for an active `shape` lane that [`exceptional_lane_mask`]
+/// found, after the environment is restored.
+pub(super) fn reject_exceptional_lanes(code: &mut Code, format: Format, shape: Shape) -> usize {
+    let active = match (format, shape) {
+        (Format::Single, Shape::Scalar) => SCALAR_VECTOR_MASK,
+        (Format::Single, Shape::Vector64) | (Format::Double, Shape::Scalar) => {
+            SINGLE_LOW_VECTOR_MASK
+        }
+        _ => SINGLE_VECTOR_MASK,
+    };
+    code.asm().test_imm(Size::Dword, Rax, i32::from(active));
+    branch(code, Condition::NotZero)
+}
 
 /// The status a guest-visible result rejects ([`reject_other_status`])
 /// except divide-by-zero.

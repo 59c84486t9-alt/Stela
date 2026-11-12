@@ -20,21 +20,23 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, FPSR_UNDERFLOW,
     INPUT_MINIMUM_EXPONENT, Input, LEFT_VECTOR, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
-    SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_high_qword, clear_scalar, commit_inexact,
-    commit_inexact_divide, commit_inexact_underflow, emit_opcode, environment, exponent_range,
-    fpsr_has, jump, nonfinite_lane, prepare_vector_input_range, prepare_vector_result_range,
-    read_inputs, read_numerical_right, read_numerical_vector, reject_other_status,
-    reject_other_status_but_divide, reject_other_status_but_underflow, resolve,
-    restore_environment, scalar_ordered_range, scalar_range_or_zero, sticky_inexact,
-    sticky_result_check, test_control, vector_exponent_range, vector_normal_or_zero_range,
-    vector_ordered_range, zero_product_check,
+    SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_high_qword, clear_scalar,
+    commit_flush_status, commit_inexact, commit_inexact_divide, commit_inexact_underflow,
+    commit_rounded_status, emit_opcode, environment, exceptional_lane_mask, exponent_range,
+    flush_subnormal_lanes, fpsr_has, jump, nonfinite_lane, prepare_vector_input_range,
+    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
+    reject_exceptional_lanes, reject_invalid, reject_other_status, reject_other_status_but_divide,
+    reject_other_status_but_underflow, resolve, restore_environment, scalar_ordered_range,
+    scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
+    vector_normal_or_zero_range, vector_ordered_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
         floating::{
-            BinaryOperation, FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ, FPCR_NEP, Format,
+            BinaryOperation, FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP,
+            Format,
         },
         simd::arithmetic::{Inputs, Operand, Shape},
     },
@@ -51,6 +53,10 @@ const REPLICATE_SINGLE_LANE: u8 = 0x55;
 const REPLICATE_LOW_DOUBLE: u8 = 0x44;
 const REPLICATE_HIGH_DOUBLE: u8 = 0xee;
 const SIGN_BITS: u8 = 1;
+/// [`exceptional_lane_mask`]'s scratch, which aliases no source.
+const EXCEPTIONAL_SCRATCH: [u8; 3] = [3, 4, 5];
+/// [`flush_subnormal_lanes`]' scratch, free before the input guards.
+const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
 
 fn arithmetic_opcode(operation: BinaryOperation) -> ArithmeticOpcode {
     match operation {
@@ -428,6 +434,58 @@ fn tiny_product_status(
     Some((vec![jump(code)], strict))
 }
 
+/// The full path with FPCR.FZ, FIZ and AH clear: subnormal inputs and
+/// tiny, overflowing and infinite results are exact on the host, whose
+/// unflushed result in Arm's rounding mode is the guest's and whose status
+/// is FPSR's ([`commit_rounded_status`]). A NaN result lane (from a NaN
+/// input, which Arm's NaN selection needs) and invalid status take the
+/// helper. Returns the jump to the common result tail. Otherwise FZ or FIZ
+/// (AH clear) flush subnormal inputs to their signed zeros, FZ adding IDC
+/// to R11D, which the caller commits with the result, and the caller's
+/// checks follow.
+fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<usize>) -> usize {
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+    let strict = branch(code, Condition::NotZero);
+    environment(code);
+    emit_opcode(
+        code,
+        operand.format,
+        operand.shape,
+        arithmetic_opcode(operand.operation),
+        right,
+    );
+    exceptional_lane_mask(
+        code,
+        operand.format,
+        operand.shape,
+        LEFT_VECTOR,
+        EXCEPTIONAL_SCRATCH,
+        // Sums are exact when tiny, and products find tininess before
+        // rounding; a quotient's is not known.
+        operand.operation == BinaryOperation::Divide,
+    );
+    restore_environment(code);
+    helper.push(reject_exceptional_lanes(
+        code,
+        operand.format,
+        operand.shape,
+    ));
+    helper.push(reject_invalid(code));
+    commit_rounded_status(code);
+    let done = jump(code);
+    let strict_start = code.len();
+    resolve(code, strict, strict_start);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    for source in [LEFT_VECTOR, right] {
+        flush_subnormal_lanes(code, operand.format, operand.shape, source, FLUSH_SCRATCH);
+    }
+    let checks = code.len();
+    resolve(code, alternative, checks);
+    done
+}
+
 /// A sticky path's open branches ([`sticky_path`]).
 struct StickyPath {
     full: Vec<usize>,
@@ -461,6 +519,7 @@ fn emit_scalar(
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
+    let rounded = rounded_path(code, operand, right, &mut helper);
     for source in [LEFT_VECTOR, right] {
         if accepts_zero(operand.operation) {
             helper.push(scalar_ordered_range(
@@ -526,6 +585,9 @@ fn emit_scalar(
     }
     resolve(code, success, success_start);
     commit_status(code, operand, success_start, tiny);
+    commit_flush_status(code);
+    let tail = code.len();
+    resolve(code, rounded, tail);
     result_sign(code, operand);
     if matches!(operand.inputs, Inputs::PairwiseScalar { .. }) {
         clear_scalar(code, operand.format, LEFT_VECTOR);
@@ -598,6 +660,19 @@ fn emit_vector(
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
+    if operand.shape == Shape::Vector64 && operand.operation == BinaryOperation::Divide {
+        // Inactive numerators are zero; 1.0 denominators keep 0/0 from raising
+        // host invalid.
+        packed(code, Host::EqualDword, EXPONENT_VECTOR, EXPONENT_VECTOR);
+        ShiftOpcode::RightDword.emit(
+            code,
+            EXPONENT_VECTOR,
+            u32::BITS as u8 - SINGLE_EXPONENT_BIAS_BITS,
+        );
+        ShiftOpcode::LeftDword.emit(code, EXPONENT_VECTOR, Format::Single.fraction_bits() as u8);
+        code.asm().movlhps(1, crate::x86_64::asm::Rm::Xmm(2));
+    }
+    let rounded = rounded_path(code, operand, right, &mut helper);
     prepare_vector_input_range(code, operand.format);
     for source in [LEFT_VECTOR, right] {
         if accepts_zero(operand.operation) {
@@ -620,18 +695,6 @@ fn emit_vector(
             vector_exponent_range(code, operand.format, operand.shape, source);
         }
         helper.push(branch(code, Condition::NotZero));
-    }
-    if operand.shape == Shape::Vector64 && operand.operation == BinaryOperation::Divide {
-        // Inactive numerators are zero; 1.0 denominators keep 0/0 from raising
-        // host invalid.
-        packed(code, Host::EqualDword, EXPONENT_VECTOR, EXPONENT_VECTOR);
-        ShiftOpcode::RightDword.emit(
-            code,
-            EXPONENT_VECTOR,
-            u32::BITS as u8 - SINGLE_EXPONENT_BIAS_BITS,
-        );
-        ShiftOpcode::LeftDword.emit(code, EXPONENT_VECTOR, Format::Single.fraction_bits() as u8);
-        code.asm().movlhps(1, crate::x86_64::asm::Rm::Xmm(2));
     }
     environment(code);
     emit_opcode(
@@ -678,6 +741,9 @@ fn emit_vector(
     }
     resolve(code, success, success_start);
     commit_status(code, operand, success_start, tiny);
+    commit_flush_status(code);
+    let tail = code.len();
+    resolve(code, rounded, tail);
     result_sign(code, operand);
     if operand.shape == Shape::Vector64 {
         clear_high_qword(code, 0);

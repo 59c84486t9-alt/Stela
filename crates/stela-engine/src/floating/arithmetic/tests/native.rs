@@ -191,8 +191,38 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     // every form that takes zeros; status of any kind (overflow, invalid)
     // still exits.
     let infinite = |raw| raw & !sign_mask(format) == exponent_mask(format);
+    let nan = |raw| raw & !sign_mask(format) > exponent_mask(format);
+    // With FZ, FIZ and AH clear, every lane completes but a NaN input, an
+    // invalid operation, FMULX's infinity times zero (an exact two, for
+    // which the host raises invalid) and a minimum normal quotient (the
+    // host may find its tininess after rounding).
+    if state.fpcr & (FPCR_FZ | FPCR_FIZ | FPCR_AH) == 0 {
+        return (0..operand.shape.lane_count(format)).all(|lane| {
+            let (a, b) = inputs(state, operand, lane);
+            let special = |x, y| zero(x) && infinite(y);
+            let extended = operand.operation == BinaryOperation::MultiplyExtended;
+            let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
+            !nan(a)
+                && !nan(b)
+                && !(extended && (special(a, b) || special(b, a)))
+                && outcome.exceptions & INVALID == 0
+                && (operand.operation != BinaryOperation::Divide
+                    || outcome.bits & !sign_mask(format) != 1 << fraction_bits(format))
+        });
+    }
+    // FZ or FIZ with AH clear flush subnormal inputs (FZ raising IDC)
+    // before the checks.
+    let flush = state.fpcr & FPCR_AH == 0;
+    let flushed = |raw| {
+        if flush && exponent(raw) == 0 {
+            raw & sign_mask(format)
+        } else {
+            raw
+        }
+    };
     (0..operand.shape.lane_count(format)).all(|lane| {
         let (a, b) = inputs(state, operand, lane);
+        let (a, b, original) = (flushed(a), flushed(b), (a, b));
         let valid = |raw| {
             (1..maximum).contains(&exponent(raw))
                 || (allows_zero || zero_quotient) && zero(raw)
@@ -201,7 +231,15 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
         if !valid(a) || !valid(b) {
             return false;
         }
-        let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
+        let mut outcome = evaluate(
+            format,
+            operand.operation,
+            state.fpcr,
+            original.0,
+            original.1,
+        )
+        .unwrap();
+        outcome.exceptions &= !INPUT_DENORMAL;
         // FMULX's infinity times zero is an exact two, but the host raises
         // invalid for it.
         if infinite(a) || infinite(b) {
@@ -466,7 +504,7 @@ fn full_path_enabled_exceptions_keep_the_prefix_and_original_state() {
 }
 
 #[test]
-fn full_path_mixed_lanes_preserve_distinct_pairs_and_reject_late_bad_inputs() {
+fn full_path_mixed_lanes_preserve_distinct_pairs_and_flush_or_reject_late_inputs() {
     for word in [0x6e62_d420, 0x4e22_d420, 0x6e22_dc20] {
         let operand = decode(word).unwrap().unwrap();
         let source: Vec<_> = [PREFIX, word, SUFFIX]
@@ -502,14 +540,16 @@ fn full_path_mixed_lanes_preserve_distinct_pairs_and_reject_late_bad_inputs() {
             write_lane(&mut state.v[2], format.bits(), lane, right);
         }
         assert!(check(&mapping, &operand, state.clone(), 0xffff));
-        for bad in [1, exponent_mask(format) | 1] {
-            let mut rejected = state.clone();
-            write_lane(&mut rejected.v[2], format.bits(), lanes - 1, bad);
-            assert!(!check(&mapping, &operand, rejected, 0x8040));
+        // FZ flushes a late subnormal input inline, with IDC; a NaN still
+        // takes the helper.
+        for (bad, native) in [(1, true), (exponent_mask(format) | 1, false)] {
+            let mut late = state.clone();
+            write_lane(&mut late.v[2], format.bits(), lanes - 1, bad);
+            assert_eq!(check(&mapping, &operand, late, 0x8040), native);
         }
         if format == Format::Double {
             write_lane(&mut state.v[2], format.bits(), lanes - 1, 1 << 32);
-            assert!(!check(&mapping, &operand, state, 0x1f80));
+            assert!(check(&mapping, &operand, state, 0x1f80));
         }
     }
 }

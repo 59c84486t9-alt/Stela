@@ -92,6 +92,12 @@ mod products;
 pub(super) mod rearrange;
 mod reductions;
 mod refinement;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod rounded_status_tests;
 mod rounding;
 pub(super) use rounding::kernel as rounding_kernel;
 #[cfg(all(
