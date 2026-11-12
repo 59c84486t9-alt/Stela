@@ -2,19 +2,20 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
-    RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma,
-    emit_opcode, environment, jump, prepare_vector_input_range, prepare_vector_result_range,
-    read_inputs, read_numerical_right, read_numerical_vector, reject_other_status,
-    reject_product_status, resolve, restore_environment, restore_environment_with_product,
-    save_product_status, scalar_ordered_range, sticky_inexact, sticky_result_check, test_control,
-    vector_ordered_range, zero_product_check,
+    RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_flush_status,
+    commit_inexact, emit_fma, emit_opcode, environment, flush_subnormal_lanes, jump,
+    prepare_vector_input_range, prepare_vector_result_range, read_inputs, read_numerical_right,
+    read_numerical_vector, reject_other_status, reject_product_status, resolve,
+    restore_environment, restore_environment_with_product, save_product_status,
+    scalar_ordered_range, sticky_inexact, sticky_result_check, test_control, vector_ordered_range,
+    zero_product_check,
 };
 use super::{Host, commit, packed};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format},
+        floating::{FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, Format},
         simd::{arithmetic::Shape, fused::Operand},
     },
     block::ExitKind,
@@ -37,6 +38,8 @@ const ADDEND: u8 = 6;
 const ORIGINAL_ADDEND: u8 = 7;
 /// The zero classifier's scratch: the scalar-only original addend's register.
 const ZERO_RANGE_SCRATCH: u8 = ORIGINAL_ADDEND;
+/// [`flush_subnormal_lanes`]' scratch, free before the input guards.
+const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
 
 fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
@@ -124,6 +127,19 @@ pub(in crate::x86_64) fn emit(
     read_numerical_vector(code, operand.shape, operand.left, LEFT);
     read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
     prepare_right(code, operand);
+    // FZ or FIZ with AH clear flush subnormal inputs to their signed zeros
+    // (FZ raising IDC, committed with the result); AH=1 keeps the helper.
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    for source in [LEFT, RIGHT, ADDEND] {
+        flush_subnormal_lanes(code, operand.format, operand.shape, source, FLUSH_SCRATCH);
+    }
+    let flushed = code.len();
+    resolve(code, alternative, flushed);
+    resolve(code, unflushed, flushed);
     if operand.shape != Shape::Scalar {
         prepare_vector_input_range(code, operand.format);
     }
@@ -218,6 +234,7 @@ pub(in crate::x86_64) fn emit(
     }
     resolve(code, success, success_start);
     commit_inexact(code);
+    commit_flush_status(code);
     if operand.shape == Shape::Scalar {
         // Register MOVSS/MOVSD replaces only the result lane of A.
         if operand.format == Format::Single {

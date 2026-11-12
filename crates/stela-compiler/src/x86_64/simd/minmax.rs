@@ -1,11 +1,10 @@
 //! FP min/max: ordered (normal, infinite, S/D zero) selection and Half integer ordering.
 use super::super::isa::ShiftOpcode;
-use super::encode::guest;
 use super::numerical::helper_section;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, branch, clear_high_qword, clear_scalar, exponent_range,
-    infinity_scalar, jump, prepare_vector_input_range, read_numerical_vector, resolve,
-    test_control, vector_ordered_range, zero_scalar,
+    Condition, INPUT_MINIMUM_EXPONENT, branch, clear_high_qword, clear_scalar, commit_flush_status,
+    exponent_range, flush_subnormal_lanes, infinity_scalar, jump, prepare_vector_input_range,
+    read_numerical_vector, resolve, test_control, vector_ordered_range, zero_scalar,
 };
 use super::{Host, commit, packed, packed_imm, read_vector};
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size, vector_extensions};
@@ -32,6 +31,8 @@ const ORIGINAL_LEFT_VECTOR: u8 = 7;
 // XMM3's input validity is dead after the guards. The right operand is consumed
 // by selection; XMM6 may itself be that operand after pairwise staging.
 const SELECTION_SCRATCH: u8 = 3;
+/// [`flush_subnormal_lanes`]' scratch: dead before selection.
+const FLUSH_SCRATCH: [u8; 4] = [SELECTION_SCRATCH, SIGN_VECTOR, 4, 5];
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 const SIGN_MASK_TO_MAGNITUDE_SHIFT: u8 = 1;
 const BITS_PER_BYTE: u32 = u8::BITS;
@@ -251,88 +252,19 @@ fn quick_guard(
     // After the NaN check, which leaves for the helper with the state
     // untouched: FZ or FIZ flush a subnormal input to its signed zero, FZ
     // with IDC.
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
     test_control(code, FPCR_FZ | FPCR_FIZ);
     let plain = branch(code, Condition::Zero);
     for source in [RESULT_VECTOR, RIGHT_VECTOR] {
-        flush_subnormal_lanes(code, format, shape, source);
+        flush_subnormal_lanes(code, format, shape, source, FLUSH_SCRATCH);
     }
+    commit_flush_status(code);
     let plain_start = code.len();
     resolve(code, plain, plain_start);
     let unflushed = jump(code);
     let end = code.len();
     resolve(code, flushing, end);
     unflushed
-}
-
-/// Replace each active subnormal S/D lane of `source` by its signed zero,
-/// adding IDC to FPSR where FPCR.FZ is set (with AH clear). A scalar's
-/// other lanes stay. Clobbers XMM2-5 and EAX.
-fn flush_subnormal_lanes(code: &mut Code, format: Format, shape: Shape, source: u8) {
-    use crate::aarch64::floating::{FPCR_FZ, INPUT_DENORMAL};
-    const MAGNITUDE: u8 = SELECTION_SCRATCH;
-    const SUBNORMAL: u8 = SIGN_VECTOR;
-    const CONSTANT: u8 = 4;
-    const ZERO: u8 = 5;
-    let double = format == Format::Double;
-    let constant = |code: &mut Code, xmm: u8, bits: u64| {
-        if double {
-            code.asm().mov_imm64(Gpr::Rax, bits);
-            packed(code, Host::MoveGprQword, xmm, 0);
-            packed(code, Host::UnpackLowQword, xmm, xmm);
-        } else {
-            let mut asm = code.asm();
-            asm.mov_imm32(Gpr::Rax, bits as u32);
-            asm.movd_to_xmm(xmm, Gpr::Rax);
-            packed_imm(code, Host::ShuffleDword, xmm, xmm, 0);
-        }
-    };
-    constant(code, CONSTANT, format.sign_mask() - 1);
-    packed(code, Host::MoveAligned, MAGNITUDE, source);
-    packed(code, Host::And, MAGNITUDE, CONSTANT);
-    // Integer compares only, so that no lane (a scalar's poisoned upper
-    // lanes included) raises host status: a zero exponent field and a
-    // nonzero magnitude, each Double judged by its high dword's exponent
-    // and both its dwords.
-    constant(code, CONSTANT, format.exponent_mask());
-    packed(code, Host::MoveAligned, SUBNORMAL, MAGNITUDE);
-    packed(code, Host::And, SUBNORMAL, CONSTANT);
-    packed(code, Host::Xor, ZERO, ZERO);
-    packed(code, Host::EqualDword, SUBNORMAL, ZERO);
-    packed(code, Host::EqualDword, MAGNITUDE, ZERO);
-    if double {
-        const HIGH_DWORDS: u8 = 0xf5;
-        const SWAP_DWORDS: u8 = 0xb1;
-        packed_imm(code, Host::ShuffleDword, SUBNORMAL, SUBNORMAL, HIGH_DWORDS);
-        packed_imm(code, Host::ShuffleDword, CONSTANT, MAGNITUDE, SWAP_DWORDS);
-        packed(code, Host::And, MAGNITUDE, CONSTANT);
-    }
-    packed(code, Host::AndNot, MAGNITUDE, SUBNORMAL);
-    packed(code, Host::MoveAligned, SUBNORMAL, MAGNITUDE);
-    if shape == Shape::Scalar {
-        // Only the low element is an input.
-        let spare = 16 - format.bits() as u8 / 8;
-        ShiftOpcode::LeftBytes.emit(code, SUBNORMAL, spare);
-        ShiftOpcode::RightBytes.emit(code, SUBNORMAL, spare);
-    }
-    // Keep the sign alone where subnormal.
-    constant(code, CONSTANT, format.sign_mask() - 1);
-    packed(code, Host::And, CONSTANT, SUBNORMAL);
-    packed(code, Host::AndNot, CONSTANT, source);
-    packed(code, Host::MoveAligned, source, CONSTANT);
-    Host::ByteSignMask.register(code, 0, SUBNORMAL, TargetCpu::Baseline);
-    code.asm().test(Size::Dword, Gpr::Rax, Gpr::Rax);
-    let none = branch(code, Condition::Zero);
-    test_control(code, FPCR_FZ);
-    let quiet = branch(code, Condition::Zero);
-    code.asm().alu_imm32(
-        Alu::Or,
-        Size::Dword,
-        guest(core::mem::offset_of!(crate::GuestState, fpsr) as u32),
-        INPUT_DENORMAL as i32,
-    );
-    let end = code.len();
-    resolve(code, none, end);
-    resolve(code, quiet, end);
 }
 
 /// Whether [`half_quick_guard`] runs on `target`; the DIT profile keeps its

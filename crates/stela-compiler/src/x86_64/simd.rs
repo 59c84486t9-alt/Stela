@@ -40,6 +40,12 @@ mod fast_conversion_tests;
 mod fast_float_tests;
 mod floating;
 mod fused;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod fused_flush_tests;
 pub(in crate::x86_64) mod half;
 #[cfg(all(
     test,

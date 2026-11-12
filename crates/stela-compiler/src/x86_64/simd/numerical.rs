@@ -1624,3 +1624,84 @@ pub(super) fn clear_scalar(code: &mut Code, format: Format, xmm: u8) {
         code.asm().movd_to_xmm(xmm, Rax);
     }
 }
+
+/// Replace each active subnormal S/D lane of `source` by its signed zero,
+/// as FZ or FIZ do to inputs with AH clear, and add IDC to R11D where FZ
+/// is set and a lane was flushed ([`commit_flush_status`]). A scalar's
+/// other lanes stay. Clobbers the four `scratch` registers and EAX.
+pub(super) fn flush_subnormal_lanes(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    scratch: [u8; 4],
+) {
+    use crate::aarch64::floating::{FPCR_FZ, INPUT_DENORMAL};
+    let [magnitude, subnormal, constant, zero] = scratch;
+    let double = format == Format::Double;
+    let load = |code: &mut Code, xmm: u8, bits: u64| {
+        if double {
+            code.asm().mov_imm64(Rax, bits);
+            packed(code, Host::MoveGprQword, xmm, 0);
+            packed(code, Host::UnpackLowQword, xmm, xmm);
+        } else {
+            let mut asm = code.asm();
+            asm.mov_imm32(Rax, bits as u32);
+            asm.movd_to_xmm(xmm, Rax);
+            packed_imm(code, Host::ShuffleDword, xmm, xmm, 0);
+        }
+    };
+    load(code, constant, format.sign_mask() - 1);
+    packed(code, Host::MoveAligned, magnitude, source);
+    packed(code, Host::And, magnitude, constant);
+    // Integer compares only, so that no lane (a scalar's poisoned upper
+    // lanes included) raises host status: a zero exponent field and a
+    // nonzero magnitude, each Double judged by its high dword's exponent
+    // and both its dwords.
+    load(code, constant, format.exponent_mask());
+    packed(code, Host::MoveAligned, subnormal, magnitude);
+    packed(code, Host::And, subnormal, constant);
+    packed(code, Host::Xor, zero, zero);
+    packed(code, Host::EqualDword, subnormal, zero);
+    packed(code, Host::EqualDword, magnitude, zero);
+    if double {
+        const HIGH_DWORDS: u8 = 0xf5;
+        const SWAP_DWORDS: u8 = 0xb1;
+        packed_imm(code, Host::ShuffleDword, subnormal, subnormal, HIGH_DWORDS);
+        packed_imm(code, Host::ShuffleDword, constant, magnitude, SWAP_DWORDS);
+        packed(code, Host::And, magnitude, constant);
+    }
+    packed(code, Host::AndNot, magnitude, subnormal);
+    packed(code, Host::MoveAligned, subnormal, magnitude);
+    if shape == Shape::Scalar {
+        // Only the low element is an input.
+        let spare = 16 - format.bits() as u8 / 8;
+        ShiftOpcode::LeftBytes.emit(code, subnormal, spare);
+        ShiftOpcode::RightBytes.emit(code, subnormal, spare);
+    }
+    // Keep the sign alone where subnormal.
+    load(code, constant, format.sign_mask() - 1);
+    packed(code, Host::And, constant, subnormal);
+    packed(code, Host::AndNot, constant, source);
+    packed(code, Host::MoveAligned, source, constant);
+    Host::ByteSignMask.register(code, 0, subnormal, crate::TargetCpu::Baseline);
+    code.asm().test(Size::Dword, Rax, Rax);
+    let none = branch(code, Condition::Zero);
+    test_control(code, FPCR_FZ);
+    let quiet = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm32(Alu::Or, Size::Dword, Gpr::R11, INPUT_DENORMAL as i32);
+    let end = code.len();
+    resolve(code, none, end);
+    resolve(code, quiet, end);
+}
+
+/// Accumulate the IDC [`flush_subnormal_lanes`] gathered in R11D.
+pub(super) fn commit_flush_status(code: &mut Code) {
+    code.asm().alu(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        Gpr::R11,
+    );
+}
