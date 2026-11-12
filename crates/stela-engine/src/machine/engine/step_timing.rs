@@ -303,6 +303,97 @@ pub struct SystemExits {
     pub devices: DeviceExits,
     pub floating: [u64; FloatingReason::COUNT],
     pub floating_words: FloatingWords,
+    pub barriers: BarrierWaits,
+}
+
+/// The [`BarrierWaits`] blocker of a PE in native code, or between its
+/// entry to a fetched block and its run.
+pub const BLOCKER_NATIVE: u64 = 1;
+/// Bit 63 of a blocker: a PE completing an exit of the slot in bits 32-62
+/// at the [`system_key`] in bits 0-31 (0 where the exit has no word).
+pub const BLOCKER_EXIT: u64 = 1 << 63;
+/// The blockers [`BarrierWaits`] holds apart.
+pub const BARRIER_BLOCKERS: usize = 32;
+
+/// The blocker of PE in an exit of `slot` at `word`.
+pub fn exit_blocker(slot: usize, word: Option<u32>) -> u64 {
+    BLOCKER_EXIT | (slot as u64) << 32 | u64::from(word.map_or(0, system_key))
+}
+
+/// The waits for one blocker: how many and their ticks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BarrierBlocker {
+    pub key: u64,
+    pub count: u64,
+    pub ticks: u64,
+}
+
+/// DSBs that completed maintenance this PE posted, under step timing: how
+/// many, those that found every PE had applied it at the first look
+/// (`quick`), and the profile ticks they spent; and by the last PE they
+/// waited for, what that PE was doing when last seen (its blocker: native
+/// code, [`BLOCKER_NATIVE`], or an exit, [`exit_blocker`]), with the rest in
+/// `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarrierWaits {
+    pub waits: u64,
+    pub quick: u64,
+    pub ticks: u64,
+    pub blockers: [BarrierBlocker; BARRIER_BLOCKERS],
+    pub other: BarrierBlocker,
+}
+
+impl Default for BarrierWaits {
+    fn default() -> Self {
+        Self {
+            waits: 0,
+            quick: 0,
+            ticks: 0,
+            blockers: [BarrierBlocker::default(); BARRIER_BLOCKERS],
+            other: BarrierBlocker::default(),
+        }
+    }
+}
+
+impl BarrierWaits {
+    /// Count a wait of `ticks`: one that waited for a PE last seen at
+    /// `blocker`, or `None` when none was waited for.
+    pub fn add(&mut self, blocker: Option<u64>, ticks: u64) {
+        self.waits += 1;
+        self.ticks += ticks;
+        match blocker {
+            None => self.quick += 1,
+            Some(key) => self.add_blocker(key, 1, ticks),
+        }
+    }
+
+    fn add_blocker(&mut self, key: u64, count: u64, ticks: u64) {
+        let entry = match self
+            .blockers
+            .iter()
+            .position(|entry| entry.count == 0 || entry.key == key)
+        {
+            Some(index) => &mut self.blockers[index],
+            None => &mut self.other,
+        };
+        if entry.count == 0 {
+            entry.key = key;
+        }
+        entry.count += count;
+        entry.ticks += ticks;
+    }
+
+    /// Add every wait `other` counts.
+    pub fn merge(&mut self, other: &Self) {
+        self.waits += other.waits;
+        self.quick += other.quick;
+        self.ticks += other.ticks;
+        for entry in other.blockers.iter().filter(|entry| entry.count != 0) {
+            self.add_blocker(entry.key, entry.count, entry.ticks);
+        }
+        self.other.count += other.other.count;
+        self.other.ticks += other.other.ticks;
+    }
 }
 
 /// What the software completion of a floating-point exit found, which names
@@ -789,6 +880,7 @@ impl Default for SystemExits {
             devices: DeviceExits::default(),
             floating: [0; FloatingReason::COUNT],
             floating_words: FloatingWords::default(),
+            barriers: BarrierWaits::default(),
         }
     }
 }
@@ -822,6 +914,7 @@ impl SystemExits {
             *count += more;
         }
         self.floating_words.merge(&exits.floating_words);
+        self.barriers.merge(&exits.barriers);
     }
 
     /// The keys with exits.
@@ -835,6 +928,7 @@ impl SystemExits {
             && self.devices.is_empty()
             && self.floating.iter().all(|&count| count == 0)
             && self.floating_words.is_empty()
+            && self.barriers.waits == 0
     }
 }
 
@@ -1758,6 +1852,41 @@ mod tests {
             total + merged.other_registers.count,
             2 * (3 + DEVICE_REGISTERS as u64)
         );
+    }
+
+    #[test]
+    fn barrier_waits_count_quick_ones_apart_and_merge_by_blocker() {
+        let system = stela_compiler::block::ExitKind::System as usize;
+        let mut waits = BarrierWaits::default();
+        waits.add(None, 3);
+        waits.add(Some(BLOCKER_NATIVE), 10);
+        let dsb = exit_blocker(system, Some(0xd503_3b9f));
+        assert_eq!(dsb, exit_blocker(system, Some(0xd503_3b80)));
+        waits.add(Some(dsb), 20);
+        for key in 0..BARRIER_BLOCKERS as u64 {
+            waits.add(Some(BLOCKER_EXIT | key << 32), 1);
+        }
+        assert_eq!((waits.waits, waits.quick, waits.ticks), (35, 1, 65));
+        assert_eq!(waits.other.count, 2);
+        let exits = SystemExits {
+            barriers: waits,
+            ..SystemExits::default()
+        };
+        assert!(!exits.is_empty());
+        let mut merged = SystemExits::default();
+        merged.merge(&exits);
+        merged.merge(&exits);
+        let merged = merged.barriers;
+        assert_eq!((merged.waits, merged.quick, merged.ticks), (70, 2, 130));
+        let native = merged
+            .blockers
+            .iter()
+            .find(|b| b.key == BLOCKER_NATIVE)
+            .unwrap();
+        assert_eq!((native.count, native.ticks), (2, 20));
+        let dsb = merged.blockers.iter().find(|b| b.key == dsb).unwrap();
+        assert_eq!((dsb.count, dsb.ticks), (2, 40));
+        assert_eq!(merged.other.count, 4);
     }
 
     #[test]

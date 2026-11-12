@@ -245,6 +245,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Blocks the next native run may chain into: none past the time slice
     /// or the run's limit.
+    /// Under step timing, tell the other PEs what this one does in its
+    /// fetched block ([`parallel::Hub::set_doing`]).
+    #[inline]
+    fn set_doing(&self, blocker: u64) {
+        if self.step_timing.is_some()
+            && let Some(hub) = &self.parallel
+        {
+            hub.set_doing(self.current, blocker);
+        }
+    }
+
     pub(super) fn chain_budget(&self) -> u64 {
         let next = self.statistics.blocks + 1;
         CHAIN_LIMIT
@@ -449,6 +460,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.timed_word = Some(self.timed_system_word(last, next_pc));
                 }
                 let spent = remaining > budget;
+                self.set_doing(step_timing::exit_blocker(slot, self.timed_word));
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok()
                     && let Some(miss) = self.branch_miss(last, next_pc, kind, spent, probed)
@@ -472,6 +484,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                 }
                 self.timing_exit(slot, returned);
+                self.set_doing(0);
                 exited
             }
             NativeExit::Fault(mut fault) => {
@@ -485,9 +498,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // A self-loop's earlier iterations in this entry
                 // (`GuestState::loop_retired`), which only its exits move.
                 let iterations = core::mem::take(&mut self.cpu.state.loop_retired);
+                self.set_doing(step_timing::exit_blocker(slot, None));
                 let handled =
                     self.native_fault(last, fault, retired.wrapping_add(iterations), btype);
                 self.timing_exit(slot, returned);
+                self.set_doing(0);
                 handled
             }
         }

@@ -309,6 +309,11 @@ struct Inbox {
     /// change adds one, so a broadcast also sees an exit and entry it did
     /// not catch.
     active: AtomicU64,
+    /// Under step timing, the exit its machine completes while
+    /// [`Self::active`] is odd ([`step_timing::exit_blocker`]), or 0 in
+    /// native code: what a broadcast that waits for it waits for
+    /// ([`step_timing::BarrierWaits`]).
+    doing: AtomicU64,
     /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
     /// Unique owner epoch; zero is free and u64::MAX is detaching.
@@ -563,6 +568,7 @@ impl Hub {
                     lower_globals: Arc::new(GlobalSpan::new()),
                     outside: AtomicBool::new(false),
                     active: AtomicU64::new(0),
+                    doing: AtomicU64::new(0),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
                     parked: AtomicBool::new(false),
@@ -978,6 +984,21 @@ impl Hub {
     }
 
     /// PE `pe` is done with its fetched block and is between blocks again.
+    /// PE `pe` completes the exit `blocker` names, or 0: runs natively
+    /// ([`Inbox::doing`]).
+    pub(super) fn set_doing(&self, pe: usize, blocker: u64) {
+        self.inboxes[pe].doing.store(blocker, Ordering::Relaxed);
+    }
+
+    /// What PE `pe` was last doing in a fetched block
+    /// ([`step_timing::BarrierWaits`]).
+    fn doing(&self, pe: usize) -> u64 {
+        match self.inboxes[pe].doing.load(Ordering::Relaxed) {
+            0 => step_timing::BLOCKER_NATIVE,
+            blocker => blocker,
+        }
+    }
+
     pub(super) fn leave_active(&self, pe: usize) {
         let inbox = &self.inboxes[pe];
         let active = inbox.active.load(Ordering::Relaxed);
@@ -2092,6 +2113,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(());
         };
         let mut posted = core::mem::take(&mut self.posted);
+        let timed = self.timing_start();
+        let mut blocker = None;
         let started = self.host.counter();
         self.observe_parallel_source(SourcePhase::BroadcastEnter);
         let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
@@ -2106,6 +2129,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         while !hub.applied(&mut posted) {
             if profile.is_some() {
                 polls = polls.saturating_add(1);
+            }
+            if self.step_timing.is_some()
+                && let Some(&(pe, _)) = posted.first()
+            {
+                blocker = Some(hub.doing(pe));
             }
             applied = applied.and(self.wait_for_others(&hub));
             self.host.relax();
@@ -2133,6 +2161,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.posted = posted;
         }
         self.statistics.broadcasts += 1;
+        if self.step_timing.is_some() {
+            let ticks = self.timing_since(timed);
+            self.system_exits.barriers.add(blocker, ticks);
+        }
         let elapsed = self.host.counter().wrapping_sub(started);
         self.statistics.sync_ticks += elapsed;
         // Publish only at boundaries, including a returned maintenance error.

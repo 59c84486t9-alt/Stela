@@ -267,6 +267,59 @@ fn numerical_exits_report(
 /// sums the pages by model, and `PES DEVICE REGISTERS` gives the sixteen
 /// costliest registers by direction (`name@address:r` or `:w`, or
 /// `name.REGISTER:r` summed over the model's pages where it names them).
+/// `PES BARRIER`: the DSBs that completed maintenance their PE posted, the
+/// share that waited for no PE, the time each took, and by what the last PE
+/// they waited for was doing (native code or an exit, by slot and word), the
+/// eight that took longest.
+fn barrier_waits_report(waits: &step_timing::BarrierWaits, tsc_hz: u64) {
+    const SHOWN: usize = 8;
+    if waits.waits == 0 {
+        return;
+    }
+    let each = |count: u64, ticks: u64| {
+        u128::from(ticks) * 1_000_000_000 / u128::from(count.max(1)) / u128::from(tsc_hz.max(1))
+    };
+    let mut line = format!(
+        "PES BARRIER waits={} quick={} ns_each={} blockers count/ns_each",
+        waits.waits,
+        waits.quick,
+        each(waits.waits, waits.ticks)
+    );
+    let mut blockers: Vec<_> = waits
+        .blockers
+        .iter()
+        .filter(|blocker| blocker.count != 0)
+        .collect();
+    blockers.sort_unstable_by_key(|blocker| core::cmp::Reverse(blocker.ticks));
+    for blocker in blockers.into_iter().take(SHOWN) {
+        let name = if blocker.key & step_timing::BLOCKER_EXIT == 0 {
+            String::from("native")
+        } else {
+            let slot = ((blocker.key & !step_timing::BLOCKER_EXIT) >> 32) as usize;
+            let word = blocker.key as u32;
+            let slot_name = EXIT_NAMES.get(slot).copied().unwrap_or("exit");
+            if word == 0 || word == step_timing::DEVICE_SITE_KEY {
+                String::from(slot_name)
+            } else {
+                format!("{slot_name}.{}", step_timing::system_key_name(word))
+            }
+        };
+        line.push_str(&format!(
+            " {name}={}/{}",
+            blocker.count,
+            each(blocker.count, blocker.ticks)
+        ));
+    }
+    if waits.other.count != 0 {
+        line.push_str(&format!(
+            " other={}/{}",
+            waits.other.count,
+            each(waits.other.count, waits.other.ticks)
+        ));
+    }
+    output::arguments(format_args!("{line}\n"));
+}
+
 fn device_exits_report<H: Host>(
     machine: &Machine<H, parallel::Board>,
     exits: &step_timing::DeviceExits,
@@ -1791,6 +1844,7 @@ impl Heartbeat {
         if machine.step_timing().is_some() {
             let exits = parallel::system_exits(machine);
             system_exits_report(&exits, tsc_hz);
+            barrier_waits_report(&exits.barriers, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
             hot_blocks_report(
