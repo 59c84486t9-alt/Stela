@@ -2619,11 +2619,11 @@ fn os_update_checks_everything_before_any_download() {
         request.build = build.into();
         request.dispatch(environment)
     };
-    // The setup's own build: refused without a download (they panic).
-    let error = os(restore::payload::SYNTHETIC_BUILD, &environment(&f.host))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("already the build"), "{error}");
+    // The setup's own build: nothing to do, and no download (they panic).
+    let done = os(restore::payload::SYNTHETIC_BUILD, &environment(&f.host)).unwrap();
+    assert!(done.contains("already the build"), "{done}");
+    assert!(done.contains("nothing to update"), "{done}");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     // Another build, offline and nowhere on this computer: refused with
     // what to do.
     let error = os("STELA2", &environment(&f.host)).unwrap_err().to_string();
@@ -3062,8 +3062,9 @@ fn os_update_leftovers_are_removed_by_running_it_again_or_repair() {
     assert!(!old_bundle.exists() && !old_medium.exists());
     assert_eq!(record(&f), done);
     assert!(status().unwrap().contains("No problems found."));
-    // The same build again, with nothing left over, is refused.
-    assert!(update(false).unwrap_err().to_string().contains("already"));
+    // The same build again, with nothing left over, has nothing to do.
+    assert!(update(false).unwrap().contains("nothing to update"));
+    assert_eq!(record(&f), done);
     stop();
     let plan = rerun(&f, |c| {
         c.action = Action::Repair;

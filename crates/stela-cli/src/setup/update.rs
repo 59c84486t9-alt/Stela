@@ -533,10 +533,13 @@ pub(super) fn update_os(
         text.push_str("Done.\n");
         return Ok(text);
     }
-    ensure!(
-        build != from,
-        "macOS {build} is already the build this setup installs"
-    );
+    if build == from {
+        return Ok(format!(
+            "macOS {build} is already the build this setup installs: nothing to update. {} \
+             checks its files.\n",
+            super::fix(usb, "status")
+        ));
+    }
     // The build's install medium and restore bundles, so Install macOS
     // restores the new build: what that needs of its image, where it comes
     // from and whether the USB has room, before anything is downloaded.
