@@ -338,6 +338,7 @@ impl Fixture {
             running: Vec::new(),
             next_tag: 0,
             looks: 0,
+            signal: None,
         };
         for _ in 0..slots {
             disk.slots.push(Slot {
@@ -395,3 +396,4 @@ mod queue;
 mod recovery;
 mod sense_completion;
 mod sense_tables;
+mod signals;

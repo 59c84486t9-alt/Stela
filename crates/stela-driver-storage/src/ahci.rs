@@ -57,6 +57,8 @@ pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
 
 const CAPABILITIES: usize = 0x00;
 const GLOBAL_CONTROL: usize = 0x04;
+/// IS: one pending-interrupt bit per port, cleared by writing it.
+const HOST_INTERRUPTS: usize = 0x08;
 const PORTS_IMPLEMENTED: usize = 0x0c;
 const CAPABILITIES_2: usize = 0x24;
 const HANDOFF: usize = 0x28;
@@ -82,11 +84,14 @@ const HANDOFF_BIOS_OWNED: u32 = 1 << 0;
 const HANDOFF_OS_OWNED: u32 = 1 << 1;
 const HANDOFF_BIOS_BUSY: u32 = 1 << 4;
 const GLOBAL_RESET: u32 = 1 << 0;
+/// GHC.IE: the HBA sends its interrupt message for pending port bits.
+const GLOBAL_INTERRUPT_ENABLE: u32 = 1 << 1;
 const GLOBAL_AHCI_ENABLE: u32 = 1 << 31;
 
 const PORT_LIST: usize = 0x00;
 const PORT_FIS: usize = 0x08;
 const PORT_INTERRUPTS: usize = 0x10;
+const PORT_INTERRUPT_ENABLE: usize = 0x14;
 const PORT_COMMAND: usize = 0x18;
 const PORT_TASK_FILE: usize = 0x20;
 const PORT_SIGNATURE: usize = 0x24;
@@ -174,6 +179,12 @@ const INTERRUPT_ERROR: u32 = INTERRUPT_TASK_FILE_ERROR
     | INTERRUPT_PHY_READY_CHANGE
     | INTERRUPT_CONNECT_CHANGE
     | INTERRUPT_UNKNOWN_FIS;
+/// The port interrupt status bits a command ends with: a D2H Register, PIO
+/// Setup or Set Device Bits FIS (Linux `PORT_IRQ_D2H_REG_FIS`,
+/// `PORT_IRQ_PIOS_FIS`, `PORT_IRQ_SDB_FIS`). Linux's `DEF_PORT_IRQ` adds the
+/// DMA Setup FIS, which ends nothing; with it enabled, a message for one
+/// that no look follows would hold IS set through the completion.
+const INTERRUPT_COMPLETION: u32 = 1 << 0 | 1 << 1 | 1 << 3;
 /// ATA status and error register bits (Linux `include/linux/ata.h`).
 const STATUS_BUSY: u8 = 1 << 7;
 const STATUS_READY: u8 = 1 << 6;
@@ -540,6 +551,17 @@ pub struct AhciDisk {
     next_tag: u32,
     /// Looks at the port since a command was last launched alone.
     looks: u32,
+    /// Where the port's completions raise the HBA's interrupt message, when
+    /// the function has MSI or MSI-X; `None` polls.
+    signal: Option<Signal>,
+}
+
+/// The HBA registers and the port's bit in IS, for a port whose
+/// completions send the interrupt message.
+#[derive(Clone, Copy)]
+struct Signal {
+    hba: Mmio,
+    port: u32,
 }
 
 /// A slot's command table, and the pool pages its block command holds.
@@ -1367,6 +1389,12 @@ pub fn attach(
         kept.get_mut().hba = Some(registers(handoff, bars[5], 0, PORT_BASE)?);
         let hba = kept.hba.expect("same checked HBA");
         function.enable_polled()?;
+        // MSI or MSI-X only: without either the HBA stays polled, INTx
+        // disabled.
+        let signalled = match handoff.completion {
+            Some(message) => function.enable_message(handoff, &bars, message)?,
+            None => false,
+        };
         let clock = handoff.clock;
         if hba.read32(CAPABILITIES_2) & CAP2_HANDOFF != 0 {
             hba.write32(HANDOFF, hba.read32(HANDOFF) | HANDOFF_OS_OWNED);
@@ -1440,6 +1468,10 @@ pub fn attach(
             match started {
                 Ok(Some(mut disk)) => {
                     disk.identity.location = format!("{address} port {index}");
+                    if signalled {
+                        let port = disk.port;
+                        disk.enable_signal(&port, hba, index);
+                    }
                     kept.get_mut().disks.push(disk);
                 }
                 Ok(None) => {}
@@ -1451,6 +1483,12 @@ pub fn attach(
                     kept.get_mut().failures.push((index, error));
                 }
             }
+        }
+        // ahci_init_controller: IS cleared, then GHC.IE set, once a port
+        // sends messages.
+        if kept.disks.iter().any(|disk| disk.signal.is_some()) {
+            hba.write32(HOST_INTERRUPTS, hba.read32(HOST_INTERRUPTS));
+            hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE | GLOBAL_INTERRUPT_ENABLE);
         }
         Ok(())
     })();
@@ -1548,6 +1586,43 @@ impl AhciDisk {
     fn ready(&self) -> Result<(), BlockError> {
         self.minimum.ready()?;
         self.fault.clone().map_or(Ok(()), Err)
+    }
+
+    /// PxIE under LPM policy `policy`: Linux `DEF_PORT_IRQ`'s error bits and
+    /// the completion bits ([`INTERRUPT_COMPLETION`]). With LPM on,
+    /// `ahci_set_lpm` masks PhyRdy changes; COMINIT's port connect change is
+    /// masked with them, as a look ignores both ([`Self::ignore_phy_events`]).
+    fn interrupt_mask(policy: u8) -> u32 {
+        let mask = INTERRUPT_ERROR | INTERRUPT_COMPLETION;
+        if policy > LPM_MAX_POWER {
+            mask & !(INTERRUPT_PHY_READY_CHANGE | INTERRUPT_CONNECT_CHANGE)
+        } else {
+            mask
+        }
+    }
+
+    /// Let the port's completions send the HBA's interrupt message, port
+    /// `index` in IS, once its MSI or MSI-X is programmed; GHC.IE follows
+    /// for the HBA.
+    fn enable_signal(&mut self, port: &impl CommandPort, hba: Mmio, index: u32) {
+        self.signal = Some(Signal { hba, port: index });
+        port.write32(PORT_INTERRUPT_ENABLE, Self::interrupt_mask(self.lpm.policy));
+    }
+
+    /// PxIE for LPM policy `policy`, on a port that sends messages.
+    fn mask_interrupts(&self, port: &impl CommandPort, policy: u8) {
+        if self.signal.is_some() {
+            port.write32(PORT_INTERRUPT_ENABLE, Self::interrupt_mask(policy));
+        }
+    }
+
+    /// After a look read and cleared the port's status (Linux
+    /// `ahci_handle_port_intr` after `ahci_port_intr`): its IS bit, so the
+    /// next completion sends the next message.
+    fn clear_signal(&self) {
+        if let Some(signal) = self.signal {
+            signal.hba.write32(HOST_INTERRUPTS, 1 << signal.port);
+        }
     }
 
     fn chunk_bytes(&self) -> usize {
@@ -1667,6 +1742,11 @@ impl BlockDevice for AhciDisk {
         let slot = self.running.remove(index).slot;
         self.release(slot);
         Some(result)
+    }
+
+    /// Whether the port's completions send the HBA's interrupt message.
+    fn signals(&self) -> bool {
+        self.signal.is_some()
     }
 
     /// A started command has a result, or a launched one's ending FIS has

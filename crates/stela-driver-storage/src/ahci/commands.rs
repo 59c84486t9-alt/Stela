@@ -502,7 +502,6 @@ impl AhciDisk {
     /// when no command completed or failed.
     pub(super) fn look(&mut self, port: &impl CommandPort, launched: &[&Launched]) -> Option<Seen> {
         let queued = launched.iter().any(|launched| launched.queued);
-        let active = if queued { PORT_SATA_ACTIVE } else { PORT_ISSUE };
         let due = self.looks.is_multiple_of(REGISTER_POLL_INTERVAL);
         self.looks = self.looks.wrapping_add(1);
         let posted = ending(queued)
@@ -512,12 +511,35 @@ impl AhciDisk {
         if !posted && !due && !launched.iter().any(|launched| launched.deadline.passed()) {
             return None;
         }
+        let seen = self.look_at(port, launched, queued, posted);
+        // Linux ahci_handle_port_intr: IS last, after PxIS, so the next
+        // completion sends the next message.
+        self.clear_signal();
+        seen
+    }
+
+    /// The register part of [`Self::look`].
+    fn look_at(
+        &mut self,
+        port: &impl CommandPort,
+        launched: &[&Launched],
+        queued: bool,
+        posted: bool,
+    ) -> Option<Seen> {
+        let active = if queued { PORT_SATA_ACTIVE } else { PORT_ISSUE };
         if queued && posted {
             self.commands
                 .write(RECEIVED_SDB, FIS_REGISTER_HOST_TO_DEVICE);
             fence(Ordering::SeqCst);
         }
-        let mut interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
+        let status = port.read32(PORT_INTERRUPTS);
+        // Linux ahci_port_intr: the completion bits read are cleared before
+        // PxSACT or PxCI is read, so a completion after that read sets them
+        // again. Error bits stay for the failure below, which clears them.
+        if self.signal.is_some() && status & INTERRUPT_COMPLETION != 0 {
+            port.write32(PORT_INTERRUPTS, status & INTERRUPT_COMPLETION);
+        }
+        let mut interrupts = status & INTERRUPT_ERROR;
         // ahci_handle_port_interrupt: a PhyRdy change LPM explains is
         // dropped and its SError bit cleared, which clears PRCS.
         if interrupts & INTERRUPT_PHY_READY_CHANGE != 0 && self.ignore_phy_events() {
