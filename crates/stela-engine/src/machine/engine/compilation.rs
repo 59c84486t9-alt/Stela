@@ -625,7 +625,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let entry = record
                 .as_ref()
                 .and_then(|record| record.find(offset as u16, context));
-            let found = entry.filter(|entry| entry.relocate(page, source, &mut relocated));
+            let found = entry
+                .as_ref()
+                .filter(|entry| entry.relocate(page, source, &mut relocated));
             if record.is_some() && found.is_none() {
                 self.statistics.record_misses[usize::from(entry.is_some())] += 1;
             }

@@ -1,7 +1,7 @@
 //! Invocation-kept source/profile and installed native recovery owners.
 use super::stored::Emission;
 use super::{NativeCode, NativeFault, Preparation};
-use crate::translations::{Digest, Entry, Record, Relocated};
+use crate::translations::{Digest, Entry, Relocated, StoredRecord};
 use alloc::sync::Arc;
 #[cfg(test)]
 use alloc::{boxed::Box, vec::Vec};
@@ -342,7 +342,7 @@ impl CodeRecovery {
     pub(super) fn qualify(
         &mut self,
         pc: u64,
-        record: Option<&Record>,
+        record: Option<&StoredRecord>,
     ) -> Result<&PackedRecovery, NativeFailureReason> {
         if !matches!(self.rows, Rows::Qualified { .. }) {
             #[cfg(test)]
@@ -352,9 +352,14 @@ impl CodeRecovery {
             let block = match &self.rows {
                 Rows::Qualified { .. } => unreachable!("unqualified above"),
                 Rows::Stored { origin, offset, .. } => {
+                    let decoded;
                     let entry = match &origin.kept {
                         Some(kept) => Some(&**kept).filter(|kept| kept.offset == *offset),
-                        None => record.and_then(|record| record.find(*offset, &origin.context)),
+                        None => {
+                            decoded =
+                                record.and_then(|record| record.find(*offset, &origin.context));
+                            decoded.as_ref()
+                        }
                     }
                     .ok_or(NativeFailureReason::StoredRecord)?;
                     let stored = entry

@@ -9,7 +9,10 @@
 //! and the pack `stela.efi` keeps
 //! ([`pack`]).
 pub mod pack;
+mod stored;
 pub mod writer;
+
+pub use stored::StoredRecord;
 
 use alloc::{string::String, vec::Vec};
 use stela_compiler::block::Features;

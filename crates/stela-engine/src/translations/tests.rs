@@ -557,6 +557,110 @@ fn merge_keeps_current_entries_and_the_first_legacy_duplicate() {
     assert_eq!(record.entries(), &[first, second, third]);
 }
 
+/// A stored record finds each entry the decoded record finds, the first of
+/// a legacy duplicate included, decoding that entry alone.
+#[test]
+fn stored_records_find_what_decoded_records_find() {
+    let source = words(&[0xd65f_03c0]);
+    let low = proved(&source, 0x40).unwrap();
+    let high = proved(&source, 0x80).unwrap();
+    let mut duplicate = low.clone();
+    duplicate.code.push(0);
+    let translator = translator_id();
+    let key = Digest::of(b"stored page");
+    let mut legacy = Record {
+        translator,
+        key,
+        entries: vec![high.clone(), low.clone(), duplicate],
+    };
+    for index in 0..40u8 {
+        let mut entry = high.clone();
+        entry.context = Digest::of(&[index]);
+        legacy.entries.push(entry);
+    }
+    let bytes = legacy.encode();
+    let decoded = Record::decode(&bytes, &translator, &key).unwrap();
+    // The first entry of each offset and context, as a decode orders them.
+    let mut first = decoded.clone();
+    first
+        .entries
+        .dedup_by_key(|entry| (entry.offset, entry.context));
+    for check in [true, false] {
+        let mut stored = StoredRecord::new(translator, key);
+        stored.add(&bytes, check).unwrap();
+        assert_eq!(stored.len(), first.entries().len());
+        for entry in first.entries() {
+            assert_eq!(
+                stored.find(entry.offset, &entry.context).as_ref(),
+                Some(entry)
+            );
+        }
+        assert_eq!(stored.find(low.offset, &low.context), Some(low.clone()));
+        assert_eq!(stored.find(low.offset + 4, &low.context), None);
+        assert_eq!(stored.record().unwrap(), first);
+    }
+}
+
+/// Records of several segments index as [`Record::merge`] merges them: the
+/// earlier segment's entry for a pair both hold.
+#[test]
+fn stored_records_of_several_segments_keep_the_earlier_entry() {
+    let source = words(&[0xd65f_03c0]);
+    let first = proved(&source, 0x40).unwrap();
+    let second = proved(&source, 0x80).unwrap();
+    let mut newer_first = first.clone();
+    newer_first.code.push(0);
+    let translator = translator_id();
+    let key = Digest::of(b"segments");
+    let mut older = Record::new(translator, key);
+    older.insert(first.clone());
+    let mut newer = Record::new(translator, key);
+    newer.insert(newer_first);
+    newer.insert(second.clone());
+    let mut stored = StoredRecord::new(translator, key);
+    stored.add(&older.encode(), true).unwrap();
+    stored.add(&newer.encode(), true).unwrap();
+    let mut merged = older.clone();
+    merged.merge(newer);
+    assert_eq!(stored.record().unwrap(), merged);
+    assert_eq!(stored.find(first.offset, &first.context), Some(first));
+    assert_eq!(stored.find(second.offset, &second.context), Some(second));
+}
+
+/// A stored record refuses damaged framing as a decode does: the hash when
+/// checked, the bounds of every entry always.
+#[test]
+fn stored_records_refuse_damaged_bytes() {
+    let source = words(&[0x9000_0020, 0x9400_0002]);
+    let entry = proved(&source, 0x10).unwrap();
+    let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));
+    let mut record = Record::new(translator, key);
+    record.insert(entry);
+    let bytes = record.encode();
+    let add = |bytes: &[u8], check: bool| StoredRecord::new(translator, key).add(bytes, check);
+    let mut flipped = bytes.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 1;
+    assert_eq!(add(&flipped, true), Err(FormatError::Checksum));
+    assert_eq!(add(&flipped, false), Ok(()));
+    assert_eq!(
+        StoredRecord::new(Digest::default(), key).add(&bytes, false),
+        Err(FormatError::Translator)
+    );
+    assert_eq!(
+        StoredRecord::new(translator, Digest::default()).add(&bytes, false),
+        Err(FormatError::Key)
+    );
+    for length in [0, HEADER_BYTES, bytes.len() - 1] {
+        assert!(add(&bytes[..length], false).is_err(), "{length}");
+    }
+    for at in (0..bytes.len()).step_by(7) {
+        let mut damaged = bytes.clone();
+        damaged[at] ^= 0x40;
+        assert!(add(&damaged, true).is_err(), "byte {at}");
+    }
+}
+
 /// The engine paths (`super::` and `crate::`) `text` names, as written,
 /// with each braced list expanded.
 fn engine_paths(text: &str) -> std::collections::BTreeSet<String> {
@@ -661,7 +765,7 @@ fn the_translator_id_covers_every_engine_item_its_inputs_name() {
                 "crate::translations",
                 "crate::translations::Digest",
                 "crate::translations::PAGE_BYTES",
-                "crate::translations::Record",
+                "crate::translations::StoredRecord",
                 "crate::translations::Entry",
                 "crate::translations::probe_displacements",
                 "crate::translations::prove",
@@ -682,6 +786,7 @@ fn the_translator_id_covers_every_engine_item_its_inputs_name() {
                 "super::Entry",
                 "super::FormatError",
                 "super::Record",
+                "super::StoredRecord",
                 "super::*",
                 "crate::machine::engine::SharedTranslation",
                 "crate::machine::Offer",

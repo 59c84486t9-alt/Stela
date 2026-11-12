@@ -22,7 +22,7 @@
 //! again.
 mod codec;
 
-use super::{Digest, Entry, FormatError, Record};
+use super::{Digest, Entry, FormatError, Record, StoredRecord};
 use crate::machine::engine::SharedTranslation;
 use crate::machine::{Offer, Translations};
 use alloc::{
@@ -355,22 +355,22 @@ impl<'a> Stored<'a> {
             })
     }
 
-    /// Each segment's record decoded, merged in segment order.
-    fn decode(
+    /// Each segment's record indexed, earlier segments' entries first, as
+    /// [`Record::merge`] merges them.
+    fn stored_record(
         &self,
         translator: &Digest,
         key: &Digest,
         scratch: &mut DecodeScratch,
-    ) -> Result<Record, DecodeError> {
-        let mut merged: Option<Record> = None;
-        for stored in self.iter() {
-            let record = stored.decode(translator, key, scratch)?;
-            match &mut merged {
-                Some(merged) => merged.merge(record),
-                None => merged = Some(record),
-            }
+    ) -> Result<StoredRecord, DecodeError> {
+        if self.iter().next().is_none() {
+            return Err(DecodeError::Invalid);
         }
-        merged.ok_or(DecodeError::Invalid)
+        let mut record = StoredRecord::new(*translator, *key);
+        for stored in self.iter() {
+            stored.add_to(&mut record, scratch)?;
+        }
+        Ok(record)
     }
 }
 
@@ -391,6 +391,23 @@ impl PackedRecord<'_> {
 
     fn same_storage(self, other: Self) -> bool {
         self.format == other.format && core::ptr::eq(self.bytes, other.bytes)
+    }
+
+    /// Its entries, indexed into `record` ([`StoredRecord::add`]).
+    fn add_to(
+        self,
+        record: &mut StoredRecord,
+        scratch: &mut DecodeScratch,
+    ) -> Result<(), DecodeError> {
+        let raw = if self.is_compressed() {
+            scratch.inflate(self.bytes)?
+        } else {
+            self.bytes
+        };
+        record.add(raw, !self.checked).map_err(|error| match error {
+            FormatError::Capacity => DecodeError::Capacity,
+            _ => DecodeError::Invalid,
+        })
     }
 
     fn decode(
@@ -1656,7 +1673,7 @@ fn retire(entry: SharedEntry, deferred: &mut Option<Arc<SharedTranslation>>) {
 /// A validated record paired with the immutable pack bytes it came from.
 pub struct DecodedRecord<'a> {
     stored: Stored<'a>,
-    record: Arc<Record>,
+    record: Arc<StoredRecord>,
     retained_bytes: usize,
 }
 
@@ -1667,7 +1684,7 @@ impl<'a> DecodedRecord<'a> {
         key: &Digest,
         scratch: &mut DecodeScratch,
     ) -> Result<Self, DecodeError> {
-        let record = Arc::new(stored.decode(translator, key, scratch)?);
+        let record = Arc::new(stored.stored_record(translator, key, scratch)?);
         let retained_bytes = record.retained_bytes();
         Ok(Self {
             stored,
@@ -1676,7 +1693,7 @@ impl<'a> DecodedRecord<'a> {
         })
     }
 
-    pub fn into_record(self) -> Arc<Record> {
+    pub fn into_record(self) -> Arc<StoredRecord> {
         self.record
     }
 }
@@ -1686,7 +1703,7 @@ impl<'a> DecodedRecord<'a> {
 #[derive(Debug, Default)]
 struct DecodedCache {
     /// Each record, its charge and its last use.
-    records: BTreeMap<Digest, (Arc<Record>, usize, u64)>,
+    records: BTreeMap<Digest, (Arc<StoredRecord>, usize, u64)>,
     /// Keys by last use.
     uses: BTreeMap<u64, Digest>,
     bytes: usize,
@@ -1696,7 +1713,7 @@ struct DecodedCache {
     /// keeps: the cache holds a small part of what the machines hold
     /// between them, and a record one of them still has need not be
     /// decoded again for another.
-    held: BTreeMap<Digest, Weak<Record>>,
+    held: BTreeMap<Digest, Weak<StoredRecord>>,
     /// The size of `held` at which the records nobody holds leave it.
     held_sweep: usize,
 }
@@ -1712,7 +1729,7 @@ impl DecodedCache {
         }
     }
 
-    fn get(&mut self, key: &Digest) -> Option<Arc<Record>> {
+    fn get(&mut self, key: &Digest) -> Option<Arc<StoredRecord>> {
         let Some((record, _, used)) = self.records.get_mut(key) else {
             return self.held.get(key)?.upgrade();
         };
@@ -1725,7 +1742,7 @@ impl DecodedCache {
 
     /// Note that `record` was handed out, for [`Self::get`] to find while
     /// anyone holds it.
-    fn hold(&mut self, record: &Arc<Record>) {
+    fn hold(&mut self, record: &Arc<StoredRecord>) {
         if self.held.len() >= self.held_sweep.max(HELD_SWEEP) {
             self.held.retain(|_, held| held.strong_count() != 0);
             self.held_sweep = 2 * self.held.len();
@@ -1735,7 +1752,7 @@ impl DecodedCache {
 
     /// Keep `record`, letting the least recently used go until it fits:
     /// those go back to the caller, to drop outside the store's lock.
-    fn insert(&mut self, record: &Arc<Record>, bytes: usize) -> Vec<Arc<Record>> {
+    fn insert(&mut self, record: &Arc<StoredRecord>, bytes: usize) -> Vec<Arc<StoredRecord>> {
         let mut evicted = Vec::new();
         self.hold(record);
         if bytes > self.bound / 8 || self.records.contains_key(&record.key) {
@@ -1759,7 +1776,7 @@ impl DecodedCache {
     }
 
     /// Let records go until the cache fits `bound`.
-    fn shrink(&mut self, bound: usize) -> Vec<Arc<Record>> {
+    fn shrink(&mut self, bound: usize) -> Vec<Arc<StoredRecord>> {
         self.bound = bound;
         let mut evicted = Vec::new();
         while self.bytes > bound {
@@ -1894,7 +1911,7 @@ impl<'a> Store<'a> {
 
     /// Bound what the store keeps beyond its pack. Records the decoded
     /// cache lets go come back, to drop outside a lock.
-    pub fn set_bounds(&mut self, bounds: Bounds) -> Vec<Arc<Record>> {
+    pub fn set_bounds(&mut self, bounds: Bounds) -> Vec<Arc<StoredRecord>> {
         self.added_bound = bounds.added;
         self.decoded.shrink(bounds.decoded)
     }
@@ -2068,7 +2085,7 @@ impl<'a> Store<'a> {
     }
 
     /// A record already decoded and checked against this pack.
-    pub fn cached_record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+    pub fn cached_record(&mut self, key: &Digest) -> Option<Arc<StoredRecord>> {
         let record = self.decoded.get(key)?;
         self.counters.cached += 1;
         self.counters.repeated += 1;
@@ -2118,7 +2135,7 @@ impl<'a> Store<'a> {
         stored: Stored<'a>,
         decoded: &Result<DecodedRecord<'a>, DecodeError>,
         scratch: &mut DecodeScratch,
-    ) -> Vec<Arc<Record>> {
+    ) -> Vec<Arc<StoredRecord>> {
         self.decode_scratch.retain(scratch);
         if !self
             .stored(key)
@@ -2199,7 +2216,7 @@ impl<'a> Store<'a> {
 }
 
 impl Translations for Store<'_> {
-    fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+    fn record(&mut self, key: &Digest) -> Option<Arc<StoredRecord>> {
         if let Some(record) = self.cached_record(key) {
             return Some(record);
         }
@@ -2285,7 +2302,7 @@ mod tests {
             ..Bounds::default()
         }));
         assert!(!store.stored(&keys[0]).unwrap().checked());
-        let held: Vec<Arc<Record>> = keys[..8]
+        let held: Vec<Arc<StoredRecord>> = keys[..8]
             .iter()
             .map(|key| store.record(key).unwrap())
             .collect();
@@ -2319,12 +2336,12 @@ mod tests {
             key.0[..8].copy_from_slice(&(index as u64).to_le_bytes());
             key
         };
-        let kept = Arc::new(Record::new(translator, key(0)));
+        let kept = Arc::new(StoredRecord::new(translator, key(0)));
         assert!(cache.insert(&kept, 1).is_empty());
         for index in 1..=2 * HELD_SWEEP {
             assert!(
                 cache
-                    .insert(&Arc::new(Record::new(translator, key(index))), 1)
+                    .insert(&Arc::new(StoredRecord::new(translator, key(index))), 1)
                     .is_empty()
             );
         }
@@ -2414,7 +2431,7 @@ mod tests {
         assert!(store.cached_record(&first).is_none());
 
         let held = store.record(&first).unwrap();
-        assert_eq!(*held, compressed_record);
+        assert_eq!(held.record().unwrap(), compressed_record);
         assert!(Arc::ptr_eq(&held, &store.record(&first).unwrap()));
         assert_eq!(store.record(&second).unwrap().key, second);
         let output = written(&mut store, u64::MAX);
@@ -2757,7 +2774,10 @@ mod tests {
             offsets.sort();
             offsets
         };
-        assert_eq!(offsets(&next.record(&key).unwrap()), [8, 0x10]);
+        assert_eq!(
+            offsets(&next.record(&key).unwrap().record().unwrap()),
+            [8, 0x10]
+        );
         assert_eq!(next.counters.loaded, 1);
         let segments = segments.into_iter().map(Segment::from).collect();
         let mut merge = Merge::new(translator, segments, Vec::new(), u64::MAX);
@@ -3080,7 +3100,7 @@ mod tests {
         assert_eq!(large.counters.unstorable, 1);
         let bytes = written(&mut small, u64::MAX);
         let mut next = Store::new(translator, Some(&bytes)).0;
-        assert_eq!(next.record(&key).unwrap().entries().len(), 4);
+        assert_eq!(next.record(&key).unwrap().len(), 4);
         // A take frees the bound for the entries that come next.
         assert_eq!(small.added_bytes(), 0);
         small.keep(&offers[63], offers[63].entry());

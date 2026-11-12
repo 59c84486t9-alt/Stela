@@ -3,6 +3,7 @@ use super::super::{
 };
 use super::*;
 use crate::translations;
+use crate::translations::Record;
 use alloc::collections::BTreeMap;
 
 /// A store in memory: records by key, the blocks offered to it, and
@@ -17,9 +18,11 @@ pub(crate) struct MemoryStore {
 }
 
 impl Translations for MemoryStore {
-    fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+    fn record(&mut self, key: &Digest) -> Option<Arc<StoredRecord>> {
         self.lookups += 1;
-        self.records.get(key).cloned()
+        self.records
+            .get(key)
+            .map(|record| Arc::new(StoredRecord::of(record)))
     }
     fn prepared(
         &mut self,

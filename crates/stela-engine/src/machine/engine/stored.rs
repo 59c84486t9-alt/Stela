@@ -9,7 +9,7 @@
 use super::known_keys::Known;
 use super::recovery::StoredOrigin;
 use super::{Devices, FETCH_PAGE, Host, Machine, Preparation, Variant};
-use crate::translations::{Digest, Entry, PAGE_BYTES, Record};
+use crate::translations::{Digest, Entry, PAGE_BYTES, StoredRecord};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use stela_compiler::block::CompiledBlock;
@@ -188,7 +188,7 @@ fn translation_bytes(emission: &Emission) -> usize {
 pub trait Translations {
     /// The record of the page whose bytes hash to `key`, if the store has
     /// a valid one.
-    fn record(&mut self, key: &Digest) -> Option<Arc<Record>>;
+    fn record(&mut self, key: &Digest) -> Option<Arc<StoredRecord>>;
     /// The block at `pc` of the page whose bytes hash to `key`, prepared
     /// in `context` at that very PC since the record was read, if the
     /// store has one: shared, so a store other machines reach copies none
@@ -381,7 +381,7 @@ pub(super) fn page_check(bytes: &[u8; PAGE_BYTES]) -> u64 {
 pub(super) struct StoredPage {
     pub(super) key: Digest,
     pub(super) bytes: Box<[u8; PAGE_BYTES]>,
-    pub(super) record: Option<Arc<Record>>,
+    pub(super) record: Option<Arc<StoredRecord>>,
     /// The latest installed block's, which the next of this page shares.
     origin: Option<Arc<StoredOrigin>>,
     /// `Machine::page_uses` at its last use.
@@ -403,7 +403,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         physical: u64,
         source: &[u8],
-    ) -> Option<(Digest, Option<Arc<Record>>)> {
+    ) -> Option<(Digest, Option<Arc<StoredRecord>>)> {
         let frame = physical & !(FETCH_PAGE - 1);
         let offset = (physical - frame) as usize;
         let matches = |bytes: &[u8]| bytes.get(offset..offset + source.len()) == Some(source);
@@ -545,7 +545,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The record `key`, from the page at `physical` if it is still kept,
     /// else decoded again from the pack.
-    pub(super) fn stored_record(&mut self, physical: u64, key: &Digest) -> Option<Arc<Record>> {
+    pub(super) fn stored_record(
+        &mut self,
+        physical: u64,
+        key: &Digest,
+    ) -> Option<Arc<StoredRecord>> {
         let frame = physical & !(FETCH_PAGE - 1);
         if let Some(StoredPage {
             key: kept,

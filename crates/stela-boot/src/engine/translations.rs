@@ -40,10 +40,10 @@ use stela_engine::machine::Translations;
 use stela_engine::machine::engine::StoreEvent;
 use stela_engine::translations;
 use stela_engine::translations::Digest;
-use stela_engine::translations::Record;
 use stela_engine::translations::pack;
 use stela_engine::translations::pack::{DecodedRecord, Pack, StagedOffer, Store, UsedKeys};
 use stela_engine::translations::writer::{self, Entries, Event, Writer};
+use stela_engine::translations::{Record, StoredRecord};
 use stela_formats::journal::{self, Commit, DATA_START, SLOT_BYTES};
 use stela_formats::payload::pieces::Extent;
 use stela_runtime::pc::fat32::Fat32;
@@ -740,7 +740,7 @@ impl Shared {
 impl Translations for Shared {
     /// The pack bytes outlive the lock, so other PEs can reach the store
     /// while a record is decoded. A writer also tracks absent keys.
-    fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
+    fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<StoredRecord>> {
         if !available(READ_PACK | WRITE_PACK) {
             return None;
         }

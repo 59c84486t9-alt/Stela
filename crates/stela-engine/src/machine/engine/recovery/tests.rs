@@ -124,7 +124,10 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
     assert_eq!(owner.stored_key(), Some(key));
     assert_eq!(owner.code_bytes(), code_bytes);
     assert_eq!(
-        &owner.qualify(BASE, Some(&record)).unwrap().rows(),
+        &owner
+            .qualify(BASE, Some(&crate::translations::StoredRecord::of(&record)))
+            .unwrap()
+            .rows(),
         expected
     );
     assert_eq!(owner.stored_key(), None);
