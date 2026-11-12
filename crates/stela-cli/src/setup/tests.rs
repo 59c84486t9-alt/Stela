@@ -3132,6 +3132,9 @@ fn interrupted_first_setup_resumes_keeping_intact_files() {
         .unwrap_err()
         .to_string();
     assert!(status.contains("was interrupted. To finish it"), "{status}");
+    // The parts it had not written are named as its, not as other fixes.
+    assert!(status.contains("1 problem:"), "{status}");
+    assert!(!status.contains("setup repair"), "{status}");
     // The same command resumes it: a dry run changes nothing.
     let mut dry = installed_command(&f);
     dry.dry_run = true;
@@ -4828,7 +4831,9 @@ fn interrupted_first_setup_status_names_the_command_that_finishes_it() {
     // The report goes to standard output; the error is one line.
     assert!(!reported.summary.contains('\n'), "{}", reported.summary);
     assert!(
-        reported.summary.contains("the report above names each fix"),
+        reported
+            .summary
+            .contains("1 problem; the report above names its fix"),
         "{}",
         reported.summary
     );

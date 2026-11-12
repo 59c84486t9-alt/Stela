@@ -680,6 +680,17 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     for install in &record.installs {
         install_status(environment, &record, install, &mut report);
     }
+    // An interrupted first setup has not written the rest yet: running it
+    // again writes it, and the other commands refuse until it has.
+    if !record.complete && report.problems.len() > 1 {
+        let rest = report.problems.len() - 1;
+        report.problems.truncate(1);
+        report.problems[0].push_str(&format!(
+            ". Running the setup again also writes the {rest} other part{} this report finds missing \
+             or different",
+            if rest == 1 { "" } else { "s" }
+        ));
+    }
     let mut text = report.text;
     if report.problems.is_empty() {
         text.push_str("No problems found.\n");
