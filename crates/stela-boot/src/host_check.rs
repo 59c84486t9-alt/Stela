@@ -349,7 +349,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }
     for (address, error) in &devices.failures {
-        crate::storage::report_failure(*address, error);
+        crate::storage::report_failure(&devices, *address, error);
     }
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));

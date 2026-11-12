@@ -73,35 +73,28 @@ pub fn captures(wifi: stela_drivers::net::wifi::intel::platform::Observations) -
     }
 }
 
-/// The host subsystem a probe failure belongs to, where its kind names one.
-fn subsystem(error: &stela_drivers::probe::Error) -> &'static str {
-    use stela_drivers::probe::Error;
-    match error {
-        Error::Enumeration(_) => "PCI",
-        Error::Vmd(_) => "storage",
-        // The r8169 Ethernet driver's; a Realtek card reader fails as a device.
-        Error::Realtek(_) | Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
-        Error::IntelWifi(_) | Error::MediatekWifi(_) | Error::RealtekWifi(_) => "Wi-Fi",
-        Error::IntelBluetooth(_) | Error::Bcm4377(_) => "Bluetooth",
-        Error::Sfh(_) | Error::SfhCold(_) | Error::Ish(_) | Error::IshCold(_) => "sensors",
-        Error::Ehci(_) => "USB",
-        Error::HdaPci(_) | Error::Hda(_) | Error::HdaNative(_) => "audio",
-        Error::Usb4(_) => "USB4",
-        _ => "device",
-    }
-}
-
 /// Whether a function whose probe failed this way could hold a disk: a
 /// storage, USB or unnamed device's failure.
-pub(crate) fn may_hold_disks(error: &stela_drivers::probe::Error) -> bool {
-    matches!(subsystem(error), "storage" | "USB" | "device")
+pub(crate) fn may_hold_disks(
+    devices: &stela_drivers::probe::Devices,
+    address: pci::Address,
+    error: &stela_drivers::probe::Error,
+) -> bool {
+    matches!(
+        devices.subsystem(address, error),
+        "storage" | "USB" | "device"
+    )
 }
 
 /// Report a PCI function probe could not bring up, by its subsystem.
-pub(crate) fn report_failure(address: pci::Address, error: &stela_drivers::probe::Error) {
+pub(crate) fn report_failure(
+    devices: &stela_drivers::probe::Devices,
+    address: pci::Address,
+    error: &stela_drivers::probe::Error,
+) {
     output::arguments(format_args!(
         "HOST DEVICE FAILED pci={address} ({}) error={error}\n",
-        subsystem(error)
+        devices.subsystem(address, error)
     ));
 }
 
@@ -444,7 +437,7 @@ impl Prepared {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }
         for (address, error) in &devices.failures {
-            report_failure(*address, error);
+            report_failure(&devices, *address, error);
         }
         for (location, error) in &devices.platform_failures {
             output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));

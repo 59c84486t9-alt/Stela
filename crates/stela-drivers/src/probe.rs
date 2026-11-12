@@ -686,6 +686,10 @@ pub struct Devices {
         >,
     >,
     pub failures: Vec<(Address, Error)>,
+    /// The PCI class of every function the scan found, which names the
+    /// subsystem of a failure whose error kind does not, such as an audio
+    /// controller the mount refused.
+    pub classes: Vec<(Address, [u8; 3])>,
     /// Devices behind an attached controller that failed on their own, such
     /// as AHCI ports and NVMe namespaces, by location.
     pub device_failures: Vec<(String, BlockError)>,
@@ -852,6 +856,42 @@ impl Devices {
             // A VMD host whose hierarchy holds no NVMe controller keeps
             // only its owner, as Linux reports no error.
             + self.owners.len()
+    }
+
+    /// The host subsystem the failure of the function at `address` belongs
+    /// to: the one its error's kind names, or else the one the function's
+    /// PCI class names, so a refusal common to every driver, such as the
+    /// mount's, is filed with its own kind of device and not with the disks.
+    pub fn subsystem(&self, address: Address, error: &Error) -> &'static str {
+        let class = self
+            .classes
+            .iter()
+            .find(|(found, _)| *found == address)
+            .map(|(_, class)| *class);
+        let by_class = match class {
+            Some([0x01, ..]) => "storage",
+            Some([0x02, 0x80, _]) => "Wi-Fi",
+            Some([0x02, ..]) => "network",
+            Some([0x03, ..]) => "GPU",
+            Some([0x04, ..]) => "audio",
+            Some([0x0c, 0x03, _]) => "USB",
+            Some([0x0d, 0x11, _]) => "Bluetooth",
+            _ => "device",
+        };
+        match error {
+            Error::Enumeration(_) => "PCI",
+            Error::Vmd(_) => "storage",
+            // The r8169 Ethernet driver's; a Realtek card reader fails as a
+            // device.
+            Error::Realtek(_) | Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
+            Error::IntelWifi(_) | Error::MediatekWifi(_) | Error::RealtekWifi(_) => "Wi-Fi",
+            Error::IntelBluetooth(_) | Error::Bcm4377(_) => "Bluetooth",
+            Error::Sfh(_) | Error::SfhCold(_) | Error::Ish(_) | Error::IshCold(_) => "sensors",
+            Error::Ehci(_) => "USB",
+            Error::HdaPci(_) | Error::Hda(_) | Error::HdaNative(_) => "audio",
+            Error::Usb4(_) => "USB4",
+            _ => by_class,
+        }
     }
 
     /// Take up what an xHCI controller brought, at its start or later
@@ -1448,6 +1488,7 @@ pub unsafe fn probe_observed(
             }
             seen += 1;
             let address = function.address;
+            devices.classes.push((address, function.class));
             if scan_starts(&function.identity(), &software_usb4) {
                 claimed.begin(address, recorded!());
             }
@@ -2467,6 +2508,31 @@ fn attach_platform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boot of issue 18: the mount refused both HD Audio controllers
+    /// before their driver ran, and they are filed as audio, not with the
+    /// devices that may hold a disk.
+    #[test]
+    fn a_refusal_common_to_every_driver_is_filed_by_the_functions_class() {
+        use crate::bus::pci::requester::{ClaimError, FunctionRole};
+        let audio = identity(0, 3, 0x8086, 0xa2f0, 0x04_03_00);
+        let unknown = identity(1, 0, 0x1234, 0x5678, 0xff_00_00);
+        let devices = Devices {
+            classes: alloc::vec![
+                (audio.address, audio.class),
+                (unknown.address, unknown.class)
+            ],
+            ..Devices::default()
+        };
+        let refused = Error::Native(ServiceError::Claim(ClaimError::UnsupportedRole(
+            FunctionRole::Unverified,
+        )));
+        assert_eq!(devices.subsystem(audio.address, &refused), "audio");
+        assert_eq!(devices.subsystem(unknown.address, &refused), "device");
+        // An error that names its driver keeps that driver's subsystem.
+        let vmd = Error::Vmd(crate::bus::vmd::Error::UnsupportedDevice);
+        assert_eq!(devices.subsystem(audio.address, &vmd), "storage");
+    }
 
     /// The boot of issue 18: an audio controller's failure stays out of the
     /// network account, and each adapter's line reads as plain words.

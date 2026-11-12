@@ -1380,7 +1380,7 @@ pub unsafe fn open(
         }
     }
     for (address, error) in &devices.failures {
-        crate::storage::report_failure(*address, error);
+        crate::storage::report_failure(&devices, *address, error);
     }
     for (address, expiry) in &devices.abandoned {
         let at = expiry
@@ -1488,7 +1488,9 @@ pub unsafe fn open(
             devices
                 .failures
                 .iter()
-                .filter(|(_, error)| crate::storage::may_hold_disks(error))
+                .filter(|(address, error)| {
+                    crate::storage::may_hold_disks(&devices, *address, error)
+                })
                 .map(|(address, error)| format!("{address} failed: {error}")),
         )
         .collect::<Vec<_>>()
@@ -1758,7 +1760,7 @@ fn account(
         ));
     }
     for (address, error) in &devices.failures {
-        if crate::storage::may_hold_disks(error) {
+        if crate::storage::may_hold_disks(devices, *address, error) {
             lines.push(format!("{address} failed: {error}."));
         }
     }
