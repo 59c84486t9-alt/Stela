@@ -16,6 +16,41 @@ fn phy_status_bit_7_is_tbi_only_on_the_8169_family() {
 }
 
 #[test]
+fn firmware_requests_name_every_admitted_chips_file_and_target() {
+    let requests: Vec<_> = firmware_requests().collect();
+    // The RTL8111H, by XID and as the RTL8168M, asks under its PCI ID.
+    for xid in ["xid-541", "xid-6c0"] {
+        assert!(requests.contains(&(0x8168, "rtl_nic/rtl8168h-2.fw", xid.into())));
+    }
+    assert!(requests.contains(&(0x8125, "rtl_nic/rtl8125b-2.fw", "xid-641".into())));
+    assert!(requests.contains(&(
+        0x3000,
+        "rtl_nic/rtl9151a-1.fw",
+        "xid-7c8-ext-80000000".into()
+    )));
+    // A chip outside a PCI ID's family never asks under it.
+    assert!(
+        !requests
+            .iter()
+            .any(|(device, name, _)| *device == 0x8168 && name.contains("8125"))
+    );
+    assert!(!requests.iter().any(|(device, _, _)| *device == 0x8169));
+    // Every request is the one load_firmware makes for its detected chip.
+    for (_, name, revision) in &requests {
+        let xid = u32::from_str_radix(&revision[4..7], 16).unwrap();
+        let detected = match revision.split_once("-ext-") {
+            Some((_, raw)) => {
+                revision::detect_extended(xid << 20, u32::from_str_radix(raw, 16).unwrap())
+            }
+            None => revision::detect(xid << 20),
+        }
+        .unwrap();
+        assert_eq!(detected.firmware, Some(*name));
+        assert_eq!(&target_revision(detected), revision);
+    }
+}
+
+#[test]
 fn exact_ordered_revision_fixtures_refuse_unknown_ancient_and_wrong_pci_family() {
     // Independent source-table cases include overlapping specific/generic masks.
     for (xid, version, fw) in [

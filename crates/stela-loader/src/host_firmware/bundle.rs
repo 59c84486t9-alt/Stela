@@ -365,7 +365,7 @@ pub fn select(functions: &[Pci]) -> Selection {
             continue;
         }
         let wifi = match (function.vendor, function.device) {
-            (0x10ec, 0x8168 | 0x8161) => {
+            (0x10ec, device) if recipes::REALTEK_PCI_DEVICES.contains(&device) => {
                 selection.members(recipes::REALTEK, &[], &why);
                 false
             }

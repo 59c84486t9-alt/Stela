@@ -117,7 +117,13 @@ pub struct Recipe {
 
 #[derive(Clone, Copy, Debug)]
 enum Consumer {
-    Realtek { mask: u16, value: u16 },
+    Realtek {
+        mask: u16,
+        value: u16,
+    },
+    /// A chip whose XID is the extended marker (`7c8` under `7cf`) and whose
+    /// extended word classifies as zero, as r8169's RTL9151AS check reads it.
+    RealtekExtended,
     IntelRsa,
     Wifi,
     Nouveau,
@@ -146,7 +152,139 @@ const fn realtek(
     }
 }
 
+/// Every Realtek PCI device ID under which the r8169 driver loads a file,
+/// aliases included: all of `stela_driver_net::realtek::PCI_DEVICES` but
+/// the RTL8169's, whose chips load none. A boot that finds one reads the
+/// Realtek files, and a request under one is answered by its XID.
+pub const REALTEK_PCI_DEVICES: &[u16] = &[
+    0x8161, 0x8168, 0x8125, 0x8126, 0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+];
+
 pub const REALTEK: &[Recipe] = &[
+    realtek(
+        "rtl_nic/rtl8126a-3.fw",
+        13232,
+        "18ffaf3b873d217bf780503a80f04fe2b03c088ba2d0c2a3d626145cb8e53b26",
+        0x7cf,
+        0x64a,
+    ),
+    realtek(
+        "rtl_nic/rtl8126a-2.fw",
+        29248,
+        "2ffa201aa7dec5e3726e268a10342b175ae8de4fa9f39f535bbbbf5cb8245879",
+        0x7cf,
+        0x649,
+    ),
+    realtek(
+        "rtl_nic/rtl8125bp-2.fw",
+        752,
+        "70010caccdb0d87461f26d77a15f86615dc970549126cf17db01a7f43baf5287",
+        0x7cf,
+        0x681,
+    ),
+    realtek(
+        "rtl_nic/rtl8125cp-1.fw",
+        1728,
+        "22d01a77f530d0bb95818b2aac138a55e656eab303380b6c75c8b7e46275c412",
+        0x7cf,
+        0x708,
+    ),
+    realtek(
+        "rtl_nic/rtl9151a-1.fw",
+        640,
+        "b18901d05fd533567163151420828f59bf3d23574a4db8a0e889e22b878225e0",
+        0x7cf,
+        0x68b,
+    ),
+    // The RTL9151AS, whose primary XID marker defers to its extended word.
+    Recipe {
+        consumer: Consumer::RealtekExtended,
+        ..realtek(
+            "rtl_nic/rtl9151a-1.fw",
+            640,
+            "b18901d05fd533567163151420828f59bf3d23574a4db8a0e889e22b878225e0",
+            0,
+            0,
+        )
+    },
+    realtek(
+        "rtl_nic/rtl8125k-1.fw",
+        8096,
+        "3764d236c0e0dce55ac0570923c66d86e984509487b5740a75ec62f9242fd234",
+        0x7cf,
+        0x68a,
+    ),
+    realtek(
+        "rtl_nic/rtl8125d-2.fw",
+        6800,
+        "c1cb0d358ca985b0d45584612143fd93613d567064702e265bfb370e99c90e35",
+        0x7cf,
+        0x689,
+    ),
+    realtek(
+        "rtl_nic/rtl8125d-1.fw",
+        17168,
+        "bc3c82939f02df2f58a17e7354096375001a80a5c1ca3f459c555d5a7d42bf1b",
+        0x7cf,
+        0x688,
+    ),
+    realtek(
+        "rtl_nic/rtl8125b-2.fw",
+        3328,
+        "529bf1c25c97ff52b401090d00ff89cc22351012336e5a0c9662728a3ee909ef",
+        0x7cf,
+        0x641,
+    ),
+    realtek(
+        "rtl_nic/rtl8125a-3.fw",
+        3456,
+        "3f6c328af0ceff5969c729edf0f535e8bb2a9b9e05d15b6be3199a3e6d421b99",
+        0x7cf,
+        0x609,
+    ),
+    realtek(
+        "rtl_nic/rtl8168g-2.fw",
+        4896,
+        "f878ec719f78e0b104bc73362a9862611858bec893f58a1b3b289a0a57d71d25",
+        0x7cf,
+        0x4c0,
+    ),
+    realtek(
+        "rtl_nic/rtl8168g-3.fw",
+        832,
+        "e4d5e62b0a5a097af34c7aa3c55f634fd5be2c232e02c6b983ebd7e699cb27e9",
+        0x7cf,
+        0x509,
+    ),
+    realtek(
+        "rtl_nic/rtl8411-2.fw",
+        1040,
+        "80dbdacba4d5dfee46b6c2b4e433f6f2eeb756d29ad46bf2362ba20c8ec594b1",
+        0x7cf,
+        0x5c8,
+    ),
+    realtek(
+        "rtl_nic/rtl8168h-2.fw",
+        976,
+        "0b4beab008e308f28296c13188ee23edfeff7d865e398a7ade170495c8cec7e6",
+        0x7cf,
+        0x541,
+    ),
+    // The RTL8168M runs the RTL8168H's file.
+    realtek(
+        "rtl_nic/rtl8168h-2.fw",
+        976,
+        "0b4beab008e308f28296c13188ee23edfeff7d865e398a7ade170495c8cec7e6",
+        0x7cf,
+        0x6c0,
+    ),
+    realtek(
+        "rtl_nic/rtl8168fp-3.fw",
+        336,
+        "c526c06aa0ab8d9b57ba2b730bb1e40a1c3513f8591e238dceb2e0f45210ed27",
+        0x7cf,
+        0x54a,
+    ),
     realtek(
         "rtl_nic/rtl8411-1.fw",
         2112,
@@ -985,18 +1123,40 @@ fn hex_field(value: &str, digits: usize) -> bool {
 }
 
 fn select_realtek(request: &Request) -> Option<&'static Recipe> {
-    if !matches!(request.target.hardware.as_str(), "10ec:8161" | "10ec:8168") {
+    let device = request
+        .target
+        .hardware
+        .strip_prefix("10ec:")
+        .filter(|s| hex_field(s, 4))
+        .and_then(|s| u16::from_str_radix(s, 16).ok())?;
+    if !REALTEK_PCI_DEVICES.contains(&device) {
         return None;
     }
-    let xid = request
-        .target
-        .revision
-        .strip_prefix("xid-")
+    let label = request.target.revision.strip_prefix("xid-")?;
+    let (primary, extended) = match label.split_once("-ext-") {
+        Some((primary, raw)) => (primary, Some(raw)),
+        None => (label, None),
+    };
+    let xid = Some(primary)
         .filter(|s| hex_field(s, 3))
         .and_then(|s| u16::from_str_radix(s, 16).ok())
         .filter(|xid| xid & !0xfcf == 0)?;
-    REALTEK.iter().find(|recipe| matches!(recipe.consumer, Consumer::Realtek { mask, value } if xid & mask == value))
-        .filter(|recipe| recipe.image.member == request.name)
+    let recipe = match extended {
+        None => REALTEK.iter().find(|recipe| matches!(recipe.consumer, Consumer::Realtek { mask, value } if xid & mask == value)),
+        Some(raw) => {
+            let raw = Some(raw)
+                .filter(|s| hex_field(s, 8))
+                .and_then(|s| u32::from_str_radix(s, 16).ok())?;
+            (xid & 0x7cf == 0x7c8 && raw & 0x7fff_ffff == 0)
+                .then(|| {
+                    REALTEK
+                        .iter()
+                        .find(|recipe| matches!(recipe.consumer, Consumer::RealtekExtended))
+                })
+                .flatten()
+        }
+    };
+    recipe.filter(|recipe| recipe.image.member == request.name)
 }
 
 fn select_intel_rsa(request: &Request) -> Option<&'static Recipe> {
@@ -1214,6 +1374,30 @@ mod tests {
             assert!(Plan::select(&inventory(name, hardware, revision, board)).is_err());
         }
         assert!(LICENSE.verify(b"changed license").is_err());
+    }
+
+    /// A chip whose file setup has no pin for stays off on every PC that
+    /// has it: each request the r8169 driver can make has its pinned file,
+    /// and the boot reads the Realtek files for each PCI ID that asks.
+    #[test]
+    fn every_realtek_firmware_request_has_a_pinned_file() {
+        let mut devices = Vec::new();
+        for (device, name, revision) in stela_driver_net::realtek::firmware_requests() {
+            if !devices.contains(&device) {
+                devices.push(device);
+            }
+            let hardware = format!("10ec:{device:04x}");
+            let plan = Plan::select(&inventory(name, &hardware, &revision, None))
+                .unwrap_or_else(|_| panic!("{hardware} {revision} {name} has no pinned file"));
+            assert_eq!(plan.selections[0].recipe.image.member, name);
+        }
+        let mut pinned = REALTEK_PCI_DEVICES.to_vec();
+        pinned.sort_unstable();
+        devices.sort_unstable();
+        assert_eq!(pinned, devices);
+        for device in stela_driver_net::realtek::PCI_DEVICES {
+            assert!(pinned.contains(device) || *device == 0x8169, "{device:04x}");
+        }
     }
 
     fn gsp_member(name: &str) -> Option<&'static str> {

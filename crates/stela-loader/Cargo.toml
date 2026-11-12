@@ -38,6 +38,8 @@ sha2 = { version = "0.10", default-features = false }
 [dev-dependencies]
 anyhow.workspace = true
 stela-engine = { path = "../stela-engine" }
+# The Realtek driver's firmware requests, which the pinned files must answer.
+stela-driver-net = { path = "../stela-driver-net" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 tempfile.workspace = true
 

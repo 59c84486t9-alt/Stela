@@ -19,9 +19,10 @@ fn the_complete_bundle_holds_every_recipe_once_by_content() {
     assert_eq!(digests.len(), objects.len());
     let (count, bytes) = size();
     assert_eq!(count, objects.len());
-    assert_eq!(count, recipes().count(), "no two recipes share a file yet");
-    // The recipes' recorded lengths: 64 files, 115.7 MiB.
-    assert_eq!((count, bytes), (64, 121_357_728), "{count} {bytes}");
+    // The RTL8168H and RTL8168M share a file, as the RTL9151A and RTL9151AS do.
+    assert_eq!(count + 2, recipes().count());
+    // The recipes' recorded lengths: 79 files, 115.8 MiB.
+    assert_eq!((count, bytes), (79, 121_450_256), "{count} {bytes}");
     // The GPU's large images come last, for a volume short of room.
     assert_eq!(objects.last().unwrap().length, 63_571_696);
     let manifest = manifest(&complete()).unwrap();
@@ -118,7 +119,11 @@ fn a_boot_selects_exactly_the_files_its_pci_functions_need() {
     ]);
     expected.extend(recipes::REALTEK.iter().map(|recipe| recipe.image.member));
     expected.sort_unstable();
+    expected.dedup();
     assert_eq!(members(&pc), expected);
+    // A Realtek chip under an alias ID, such as a Killer E2600, reads them too.
+    let killer = select(&[pci(0x10ec, 0x2600, 0x02)]);
+    assert!(members(&killer).contains(&"rtl_nic/rtl8168h-2.fw"));
     assert_eq!(
         pc.wanted
             .iter()

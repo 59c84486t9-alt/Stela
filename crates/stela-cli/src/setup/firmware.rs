@@ -872,8 +872,8 @@ mod tests {
         let manifest = bundle::manifest(&files).unwrap();
         let parsed = bundle::Bundle::parse(&manifest).unwrap();
         assert!(parsed.missing().is_empty());
-        assert_eq!(parsed.objects.len(), 64);
-        assert!(bundle_summary().starts_with("every supported device: 64 files, 115.7 MiB"));
+        assert_eq!(parsed.objects.len(), 79);
+        assert!(bundle_summary().starts_with("every supported device: 79 files, 115.8 MiB"));
         // A volume short of room keeps the small files and leaves the large
         // GPU images out, by name.
         let (files, left) = bundle_plan(Some(MARGIN + 40 * MIB), 0);
@@ -1104,7 +1104,7 @@ mod tests {
         let status = bundle_status(dir.path()).unwrap_err();
         assert_eq!(
             status,
-            "the firmware bundle is incomplete: 3 of 64 files are on the USB"
+            "the firmware bundle is incomplete: 3 of 79 files are on the USB"
         );
     }
 
@@ -1126,7 +1126,7 @@ mod tests {
         )
         .unwrap();
         let status = bundle_status(dir.path()).unwrap_err();
-        assert!(status.contains("lacks 63 of 64 files"), "{status}");
+        assert!(status.contains("lacks 78 of 79 files"), "{status}");
         assert!(
             status.contains("nvidia/ga102/gsp/gsp-570.144.bin"),
             "{status}"
@@ -1587,6 +1587,14 @@ mod tests {
             ("rtl_nic/rtl8168e-1.fw", "xid-2c1"), ("rtl_nic/rtl8168e-2.fw", "xid-2c0"),
             ("rtl_nic/rtl8168e-3.fw", "xid-2c8"), ("rtl_nic/rtl8168f-1.fw", "xid-480"),
             ("rtl_nic/rtl8168f-2.fw", "xid-481"), ("rtl_nic/rtl8411-1.fw", "xid-488"),
+            ("rtl_nic/rtl8168g-2.fw", "xid-4c0"), ("rtl_nic/rtl8168g-3.fw", "xid-509"),
+            ("rtl_nic/rtl8411-2.fw", "xid-5c8"), ("rtl_nic/rtl8168h-2.fw", "xid-541"),
+            ("rtl_nic/rtl8168fp-3.fw", "xid-54a"), ("rtl_nic/rtl8125a-3.fw", "xid-609"),
+            ("rtl_nic/rtl8125b-2.fw", "xid-641"), ("rtl_nic/rtl8125d-1.fw", "xid-688"),
+            ("rtl_nic/rtl8125d-2.fw", "xid-689"), ("rtl_nic/rtl8125k-1.fw", "xid-68a"),
+            ("rtl_nic/rtl9151a-1.fw", "xid-68b"), ("rtl_nic/rtl8125cp-1.fw", "xid-708"),
+            ("rtl_nic/rtl8125bp-2.fw", "xid-681"), ("rtl_nic/rtl8126a-2.fw", "xid-649"),
+            ("rtl_nic/rtl8126a-3.fw", "xid-64a"),
         ].map(|(name, revision)| serde_json::json!({"name":name,"target":{"driver":"realtek","hardware":"10ec:8168","revision":revision,"board":null},"minimum_bytes":4}));
         let inventory = output.join("synthetic-observed-requirements.json");
         fs::write(
@@ -1613,7 +1621,7 @@ mod tests {
         let manifest_bytes = fs::read(destination.join("manifest.json")).unwrap();
         let manifest = host_firmware::Manifest::parse(&manifest_bytes).unwrap();
         let observed = read_inventory(&inventory).unwrap();
-        assert_eq!(manifest.images.len(), 8);
+        assert_eq!(manifest.images.len(), 23);
         for (image, request) in manifest.images.iter().zip(observed.requests()) {
             assert_eq!(image.name, request.name);
             assert_eq!(image.target.revision, request.target.revision);
@@ -1647,7 +1655,7 @@ mod tests {
             host_firmware::Package::read(&destination)
                 .unwrap()
                 .inventory(),
-            (8, 22876)
+            (23, 115_404)
         );
         let again = provision(ProvisionOptions {
             requirements: Some(&inventory),

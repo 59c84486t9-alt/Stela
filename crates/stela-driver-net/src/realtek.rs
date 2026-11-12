@@ -82,7 +82,7 @@ mod start;
 use firmware::Script;
 use hardware::Hardware;
 use registers::*;
-pub use revision::Revision;
+pub use revision::{PCI_DEVICES, Revision};
 use ring::Ring;
 const NBASE_LINK_POLL_US: u64 = 10_000;
 /// The events that send the completion signal: rtl8169's RTL_EVENT_NAPI_RX
@@ -551,15 +551,34 @@ fn detect_revision<R: Registers>(
     })
 }
 
+/// The `revision` label of a firmware target: the chip's XID, and its
+/// extended word where it has one.
+fn target_revision(revision: Revision) -> String {
+    match revision.extended_xid {
+        Some(raw) => format!("xid-{:03x}-ext-{raw:08x}", revision.xid),
+        None => format!("xid-{:03x}", revision.xid),
+    }
+}
+
+/// Every firmware request an admitted chip can make, as its PCI device,
+/// the file and the target's `revision` label: the requests setup's pinned
+/// files must answer.
+pub fn firmware_requests() -> impl Iterator<Item = (u16, &'static str, String)> {
+    PCI_DEVICES.iter().flat_map(|&device| {
+        revision::with_firmware()
+            .filter(move |&revision| revision::pci_family(device, revision))
+            .filter_map(move |revision| {
+                Some((device, revision.firmware?, target_revision(revision)))
+            })
+    })
+}
+
 fn load_firmware<'a>(
     provider: &'a dyn resources::Provider,
     hardware: &str,
     revision: Revision,
 ) -> Result<Option<resources::Image<'a>>, Error> {
-    let xid = match revision.extended_xid {
-        Some(raw) => format!("xid-{:03x}-ext-{raw:08x}", revision.xid),
-        None => format!("xid-{:03x}", revision.xid),
-    };
+    let xid = target_revision(revision);
     revision
         .firmware
         .map(|name| {
