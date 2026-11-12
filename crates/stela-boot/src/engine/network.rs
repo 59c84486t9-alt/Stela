@@ -186,6 +186,7 @@ impl HostNetwork {
         while !links.devices.is_empty() {
             let link = RootLink::new(links.devices.remove(0), links.root);
             let driver = link.device.driver();
+            let wireless = link.device.wireless();
             let location = String::from(link.device.location());
             output::arguments(format_args!(
                 "NETWORK candidate driver={driver} adapter={location} mac={}\n",
@@ -234,11 +235,9 @@ impl HostNetwork {
                 Err(error) => {
                     output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
                     failures.push(match error {
-                        // A started adapter with no cable reports no link.
-                        stela_runtime::net::NetError::NoCarrier => format!(
-                            "{location}: no link. Check that a network cable is plugged in and \
-                             that the other end is on."
-                        ),
+                        stela_runtime::net::NetError::NoCarrier => {
+                            stela_drivers::probe::no_link(&location, wireless)
+                        }
                         error => format!("{location}: no address ({error})."),
                     });
                     // Its driver stops it, in the loader's root (`RootLink`).

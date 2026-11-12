@@ -281,6 +281,16 @@ impl Adapter {
         }
     }
 
+    /// Whether the adapter is a Wi-Fi radio rather than a wired port.
+    pub fn wireless(&self) -> bool {
+        match self {
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(_) => true,
+            Self::MediatekWifi(_) | Self::RealtekWifi(_) => true,
+            _ => false,
+        }
+    }
+
     /// Where the adapter is, for logs.
     pub fn location(&self) -> &str {
         match self {
@@ -1057,6 +1067,19 @@ impl Devices {
             ));
         }
         lines
+    }
+}
+
+/// The screen line for a started adapter that never got a link: a wired
+/// port is told to check its cable, a Wi-Fi radio that it did not join.
+pub fn no_link(location: &str, wireless: bool) -> String {
+    if wireless {
+        alloc::format!("{location}: not connected to the Wi-Fi network.")
+    } else {
+        alloc::format!(
+            "{location}: no link. Check that a network cable is plugged in and that the other end \
+             is on."
+        )
     }
 }
 
@@ -2646,6 +2669,20 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    /// The cable advice is for a wired port only, never a Wi-Fi link.
+    #[test]
+    fn the_cable_advice_is_for_a_wired_port_only() {
+        assert_eq!(
+            no_link("0000:00:1f.6", false),
+            "0000:00:1f.6: no link. Check that a network cable is plugged in and that the other \
+             end is on."
+        );
+        assert_eq!(
+            no_link("0000:04:00.0", true),
+            "0000:04:00.0: not connected to the Wi-Fi network."
+        );
     }
 
     /// A function whose device never answers spends its whole budget and
