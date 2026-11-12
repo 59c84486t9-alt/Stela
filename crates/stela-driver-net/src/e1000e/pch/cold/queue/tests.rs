@@ -1274,10 +1274,11 @@ fn source_nvm_outcomes_compose_through_every_cold_reset_packet_and_stop() {
                 }
             }
             let result = i219::tests::start(i219::tests::sample_device(family), io, timer);
-            if expected != 0 {
+            // Linux repairs a cleared valid bit in flash and then runs the
+            // adapter; Stela runs it with the image unwritten.
+            if expected == 1 {
                 let kind = match result {
                     Err(Error::Nvm(nvm::Error::Checksum(_))) => 1,
-                    Err(Error::Nvm(nvm::Error::RepairRequired)) => 2,
                     _ => panic!(
                         "accepted invalid family image{family:?} marker{marker} check{check}"
                     ),

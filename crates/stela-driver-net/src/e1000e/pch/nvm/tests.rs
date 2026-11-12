@@ -337,9 +337,12 @@ fn every_flash_access_failure_preserves_output_and_keeps_owner() {
     }
 }
 #[test]
-fn invalid_bank_checksum_marker_and_descriptor_never_get_fallback_success() {
+fn invalid_bank_checksum_and_descriptor_never_get_fallback_success() {
     for layout in [Layout::Pch2, Layout::Lpt, Layout::Spt] {
         for fault in 0..4 {
+            if fault == 2 {
+                continue;
+            }
             let (mut nvm, state, _) = fixture(layout, 0);
             let base = if layout == Layout::Spt { 0 } else { 0x2000 };
             match fault {
@@ -359,10 +362,7 @@ fn invalid_bank_checksum_marker_and_descriptor_never_get_fallback_success() {
             let error = nvm.validate().unwrap_err();
             assert!(matches!(
                 (fault, error),
-                (0, Error::NoValidBank)
-                    | (1, Error::Checksum(_))
-                    | (2, Error::RepairRequired)
-                    | (3, Error::InvalidDescriptor)
+                (0, Error::NoValidBank) | (1, Error::Checksum(_)) | (3, Error::InvalidDescriptor)
             ));
             assert!(nvm.is_poisoned());
         }
@@ -550,5 +550,31 @@ fn failed_flash_minimum_keeps_output_and_actual_register_timer_pair() {
         drop(nvm);
         assert_eq!(released.load(Ordering::SeqCst), 0);
         assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// `e1000_validate_nvm_checksum_ich8lan` before TGP: an image whose checksum
+/// valid bit is clear runs, whatever its checksum, as Linux runs it after
+/// setting the bit and rewriting the checksum; Stela writes nothing and
+/// reports the repair it left out.
+#[test]
+fn a_cleared_checksum_valid_bit_runs_as_linux_runs_it_after_its_repair() {
+    for layout in [Layout::Pch2, Layout::Lpt, Layout::Spt] {
+        let (mut nvm, state, _) = fixture(layout, 0);
+        let base = if layout == Layout::Spt { 0 } else { 0x2000 };
+        let (at, mask) = if layout == Layout::Pch2 {
+            (0x19 * 2, 0x40)
+        } else {
+            (3 * 2, 1)
+        };
+        state.borrow_mut().memory[base + at] &= !mask;
+        state.borrow_mut().memory[base + 63 * 2] ^= 1;
+        assert_eq!(nvm.validate(), Ok(()), "{layout:?}");
+        assert!(nvm.repair_left_out());
+        // The model refuses any flash write cycle: the repair is left out.
+        assert!(!nvm.is_poisoned());
+        let (mut good, _, _) = fixture(layout, 0);
+        assert_eq!(good.validate(), Ok(()));
+        assert!(!good.repair_left_out());
     }
 }

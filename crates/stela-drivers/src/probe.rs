@@ -1681,6 +1681,18 @@ pub unsafe fn probe_observed(
                 // configuration and both register windows to the end of boot.
                 let attached =
                     unsafe { pch::Pch::attach(function, handoff, dma, minimum.clone(), host) };
+                if let Ok(device) = &attached
+                    && device.nvm_repair_left_out()
+                {
+                    devices.warnings.push((
+                        address,
+                        Warning::Message(
+                            "e1000e: the NVM checksum valid bit is clear; Linux would set it and \
+                             rewrite the checksum in flash, Stela runs the adapter without \
+                             writing the NVM",
+                        ),
+                    ));
+                }
                 attach_link!(attached.map(Box::new), Adapter::Pch);
             } else if net::igb::matches(&function) {
                 let minimum = minimum_for_function!().clone();

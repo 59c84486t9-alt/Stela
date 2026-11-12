@@ -159,16 +159,17 @@ pub(super) mod tests {
                     unsafe { Controller::claim_i219(sample_device(family), io, timer) }.unwrap();
                 let result = controller.validate_nvm();
                 let kind = match result {
+                    // Linux repairs the image in flash; Stela runs it unwritten.
+                    Ok(()) if controller.nvm.repair_left_out() => 2,
                     Ok(()) => 0,
                     Err(Error::Nvm(nvm::Error::Checksum(_))) => 1,
-                    Err(Error::Nvm(nvm::Error::RepairRequired)) => 2,
                     Err(other) => panic!("unexpected family NVM error{other:?}"),
                 };
                 assert_eq!(
                     kind, expected,
                     "family={family:?} marker={marker} check={check}"
                 );
-                if kind == 0 {
+                if kind != 1 {
                     assert_eq!(
                         controller.nvm.station().unwrap().0,
                         [2, 0x11, 0x22, 0x33, 0x44, 0x55]

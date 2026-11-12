@@ -154,6 +154,11 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
     pub fn failure(&self) -> Option<&Error> {
         self.failure.as_ref()
     }
+    /// Whether the NVM's checksum valid bit was clear, which Linux repairs
+    /// in flash and Stela leaves unwritten.
+    pub fn nvm_repair_left_out(&self) -> bool {
+        self.controller.nvm.repair_left_out()
+    }
     fn check(&mut self) -> Result<(), Error> {
         if let Some(error) = &self.failure
             && error.minimum_cause().is_some()

@@ -5,6 +5,9 @@
 //! No erase/program/checksum-repair command is issued. Missing valid banks and
 //! family-required checksums fail explicitly instead of falling back to bank
 //! zero. ID-selected TGP/ADP validation follows its source marker policy.
+//! An image whose checksum valid bit is clear, which Linux repairs in flash
+//! before it runs the adapter, runs as Linux then runs it, with the repair
+//! left out and reported through [`Nvm::repair_left_out`].
 use super::Delay;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -62,7 +65,6 @@ pub enum Error {
     },
     NoValidBank,
     Checksum(u16),
-    RepairRequired,
     InvalidStation,
     Poisoned,
 }
@@ -101,7 +103,6 @@ impl core::fmt::Display for Error {
             ),
             Self::NoValidBank => f.write_str("neither NVM bank is valid"),
             Self::Checksum(sum) => write!(f, "its NVM checksum is wrong ({sum:#06x})"),
-            Self::RepairRequired => f.write_str("its NVM needs a repair Linux would write"),
             Self::InvalidStation => f.write_str("its NVM holds no valid MAC address"),
             Self::Poisoned => f.write_str("an earlier flash failure left it unusable"),
         }
@@ -164,7 +165,14 @@ pub struct Nvm<R: Registers, D: Delay> {
     geometry: Geometry,
     bank: Option<u8>,
     poisoned: bool,
+    /// The checksum valid bit was clear: Linux would set it and rewrite the
+    /// checksum in flash; Stela never writes the NVM.
+    unrepaired: bool,
 }
+
+/// `e1000_probe` validates the checksum up to three times: the first read
+/// after power-up may not yet see the whole image.
+const CHECKSUM_TRIES: usize = 3;
 impl<R: Registers, D: Delay> Nvm<R, D> {
     /// # Safety
     /// `layout` comes from the live PCH PCI generation, not a guessed
@@ -184,6 +192,7 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
             },
             bank: None,
             poisoned: false,
+            unrepaired: false,
         };
         let result = (|| {
             let fw = this.io()?.read_mac32(FWSM)?;
@@ -454,28 +463,46 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
             }
         }
     }
-    /// Validate the factory checksum and source generation's validity marker.
-    /// An image needing persistent repair is an explicit unsupported profile.
+    /// `e1000_validate_nvm_checksum_ich8lan` before TGP: an image whose
+    /// checksum valid bit is clear was prepared by OEM software that left the
+    /// checksum out, and Linux sets the bit and rewrites the checksum, after
+    /// which the image always validates. Stela reads the image as it is and
+    /// records the repair it left out; any other image must sum to 0xbaba.
     pub fn validate(&mut self) -> Result<(), Error> {
-        let mut words = [0u16; 64];
-        self.read(0, &mut words)?;
-        let sum = words.iter().copied().fold(0u16, u16::wrapping_add);
         let (at, mask) = if self.layout == Layout::Pch2 {
             (0x19, 0x40)
         } else {
             (3, 1)
         };
-        let result = if words[at] & mask == 0 {
-            Err(Error::RepairRequired)
-        } else if sum != 0xbaba {
-            Err(Error::Checksum(sum))
-        } else {
-            Ok(())
-        };
-        if result.is_err() {
-            self.poisoned = true;
+        let mut words = [0u16; 64];
+        self.read(0, &mut words)?;
+        if words[at] & mask == 0 {
+            self.unrepaired = true;
+            return Ok(());
         }
-        result
+        self.checksum(words)
+    }
+    /// `e1000e_validate_nvm_checksum_generic` over `words`, the first 64,
+    /// read again as `e1000_probe` tries again.
+    fn checksum(&mut self, mut words: [u16; 64]) -> Result<(), Error> {
+        let mut tries = 1;
+        loop {
+            let sum = words.iter().copied().fold(0u16, u16::wrapping_add);
+            if sum == 0xbaba {
+                return Ok(());
+            }
+            if tries == CHECKSUM_TRIES {
+                self.poisoned = true;
+                return Err(Error::Checksum(sum));
+            }
+            tries += 1;
+            self.read(0, &mut words)?;
+        }
+    }
+    /// Whether [`Self::validate`] found an image Linux would have repaired in
+    /// flash, a write Stela leaves out.
+    pub fn repair_left_out(&self) -> bool {
+        self.unrepaired
     }
     /// Source TGP/ADP checksum policy after PCI family selection. The
     /// selected bank is still observed by `read`; station validity is separate.
@@ -492,19 +519,14 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
         if family == I219Validation::Tgp && marker[0] & 1 == 0 {
             return Ok(());
         }
-        let mut words = [0u16; 64];
-        self.read(0, &mut words)?;
         // The unchanged generic source validator also exempts an explicitly
         // uninitialized TGP checksum word. No other family gets that rule.
+        let mut words = [0u16; 64];
+        self.read(0, &mut words)?;
         if family == I219Validation::Tgp && words[63] == u16::MAX {
             return Ok(());
         }
-        let sum = words.iter().copied().fold(0u16, u16::wrapping_add);
-        if sum != 0xbaba {
-            self.poisoned = true;
-            return Err(Error::Checksum(sum));
-        }
-        Ok(())
+        self.checksum(words)
     }
     pub fn station(&mut self) -> Result<crate::Mac, Error> {
         let mut words = [0u16; 3];

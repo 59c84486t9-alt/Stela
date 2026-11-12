@@ -292,6 +292,12 @@ impl Pch {
     pub fn stop(&mut self) -> Result<(), Error> {
         self.link.shutdown()
     }
+
+    /// Whether the NVM's checksum valid bit was clear, which Linux repairs
+    /// in flash and Stela leaves unwritten.
+    pub fn nvm_repair_left_out(&self) -> bool {
+        self.link.nvm_repair_left_out()
+    }
 }
 
 impl Link for Pch {
