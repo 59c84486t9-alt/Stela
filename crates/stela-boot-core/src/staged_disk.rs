@@ -486,8 +486,15 @@ pub const SILENT_COMPLETIONS: u32 = 64;
 ///
 /// Its message may never arrive (an interrupt the platform does not route,
 /// a controller that sends none): its commands then still complete, found by
-/// the looks for lost signals, but nothing should wait for a signal. Signals
-/// from other devices share the count, so one heard proves it only roughly.
+/// the looks for lost signals, but nothing should wait for a signal.
+///
+/// The check is not per device: the host handoff gives every device that
+/// signals (each disk, a Wi-Fi adapter) the same message, one vector to one
+/// processor, so a signal does not name its source. Telling them apart
+/// would take a vector and a count per device through the handoff and the
+/// drivers, which this check does not justify; so another device's signal
+/// can make a silent disk look heard, which leaves it at the lost-signal
+/// looks' pace, as before.
 #[derive(Debug, Default)]
 pub struct SignalWatch {
     /// The signal count at the first completion.
