@@ -466,6 +466,11 @@ impl Xhci {
         Some(start.saturating_add(ahead.saturating_mul(MICROFRAME)))
     }
 
+    /// What [`Self::attach`] last cabled to the USB2 port.
+    pub fn attached(&self) -> Option<Usb2Speed> {
+        self.ports[0].attached
+    }
+
     /// Cables `attached` to the USB2 port, or nothing.
     pub fn attach(&mut self, attached: Option<Usb2Speed>) {
         if self.ports[0].attached == attached {

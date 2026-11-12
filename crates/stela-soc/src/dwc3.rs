@@ -567,6 +567,15 @@ impl Dwc3 {
         }
     }
 
+    /// Whether [`Self::sync_port`] with `state` would change nothing: no
+    /// PHY disconnection to report and the port's generation and readiness
+    /// already `state`'s.
+    pub fn port_synced(&self, state: &impl PortState) -> bool {
+        !self.pending_phy_disconnect
+            && self.port_generation == state.generation()
+            && self.port_ready == state.high_speed_device_ready()
+    }
+
     pub fn sync_port(&mut self, state: &impl PortState) -> Result<()> {
         self.activity_ready()?;
         if self.pending_phy_disconnect {
@@ -649,6 +658,11 @@ impl Dwc3 {
         } else {
             None
         }
+    }
+
+    /// The USB2 function [`Self::attach_host_function`] last cabled.
+    pub fn host_function(&self) -> Option<Usb2Speed> {
+        self.host.attached()
     }
 
     /// Cables a USB2 function of `speed` to the host personality's root

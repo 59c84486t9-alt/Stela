@@ -96,6 +96,66 @@ fn a_write_elsewhere_runs_the_usb_schedule_only_with_work() {
     );
 }
 
+/// A cable change reaches the USB master through its connector, not a
+/// write to its devices: a write elsewhere still takes it up, a device-mode
+/// attach as the controller's port and a host-mode one as its host cable,
+/// and then leaves the master alone again.
+#[test]
+fn a_write_elsewhere_takes_up_a_cable_change() {
+    use crate::typec::{Attached, DataRole, Orientation, Usb2Speed};
+    let mut d = AppleDevices::new();
+    let dart = d
+        .add_dart(
+            Range {
+                physical: 0x382f00000,
+                bytes: 0x4000,
+            },
+            16,
+            None,
+            None,
+        )
+        .unwrap();
+    let phy = add_usb_phy(&mut d);
+    d.add_usb(&usb_placement(), dart).unwrap();
+    release_usb_phy(&mut d, &phy);
+    d.add_cpm_power(CPM, false).unwrap();
+    let mut ram = Ram::new(0x800000000, 0x10000);
+    let settle = |d: &mut AppleDevices, ram: &mut Ram| {
+        d.write(0, CPM + 0x250, 8, 1, 0).unwrap();
+        d.settle_write(0, 0, &mut Locked(ram)).transfer.unwrap();
+    };
+    settle(&mut d, &mut ram);
+    let cable = |role| Attached {
+        orientation: Orientation::Normal,
+        role,
+        source: role == DataRole::Dfp,
+        vbus: true,
+        speed: Usb2Speed::Full,
+    };
+    let connector = d.usb_masters[0].connector.clone();
+    connector
+        .set_connection(Some(cable(DataRole::Ufp)))
+        .unwrap();
+    let due = |d: &mut AppleDevices| {
+        let master = &d.usb_masters[0];
+        let controller = d.bus.device::<Dwc3>(master.device).unwrap();
+        AppleDevices::usb_due(controller, master, 0)
+    };
+    assert!(due(&mut d));
+    settle(&mut d, &mut ram);
+    assert!(d.usb_masters[0].port == UsbPort::of(&connector));
+    connector
+        .set_connection(Some(cable(DataRole::Dfp)))
+        .unwrap();
+    assert!(due(&mut d));
+    settle(&mut d, &mut ram);
+    let master = &d.usb_masters[0];
+    let controller = d.bus.device::<Dwc3>(master.device).unwrap();
+    assert!(master.port == UsbPort::of(&connector));
+    assert_eq!(controller.host_function(), Some(Usb2Speed::Full));
+    assert!(!due(&mut d));
+}
+
 /// Host cost of a CLPC counter read through a shared board, locked and
 /// passive, and of a write elsewhere's transfer with a USB master, full and
 /// with the schedule left to its work: `cargo test --release -p stela-soc

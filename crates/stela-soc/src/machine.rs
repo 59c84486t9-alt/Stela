@@ -268,13 +268,6 @@ pub struct AppleDevices {
     /// DMA the current transfer runs ([`Devices::settle_write`]).
     last_write: Vec<Option<(u64, u8)>>,
     writer: Option<(u64, u8)>,
-    /// Devices that start no DMA and reach no master's registers (the
-    /// console UART, the AIC): a write to one runs the masters' steps only when
-    /// their DMA is due or every [`QUIET_WRITES`] writes
-    /// ([`Self::quiet_write`]).
-    quiet: Vec<DeviceId>,
-    /// Writes to [`Self::quiet`] devices since the masters last ran.
-    quiet_streak: u32,
     /// Whether DMA data copies are left to [`Devices::take_unlocked`].
     defer_dma: bool,
     /// The displays' composes left since the last
@@ -686,8 +679,6 @@ impl AppleDevices {
             passive: crate::passive::PassiveMap::default(),
             last_write: Vec::new(),
             writer: None,
-            quiet: Vec::new(),
-            quiet_streak: 0,
             defer_dma: false,
             composes: Vec::new(),
         }
@@ -1363,52 +1354,14 @@ impl Devices for AppleDevices {
             .finish(outcome.answer);
     }
 
+    /// The entry, each master's DMA step and the wires it settles. After a
+    /// device write ([`Self::settle_write`]) a master that write did not
+    /// reach takes its step only when it has work ([`takes_step`]).
     fn transfer(
         &mut self,
         cpu: usize,
         memory: &mut dyn Memory,
         now: u64,
-    ) -> Result<(), DeviceError> {
-        self.transfer_with(cpu, memory, now, true)
-    }
-
-    /// As the default, with the transfer knowing PE `cpu`'s write: a USB
-    /// master that write did not reach runs its schedule only when it has
-    /// work ([`AppleDevices::usb_due`]); the home machine's transfers run
-    /// it whatever, as before.
-    fn settle_write(
-        &mut self,
-        cpu: usize,
-        now: u64,
-        memory: &mut dyn stela_engine::machine::engine::LockedMemory,
-    ) -> stela_engine::machine::engine::Settled {
-        self.writer = self.last_write.get_mut(cpu).and_then(Option::take);
-        let lock = self.memory_lock();
-        let masters = !self.quiet_write(now);
-        let transfer = self.transfer_with(cpu, memory.under(lock), now, masters);
-        self.writer = None;
-        stela_engine::machine::engine::Settled {
-            transfer,
-            lock,
-            call: self.take_call(cpu),
-            after: self.memory_lock(),
-        }
-    }
-}
-
-/// The most writes to [`AppleDevices::quiet`] devices in a row whose
-/// transfer leaves the masters' steps out: a console line's worth of bytes.
-const QUIET_WRITES: u32 = 16;
-
-impl AppleDevices {
-    /// A transfer ([`Devices::transfer`]): its entry, each master's DMA step
-    /// when `masters`, and the wires it settles.
-    fn transfer_with(
-        &mut self,
-        cpu: usize,
-        memory: &mut dyn Memory,
-        now: u64,
-        masters: bool,
     ) -> Result<(), DeviceError> {
         let mut lap = self.transfer_times.lap();
         self.observe_time(now, "transfer");
@@ -1418,7 +1371,7 @@ impl AppleDevices {
         // A master's refused work stops only that master: the others and the
         // devices' timers go on, and the first refusal is what is reported.
         let mut results = [const { Ok(()) }; 7];
-        for (index, result) in results.iter_mut().enumerate().filter(|_| masters) {
+        for (index, result) in results.iter_mut().enumerate() {
             *result = match index {
                 0 => self.transfer_pmp(cpu, memory, now),
                 1 => self.transfer_aes(cpu, memory, now),
@@ -1435,25 +1388,48 @@ impl AppleDevices {
         results.into_iter().find(Result::is_err).unwrap_or(settled)
     }
 
-    /// Whether the write being settled ([`Self::writer`]) went to a
-    /// [`Self::quiet`] device while no master's DMA is due at `now`, so the
-    /// masters' steps can wait: the write changed no master's state, and work
-    /// a master has pending is what its DMA deadline names, as for a guest
-    /// that only reads. The masters still run every [`QUIET_WRITES`] such
-    /// writes, so a long run of console output never holds them back longer.
-    fn quiet_write(&mut self, now: u64) -> bool {
-        let quiet = !self.quiet.is_empty()
-            && self.quiet_streak < QUIET_WRITES
-            && self.writer.is_some_and(|(physical, bytes)| {
-                Width::from_bytes(u64::from(bytes))
-                    .and_then(|width| self.bus.route(physical, width).ok())
-                    .is_some_and(|(device, _)| self.quiet.contains(&device))
-            })
-            && self.dma_deadline().is_none_or(|due| due > now);
-        self.quiet_streak = if quiet { self.quiet_streak + 1 } else { 0 };
-        quiet
+    /// As the default, with the transfer knowing PE `cpu`'s write: each
+    /// master that write did not reach takes its step only when it has work
+    /// ([`takes_step`]); the home machine's transfers run every step.
+    fn settle_write(
+        &mut self,
+        cpu: usize,
+        now: u64,
+        memory: &mut dyn stela_engine::machine::engine::LockedMemory,
+    ) -> stela_engine::machine::engine::Settled {
+        self.writer = self.last_write.get_mut(cpu).and_then(Option::take);
+        let lock = self.memory_lock();
+        let transfer = self.transfer(cpu, memory.under(lock), now);
+        self.writer = None;
+        stela_engine::machine::engine::Settled {
+            transfer,
+            lock,
+            call: self.take_call(cpu),
+            after: self.memory_lock(),
+        }
     }
+}
 
+/// Whether a master whose devices are `devices` takes its step in a
+/// transfer after the write `written` ([`AppleDevices::written_device`]):
+/// always in a transfer of the home machine's own (`None`) or after a write
+/// that reached one of `devices`, and otherwise only when `due` says the
+/// step has work. Each master's `due` is exact: everything its step would
+/// act on, its deadlines and the state other devices' writes and the
+/// transfer's entry (power, PHYs, cables) can change. A step that only acts
+/// on its devices' pending work (AES, storage, GFX, SEP) is its own test.
+fn takes_step(
+    written: Option<Option<DeviceId>>,
+    devices: &[DeviceId],
+    due: impl FnOnce() -> bool,
+) -> bool {
+    match written {
+        None => true,
+        Some(device) => device.is_some_and(|device| devices.contains(&device)) || due(),
+    }
+}
+
+impl AppleDevices {
     fn transfer_pmp(
         &mut self,
         cpu: usize,
@@ -1628,9 +1604,8 @@ impl AppleDevices {
     /// notice the AP sent is seen by this step's vblank; then the display at
     /// `now` (its vblank, a present latched at it); then the link DMA again
     /// for the callbacks the vblank queued, its vsync and the completions.
-    /// After a write that reached none of a DCP's devices (its ASC, link
-    /// DART, surface DART) the DCP skips its step unless it has work
-    /// ([`Self::dcp_due`]); the home machine's transfers always run it.
+    /// Its devices are its ASC, link DART and surface DART, and its work
+    /// [`Self::dcp_due`] ([`takes_step`]).
     fn transfer_dcp(
         &mut self,
         cpu: usize,
@@ -1640,14 +1615,9 @@ impl AppleDevices {
         let written = self.written_device();
         for index in 0..self.dcp_masters.len() {
             let master = &self.dcp_masters[index];
-            let optional = written.is_some_and(|device| {
-                device.is_some_and(|device| {
-                    device != master.asc
-                        && device != master.dart
-                        && master.surface.is_none_or(|(surface, _)| device != surface)
-                })
-            });
-            if optional && !self.dcp_due(index, now) {
+            let surface = master.surface.map(|(surface, _)| surface);
+            let devices = [master.asc, master.dart, surface.unwrap_or(master.dart)];
+            if !takes_step(written, &devices, || self.dcp_due(index, now)) {
                 continue;
             }
             self.service_dcp_link(index, cpu, memory, now)?;
@@ -1791,11 +1761,31 @@ impl AppleDevices {
         })
     }
 
-    /// Whether USB master `master`'s schedule has work at `now`, its cable
-    /// and PHY already brought up to date: what the home machine's DMA
-    /// deadline is for ([`Devices::dma_deadline`]), and the work a step takes
-    /// whatever the time.
+    /// Whether USB master `master`'s step has work at `now`: a session to
+    /// cancel, a new cable generation, a port or host cable the controller
+    /// has not taken up (the PHY and power the transfer's entry settled can
+    /// change it), and, with the controller active, its schedule's work: what
+    /// the home machine's DMA deadline is for ([`Devices::dma_deadline`]),
+    /// and the work a step takes whatever the time.
     fn usb_due(controller: &Dwc3, master: &UsbMaster, now: u64) -> bool {
+        let connector = UsbPort::of(&master.connector);
+        if master.session_reset || controller.service_due() || connector != master.port {
+            return true;
+        }
+        if !controller.lifecycle_active() {
+            return false;
+        }
+        let physical_port = UsbPort {
+            generation: connector.generation,
+            ready: connector.ready && controller.phy_ready(),
+        };
+        let cable = controller
+            .phy_ready()
+            .then(|| host_function(&master.connector))
+            .flatten();
+        if !controller.port_synced(&physical_port) || controller.host_function() != cable {
+            return true;
+        }
         if master.phy_changed
             || master.session_reset
             || controller.service_due()
@@ -1812,10 +1802,9 @@ impl AppleDevices {
             .any(|due| due <= now)
     }
 
-    /// Each USB master's step. After a write that reached none of a master's
-    /// devices (core, PHY, DART) the master skips its schedule unless it has
-    /// work ([`Self::usb_due`]), keeping its session clock where the step
-    /// would have; the home machine's transfers always run it.
+    /// Each USB master's step. Its devices are its core, PHY and DART, and
+    /// its work [`Self::usb_due`] ([`takes_step`]); a master that skips its
+    /// step keeps its session clock where the step would have.
     fn transfer_usb(
         &mut self,
         cpu: usize,
@@ -1828,6 +1817,14 @@ impl AppleDevices {
                 .bus
                 .pair_mut::<Dwc3, Dart>(master.device, master.dart)
                 .expect("USB master retains its DART");
+            let devices = [master.device, master.phy, master.dart];
+            if !takes_step(written, &devices, || Self::usb_due(controller, master, now)) {
+                // A detached session moves nothing; its clock moves on.
+                if controller.lifecycle_active() && !master.attached && now >= master.next_poll {
+                    master.next_poll = usb_poll(now, master.next_poll).1;
+                }
+                continue;
+            }
             let mut access = Access::new(cpu, now, &mut self.latch);
             let mut port = Port {
                 iommu: dart,
@@ -1867,18 +1864,6 @@ impl AppleDevices {
                         .flatten(),
                 )
                 .map_err(fail)?;
-            let optional = written.is_some_and(|device| {
-                device.is_some_and(|device| {
-                    ![master.device, master.phy, master.dart].contains(&device)
-                })
-            });
-            if optional && !Self::usb_due(controller, master, now) {
-                // A detached session moves nothing; its clock moves on.
-                if !master.attached && now >= master.next_poll {
-                    master.next_poll = usb_poll(now, master.next_poll).1;
-                }
-                continue;
-            }
             let function = master.peripheral.as_mut().map(|p| p as &mut dyn Function);
             controller.service_host(&mut port, function).map_err(fail)?;
             controller.flush(&mut port).map_err(fail)?;
