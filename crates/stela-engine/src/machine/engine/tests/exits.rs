@@ -184,6 +184,11 @@ fn exit_transition_costs() {
     let mut machine = branches();
     let ns = time(&mut machine, 2, direct_round);
     std::println!("EXITS direct round_trip ns_per_exit={ns}");
+    // With the step loop's profiler on, as a profile build runs.
+    let mut profiled = branches();
+    profiled.set_step_timing(true);
+    let ns = time(&mut profiled, 2, direct_round);
+    std::println!("EXITS direct round_trip profiled ns_per_exit={ns}");
     // Its parts: the schedule, the fetch, and the run with its exit.
     let ns = time(&mut machine, 1, |machine| machine.schedule().unwrap());
     std::println!("EXITS direct part=schedule ns={ns}");

@@ -1245,6 +1245,9 @@ impl Heartbeat {
             // All PEs: why runs ended at fallthrough, direct, indirect, call
             // and return exits.
             let mut branch_misses = [0u64; 40];
+            // All PEs: their TLB mail's waits, the sums over the interval
+            // and the longest of the run.
+            let mut mail_waits = [0u64; stela_engine::machine::engine::MAIL_WAITS];
             let mut itlb_sources = String::from(concat!(
                 "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
                 "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
@@ -1385,6 +1388,20 @@ impl Heartbeat {
                         .zip(before.transition_misses.as_flattened()),
                 ) {
                     *total += now.saturating_sub(*before);
+                }
+                {
+                    use stela_engine::machine::engine::MailWait::{Longest, LongestNative};
+                    let longest = Longest as usize;
+                    for (total, (now, before)) in mail_waits[..longest]
+                        .iter_mut()
+                        .zip(now.mail_waits.iter().zip(&before.mail_waits))
+                    {
+                        *total += now.saturating_sub(*before);
+                    }
+                    if now.mail_waits[longest] > mail_waits[longest] {
+                        mail_waits[longest] = now.mail_waits[longest];
+                        mail_waits[LongestNative as usize] = now.mail_waits[LongestNative as usize];
+                    }
                 }
                 for (total, (now, before)) in branch_misses.iter_mut().zip(
                     now.branch_misses
@@ -1548,6 +1565,23 @@ impl Heartbeat {
             output::arguments(format_args!(
                 "PES BRANCH MISSES spent/interrupt/unlinked/itlb/table/btype/found/transitioned fallthrough={fallthrough} direct={direct} indirect={indirect} call={call} return={ret}\n"
             ));
+            {
+                use stela_engine::machine::engine::MailWait as W;
+                let count = mail_waits[W::Count as usize].max(1);
+                let nanos =
+                    |ticks: u64| u128::from(ticks) * 1_000_000_000 / u128::from(tsc_hz.max(1));
+                let each = |part: W| nanos(mail_waits[part as usize] / count);
+                output::arguments(format_args!(
+                    "PES MAIL tlb={} ns_each latency={} native={} exit={} apply={} longest_us={}/native_us={}\n",
+                    mail_waits[W::Count as usize],
+                    each(W::Latency),
+                    each(W::Native),
+                    each(W::Exit),
+                    each(W::Apply),
+                    nanos(mail_waits[W::Longest as usize]) / 1000,
+                    nanos(mail_waits[W::LongestNative as usize]) / 1000,
+                ));
+            }
             output::arguments(format_args!("{store}\n"));
             stamped.push_str(&format!(" in_use={stamped_in_use}"));
             stamped_line = Some((stamped, predicted, pac_fills));

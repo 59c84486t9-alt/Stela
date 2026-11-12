@@ -311,6 +311,9 @@ struct Inbox {
     /// The serial of the last maintenance posted and of the last applied.
     posted: AtomicU64,
     applied: AtomicU64,
+    /// The host tick of the first post its machine has not read yet, 0
+    /// for none ([`super::Statistics::mail_waits`]).
+    posted_at: AtomicU64,
     /// Device lines changed since the machine last read them.
     lines: AtomicU64,
     /// The regime and ASID ([`context_word`]) of the only non-global
@@ -386,6 +389,9 @@ pub struct Counts {
     /// Of `waits`, WFEs completed in their exit ([`super::Statistics::short_waits`]).
     pub short_waits: u64,
     pub sync_ticks: u64,
+    /// The TLB mail it applied and how long it waited
+    /// ([`super::Statistics::mail_waits`]).
+    pub mail_waits: [u64; super::reports::MAIL_WAITS],
     pub waits: u64,
     pub broadcasts: u64,
     pub forwards: u64,
@@ -553,6 +559,7 @@ impl Hub {
                     discarded: AtomicBool::new(false),
                     posted: AtomicU64::new(0),
                     applied: AtomicU64::new(0),
+                    posted_at: AtomicU64::new(0),
                     lines: AtomicU64::new(0),
                     counts: Mutex::new(Counts::default()),
                     system_exits: Mutex::new(step_timing::SystemExits::default()),
@@ -873,6 +880,11 @@ impl Hub {
                 _ => true,
             });
             if reaches {
+                let now = self.ticks().max(1);
+                let _ =
+                    inbox
+                        .posted_at
+                        .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
                 self.interrupt(pe);
                 reached(pe, serial);
                 posted += 1;
@@ -966,7 +978,7 @@ impl Hub {
         }
     }
 
-    fn pending(&self, pe: usize) -> bool {
+    pub(super) fn pending(&self, pe: usize) -> bool {
         self.inboxes[pe].pending.load(Ordering::SeqCst)
     }
 
@@ -1635,10 +1647,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.signal_event();
             }
             self.statistics.itlb_sources[super::ItlbSource::MailMerged as usize] += mail.merged;
+            let posted = hub.inboxes[self.current]
+                .posted_at
+                .swap(0, Ordering::Relaxed);
+            let read = hub.ticks();
             for maintenance in &mail.maintenance {
                 self.maintain(*maintenance)?;
             }
             hub.acknowledge(self.current, mail.serial);
+            let returned = core::mem::take(&mut self.mail_returned);
+            if posted != 0 && read != 0 {
+                self.note_mail_wait(posted, returned, read, hub.ticks());
+            }
             self.mail_spare = mail.maintenance;
             if let Some(address) = mail.start {
                 self.start(Start {
@@ -1652,6 +1672,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.chain.acknowledge_interrupt(observed);
         }
         result
+    }
+
+    /// Count a TLB maintenance mail first posted at host tick `posted`,
+    /// whose PE's native run returned at `returned` (0 when it was not in
+    /// one), read at `read` and applied by `applied`
+    /// ([`super::Statistics::mail_waits`]).
+    fn note_mail_wait(&mut self, posted: u64, returned: u64, read: u64, applied: u64) {
+        use super::reports::MailWait;
+        let latency = read.saturating_sub(posted);
+        let native = match returned {
+            0 => 0,
+            returned => returned.saturating_sub(posted).min(latency),
+        };
+        let waits = &mut self.statistics.mail_waits;
+        waits[MailWait::Count as usize] += 1;
+        waits[MailWait::Latency as usize] += latency;
+        waits[MailWait::Native as usize] += native;
+        waits[MailWait::Exit as usize] += latency - native;
+        waits[MailWait::Apply as usize] += applied.saturating_sub(read);
+        if latency > waits[MailWait::Longest as usize] {
+            waits[MailWait::Longest as usize] = latency;
+            waits[MailWait::LongestNative as usize] = native;
+        }
     }
 
     /// Whether the running PE waits in WFE on an armed monitor while other
@@ -2120,6 +2163,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             halt_ticks: statistics.halt_ticks,
             short_waits: statistics.short_waits,
             sync_ticks: statistics.sync_ticks,
+            mail_waits: statistics.mail_waits,
             waits: statistics.waits,
             broadcasts: statistics.broadcasts,
             forwards: statistics.forwards,

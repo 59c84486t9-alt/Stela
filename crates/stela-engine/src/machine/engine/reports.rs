@@ -711,7 +711,29 @@ pub struct Statistics {
     pub broadcasts: u64,
     pub forwards: u64,
     pub sync_ticks: u64,
+    /// The TLB maintenance mail this PE applied, in host ticks
+    /// ([`MailWait`]): how long each waited from its first post to the
+    /// read, the part of that its native run took to return, the part its
+    /// exit took after, and the apply; then the longest wait and its
+    /// native part.
+    pub mail_waits: [u64; MAIL_WAITS],
 }
+
+/// The parts of [`Statistics::mail_waits`]: sums of the first five, the
+/// greatest of the last two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailWait {
+    Count,
+    Latency,
+    Native,
+    Exit,
+    Apply,
+    Longest,
+    LongestNative,
+}
+
+/// [`MailWait`]'s parts.
+pub const MAIL_WAITS: usize = MailWait::LongestNative as usize + 1;
 
 impl core::ops::AddAssign for Statistics {
     fn add_assign(&mut self, other: Self) {
@@ -785,8 +807,16 @@ impl core::ops::AddAssign for Statistics {
             broadcasts,
             forwards,
             sync_ticks,
+            mail_waits,
             store_sources,
         } = other;
+        for (index, (total, count)) in self.mail_waits.iter_mut().zip(mail_waits).enumerate() {
+            if index < MailWait::Longest as usize {
+                *total += count;
+            } else {
+                *total = (*total).max(count);
+            }
+        }
         self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
             *total += count;

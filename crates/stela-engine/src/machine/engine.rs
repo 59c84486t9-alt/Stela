@@ -13,9 +13,9 @@ use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;
 use reports::*;
 pub use reports::{
-    DeviceRegister, Discard, Event, ExitWordsWalk, Footprint, FootprintWalk, Occupancy, PeState,
-    Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed, Suspension, TRACE_HITS,
-    TraceHit, WATCH_HITS, WatchHit,
+    DeviceRegister, Discard, Event, ExitWordsWalk, Footprint, FootprintWalk, MAIL_WAITS, MailWait,
+    Occupancy, PeState, Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed,
+    Suspension, TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
 };
 mod amx;
 mod apple_maintenance;
@@ -925,6 +925,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// the next fetch in the context walks them again
     /// ([`Self::refill_dropped`]).
     dropped_refills: BTreeMap<u64, Vec<u64>>,
+    /// The host tick at which the first native run that returned with
+    /// mail waiting returned, 0 for none since the last read
+    /// ([`Statistics::mail_waits`]).
+    mail_returned: u64,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
     /// Accessors by encoding.
@@ -1375,6 +1379,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pending_refills: BTreeMap::new(),
             refills: Vec::new(),
             dropped_refills: BTreeMap::new(),
+            mail_returned: 0,
             applying_mail: false,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),

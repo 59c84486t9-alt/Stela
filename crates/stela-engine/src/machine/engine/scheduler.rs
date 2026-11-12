@@ -304,6 +304,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
+        if self.mail_returned == 0
+            && let Some(hub) = &self.parallel
+            && hub.pending(self.current)
+        {
+            self.mail_returned = hub.ticks().max(1);
+        }
         if self.mirrors.switches.len != 0 {
             self.take_thread_switches();
         }

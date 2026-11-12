@@ -709,6 +709,62 @@ fn mail_for_a_pe_that_does_not_read_it_stays_bounded() {
 /// A run of TLBIs by page, as XNU's and SPTM's loops send them, merges
 /// into one range a sleeping PE applies at once: no invalidation of
 /// everything, and the kernel's contexts outlive it.
+/// A PE counts how long its TLB mail waited, from the first post it had
+/// not read to the read, and how long its native run, when one was going,
+/// took of that to return; then the apply. Later posts of the same mail
+/// keep the first's time.
+#[test]
+fn a_pe_times_its_tlb_mail_from_the_first_post_to_the_read() {
+    use super::super::reports::MailWait;
+    use crate::machine::system::TlbiKind::VAA;
+    let clock = Arc::new(AtomicUsize::new(1));
+    let hub = Hub::new(2, Ticks(Arc::clone(&clock)));
+    for pe in 0..2 {
+        hub.set_live(pe, true);
+    }
+    // NOP.
+    let mut machine = first_of_two(&[0xd503_201f], &hub);
+    let waits = |machine: &Machine<_, _>| machine.statistics.mail_waits;
+    // Mail read between runs: all of its wait is the engine's.
+    hub.broadcast(1, &[tlbi(VAA, 0x10_0000)]);
+    hub.broadcast(1, &[tlbi(VAA, 0x10_0001)]);
+    machine.read_mail().unwrap();
+    let counted = waits(&machine);
+    assert_eq!(counted[MailWait::Count as usize], 1);
+    assert!(counted[MailWait::Latency as usize] >= 2);
+    assert_eq!(counted[MailWait::Native as usize], 0);
+    assert_eq!(
+        counted[MailWait::Exit as usize],
+        counted[MailWait::Latency as usize]
+    );
+    assert!(counted[MailWait::Apply as usize] >= 1);
+    assert_eq!(
+        counted[MailWait::Longest as usize],
+        counted[MailWait::Latency as usize]
+    );
+    // Mail posted while a native run goes on: its return counts apart.
+    let pc = machine.cpu.pc;
+    let Ok(super::super::Fetched::Block(index)) = machine.fetch_block(pc, false) else {
+        panic!("a block");
+    };
+    hub.broadcast(1, &[tlbi(VAA, 0x20_0000)]);
+    machine.host.exits = vec![super::super::NativeExit::Exit {
+        next_pc: pc + 4,
+        kind: stela_compiler::block::ExitKind::Fallthrough as u64,
+    }];
+    let budget = machine.chain_budget();
+    machine.execute(index, budget).unwrap();
+    machine.read_mail().unwrap();
+    let after = waits(&machine);
+    assert_eq!(after[MailWait::Count as usize], 2);
+    let native = after[MailWait::Native as usize];
+    assert!(native >= 1);
+    assert!(native < after[MailWait::Latency as usize] - counted[MailWait::Latency as usize]);
+    // Nothing waits after the read.
+    machine.read_mail().unwrap();
+    assert_eq!(waits(&machine), after);
+}
+
 #[test]
 fn a_run_of_tlbis_by_page_merges_into_one_range() {
     use crate::machine::system::TlbiKind::{VA, VAA};
