@@ -11,6 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use stela_loader::host_firmware;
 
 pub(super) fn uninstall(
     environment: &Environment<'_>,
@@ -57,6 +58,11 @@ pub(super) fn uninstall(
             if directory.is_dir() {
                 removals.push(directory);
             }
+        }
+        // The firmware bundle setup, repair and update keep on the volume.
+        let firmware = record.volume.join(host_firmware::bundle::DIRECTORY);
+        if firmware.is_dir() {
+            removals.push(firmware);
         }
     } else {
         writeln!(

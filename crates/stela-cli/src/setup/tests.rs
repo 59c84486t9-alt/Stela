@@ -640,9 +640,20 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     .to_string();
     assert!(error.contains("only one"), "{error}");
 
+    // The firmware bundle a setup with a bundle-reading stela.efi puts on
+    // the volume goes too.
+    let firmware = record
+        .volume
+        .join(stela_loader::host_firmware::bundle::DIRECTORY);
+    fs::create_dir_all(firmware.join("licenses")).unwrap();
+    fs::write(firmware.join("bundle.json"), b"{}").unwrap();
     let dry = uninstall(&environment(host), &f.esp, true).unwrap();
     assert!(dry.contains("Dry run"));
-    assert!(bundle.is_dir());
+    assert!(
+        dry.contains(&format!("remove   {}", firmware.display())),
+        "{dry}"
+    );
+    assert!(bundle.is_dir() && firmware.is_dir());
     let done = uninstall(&environment(host), &f.esp, false).unwrap();
     assert!(done.contains("Done."));
     assert_eq!(
