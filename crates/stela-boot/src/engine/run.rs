@@ -1612,6 +1612,7 @@ impl Heartbeat {
             let mut itlb_sources = String::from(concat!(
                 "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
                 "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
+                "/drop_upper/drop_no_asid/drop_global",
             ));
             // Per PE: its installs at EL0 and then above EL0 by where the
             // block came from: compiled in a page the store keys (offered

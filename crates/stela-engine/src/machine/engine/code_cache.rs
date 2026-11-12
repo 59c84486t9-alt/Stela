@@ -430,6 +430,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 };
                 statistics.itlb_drops[1] += 1;
                 statistics.itlb_sources[source as usize] += 1;
+                if source == ItlbSource::DropEvery {
+                    let every = match (half, scoped) {
+                        (1, _) => ItlbSource::DropUpper,
+                        (_, None) => ItlbSource::DropNoAsid,
+                        _ => ItlbSource::DropGlobal,
+                    };
+                    statistics.itlb_sources[every as usize] += 1;
+                }
                 super::compilation::note_itlb_ghost(ghosts, entry, ItlbMiss::Forgotten);
                 if spaces.live(entry.key).is_some() {
                     Self::keep_dropped(

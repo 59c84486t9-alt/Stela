@@ -578,4 +578,11 @@ fn a_tlbi_by_va_and_asid_reaches_other_asids_only_at_their_global_entries() {
     tlbi(&mut machine, OWN, None);
     assert!(!held(&machine, OWN, mine));
     assert!(!held(&machine, OWN, other));
+    // The drops in every context, by why: two global entries, then two
+    // entries a TLBI without an ASID reached; none of the upper half.
+    let sources = |source: ItlbSource| machine.statistics.itlb_sources[source as usize];
+    assert_eq!(sources(ItlbSource::DropEvery), 4);
+    assert_eq!(sources(ItlbSource::DropGlobal), 2);
+    assert_eq!(sources(ItlbSource::DropNoAsid), 2);
+    assert_eq!(sources(ItlbSource::DropUpper), 0);
 }

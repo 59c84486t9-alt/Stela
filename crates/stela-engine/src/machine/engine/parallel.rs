@@ -445,7 +445,7 @@ pub struct Counts {
     /// Why its runs ended at branch-kind exits, in kind order
     /// ([`super::Statistics::branch_misses`]).
     pub branch_misses: [[u64; super::reports::BRANCH_REASONS]; super::reports::BRANCH_KINDS],
-    pub itlb_sources: [u64; 12],
+    pub itlb_sources: [u64; super::ItlbSource::COUNT],
     /// Its stamped transfers ([`chain::StampCount`]'s order), the exits it
     /// gave a stamped tail, how many exits had one when it last looked, then
     /// the PAC branch exits it gave a predicted tail.
