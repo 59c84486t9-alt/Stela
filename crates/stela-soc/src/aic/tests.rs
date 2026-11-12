@@ -909,3 +909,66 @@ fn an_unsplit_devicetree_vector_names_its_die_by_max_irq() {
         );
     }
 }
+
+/// The event register is plain exactly while no IRQ is deliverable: served
+/// again then, it gives what the model gives; an input that rises, an
+/// unmask, a software trigger or a steering change moves the epoch first.
+#[test]
+fn the_event_register_is_plain_while_nothing_is_deliverable() {
+    use crate::plain_reads::{Op, check};
+    const INPUTS: [u16; 3] = [3, 37, 739];
+    fn wire(
+        bus: &mut crate::bus::Bus,
+        aic: crate::bus::DeviceId,
+        access: &mut Access<'_>,
+        value: usize,
+    ) -> u64 {
+        let input = AicInput::new(0, INPUTS[value % INPUTS.len()]);
+        let asserted = (value / INPUTS.len()).is_multiple_of(2);
+        let aic = bus.device_mut::<Aic2>(aic).unwrap();
+        aic.set_input(input, asserted, access).unwrap();
+        u64::from(asserted)
+    }
+    fn steer(
+        bus: &mut crate::bus::Bus,
+        aic: crate::bus::DeviceId,
+        access: &mut Access<'_>,
+        value: usize,
+    ) -> u64 {
+        let refuses = value.is_multiple_of(2);
+        bus.device_mut::<Aic2>(aic)
+            .unwrap()
+            .steer(value / 2 % 4, refuses, access);
+        u64::from(refuses)
+    }
+    let make = || -> alloc::boxed::Box<dyn MmioDevice> {
+        let mut aic = Aic2::new(Aic2Config {
+            cpus: 4,
+            default_cpus: 0b1111,
+            ..aic(1).config
+        })
+        .unwrap();
+        let mut latch = InterruptLatch::new();
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        alloc::boxed::Box::new(aic)
+    };
+    const BITS: &[u64] = &[1 << 3, 1 << 5, 1 << 3 | 1 << 5, 0];
+    const HIGH: &[u64] = &[1 << 3, 1 << 5, 0];
+    check(
+        make,
+        0..EVENT + 4,
+        &[(EVENT, Width::Word)],
+        &[
+            Op::Write(MASK_CLR, Width::Word, BITS),
+            Op::Write(MASK_SET, Width::Word, BITS),
+            Op::Write(MASK_CLR + 4, Width::Word, HIGH),
+            Op::Write(MASK_CLR + 4 * (739 / 32), Width::Word, &[1 << (739 % 32)]),
+            Op::Write(SW_SET, Width::Word, BITS),
+            Op::Write(SW_CLR, Width::Word, BITS),
+            Op::Write(CONFIG, Width::Word, &[0, CONFIG_ENABLE as u64]),
+            Op::Read(MASK_SET, Width::Word),
+            Op::Call(wire),
+            Op::Call(steer),
+        ],
+    );
+}

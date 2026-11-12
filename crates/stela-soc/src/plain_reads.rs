@@ -1,7 +1,7 @@
 //! The check every model's plain reads ([`MmioDevice::plain_read`]) pass: a
 //! read served again while its model's epoch holds gives what the model
 //! gives, and leaving plain reads out changes nothing else the model does.
-use crate::bus::{Access, Bus, MmioDevice, Width};
+use crate::bus::{Access, Bus, DeviceId, MmioDevice, Width};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::sync::Arc;
@@ -20,6 +20,9 @@ pub(crate) enum Op {
     Read(u64, Width),
     /// The model's advance with time.
     Advance,
+    /// A change through the model's typed handle, such as an input wire:
+    /// given the bus, the model, the access and a random value.
+    Call(fn(&mut Bus, DeviceId, &mut Access<'_>, usize) -> u64),
 }
 
 /// Drive bus models from `make` through random sequences of `ops` and of the
@@ -27,8 +30,9 @@ pub(crate) enum Op {
 /// and the other none: their every other result and wire stay the same. A
 /// plain read's value while the model's epoch holds the count it held at an
 /// earlier plain read of the same register is that earlier value, whatever
-/// the reading PE and the time. `window` is the model's offsets the bus
-/// maps.
+/// the reading PE and the time. A register of `plain` may be plain only in
+/// some states: while it is not, its read is one of `ops`' reads, by the
+/// same PE on both models. `window` is the model's offsets the bus maps.
 pub(crate) fn check(
     make: impl Fn() -> Box<dyn MmioDevice>,
     window: core::ops::Range<u64>,
@@ -40,12 +44,12 @@ pub(crate) fn check(
         let device = bus.add(make());
         bus.map(device, BASE, window.end - window.start, window.start)
             .unwrap();
-        bus
+        (bus, device)
     };
     let at = |offset: u64| BASE + offset - window.start;
     let mut served = 0;
     for seed in 1..=32u64 {
-        let (mut read, mut left) = (bus(), bus());
+        let ((mut read, device), (mut left, _)) = (bus(), bus());
         let (mut read_wires, mut left_wires) = (InterruptLatch::new(), InterruptLatch::new());
         let mut kept: Vec<Option<(Arc<AtomicU64>, u64, u64)>> = alloc::vec![None; plain.len()];
         let mut random = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -57,10 +61,22 @@ pub(crate) fn check(
             let value = (random >> 40) as usize;
             if let Some(index) = pick.checked_sub(ops.len()) {
                 let (offset, width) = plain[index];
-                let (epoch, seen) = read
-                    .plain_epoch(at(offset), width)
-                    .unwrap_or_else(|| panic!("{offset:#x} {width:?} is not plain"));
                 let cpu = value % 4;
+                let Some((epoch, seen)) = read.plain_epoch(at(offset), width) else {
+                    let a = read.read(
+                        at(offset),
+                        width,
+                        &mut Access::new(cpu, now, &mut read_wires),
+                    );
+                    let b = left.read(
+                        at(offset),
+                        width,
+                        &mut Access::new(cpu, now, &mut left_wires),
+                    );
+                    assert_eq!(a, b, "seed {seed} step {now}");
+                    kept[index] = None;
+                    continue;
+                };
                 let got = read.read(
                     at(offset),
                     width,
@@ -109,6 +125,20 @@ pub(crate) fn check(
                         .map(|next| next.unwrap_or(u64::MAX)),
                     left.advance(&mut Access::new(0, now, &mut left_wires))
                         .map(|next| next.unwrap_or(u64::MAX)),
+                ),
+                Op::Call(call) => (
+                    Ok(call(
+                        &mut read,
+                        device,
+                        &mut Access::new(0, now, &mut read_wires),
+                        value,
+                    )),
+                    Ok(call(
+                        &mut left,
+                        device,
+                        &mut Access::new(0, now, &mut left_wires),
+                        value,
+                    )),
                 ),
             };
             assert_eq!(a, b, "seed {seed} step {now}");

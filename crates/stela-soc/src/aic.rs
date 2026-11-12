@@ -714,6 +714,15 @@ impl MmioDevice for Aic2 {
     fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
         Some(self)
     }
+    /// The event register while no IRQ is deliverable to any CPU: its read
+    /// claims nothing and gives 0 to every CPU the AIC serves, until an
+    /// input, a register write or a steering change, each of which reaches
+    /// the model through the bus and moves its epoch first.
+    fn plain_read(&self, offset: u64, width: Width) -> bool {
+        width == Width::Word
+            && offset == self.config.event_offset
+            && (self.accepting_cpus() == 0 || self.first_pending().is_none())
+    }
     fn read(
         &mut self,
         offset: u64,
