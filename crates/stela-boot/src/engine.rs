@@ -870,8 +870,8 @@ fn show_reset(otherwise: &str, action: &str, hold: u64) {
     }
     show_stop(&guest_down(String::from(otherwise)));
     crate::status::info(
-        "Its full log is on this USB: on another computer, `stela setup boot-log --usb USB` \
-         prints it.",
+        "Its full log is on this USB: on another computer, `stela setup boot-log --output \
+         log.txt` saves it.",
     );
     crate::status::countdown(action, hold);
 }

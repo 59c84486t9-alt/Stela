@@ -22,8 +22,8 @@ Then boot the PC from the stick.
 
 ## Boot log
 
-If Stela does not work, include the boot log in your report:
+If Stela does not work, save the boot log and include `log.txt` in your report:
 
 ```
-sudo ./stela setup boot-log
+sudo ./stela setup boot-log --output log.txt
 ```

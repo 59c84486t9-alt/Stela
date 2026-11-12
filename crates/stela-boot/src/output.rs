@@ -927,7 +927,8 @@ fn stopped(message: &str, next: &str) {
 /// What a stopped boot tells the user to do next: where its log is, and how
 /// to read it on another computer.
 pub const STOPPED: &str = "Stela stopped. Its log is on this USB: on another computer, `stela \
-    setup boot-log --usb USB` prints it; include it in a report. Turn the PC off to try again.";
+    setup boot-log --output log.txt` saves it; include that file in a report. Turn the PC off to \
+    try again.";
 
 /// What a stop before the engine writes the USB's log again tells the
 /// user: the screen is all that is kept of this part of the run.
