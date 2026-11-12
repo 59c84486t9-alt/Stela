@@ -3250,13 +3250,23 @@ fn native_dsb_completes_only_without_outstanding_maintenance() {
     machine.cpu.pstate.el = 0;
     assert!(native(&mut machine), "at EL0");
     machine.cpu.pstate.el = 1;
-    // Maintenance for the other PE: the DSB must send it and wait.
+    // Maintenance while the other PE runs no block goes at once, and it
+    // will read it before it runs one: the DSB has nothing to complete.
+    hub.leave_active(1);
+    machine.post(Maintenance::Code(None));
+    assert!(machine.outgoing.is_empty() && machine.posted.is_empty());
+    assert!(hub.take(1).is_some());
+    assert!(native(&mut machine), "nobody to wait for");
+    // Maintenance while it runs a block: the DSB must send it and wait.
+    assert!(hub.enter_active(1));
     machine.post(Maintenance::Code(None));
     assert!(!native(&mut machine), "maintenance posted");
+    assert!(hub.take(1).is_none(), "kept for the DSB");
     hub.set_live(1, false);
     engine(&mut machine);
     assert!(machine.outgoing.is_empty() && machine.posted.is_empty());
     assert!(native(&mut machine));
+    hub.set_live(1, true);
     // A code page cell the DSB that ends the run of lines must close.
     machine.mirrors.open_code_page(0x4000);
     assert!(!native(&mut machine), "code page cell open");

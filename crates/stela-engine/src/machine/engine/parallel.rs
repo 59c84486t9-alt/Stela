@@ -1281,6 +1281,17 @@ impl Hub {
         }
     }
 
+    /// Whether a PE but `from` acts on a fetched block ([`Inbox::active`]),
+    /// which a broadcast would wait for ([`Self::applied`]).
+    pub(super) fn others_active(&self, from: usize) -> bool {
+        self.others(from).any(|pe| {
+            let inbox = &self.inboxes[pe];
+            inbox.active.load(Ordering::SeqCst) & 1 != 0
+                && !inbox.sleeping.load(Ordering::SeqCst)
+                && !inbox.outside.load(Ordering::SeqCst)
+        })
+    }
+
     fn others(&self, from: usize) -> impl Iterator<Item = usize> + '_ {
         (0..self.inboxes.len())
             .filter(move |&pe| pe != from && self.inboxes[pe].live.load(Ordering::Acquire))
@@ -2049,15 +2060,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// completes for them at this PE's next DSB, which sends what this PE
     /// kept in one piece of mail and waits for them
     /// ([`Self::complete_maintenance`]): a run of maintenance takes them
-    /// from their code once.
+    /// from their code once. While no other PE acts on a fetched block,
+    /// there is nobody to take from code: the mail goes at once, and once
+    /// every PE it reaches counts as having applied it ([`Hub::applied`]),
+    /// which stays so, the next DSB finds nothing outstanding and completes
+    /// natively ([`Self::open_barrier`]).
     pub(super) fn post(&mut self, maintenance: Maintenance) {
-        if self.parallel.is_none() {
+        let Some(hub) = self.parallel.clone() else {
             return;
-        }
+        };
         self.mirrors.barrier = stela_compiler::x86_64::register_read::Cell::default();
         self.outgoing.push(maintenance);
-        if self.outgoing.len() == OUTGOING {
+        if self.outgoing.len() == OUTGOING || !hub.others_active(self.current) {
             self.send_outgoing();
+            if hub.applied(&mut self.posted) {
+                self.open_barrier();
+            }
         }
     }
 
