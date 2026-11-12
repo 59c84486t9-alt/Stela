@@ -81,6 +81,13 @@ pub trait Kick: Send + Sync {
     fn release_due(&self) -> bool {
         false
     }
+    /// Whether the work [`Self::release_due`] reports only gives a host
+    /// device commands, with nothing to take from it: a start is one
+    /// doorbell write, cheaper than the wake of a sleeping PE, so the
+    /// releasing processor does it at once instead of handing it on.
+    fn release_inline(&self) -> bool {
+        false
+    }
     /// Runs on the processor that just released the devices' lock: whether
     /// a host interrupt it takes now brought host work no one has been told
     /// of (a host disk's completion signal, which a core running guest code

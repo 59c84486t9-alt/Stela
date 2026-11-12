@@ -3334,6 +3334,67 @@ fn released_host_work_goes_to_a_pe_that_sleeps_waiting_for_an_interrupt() {
     assert_eq!(releases(&home), (1, 1), "counted as handed off");
 }
 
+/// Released host work that only starts commands (a doorbell write) runs
+/// on the releasing PE at once, even with a PE asleep to take it: its wake
+/// would cost more, and the command would start only after it.
+#[test]
+fn released_work_that_only_starts_commands_runs_on_the_releasing_pe() {
+    #[derive(Default)]
+    struct Work {
+        kicked: Mutex<Vec<usize>>,
+        due: AtomicBool,
+        inline: AtomicBool,
+        done: AtomicUsize,
+    }
+    struct Released(Arc<Work>);
+    impl Kick for Released {
+        fn kick(&self, pe: usize) {
+            self.0.kicked.lock().unwrap().push(pe);
+        }
+        fn released(&self) -> bool {
+            if self.0.due.swap(false, Ordering::SeqCst) {
+                self.0.done.fetch_add(1, Ordering::SeqCst);
+            }
+            false
+        }
+        fn release_due(&self) -> bool {
+            self.0.due.load(Ordering::SeqCst)
+        }
+        fn release_inline(&self) -> bool {
+            self.0.inline.load(Ordering::SeqCst)
+        }
+    }
+    let work = Arc::new(Work::default());
+    let hub = Hub::new(3, Released(Arc::clone(&work)));
+    for pe in 0..3 {
+        hub.set_live(pe, true);
+    }
+    let home = SharedDevices::new(Pending::default(), Arc::clone(&hub));
+    let mut worker = home.worker();
+    let releases = |home: &SharedDevices<Pending>| {
+        let times = home.lock_times()[Call::Access as usize];
+        (times.stepped, times.handed)
+    };
+    // PE 1 is in a guest exit; PE 2 sleeps waiting for an interrupt.
+    hub.inboxes[1].outside.store(true, Ordering::SeqCst);
+    hub.inboxes[2].sleeping.store(true, Ordering::SeqCst);
+    hub.inboxes[2].serves.store(true, Ordering::SeqCst);
+    work.due.store(true, Ordering::SeqCst);
+    work.inline.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+    assert_eq!(work.done.load(Ordering::SeqCst), 1, "started on the caller");
+    assert!(work.kicked.lock().unwrap().is_empty(), "no PE woken");
+    assert!(!hub.service.load(Ordering::SeqCst));
+    assert_eq!(releases(&home), (1, 0));
+    // Work that also takes completions still goes to the sleeping PE.
+    work.due.store(true, Ordering::SeqCst);
+    work.inline.store(false, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+    assert_eq!(work.done.load(Ordering::SeqCst), 1);
+    assert_eq!(*work.kicked.lock().unwrap(), [2]);
+    assert_eq!(releases(&home), (1, 1));
+}
+
 /// A host interrupt a busy PE took at its release (a host disk's completion
 /// signal) wakes a PE that sleeps waiting for an interrupt, at that release
 /// on the model clock rather than at the busy PE's slice end; with none

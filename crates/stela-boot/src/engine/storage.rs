@@ -955,6 +955,16 @@ pub(super) fn release_due() -> bool {
     STEP_DUE.load(Ordering::Relaxed)
 }
 
+/// Whether the step [`release_due`] reports only gives the host disks
+/// their queued commands, none of them running a command a step would
+/// look at: a doorbell write, which the releasing processor does itself
+/// rather than wake a sleeping PE for it.
+pub(super) fn release_inline() -> bool {
+    staged_workers()
+        .filter(|worker| worker.work())
+        .all(DiskWorker::starts_only)
+}
+
 /// After a device call released the devices' lock, outside it: the step its
 /// staged disk commands left, on the processor whose guest made them, as
 /// the disk's own I/O ran there before staging; whether it collected a

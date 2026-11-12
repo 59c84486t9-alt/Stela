@@ -79,6 +79,10 @@ impl Kick for Doorbells {
         super::storage::release_due()
     }
 
+    fn release_inline(&self) -> bool {
+        super::storage::release_inline()
+    }
+
     fn signal_due(&self) -> bool {
         super::storage::signal_due()
     }

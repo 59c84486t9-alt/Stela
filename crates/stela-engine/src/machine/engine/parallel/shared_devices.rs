@@ -408,12 +408,13 @@ impl<D: Devices> Drop for Held<'_, D> {
         // maintenance broadcast would wait for it. A PE outside it for a
         // guest exit (a storage doorbell's) hands the work to a PE that
         // sleeps waiting for an interrupt, whose idle core does it at its
-        // host service, and goes on with its guest; with none asleep it does
-        // the work itself, as before.
+        // host service, and goes on with its guest; with none asleep, or
+        // when the work only starts commands, which costs less than that
+        // PE's wake, it does the work itself.
         let hub = &self.board.hub;
         let mut handed = false;
         if hub.serves_released(self.pe) && hub.kick.release_due() {
-            if hub.hand_off_service(self.pe) {
+            if !hub.kick.release_inline() && hub.hand_off_service(self.pe) {
                 handed = true;
                 self.board.handed[call].fetch_add(1, Ordering::Relaxed);
             } else {

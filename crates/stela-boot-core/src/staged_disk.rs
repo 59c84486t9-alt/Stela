@@ -323,6 +323,17 @@ impl DiskWorker {
         self.staging.work.load(Ordering::Acquire)
     }
 
+    /// Whether a step would only start queued commands on the host disk:
+    /// none runs on it to look for, and it queues them rather than running
+    /// each where it is asked. False while another processor holds it.
+    pub fn starts_only(&self) -> bool {
+        self.staging.host.try_lock().is_some_and(|host| {
+            host.running.is_empty()
+                && host.device.depth() > 0
+                && !self.staging.queue.lock().waiting.is_empty()
+        })
+    }
+
     /// Whether the host disk has posted what a step would take now, a look
     /// at memory: a disk that moves a command by one device round trip a
     /// look shows the next part so while the step that took the last made

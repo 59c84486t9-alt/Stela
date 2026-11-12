@@ -884,3 +884,26 @@ fn a_disk_that_moves_one_round_trip_a_look_shows_its_next_part_posted() {
     drop(held);
     assert!(worker.posted());
 }
+
+/// A step only starts commands while none runs on a queueing host disk;
+/// once one runs, or for a disk that runs each command where it is asked,
+/// a step does more, and another processor's step leaves it nothing.
+#[test]
+fn a_step_only_starts_while_no_command_runs_on_a_queueing_disk() {
+    let (mut model, worker, disk) = staged(8);
+    assert!(!worker.starts_only(), "nothing queued");
+    let tag = model.start(write(1, 1)).unwrap();
+    assert!(worker.starts_only());
+    let held = worker.staging.host.lock();
+    assert!(!worker.starts_only());
+    drop(held);
+    stepped(&worker);
+    model.start(write(2, 2)).unwrap();
+    assert!(!worker.starts_only(), "a command runs to look at");
+    disk.borrow_mut().complete_all();
+    stepped(&worker);
+    assert_eq!(model.finish(tag), Some(Ok(None)));
+    let (mut model, worker, _) = staged(0);
+    model.start(write(1, 1)).unwrap();
+    assert!(!worker.starts_only(), "the disk runs it where it is asked");
+}
