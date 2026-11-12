@@ -38,6 +38,10 @@ struct Disk {
     together: bool,
     /// Finish calls that reached the disk.
     looks: usize,
+    /// Looks each started command takes, one device round trip each, the
+    /// next part posted at once; 0 for none. `left` for the running one.
+    parts: usize,
+    left: usize,
     running: Vec<(u32, Command)>,
     completed: BTreeMap<u32, Finished>,
     next: u32,
@@ -162,6 +166,7 @@ impl BlockDevice for Device {
         let tag = disk.next;
         disk.next += 1;
         disk.running.push((tag, command));
+        disk.left = disk.parts;
         Ok(tag)
     }
     fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
@@ -177,7 +182,9 @@ impl BlockDevice for Device {
     /// A completion waits, or one would at the next finish.
     fn posted(&self) -> bool {
         let disk = self.disk.borrow();
-        !disk.hidden && (!disk.completed.is_empty() || disk.auto && !disk.running.is_empty())
+        !disk.hidden
+            && (!disk.completed.is_empty()
+                || (disk.auto || disk.parts != 0) && !disk.running.is_empty())
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         let during = self.disk.borrow_mut().during_finish.take();
@@ -190,6 +197,12 @@ impl BlockDevice for Device {
         disk.looks += 1;
         if disk.auto {
             disk.complete_all();
+        }
+        if disk.parts != 0 && !disk.running.is_empty() {
+            disk.left -= 1;
+            if disk.left == 0 {
+                disk.complete_all();
+            }
         }
         disk.completed.remove(&tag)
     }
@@ -841,4 +854,33 @@ fn a_disk_whose_signal_never_comes_is_found_silent_once() {
     assert!(!heard.completed(7));
     assert!(!heard.completed(8));
     assert!((0..2 * SILENT_COMPLETIONS).all(|_| !heard.completed(8)));
+}
+
+/// A disk that moves a command by one device round trip a look shows its
+/// next part posted after each step, though the step took no result: a
+/// waiting processor's steps follow it, each leaving the disk between.
+#[test]
+fn a_disk_that_moves_one_round_trip_a_look_shows_its_next_part_posted() {
+    let (mut model, worker, disk) = staged(1);
+    disk.borrow_mut().parts = 3;
+    let tag = model.start(write(1, 1)).unwrap();
+    assert!(!worker.posted(), "nothing runs on the host disk yet");
+    assert_eq!(stepped(&worker).started, 1);
+    let mut steps = 0;
+    while worker.posted() {
+        let step = stepped(&worker);
+        steps += 1;
+        assert_eq!(step.finished, usize::from(steps == 3));
+        assert!(steps <= 3, "a step moved no part");
+    }
+    assert_eq!((steps, disk.borrow().looks), (3, 3));
+    assert_eq!(model.finish(tag), Some(Ok(None)));
+    // Another processor holding the host disk leaves nothing to look at.
+    disk.borrow_mut().parts = 2;
+    model.start(write(2, 2)).unwrap();
+    stepped(&worker);
+    let held = worker.staging.host.lock();
+    assert!(!worker.posted());
+    drop(held);
+    assert!(worker.posted());
 }

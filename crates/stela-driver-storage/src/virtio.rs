@@ -308,15 +308,27 @@ impl VirtioBlk {
         })
     }
 
-    /// Move the started block command on as far as it goes without waiting.
+    /// Move the started block command on without waiting, by one device
+    /// round trip at most: take the posted request's result if the device
+    /// returned it, and post the next. A call never chains requests, even
+    /// when the device returns each at its notify (an emulated one that
+    /// runs the request in the notifying CPU's exit): the caller holds the
+    /// host drivers' lock, which other disks' commands wait for.
     fn run(&mut self) {
         let Some(mut running) = self.running.take() else {
             return;
         };
+        let mut offered = false;
         while running.result.is_none() {
             let Some((posted, bytes)) = running.posted else {
+                if offered && Self::posts_more(&running) {
+                    break;
+                }
                 match self.next_request(&running) {
-                    Ok(Some(posted)) => running.posted = Some(posted),
+                    Ok(Some(posted)) => {
+                        offered = true;
+                        running.posted = Some(posted);
+                    }
                     Ok(None) => {
                         let data = core::mem::take(&mut running.data);
                         let read = matches!(running.command, Command::Read { .. });
@@ -341,6 +353,19 @@ impl VirtioBlk {
             }
         }
         self.running = Some(running);
+    }
+
+    /// Whether `running` has a part left to post ([`Self::next_request`]).
+    fn posts_more(running: &Running) -> bool {
+        let done = running.done;
+        match &running.command {
+            Command::Read { bytes, .. } => done < *bytes,
+            Command::Write {
+                data, fua: false, ..
+            } => done < data.len(),
+            Command::Flush | Command::Discard { .. } | Command::WriteZeroes { .. } => done == 0,
+            Command::Write { fua: true, .. } => false,
+        }
     }
 
     /// Post the next part of `running`'s command, or `None` once all of it
@@ -500,12 +525,109 @@ impl BlockDevice for VirtioBlk {
         Some(result)
     }
 
+    /// A command with a part left to post, which a look posts, counts as
+    /// posted too.
     fn posted(&self) -> bool {
-        self.running.as_ref().is_some_and(|running| {
-            running.result.is_some()
-                || running
-                    .posted
-                    .is_some_and(|(posted, _)| self.returned(posted))
-        })
+        self.running
+            .as_ref()
+            .is_some_and(|running| match running.posted {
+                _ if running.result.is_some() => true,
+                Some((posted, _)) => self.returned(posted),
+                None => true,
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::dma::TestRegion;
+    use alloc::{string::String, vec};
+
+    /// A queue whose device returns each request at its notify, as an
+    /// emulated one does in the notifying CPU's exit: the notify register
+    /// lies on the request's status byte, so notifying writes the status
+    /// "done", and the used index starts where the first request's ends.
+    fn returning_at_notify(region: &mut TestRegion, registers: &mut [u64]) -> VirtioBlk {
+        let request = region.allocate(4096, 4096).unwrap();
+        // SAFETY: the fixture owns both allocations past the driver's use;
+        // no device reaches them.
+        let (device, notify) = unsafe {
+            (
+                Mmio::new(registers.as_mut_ptr() as u64, size_of_val(registers)),
+                Mmio::new(request.bus_address() + REQUEST_STATUS as u64, 2),
+            )
+        };
+        VirtioBlk {
+            device,
+            notify,
+            queue: region.allocate(4096, 4096).unwrap(),
+            request,
+            bounce: region.allocate(BOUNCE_BYTES, 4096).unwrap(),
+            entries: QUEUE_ENTRIES,
+            // The first request's used index is then 0, as the zeroed queue
+            // already says.
+            next: u16::MAX,
+            sectors_per_block: 1,
+            identity: Identity {
+                transport: Transport::VirtioBlk,
+                location: String::from("fixture"),
+                model: String::from("virtio-blk"),
+                serial: String::new(),
+                blocks: 1 << 20,
+                block_size: SECTOR as u32,
+                read_only: false,
+                features: Features {
+                    max_transfer: BOUNCE_BYTES,
+                    ..Features::default()
+                },
+            },
+            clock: Clock {
+                ticks_per_microsecond: 1000,
+            },
+            fault: None,
+            running: None,
+            next_tag: 0,
+        }
+    }
+
+    /// The device has returned `count` requests in all.
+    fn returned(disk: &mut VirtioBlk, count: u16) {
+        disk.queue.write(USED + 2, count.wrapping_sub(1));
+    }
+
+    /// A look moves a command by one device round trip at most, even when
+    /// the device returns each request at once: it takes the returned
+    /// result and posts one request, never a chain of them, and says the
+    /// rest is ready for the next look.
+    #[test]
+    fn a_look_posts_one_request_however_soon_the_device_returns_it() {
+        let mut region = TestRegion::new(256 * 1024);
+        let mut registers = vec![0u64; 16].into_boxed_slice();
+        let mut disk = returning_at_notify(&mut region, &mut registers);
+        let tag = disk
+            .start(Command::Write {
+                lba: 0,
+                data: vec![0x5a; 3 * BOUNCE_BYTES],
+                fua: false,
+            })
+            .unwrap();
+        assert_eq!(disk.next, 0, "the start posted one request");
+        assert_eq!(disk.running.as_ref().unwrap().done, BOUNCE_BYTES);
+        assert!(disk.posted(), "the next part waits for a look");
+
+        assert_eq!(disk.finish(tag), None);
+        assert_eq!(disk.next, 1, "the look posted one request");
+        assert!(!disk.posted(), "the device has not returned it");
+
+        returned(&mut disk, 2);
+        assert!(disk.posted());
+        assert_eq!(disk.finish(tag), None);
+        assert_eq!(disk.next, 2, "the look took the result and posted one");
+
+        returned(&mut disk, 3);
+        assert_eq!(disk.finish(tag), Some(Ok(None)));
+        assert_eq!(disk.next, 2, "nothing was left to post");
+        assert!(!disk.posted());
     }
 }

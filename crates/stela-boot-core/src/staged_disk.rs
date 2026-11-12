@@ -323,6 +323,17 @@ impl DiskWorker {
         self.staging.work.load(Ordering::Acquire)
     }
 
+    /// Whether the host disk has posted what a step would take now, a look
+    /// at memory: a disk that moves a command by one device round trip a
+    /// look shows the next part so while the step that took the last made
+    /// no progress the model sees. False while another processor holds it.
+    pub fn posted(&self) -> bool {
+        self.staging
+            .host
+            .try_lock()
+            .is_some_and(|host| !host.running.is_empty() && host.device.posted())
+    }
+
     /// One bounded step at time `now`: take the host disk's completions and
     /// give it the next commands. Another processor's step leaves this one
     /// nothing. Completions are looked for once the disk has posted one (a

@@ -803,7 +803,7 @@ impl<I: Io> Bot<I> {
     /// The begun command's result, the caller waiting for its transfers.
     fn wait(&mut self, mut output: Option<&mut [u8]>) -> Result<Vec<u8>, BlockError> {
         loop {
-            if let Some(result) = self.end_with_output(output.as_deref_mut()) {
+            if let Some(result) = self.end_with_output(output.as_deref_mut(), false) {
                 return result;
             }
             crate::waiting();
@@ -876,14 +876,21 @@ impl<I: Io> Bot<I> {
 
     /// The begun command's data once its status arrived, with same-LUN
     /// auto-sense after a failure, which runs as the command did; never
-    /// waits for a transfer.
+    /// waits for a transfer. A call moves the command by one device round
+    /// trip at most: it takes a completed transfer and submits at most one,
+    /// even when the device completes each at its doorbell, as an emulated
+    /// one may in the submitting CPU's exit; the caller may hold a lock
+    /// other disks' commands wait for.
     pub fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
-        self.end_with_output(None)
+        self.end_with_output(None, true)
     }
 
+    /// [`Self::end`], moving on through every transfer already complete
+    /// unless `bounded`, for a caller that waits for the command anyway.
     fn end_with_output(
         &mut self,
         output: Option<&mut [u8]>,
+        bounded: bool,
     ) -> Option<Result<Vec<u8>, BlockError>> {
         if let Some(error) = &self.minimum_error {
             return self.begun.as_ref().map(|_| Err(error.clone()));
@@ -895,6 +902,12 @@ impl<I: Io> Bot<I> {
         let result = loop {
             match self.advance(&mut begun, output.as_deref_mut()) {
                 Next::Wait => {
+                    self.begun = Some(begun);
+                    return None;
+                }
+                // Each new stage submitted a transfer.
+                Next::Stage(stage) if bounded => {
+                    begun.stage = stage;
                     self.begun = Some(begun);
                     return None;
                 }
@@ -950,7 +963,10 @@ impl<I: Io> Bot<I> {
             }));
         }
         self.begun.as_mut().unwrap().sensing = Some(sensing);
-        self.end()
+        if bounded {
+            return None;
+        }
+        self.end_with_output(None, false)
     }
 
     /// Move the begun command on as far as its completed transfers allow.

@@ -1085,7 +1085,8 @@ pub(super) fn try_stage(
 
 /// Give each staged disk's host side its queued commands and take its
 /// completions, outside the devices' lock. A PE that waits (`whole`) steps
-/// while each step makes progress, until an interrupt comes for it; one
+/// while each step makes progress, or leaves the next part of a command
+/// posted, until an interrupt comes for it; one
 /// with guest code to run takes one bounded step, and only for a disk no
 /// processor stepped for [`FALLBACK_MILLIS`] or one whose completion signal
 /// came since the last step. What a step took reaches the guest at the next
@@ -1105,12 +1106,25 @@ pub(super) fn serve_staged(whole: bool) -> bool {
         return false;
     }
     let mut finished = false;
+    let started = super::host::fresh_counter();
+    let budget = super::host::COUNTER_HZ / 1_000_000 * STEP_MICROS;
     for worker in staged_workers() {
         while worker.work() {
             let step = step(worker);
             finished |= step.as_ref().is_some_and(|step| step.finished != 0);
+            if !whole || super::host::interrupted() {
+                break;
+            }
+            // A disk that moves a command one round trip a step shows its
+            // next part posted: follow it for a step's time, so a part that
+            // never ends cannot hold this PE. The look waits for no core
+            // inside the host drivers.
             let progressed = step.is_some_and(|step| step.progressed());
-            if !whole || !progressed || super::host::interrupted() {
+            if !progressed
+                && !(super::host::fresh_counter().wrapping_sub(started) < budget
+                    && !host_drivers_taken()
+                    && worker.posted())
+            {
                 break;
             }
         }

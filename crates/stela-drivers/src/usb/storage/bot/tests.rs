@@ -520,6 +520,16 @@ fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
         port_resets: 0,
     })))
 }
+/// The begun command's result, from calls of [`Bot::end`], each of which
+/// moves it by one transfer at most.
+fn ended<I: Io>(bot: &mut Bot<I>) -> Result<Vec<u8>, BlockError> {
+    for _ in 0..16 {
+        if let Some(result) = bot.end() {
+            return result;
+        }
+    }
+    panic!("a BOT command did not end in 16 calls");
+}
 fn dma(backing: &mut [u64]) -> RegionAllocator {
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: each caller keeps the exclusive backing alive until all Bot
@@ -1342,8 +1352,16 @@ fn synchronous_read_copies_only_after_valid_status() {
     output.resize(length, 0xa5);
     bot.read_into(0, multi.as_ref(), &mut output).unwrap();
     assert!(output.iter().all(|&byte| byte == 0x52));
+    // The model completes each transfer at its submission, yet a call
+    // moves the command by one round trip: data, data, status, result.
+    let before = state.borrow().transfers;
     bot.begin(0, multi.as_ref(), Data::In(length)).unwrap();
+    for submitted in 2..=4 {
+        assert_eq!(bot.end(), None);
+        assert_eq!(state.borrow().transfers, before + submitted);
+    }
     assert_eq!(bot.end(), Some(Ok(output)));
+    assert_eq!(state.borrow().transfers, before + 4);
     let mut output = vec![0xa5; MAX_TD];
 
     for (fault, expected) in [
@@ -1618,7 +1636,7 @@ fn a_settling_reset_holds_commands_without_waiting() {
     let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
     state.borrow_mut().fault = Fault::Phase;
     bot.begin(0, &[0; 6], Data::None).unwrap();
-    assert!(bot.end().unwrap().is_err());
+    assert!(ended(&mut bot).is_err());
     state.borrow_mut().fault = Fault::None;
     assert!(bot.busy());
     assert!(bot.begin(1, &[0; 6], Data::None).is_err());
