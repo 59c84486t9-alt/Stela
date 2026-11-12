@@ -529,3 +529,225 @@ fn minimum_normal_results_take_the_helper() {
     assert_eq!(outcome.bits, minimum);
     assert_eq!(outcome.exceptions, floating::UNDERFLOW | floating::INEXACT);
 }
+
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Binary(BinaryOperation),
+    Fused(FusedOperation),
+}
+
+/// A word, its operation, and whether it is a vector of every lane (else
+/// lane 0 alone).
+type Case = (u32, Kind, bool);
+
+/// Run `word` with Vn, Vm and Va (and Vd, the vector addend) holding
+/// `left`, `right` and `addend` in every lane or lane 0. Returns the exit,
+/// the initial, actual and expected states.
+fn run_lanes(
+    target: TargetCpu,
+    (word, kind, vector): Case,
+    format: Format,
+    fpcr: u32,
+    [left, right, addend]: [u64; 3],
+) -> (u64, GuestState, GuestState, GuestState) {
+    let lanes = if !vector {
+        1
+    } else if format == Format::Double {
+        2
+    } else {
+        4
+    };
+    let mut initial = GuestState {
+        fpcr,
+        ..GuestState::default()
+    };
+    initial.x[30] = RETURN;
+    for index in 0..lanes {
+        set_lane(&mut initial.v[N as usize], format, index, left);
+        set_lane(&mut initial.v[M as usize], format, index, right);
+        set_lane(&mut initial.v[A as usize], format, index, addend);
+        set_lane(&mut initial.v[D as usize], format, index, addend);
+    }
+    let outcome = match kind {
+        Kind::Fused(operation) => {
+            floating::fused::evaluate(format, operation, fpcr, addend, left, right)
+        }
+        Kind::Binary(operation) => floating::evaluate(format, operation, fpcr, left, right),
+    }
+    .unwrap();
+    let mut expected = initial.clone();
+    expected.fpsr |= outcome.exceptions;
+    let mut result = [0u64; 2];
+    for index in 0..lanes {
+        set_lane(&mut result, format, index, outcome.bits);
+    }
+    expected.v[D as usize] = result;
+    let mut actual = initial.clone();
+    let exit = run(&compile(word, target), &mut actual);
+    (exit, initial, actual, expected)
+}
+
+/// Arm negates the product operand Vn of FMLS, FMSUB and FNMADD and the
+/// addend of FNMADD and FNMSUB before FPProcessNaNs, so a NaN there
+/// propagates with its sign flipped (quieted, or the default NaN under DN),
+/// in the order addend, Vn, Vm with signaling NaNs first. On an FMA tier
+/// every NaN lane completes inline but for a quiet NaN addend with a NaN
+/// product, which takes the helper.
+#[test]
+fn fused_nan_operands_keep_arm_negation_signs() {
+    for target in targets() {
+        if !target.supports(TargetCpu::Fma) || target.data_independent_timing() {
+            continue;
+        }
+        for format in [Format::Single, Format::Double] {
+            let fraction_bits = format.fraction_bits();
+            let infinity = format.exponent_mask();
+            let quiet = 1u64 << (fraction_bits - 1);
+            let sign = format.sign_mask();
+            let nans = [
+                infinity | quiet | 5,
+                infinity | 7,
+                sign | infinity | quiet | 9,
+                sign | infinity | 3,
+            ];
+            let ordinary = u64::from(format.exponent_bias()) << fraction_bits | quiet;
+            let double = u32::from(format == Format::Double);
+            let scalar = |base: u32| base | double << 22 | M << 16 | A << 10 | N << 5 | D;
+            let cases: [Case; 5] = [
+                (scalar(0x1f00_0000), Kind::Fused(FusedOperation::Add), false),
+                (
+                    scalar(0x1f00_8000),
+                    Kind::Fused(FusedOperation::Subtract),
+                    false,
+                ),
+                (
+                    scalar(0x1f20_0000),
+                    Kind::Fused(FusedOperation::NegatedAdd),
+                    false,
+                ),
+                (
+                    scalar(0x1f20_8000),
+                    Kind::Fused(FusedOperation::NegatedSubtract),
+                    false,
+                ),
+                (
+                    fused_word(Form::Vector(true, 128 / format.bits()), format),
+                    Kind::Fused(FusedOperation::Subtract),
+                    true,
+                ),
+            ];
+            for case in cases {
+                for fpcr in [0, FPCR_DN] {
+                    for (first, &nan) in nans.iter().enumerate() {
+                        for position in 0..3 {
+                            // One NaN, then a second NaN in the next position.
+                            for second in [None, Some(nans[(first + 1) % 4])] {
+                                let mut inputs = [ordinary; 3];
+                                inputs[position] = nan;
+                                if let Some(other) = second {
+                                    inputs[(position + 1) % 3] = other;
+                                }
+                                let [left, right, addend] = inputs;
+                                let (exit, initial, actual, expected) =
+                                    run_lanes(target, case, format, fpcr, inputs);
+                                let label = alloc::format!(
+                                    "{case:x?} {format:?} {inputs:x?} {fpcr:#x} {target:?}"
+                                );
+                                let helper = addend & quiet != 0
+                                    && is_nan(format, addend)
+                                    && (is_nan(format, left) || is_nan(format, right));
+                                if helper {
+                                    assert_eq!(exit, PC.0, "{label}");
+                                    assert_eq!(actual, initial, "{label}");
+                                    continue;
+                                }
+                                assert_eq!(exit, RETURN, "{label}");
+                                assert_eq!(actual, expected, "{label}");
+                            }
+                        }
+                    }
+                }
+            }
+            // The flipped sign itself, apart from the reference: FMSUB of a
+            // positive quiet NaN Vn gives the negative NaN.
+            let (exit, _, actual, _) =
+                run_lanes(target, cases[1], format, 0, [nans[0], ordinary, ordinary]);
+            assert_eq!(exit, RETURN);
+            assert_eq!(lane(actual.v[D as usize], format, 0), nans[0] | sign);
+        }
+    }
+}
+
+/// FZ (with IDC) and FIZ (without) flush subnormal inputs inline, ahead of
+/// NaN and division-by-zero handling; under FIZ an inexact subnormal result stays
+/// inline with UFC, while under FZ a result Arm flushes takes the helper,
+/// leaving the state unchanged.
+#[test]
+fn flushed_inputs_complete_inline_and_flushed_results_exit() {
+    const SUBNORMAL: u64 = 0x0000_0003;
+    const MINIMUM_ODD: u64 = 0x0080_0001;
+    const HALF: u64 = 0x3f00_0000;
+    const ONE: u64 = 0x3f80_0000;
+    const QUIET_NAN: u64 = 0x7fc0_0001;
+    let registers = M << 16 | N << 5 | D;
+    let add = (
+        1 << 30 | 0x0e20_d400 | registers,
+        Kind::Binary(BinaryOperation::Add),
+        true,
+    );
+    let divide = (
+        1 << 30 | 0x2e20_fc00 | registers,
+        Kind::Binary(BinaryOperation::Divide),
+        true,
+    );
+    let multiply = (
+        0x1e20_0800 | registers,
+        Kind::Binary(BinaryOperation::Multiply),
+        false,
+    );
+    let fmla = (
+        fused_word(Form::Vector(false, 4), Format::Single),
+        Kind::Fused(FusedOperation::Add),
+        true,
+    );
+    // (case, fpcr, [left, right, addend], completes inline).
+    let table: [(Case, u32, [u64; 3], bool); 8] = [
+        (add, FPCR_FZ, [SUBNORMAL, ONE, 0], true),
+        (add, FPCR_FIZ, [ONE, SUBNORMAL | 1 << 31, 0], true),
+        // 1 / flushed 0: the infinity with DZC and IDC.
+        (divide, FPCR_FZ, [ONE, SUBNORMAL, 0], true),
+        // A NaN beside a flushed input: the NaN, with IDC.
+        (add, FPCR_FZ, [QUIET_NAN, SUBNORMAL, 0], true),
+        // An inexact subnormal product: UFC under FIZ, flushed under FZ.
+        (multiply, FPCR_FIZ, [MINIMUM_ODD, HALF, 0], true),
+        (multiply, FPCR_FZ, [MINIMUM_ODD, HALF, 0], false),
+        // A flushed addend beside a normal product.
+        (fmla, FPCR_FZ, [ONE, HALF, SUBNORMAL], true),
+        // A product Arm flushes to zero.
+        (fmla, FPCR_FZ, [MINIMUM_ODD, HALF, 0], false),
+    ];
+    for target in targets() {
+        let fma = target.supports(TargetCpu::Fma) && !target.data_independent_timing();
+        for (row, &(case, fpcr, inputs, inline)) in table.iter().enumerate() {
+            if matches!(case.1, Kind::Fused(_)) && !fma {
+                continue;
+            }
+            let label = alloc::format!("row {row} {:08x} {fpcr:#x} {target:?}", case.0);
+            let (exit, initial, actual, expected) =
+                run_lanes(target, case, Format::Single, fpcr, inputs);
+            if !inline {
+                assert_eq!(exit, PC.0, "{label}");
+                assert_eq!(actual, initial, "{label}");
+                continue;
+            }
+            assert_eq!(exit, RETURN, "{label}");
+            let subnormal = inputs.iter().any(|&bits| bits & 0x7fff_ffff == SUBNORMAL);
+            assert_eq!(
+                actual.fpsr & floating::INPUT_DENORMAL != 0,
+                subnormal && fpcr & FPCR_FZ != 0,
+                "{label}"
+            );
+            assert_eq!(actual, expected, "{label}");
+        }
+    }
+}
