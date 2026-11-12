@@ -71,12 +71,16 @@ jobs:
 
       - name: Put LLVM on PATH
         run: |
-          # Mbed TLS takes -mllvm --disable-select-optimize, LLVM 15 and newer.
+          # The C build passes --no-default-config, which Clang 16 and newer
+          # take; Linux uses the LLVM 21 the boot program builds with.
           case "$RUNNER_OS" in
             Windows) echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH" ;;
             Linux)
-              [[ -d /usr/lib/llvm-15/bin ]] || { sudo apt-get update -q && sudo apt-get install -y -q clang-15; }
-              echo /usr/lib/llvm-15/bin >> "$GITHUB_PATH"
+              curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+              echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+              sudo apt-get update -q
+              sudo apt-get install -y -q --no-install-recommends clang-21 llvm-21
+              echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
               ;;
           esac
 
