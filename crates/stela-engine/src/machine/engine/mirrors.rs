@@ -115,9 +115,9 @@ pub(super) struct Mirrors {
     /// ([`Machine::take_thread_switches`]).
     pub(super) switches: register_read::SwitchLog,
     /// Nonzero while the engine holds an exclusive monitor of its own
-    /// (`Cpu::monitor`) or the PE's monitor and event register live in its
-    /// canonical memory, set as native code is entered: native ERET then
-    /// leaves clearing and signalling them to the engine.
+    /// (`Cpu::monitor`), set as native code is entered: native ERET then
+    /// leaves clearing it to the engine. A canonical reservation has its
+    /// own word, which the exclusive service keeps (`Record::reservation`).
     pub(super) monitor: u64,
     /// The performance monitor's cycle counter as native code is entered
     /// ([`Machine::enter_cycles`]), from which a cycle counter read computes
