@@ -501,6 +501,8 @@ pub struct Heap {
     total: AtomicUsize,
     main: AtomicUsize,
     carved: AtomicUsize,
+    /// The heap's bytes not carved, the reserve's with the main bins'.
+    room: AtomicUsize,
     waits: AtomicU64,
 }
 // SAFETY: all list/header mutations use the real acquire/release exclusion.
@@ -536,6 +538,7 @@ impl Heap {
             total: AtomicUsize::new(0),
             main: AtomicUsize::new(0),
             carved: AtomicUsize::new(0),
+            room: AtomicUsize::new(0),
             waits: AtomicU64::new(0),
             state: UnsafeCell::new(State {
                 start: 0,
@@ -830,6 +833,20 @@ impl Heap {
             || self.carved.load(Ordering::Relaxed) > self.main.load(Ordering::Relaxed) / 16 * 15
     }
 
+    /// The heap's bytes, as the lock last left them.
+    pub fn total(&self) -> usize {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    /// The bytes no block was carved from, the reserve's with the main
+    /// bins', as the lock last left them: what a large request can surely
+    /// still find, short of the holes between live blocks and the freed
+    /// small blocks their classes keep. A cache that may grow asks it
+    /// without taking the lock.
+    pub fn room(&self) -> usize {
+        self.room.load(Ordering::Relaxed)
+    }
+
     /// Bytes allocated and not freed: the class lists' and the caches'.
     fn live(&self) -> usize {
         self.live
@@ -1111,6 +1128,9 @@ impl Drop for Guard<'_> {
         self.heap
             .carved
             .store(state.carved - state.carved_reserve, Ordering::Relaxed);
+        self.heap
+            .room
+            .store(state.total - state.carved, Ordering::Relaxed);
         self.heap.held.store(false, Ordering::Release);
         #[cfg(target_os = "uefi")]
         // SAFETY: this CPU's saved flags; the guard cannot migrate and no

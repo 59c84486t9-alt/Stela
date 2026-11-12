@@ -907,3 +907,41 @@ fn the_large_hook_hears_every_tracked_block_made_resized_and_freed() {
     assert_eq!(HOOKED_LIVE.load(Ordering::Relaxed), 0);
     assert!(HOOKED_CALLS.load(Ordering::Relaxed) >= 5);
 }
+
+#[test]
+fn the_room_is_what_no_block_was_carved_from_and_comes_back_when_freed() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    // SAFETY: exclusive test backing, kept through every exact free.
+    unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+    heap.reserve_tail(ram.0.len() / 16);
+    let total = heap.total();
+    assert_eq!(total, ram.0.len());
+    assert_eq!(heap.room(), total);
+    // Fill the heap with large blocks: the room shrinks by each, into the
+    // reserve, down to nothing a block fits.
+    let layout = Layout::from_size_align(8192, 16).unwrap();
+    let mut blocks = Vec::new();
+    loop {
+        let before = heap.room();
+        // SAFETY: a valid layout; every block is freed below.
+        let block = unsafe { heap.alloc(layout) };
+        if block.is_null() {
+            break;
+        }
+        blocks.push(block);
+        assert!(
+            heap.room() <= before - layout.size(),
+            "{} of {before}",
+            heap.room()
+        );
+    }
+    assert!(blocks.len() >= 14, "{}", blocks.len());
+    assert!(heap.room() < 2 * layout.size(), "{}", heap.room());
+    // Small blocks freed stay carved in their class; large ones return.
+    for block in blocks {
+        // SAFETY: each block once, with its layout.
+        unsafe { heap.dealloc(block, layout) };
+    }
+    assert_eq!(heap.room(), total);
+}
