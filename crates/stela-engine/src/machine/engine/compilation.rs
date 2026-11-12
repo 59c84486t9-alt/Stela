@@ -789,10 +789,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             );
             self.code.rebases.keep(key, offset as u16, context, entry);
         }
-        // A store keeps an offer's stored form. With memory low it keeps no
-        // more, but the other PEs still take the
-        // block: this one retains the emission anyway, and each reuse saves
-        // a compile and a copy.
+        // A store keeps an offer's stored form within its own bound, which
+        // the heap's budget sets aside: memory low, as the heap rests once
+        // the engine's caches have grown, still keeps it, or the pack would
+        // miss every block compiled after that. The other PEs take the block
+        // either way.
         if let (Some((key, _)), Some(context)) = (stored, context)
             && let low = self.host.memory_low()
             && let Some(translations) = self.host.translations()
@@ -806,12 +807,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 successors,
                 quiet: self.cpu.pstate.el == 0,
             };
-            if low {
-                translations.lend(offer);
-            } else {
-                translations.offer(offer);
-                self.statistics.offered += 1;
-            }
+            translations.offer(offer);
+            self.statistics.offered += 1;
+            self.statistics.offered_low += u64::from(low);
         }
         self.install(
             pc,

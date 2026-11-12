@@ -550,7 +550,7 @@ fn a_stored_install_relocates_into_the_machines_own_buffers() {
 }
 
 #[test]
-fn with_memory_low_pages_stay_and_nothing_is_offered() {
+fn with_memory_low_pages_stay_and_offers_still_reach_the_store() {
     // A block in each of two pages: add x0, x0, #1; svc #0.
     const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
     let mut words = vec![0; PAGE_WORDS + 2];
@@ -570,8 +570,9 @@ fn with_memory_low_pages_stay_and_nothing_is_offered() {
         machine.pages.keys().copied().collect::<Vec<_>>(),
         [BASE, BASE + FETCH_PAGE]
     );
-    assert_eq!(machine.statistics.offered, 1);
-    assert_eq!(machine.host.store.as_ref().unwrap().offers.len(), 1);
+    assert_eq!(machine.statistics.offered, 2);
+    assert_eq!(machine.statistics.offered_low, 1);
+    assert_eq!(machine.host.store.as_ref().unwrap().offers.len(), 2);
 }
 
 /// `PES STORE`: every install counts once, at its level, by where its

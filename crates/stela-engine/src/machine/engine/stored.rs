@@ -204,8 +204,6 @@ pub trait Translations {
     }
     /// A block the engine compiled from a page the store had no entry for.
     fn offer(&mut self, offer: Offer);
-    /// A block for the other PEs alone, which no pack keeps.
-    fn lend(&mut self, _offer: Offer) {}
     /// What a machine's use of the store cost or found, for the store's
     /// counters.
     fn note(&mut self, _event: StoreEvent) {}

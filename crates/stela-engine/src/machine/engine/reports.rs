@@ -620,6 +620,8 @@ pub struct Statistics {
     /// Fetch pages read again whose known key the store held no record
     /// for: not looked up again.
     pub known_absent: u64,
+    /// Blocks offered to the store while memory was low.
+    pub offered_low: u64,
     /// Device transfers run because their deadline came, and the devices'
     /// interrupt lines and deadline asked anew because a cached answer
     /// expired, with the profile clock ticks each took under step timing.
@@ -769,6 +771,7 @@ impl core::ops::AddAssign for Statistics {
             page_ticks,
             known_keys,
             known_absent,
+            offered_low,
             shared_ticks,
             install_ticks,
             due_transfers,
@@ -924,6 +927,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.page_ticks, page_ticks),
             (&mut self.known_keys, known_keys),
             (&mut self.known_absent, known_absent),
+            (&mut self.offered_low, offered_low),
             (&mut self.shared_ticks, shared_ticks),
             (&mut self.install_ticks, install_ticks),
             (&mut self.due_transfers, due_transfers),

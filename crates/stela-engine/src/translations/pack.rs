@@ -1870,10 +1870,6 @@ impl Translations for Store<'_> {
     fn offer(&mut self, offer: Offer) {
         let entry = offer.entry();
         self.keep(&offer, entry);
-        self.lend(offer);
-    }
-
-    fn lend(&mut self, offer: Offer) {
         if let Some(mut staged) = StagedOffer::new(offer, self.shared_bound) {
             drop(self.accept_shared(&mut staged));
         }

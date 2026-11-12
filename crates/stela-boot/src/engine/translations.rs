@@ -787,12 +787,6 @@ impl Translations for Shared {
         }
     }
 
-    fn lend(&mut self, offer: Offer) {
-        if available(SHARE_BLOCKS) {
-            Self::publish_shared(offer);
-        }
-    }
-
     fn note(&mut self, event: StoreEvent) {
         match event {
             StoreEvent::PageRead { ticks } => {
