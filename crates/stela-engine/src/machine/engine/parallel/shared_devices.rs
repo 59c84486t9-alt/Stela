@@ -29,6 +29,10 @@ pub(super) struct Board<D> {
     /// By [`Call`], the releases that handed a host interrupt's work
     /// ([`Kick::signal_due`]) to a sleeping PE.
     pub(super) signals: [AtomicU64; Call::ALL.len()],
+    /// By [`Call`], the releases that took such work's step themselves
+    /// with no PE asleep ([`Kick::signal_step`]); its ticks count in
+    /// `step_ticks`.
+    pub(super) signal_steps: [AtomicU64; Call::ALL.len()],
     /// By PE, the ticks of host work its releases did on its core, which a
     /// device write's settle reports apart ([`super::super::WriteSettled`]).
     pub(super) released: Box<[AtomicU64]>,
@@ -412,31 +416,48 @@ impl<D: Devices> Drop for Held<'_, D> {
         // when the work only starts commands, which costs less than that
         // PE's wake, it does the work itself.
         let hub = &self.board.hub;
-        let mut handed = false;
+        // At most one piece of host work a release, so no stream of
+        // signals can keep a PE from its guest.
+        let mut acted = false;
         if hub.serves_released(self.pe) && hub.kick.release_due() {
+            acted = true;
             if !hub.kick.release_inline() && hub.hand_off_service(self.pe) {
-                handed = true;
                 self.board.handed[call].fetch_add(1, Ordering::Relaxed);
             } else {
-                let start = hub.ticks();
-                let completed = hub.kick.released();
-                let spent = hub.ticks().wrapping_sub(start);
+                self.step_here(call, || hub.kick.released());
                 self.board.stepped[call].fetch_add(1, Ordering::Relaxed);
-                self.board.step_ticks[call].fetch_add(spent, Ordering::Relaxed);
-                if let Some(released) = self.board.released.get(self.pe) {
-                    released.fetch_add(spent, Ordering::Relaxed);
-                }
-                if completed {
-                    self.board.call_home();
-                }
             }
         }
         // A host interrupt this core held pending while its guest ran (a
         // host disk's completion signal) goes to a PE that sleeps waiting
         // for an interrupt, which takes it at its host service, rather than
-        // waiting for this core's slice end. Nothing to do here otherwise.
-        if !handed && hub.kick.signal_due() && hub.hand_off_service(self.pe) {
-            self.board.signals[call].fetch_add(1, Ordering::Relaxed);
+        // waiting for this core's slice end. With none asleep, a PE outside
+        // its run loop takes one bounded step of it here, once a signal.
+        if !acted && hub.kick.signal_due() {
+            if hub.hand_off_service(self.pe) {
+                self.board.signals[call].fetch_add(1, Ordering::Relaxed);
+            } else if hub.serves_released(self.pe) {
+                self.step_here(call, || hub.kick.signal_step());
+                self.board.signal_steps[call].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl<D: Devices> Held<'_, D> {
+    /// Do host work on this core after the release, timing it for `call`;
+    /// what completed reaches the home machine at once.
+    fn step_here(&self, call: usize, work: impl FnOnce() -> bool) {
+        let hub = &self.board.hub;
+        let start = hub.ticks();
+        let completed = work();
+        let spent = hub.ticks().wrapping_sub(start);
+        self.board.step_ticks[call].fetch_add(spent, Ordering::Relaxed);
+        if let Some(released) = self.board.released.get(self.pe) {
+            released.fetch_add(spent, Ordering::Relaxed);
+        }
+        if completed {
+            self.board.call_home();
         }
     }
 }
@@ -465,6 +486,8 @@ pub struct LockTimes {
     pub handed: u64,
     /// Releases that handed a host interrupt's work to a sleeping PE.
     pub signals: u64,
+    /// Releases that took a host interrupt's step themselves.
+    pub signal_steps: u64,
 }
 
 /// The board's devices, shared by every PE's machine.
@@ -595,6 +618,7 @@ impl<D: Devices> SharedDevices<D> {
             step_ticks: Default::default(),
             handed: Default::default(),
             signals: Default::default(),
+            signal_steps: Default::default(),
             released: (0..pes).map(|_| AtomicU64::new(0)).collect(),
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
@@ -722,6 +746,7 @@ impl<D: Devices> SharedDevices<D> {
             step: self.board.step_ticks[call].load(Ordering::Relaxed),
             handed: self.board.handed[call].load(Ordering::Relaxed),
             signals: self.board.signals[call].load(Ordering::Relaxed),
+            signal_steps: self.board.signal_steps[call].load(Ordering::Relaxed),
             longest: self.board.longest[call].swap(0, Ordering::Relaxed),
         })
     }

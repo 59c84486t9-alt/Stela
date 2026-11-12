@@ -3461,6 +3461,82 @@ fn a_busy_pes_completion_signal_wakes_a_sleeping_pe_at_its_release() {
     assert_eq!(handed(&home), (1, 1));
 }
 
+/// With no PE asleep, a release outside the run loop takes a completion
+/// signal's step itself, once for the signal; a stream of signals gets at
+/// most one step a release, none at a release that did its own host work
+/// already, and none from a PE inside its run loop.
+#[test]
+fn a_stream_of_signals_gets_at_most_one_step_a_release() {
+    #[derive(Default)]
+    struct Signals {
+        kicked: Mutex<Vec<usize>>,
+        due: AtomicBool,
+        released: AtomicUsize,
+        stepped: AtomicUsize,
+    }
+    struct Stream(Arc<Signals>);
+    impl Kick for Stream {
+        fn kick(&self, pe: usize) {
+            self.0.kicked.lock().unwrap().push(pe);
+        }
+        fn released(&self) -> bool {
+            self.0.due.store(false, Ordering::SeqCst);
+            self.0.released.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+        fn release_due(&self) -> bool {
+            self.0.due.load(Ordering::SeqCst)
+        }
+        // A new signal comes before every release.
+        fn signal_due(&self) -> bool {
+            true
+        }
+        fn signal_step(&self) -> bool {
+            self.0.stepped.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+    let signals = Arc::new(Signals::default());
+    let hub = Hub::new(3, Stream(Arc::clone(&signals)));
+    for pe in 0..3 {
+        hub.set_live(pe, true);
+    }
+    let home = SharedDevices::new(Pending::default(), Arc::clone(&hub));
+    let mut worker = home.worker();
+    let steps = |home: &SharedDevices<Pending>| {
+        let times = home.lock_times()[Call::Access as usize];
+        (times.stepped, times.signals, times.signal_steps)
+    };
+    let work = |signals: &Signals| {
+        (
+            signals.released.load(Ordering::SeqCst),
+            signals.stepped.load(Ordering::SeqCst),
+        )
+    };
+    // PE 1 runs in its loop: it leaves the signal to the host's service.
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+    assert_eq!(work(&signals), (0, 0));
+    // In a guest exit with nobody asleep, each release steps once.
+    hub.inboxes[1].outside.store(true, Ordering::SeqCst);
+    for release in 1..=3 {
+        assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+        assert_eq!(work(&signals), (0, release));
+    }
+    assert_eq!(steps(&home), (0, 0, 3));
+    // A release that did its own host work takes no signal step too.
+    signals.due.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+    assert_eq!(work(&signals), (1, 3));
+    assert_eq!(steps(&home), (1, 0, 3));
+    // A PE asleep to take it is woken instead.
+    hub.inboxes[2].sleeping.store(true, Ordering::SeqCst);
+    hub.inboxes[2].serves.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 0), Ok(0));
+    assert_eq!(work(&signals), (1, 3));
+    assert_eq!(*signals.kicked.lock().unwrap(), [2]);
+    assert_eq!(steps(&home), (1, 1, 3));
+}
+
 /// A core whose halt waits on a doorbell never polls before it halts; any
 /// other polls as Linux's haltpoll governor fits it, at most `most`.
 #[test]

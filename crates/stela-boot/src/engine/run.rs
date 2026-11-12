@@ -1900,19 +1900,22 @@ impl Heartbeat {
             }
             // By call since the last beat: the releases that did the host's
             // work (a staged disk's step) on the calling core and its
-            // microseconds there, those that handed it to a sleeping PE, and
-            // those that handed it a host disk's completion signal.
-            let mut releases = String::from("DEVICE RELEASES stepped/us/handed/signals");
+            // microseconds there, those that handed it to a sleeping PE,
+            // those that handed it a host disk's completion signal, and those
+            // that took that signal's step themselves with no PE asleep.
+            let mut releases =
+                String::from("DEVICE RELEASES stepped/us/handed/signals/signal_steps");
             for (index, call) in Call::ALL.iter().enumerate() {
                 let (now, then) = (&times[index], &self.lock_times[index]);
                 releases.push_str(&format!(
-                    " {}={}/{}/{}/{}",
+                    " {}={}/{}/{}/{}/{}",
                     call.name(),
                     now.stepped.wrapping_sub(then.stepped),
                     u128::from(now.step.wrapping_sub(then.step)) * 1_000_000
                         / u128::from(host::COUNTER_HZ),
                     now.handed.wrapping_sub(then.handed),
                     now.signals.wrapping_sub(then.signals),
+                    now.signal_steps.wrapping_sub(then.signal_steps),
                 ));
             }
             self.lock_times = times;

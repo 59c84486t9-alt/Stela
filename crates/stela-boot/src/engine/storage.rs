@@ -1167,7 +1167,8 @@ static HANDED_SIGNALS: staged_disk::SignalHandOff = staged_disk::SignalHandOff::
 /// commands on its host disk, take the interrupts this core held pending
 /// while its guest ran, a host disk's completion signal among them, and
 /// whether one came that a sleeping PE should take ([`signalled`]), once per
-/// signal. Its guest goes on; the PE's host service steps the disk.
+/// signal. Its guest goes on; the PE's host service steps the disk, or with
+/// none asleep this release does ([`signal_step`]).
 pub(super) fn signal_due() -> bool {
     if !staged_workers().any(DiskWorker::work)
         || super::host::in_interrupt()
@@ -1184,6 +1185,30 @@ pub(super) fn signal_due() -> bool {
         SEEN_DOORBELLS.load(Ordering::Relaxed),
         host_drivers_taken(),
     )
+}
+
+/// With no PE asleep to take a completion signal [`signal_due`] reported:
+/// one step of each staged disk with work, on this core after its device
+/// release, within [`STEP_MICROS`] in all; none inside an interrupt or the
+/// host drivers, whose lock the step needs. Another core inside them
+/// leaves the step owed to its release ([`step`]). Whether it collected a
+/// completion.
+pub(super) fn signal_step() -> bool {
+    if super::host::in_interrupt() || host_drivers_held_here() {
+        return false;
+    }
+    let started = super::host::fresh_counter();
+    let budget = super::host::COUNTER_HZ / 1_000_000 * STEP_MICROS;
+    let mut finished = false;
+    for worker in staged_workers() {
+        if super::host::fresh_counter().wrapping_sub(started) >= budget {
+            break;
+        }
+        if worker.work() {
+            finished |= step(worker).is_some_and(|step| step.finished != 0);
+        }
+    }
+    finished
 }
 
 fn staged_workers() -> impl Iterator<Item = &'static DiskWorker> {

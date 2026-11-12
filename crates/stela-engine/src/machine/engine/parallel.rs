@@ -98,6 +98,13 @@ pub trait Kick: Send + Sync {
     fn signal_due(&self) -> bool {
         false
     }
+    /// With no PE asleep to take the work a [`Self::signal_due`] signal
+    /// brought, one bounded step of it on the releasing processor, outside
+    /// the devices' lock and any lock the step could need. Whether it
+    /// completed something the devices should look at now.
+    fn signal_step(&self) -> bool {
+        false
+    }
 }
 
 /// The halt-poll after a wait that took `blocked` counts, from `poll`, at
