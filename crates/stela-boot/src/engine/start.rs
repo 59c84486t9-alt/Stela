@@ -1322,11 +1322,13 @@ fn open_gpus(
         .iter()
         .map(|region| region.physical..region.physical + region.bytes)
         .collect();
+    super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::GpuMmioWindow);
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::GpuClock);
     if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
         crate::status::warn(&stela_boot_core::work_status::gpu_without_clock(
             crate::cpu::INVARIANT_TSC.present(),
@@ -1338,6 +1340,7 @@ fn open_gpus(
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
     crate::status::begin("Starting the GPU");
+    super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::GpuFramebuffer);
     let gop = if handoff.screen.is_some() {
         mmio.verified_framebuffer().map(Some)
     } else {
@@ -1348,6 +1351,7 @@ fn open_gpus(
     let found = adapters.clone();
     let claiming = host::rdtsc();
     let claimed = work.call_owned(60_000_000, move || {
+        super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::GpuPciClaim);
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new())
             .with_guest_ram(guest_ram);
         let random = stela_drivers::probe::NativeServices::entropy(&services)
@@ -1410,6 +1414,7 @@ fn open_gpus(
     // even when the start never returns.
     output::flush_log();
     let opening = host::rdtsc();
+    super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::GpuOpen);
     let opened = gpu::open(machine, claimed);
     // `GPU START claim_ms=… linux_ms=… probe_ms=… total_ms=…`: claiming the
     // functions, starting Linux, and nouveau's probe, which boots the GSP
@@ -2409,6 +2414,7 @@ fn start_platform(
     }
     // Retire the configuration census and park the contained function owners
     // before either SCI publication or remapper takeover.
+    super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::PciContainment);
     let contained_pci = native_mmio.and_then(|mmio| {
         // SAFETY: firmware is stopped, APs have not started, and native
         // probing has not published any PCI/controller owner yet.
@@ -2763,6 +2769,7 @@ fn start_devices(
             // it; this whole bound only catches a stall outside every
             // function's start, so it leaves room for several given up.
             let open = move || {
+                super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::DeviceServices);
                 let native = mmio.map(|mmio| {
                     services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz, usb4_approved)
                 });
@@ -2772,6 +2779,7 @@ fn start_devices(
                 // under the same guard when no owned stack exists. Owned
                 // handoff, inputs and kept services survive completion or
                 // quarantine.
+                super::interrupts::diagnostic_stage(super::interrupts::DiagnosticStage::DeviceProbe);
                 unsafe {
                     storage::open(
                         &storage_handoff,
