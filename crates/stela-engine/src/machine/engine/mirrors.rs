@@ -418,6 +418,8 @@ pub(super) const TRANSITIONS: transition::Places = transition::Places {
         Anchor::Pointer,
         offset_of!(super::pointer::PointerService, generation),
     ),
+    cycles: CYCLES,
+    instructions: INSTRUCTION_COUNTER,
 };
 const _: () = assert!(size_of::<usize>() == size_of::<u64>());
 

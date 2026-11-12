@@ -538,8 +538,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Whether the next native run may continue through transitions
-    /// ([`transition::Table::chain`]): freely where no counter tells the
-    /// levels apart. Else, where native code reads the count, it logs each
+    /// ([`transition::Table::chain`]): freely where no counter tells apart
+    /// the states it can reach, its own and those the records lead to, under
+    /// the controls now (another regime's filter is none of them). Else,
+    /// where native code reads the count, it logs each
     /// ([`CHAIN_LOGGED`]) for [`Self::adopt_segments`], unless an armed PMI
     /// could assert within the run in some level: by instructions within
     /// the most a run retires, by cycles within a second of count, far
@@ -552,10 +554,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if pmu.alike() {
             return CHAIN_FREE;
         }
+        let table = &self.mirrors.transitions;
+        let reached = table
+            .records
+            .as_flattened()
+            .iter()
+            .filter(|record| record.generation == table.generation)
+            .fold(1 << self.mirror_state(), |reached, record| {
+                reached | 1 << (record.to as usize % transition::STATES)
+            });
+        let states = self.cpu.pmu_states();
+        let mut contexts = [states[0]; transition::STATES];
+        let mut count = 0;
+        for (state, context) in states.into_iter().enumerate() {
+            if reached >> state & 1 != 0 {
+                contexts[count] = context;
+                count += 1;
+            }
+        }
+        let contexts = &contexts[..count];
+        if pmu.alike_in(contexts) {
+            return CHAIN_FREE;
+        }
         if !self.clock.reads_natively() {
             return 0;
         }
-        let (cycles, instructions) = pmu.level_deadlines();
+        let (cycles, instructions) = pmu.level_deadlines(contexts);
         let margin = pmu.count_frequency();
         let retired = self.cpu.retired;
         if instructions.is_some_and(|deadline| {
@@ -709,6 +733,43 @@ pub(super) mod tests {
         machine: &mut Machine<FakeHost, NoDevices>,
         code: &[u8],
     ) -> (u64, u64) {
+        enter_native(machine);
+        let exit = call_native(machine, code);
+        let counts = machine.mirrors.transitions.take_counts();
+        if counts != [0; KINDS] {
+            machine.adopt_native_state();
+        }
+        machine.cpu.pstate.daif = machine.cpu.state.daif as u8;
+        machine.cpu.pstate.sp = machine.mirrors.selected != 0;
+        machine.mirrors.leave(&mut machine.cpu.pstate);
+        if counts != [0; KINDS] {
+            machine.adopt_transitions(counts, 0);
+            machine.cpu.pc = exit.0;
+        }
+        exit
+    }
+
+    /// What `Machine::execute` sets up before native code runs.
+    pub(in crate::machine::engine) fn enter_native(machine: &mut Machine<FakeHost, NoDevices>) {
+        machine.cpu.state.daif = u32::from(machine.cpu.pstate.daif);
+        machine.mirrors.selected = u64::from(machine.cpu.pstate.sp);
+        machine.mirrors.monitor = u64::from(machine.cpu.monitor.is_some());
+        let state = machine.mirror_state();
+        machine.mirrors.transition(state);
+        machine.mirrors.enter(machine.cpu.pstate);
+        machine.cpu.state.pan = u64::from(machine.cpu.pstate.pan);
+        machine.enter_cycles();
+        machine.enter_events();
+        machine.cpu.state.anchors = machine.anchors();
+        machine.cpu.state.lower_limit = machine.lower_limit();
+    }
+
+    /// Run `code` on the host on the machine's frame as it stands, within
+    /// a native run [`enter_native`] began; the exit's PC and kind.
+    pub(in crate::machine::engine) fn call_native(
+        machine: &mut Machine<FakeHost, NoDevices>,
+        code: &[u8],
+    ) -> (u64, u64) {
         use core::ffi::c_void;
         unsafe extern "C" {
             fn mmap(
@@ -727,17 +788,6 @@ pub(super) mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        machine.cpu.state.daif = u32::from(machine.cpu.pstate.daif);
-        machine.mirrors.selected = u64::from(machine.cpu.pstate.sp);
-        machine.mirrors.monitor = u64::from(machine.cpu.monitor.is_some());
-        let state = machine.mirror_state();
-        machine.mirrors.transition(state);
-        machine.mirrors.enter(machine.cpu.pstate);
-        machine.cpu.state.pan = u64::from(machine.cpu.pstate.pan);
-        machine.enter_cycles();
-        machine.enter_events();
-        machine.cpu.state.anchors = machine.anchors();
-        machine.cpu.state.lower_limit = machine.lower_limit();
         let code = stela_compiler::x86_64::pinned::entered(code);
         assert!(code.len() <= PAGE);
         // SAFETY: private anonymous memory, RX after the copy, unmapped after
@@ -754,17 +804,6 @@ pub(super) mod tests {
             assert_eq!(munmap(page, PAGE), 0);
             exit
         };
-        let counts = machine.mirrors.transitions.take_counts();
-        if counts != [0; KINDS] {
-            machine.adopt_native_state();
-        }
-        machine.cpu.pstate.daif = machine.cpu.state.daif as u8;
-        machine.cpu.pstate.sp = machine.mirrors.selected != 0;
-        machine.mirrors.leave(&mut machine.cpu.pstate);
-        if counts != [0; KINDS] {
-            machine.adopt_transitions(counts, 0);
-            machine.cpu.pc = exit[0];
-        }
         (exit[0], exit[1])
     }
 

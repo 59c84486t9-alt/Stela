@@ -38,9 +38,11 @@
 //! room, and logs the instructions the run retired up to it with those of
 //! its block (each builder's `ending`), the count and the state entered, so
 //! that the engine brings the counters up to each in its own level
-//! ([`Segment`]). Reading the count, it also takes two words of the host
-//! stack and the count reader's words.
-use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size};
+//! ([`Segment`]). It folds the native counters' reads up to itself and on
+//! at the new state's rates (`fold_counters`), so that native reads in the
+//! next segment answer what the engine's would. Reading the count, it also
+//! takes a few words of the host stack and the count reader's words.
+use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size, Unary};
 use super::flag_word::{ARM_MASK, ARM_SHIFT, PACK_MULTIPLIER, UNPACK_MULTIPLIER, WORD_MASK};
 use super::pointer::Thunk;
 use crate::{Anchor, GuestAddress, GuestState, Place, aarch64::Register, block::ExitKind};
@@ -288,6 +290,10 @@ pub struct Places {
     /// The PAC service's tag words (`x86_64::pointer`) and generation.
     pub pointer_tags: Place,
     pub pointer_generation: Place,
+    /// The native counters (`register_read::CycleCounter` and
+    /// `InstructionCounter`) a logged transition folds.
+    pub cycles: Place,
+    pub instructions: Place,
 }
 
 const RECORD_BYTES: usize = size_of::<Record>();
@@ -375,6 +381,121 @@ fn swap_stack(asm: &mut Asm<'_>) {
     asm.mov_store(Qword, Mem::base(Rcx, 0), sp);
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, sp_load)));
     asm.mov_load(Qword, sp, Mem::base(Rcx, 0));
+}
+
+/// Bring the native counters up to the segment just logged (RAX at it, less
+/// the log's offset) and on in the state it entered, as the engine's
+/// synchronization at it does: the instruction counter's base moves so
+/// that the count up to the segment stays while the state's `step` takes
+/// over; the cycle counter takes the cycles up to the segment's count into
+/// `counter` and `remainder` at it, then the state's `clock`. A quotient
+/// that would not fit in 64 bits closes the cycle counter, whose reads then
+/// exit. It clobbers RAX, RCX and RDX and keeps the stack.
+fn fold_counters(asm: &mut Asm<'_>, places: &Places) {
+    use super::register_read::{CycleCounter, InstructionCounter};
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Dword, Qword};
+    let segment = |field: usize| Mem::base(Rax, (offset_of!(Table, log) + field) as i32);
+    let counter = |field: usize| Mem::base(Rcx, field as i32);
+    // RDX at the word of the entered state in the array at `field` of RCX.
+    let state_word = |asm: &mut Asm<'_>, field: usize| {
+        asm.mov_load(Qword, Rdx, segment(offset_of!(Segment, to)));
+        asm.alu_imm8(Alu::And, Dword, Rdx, (STATES - 1) as i8);
+        asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 3);
+        asm.alu(Alu::Add, Qword, Rdx, Rcx);
+        asm.mov_load(Qword, Rdx, Mem::base(Rdx, field as i32));
+    };
+    asm.push(Rax);
+    asm.place(Rcx, places.instructions);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Qword,
+        counter(offset_of!(InstructionCounter, open)),
+        0,
+    );
+    let closed = asm.jcc(Cond::E);
+    state_word(asm, offset_of!(InstructionCounter, steps));
+    // base += (retired & step) - (retired & new step).
+    asm.mov_load(Qword, Rax, segment(offset_of!(Segment, retired)));
+    asm.push(Rax);
+    asm.alu_load(
+        Alu::And,
+        Qword,
+        Rax,
+        counter(offset_of!(InstructionCounter, step)),
+    );
+    asm.alu(
+        Alu::Add,
+        Qword,
+        counter(offset_of!(InstructionCounter, base)),
+        Rax,
+    );
+    asm.pop(Rax);
+    asm.alu(Alu::And, Qword, Rax, Rdx);
+    asm.alu(
+        Alu::Sub,
+        Qword,
+        counter(offset_of!(InstructionCounter, base)),
+        Rax,
+    );
+    asm.mov_store(Qword, counter(offset_of!(InstructionCounter, step)), Rdx);
+    asm.bind(closed);
+    asm.pop(Rax);
+    asm.place(Rcx, places.cycles);
+    asm.alu_imm8(Alu::Cmp, Qword, counter(offset_of!(CycleCounter, open)), 0);
+    let closed = asm.jcc(Cond::E);
+    state_word(asm, offset_of!(CycleCounter, clocks));
+    asm.push(Rdx);
+    // The ticks since `synced`: none before it, which leaves the counter.
+    asm.mov_load(Qword, Rax, segment(offset_of!(Segment, count)));
+    asm.alu_load(
+        Alu::Sub,
+        Qword,
+        Rax,
+        counter(offset_of!(CycleCounter, synced)),
+    );
+    let before = asm.jcc(Cond::B);
+    asm.alu(
+        Alu::Add,
+        Qword,
+        counter(offset_of!(CycleCounter, synced)),
+        Rax,
+    );
+    asm.unary(Unary::Mul, Qword, counter(offset_of!(CycleCounter, clock)));
+    asm.alu_load(
+        Alu::Add,
+        Qword,
+        Rax,
+        counter(offset_of!(CycleCounter, remainder)),
+    );
+    asm.alu_imm8(Alu::Adc, Qword, Rdx, 0);
+    let frequency = counter(offset_of!(CycleCounter, frequency));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, frequency);
+    let wide = asm.jcc(Cond::Ae);
+    asm.unary(Unary::Div, Qword, frequency);
+    asm.mov_store(Qword, counter(offset_of!(CycleCounter, remainder)), Rdx);
+    asm.alu_load(
+        Alu::Add,
+        Qword,
+        Rax,
+        counter(offset_of!(CycleCounter, counter)),
+    );
+    asm.alu_load(
+        Alu::And,
+        Qword,
+        Rax,
+        counter(offset_of!(CycleCounter, mask)),
+    );
+    asm.mov_store(Qword, counter(offset_of!(CycleCounter, counter)), Rax);
+    asm.bind(before);
+    asm.pop(Rdx);
+    asm.mov_store(Qword, counter(offset_of!(CycleCounter, clock)), Rdx);
+    let done = asm.jmp8();
+    asm.bind(wide);
+    asm.pop(Rdx);
+    asm.mov_rm_imm32(Qword, counter(offset_of!(CycleCounter, open)), 0);
+    asm.bind(closed);
+    asm.bind(done);
 }
 
 /// What every completion does after its own effects, RDX at the record,
@@ -512,6 +633,7 @@ fn commit(
     super::register_read::read_count(&mut asm, places.count);
     asm.pop(Rax);
     asm.mov_store(Qword, segment(offset_of!(Segment, count)), Rdx);
+    fold_counters(&mut asm, places);
     asm.pop(Rdx);
     asm.bind(free);
     asm.mov_load(Qword, Rax, to(offset_of!(Record, target)));
@@ -955,6 +1077,8 @@ mod tests {
         monitor: u64,
         pointer_tags: [u64; crate::x86_64::pointer::TAG_WORDS],
         pointer_generation: u64,
+        cycles: crate::x86_64::register_read::CycleCounter,
+        instructions: crate::x86_64::register_read::InstructionCounter,
     }
 
     /// A level's GXF registers and two stack slots.
@@ -983,6 +1107,8 @@ mod tests {
         monitor: Place::new(Anchor::Mirrors, offset_of!(Words, monitor)),
         pointer_tags: Place::new(Anchor::Mirrors, offset_of!(Words, pointer_tags)),
         pointer_generation: Place::new(Anchor::Mirrors, offset_of!(Words, pointer_generation)),
+        cycles: Place::new(Anchor::Mirrors, offset_of!(Words, cycles)),
+        instructions: Place::new(Anchor::Mirrors, offset_of!(Words, instructions)),
     };
     const MISS: Exit = Exit {
         pc: PC.0,
@@ -1235,6 +1361,100 @@ mod tests {
             assert_eq!(log, rig.table.log);
             assert_eq!(rig.table.logged, 0);
         }
+    }
+
+    /// A logged completion folds the native counters up to its segment and
+    /// on in the state it entered, as the engine's synchronization there
+    /// does: the instruction count stays at the segment while the entered
+    /// state's step takes over; the cycle counter takes the cycles up to the
+    /// segment's count, its remainder carried, then the entered state's
+    /// clock. A count before `synced` takes no cycles; a quotient past 64
+    /// bits closes the cycle counter; closed counters stay as they were.
+    #[test]
+    fn logged_completions_fold_the_counters_into_the_state_entered() {
+        use crate::x86_64::register_read::{CycleCounter, InstructionCounter};
+        use core::sync::atomic::Ordering::Relaxed;
+        let thunk = guarded_enter_thunk(PC, 0xfe01_0003, &PLACES, 7);
+        let run = |instructions: InstructionCounter, cycles: CycleCounter, now: u64| {
+            let mut rig = entering();
+            rig.table.chain = CHAIN_LOGGED;
+            let contexts_generation = rig.table.contexts_generation;
+            let record = &mut rig.table.records[2][GUARDED_ENTER];
+            record.chain = 1;
+            record.contexts_generation = contexts_generation;
+            rig.control.retired = 40;
+            rig.clock.offset.store(now, Relaxed);
+            rig.words.instructions = instructions;
+            rig.words.cycles = cycles;
+            rig.run(&thunk);
+            assert_eq!(rig.table.logged, 1);
+            (rig.words.instructions, rig.words.cycles)
+        };
+        let mut steps = [u64::MAX; STATES];
+        steps[6] = 0;
+        let instructions = InstructionCounter {
+            open: 1,
+            base: 1_000,
+            step: u64::MAX,
+            mask: u64::MAX >> 16,
+            overflow: 0,
+            steps,
+        };
+        let mut clocks = [7; STATES];
+        clocks[6] = 11;
+        let cycles = CycleCounter {
+            open: 1,
+            counter: 500,
+            synced: 4_000,
+            remainder: 2,
+            clock: 7,
+            frequency: 3,
+            mask: u64::MAX >> 16,
+            overflow: 0,
+            clocks,
+        };
+        // 47 instructions counted up to the GENTER (40 and its block's 7),
+        // none after: a later read finds base + 0.
+        let (folded, timed) = run(instructions, cycles, 5_000);
+        assert_eq!((folded.base, folded.step), (1_047, 0));
+        assert_eq!(folded.steps, steps);
+        // 1000 ticks of 7 cycles in thirds with 2 carried: 7002 / 3.
+        assert_eq!(
+            (timed.counter, timed.synced, timed.remainder, timed.clock),
+            (500 + 2_334, 5_000, 0, 11)
+        );
+        assert_eq!(timed.at(5_003), Some(2_834 + 11));
+        // From a state that does not count into one that does.
+        let quiet = InstructionCounter {
+            step: 0,
+            steps: [u64::MAX; STATES],
+            ..instructions
+        };
+        let (folded, _) = run(quiet, cycles, 5_000);
+        assert_eq!(folded.base.wrapping_add(47) & folded.mask, 1_000);
+        assert_eq!(folded.at(50), Some(1_003));
+        // A count before `synced`: no cycles, the clock still moves.
+        let (_, timed) = run(instructions, cycles, 3_000);
+        assert_eq!(
+            (timed.counter, timed.synced, timed.remainder, timed.clock),
+            (500, 4_000, 2, 11)
+        );
+        // A quotient past 64 bits closes the cycle counter.
+        let wide = CycleCounter {
+            clock: u64::MAX,
+            ..cycles
+        };
+        let (_, timed) = run(instructions, wide, 5_000);
+        assert_eq!(timed.open, 0);
+        // Closed counters stay.
+        let closed = (
+            InstructionCounter {
+                open: 0,
+                ..instructions
+            },
+            CycleCounter { open: 0, ..cycles },
+        );
+        assert_eq!(run(closed.0, closed.1, 5_000), closed);
     }
 
     /// Without a record that holds for the frame, the state and the stack

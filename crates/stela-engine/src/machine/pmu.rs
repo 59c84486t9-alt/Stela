@@ -122,6 +122,8 @@ const EXTENSION: [Encoding; EXTENSIONS] = [
 const EXTENSIONS: usize = 9;
 
 pub const COUNTERS: usize = 10;
+/// The PE states native code passes through (`transition::STATES`).
+pub const STATES: usize = stela_compiler::x86_64::transition::STATES;
 const CYCLES: usize = 0;
 const INSTRUCTIONS: usize = 1;
 #[cfg(test)]
@@ -408,18 +410,24 @@ impl Pmu {
     /// `counters[0]` plus the floor of the ticks since, scaled with the
     /// carried remainder, and nothing while PMC0 does not count there.
     /// While PMC0's PMI is armed a count with the overflow bit set exits
-    /// ([`Self::armed_overflow`]).
-    pub fn native_cycles(&self) -> stela_compiler::x86_64::register_read::CycleCounter {
+    /// ([`Self::armed_overflow`]). `states` are the contexts of the PE's
+    /// states, whose clocks a logged transition takes on.
+    pub fn native_cycles(
+        &self,
+        states: &[Context; STATES],
+    ) -> stela_compiler::x86_64::register_read::CycleCounter {
         let counting = self.counts(CYCLES, self.context);
+        let clock = |counting: bool| if counting { self.clock } else { 0 };
         stela_compiler::x86_64::register_read::CycleCounter {
             open: 1,
             counter: self.counters[CYCLES],
             synced: self.synced_count,
             remainder: self.remainder[CYCLES],
-            clock: if counting { self.clock } else { 0 },
+            clock: clock(counting),
             frequency: self.frequency,
             mask: self.layout.width.mask(),
             overflow: self.armed_overflow(CYCLES),
+            clocks: states.map(|context| clock(self.counts(CYCLES, context))),
         }
     }
 
@@ -432,11 +440,15 @@ impl Pmu {
     /// while PMC1 counts there. It is closed where `context` counts
     /// otherwise than the synchronized one. While PMC1's PMI is armed a
     /// count with the overflow bit set exits ([`Self::armed_overflow`]).
+    /// `states` are the contexts of the PE's states, whose steps a logged
+    /// transition takes on.
     pub fn native_instructions(
         &self,
         retired: u64,
         context: Context,
+        states: &[Context; STATES],
     ) -> stela_compiler::x86_64::register_read::InstructionCounter {
+        let step = |counting: bool| if counting { u64::MAX } else { 0 };
         let counting = self.counts(INSTRUCTIONS, self.context);
         if counting != self.counts(INSTRUCTIONS, context) {
             return Default::default();
@@ -449,9 +461,10 @@ impl Pmu {
         stela_compiler::x86_64::register_read::InstructionCounter {
             open: 1,
             base: self.counters[INSTRUCTIONS].wrapping_add(since),
-            step: if counting { u64::MAX } else { 0 },
+            step: step(counting),
             mask: self.layout.width.mask(),
             overflow: self.armed_overflow(INSTRUCTIONS),
+            steps: states.map(|context| step(self.counts(INSTRUCTIONS, context))),
         }
     }
 
@@ -522,16 +535,28 @@ impl Pmu {
     }
 
     /// The earliest system count and retired instruction count at which
-    /// the PMI can assert while native code may pass through every level
-    /// (a native run that continues through transitions): each counter
-    /// that counts in some level counts as though it counted in all, so
-    /// neither comes later than the PMI's in any order of levels.
-    pub fn level_deadlines(&self) -> (Option<u64>, Option<u64>) {
-        self.deadlines(|n| running_contexts().any(|context| self.counts(n, context)))
+    /// the PMI can assert while native code may pass through every one of
+    /// `contexts` (a native run that continues through transitions): each
+    /// counter that counts in one of them counts as though it counted in
+    /// all, so neither comes later than the PMI's in any order of them.
+    pub fn level_deadlines(&self, contexts: &[Context]) -> (Option<u64>, Option<u64>) {
+        self.deadlines(|n| contexts.iter().any(|&context| self.counts(n, context)))
+    }
+
+    /// Whether every counter counts alike in each of `contexts`: as
+    /// [`Self::alike`] for the contexts a run can reach, which leave out
+    /// the filters of other regimes (PMCR1_EL12 outside a VM's EL1&0).
+    pub fn alike_in(&self, contexts: &[Context]) -> bool {
+        self.alike
+            || (0..COUNTERS).all(|n| {
+                let mut counts = contexts.iter().map(|&context| self.counts(n, context));
+                let first = counts.next();
+                counts.all(|count| Some(count) == first)
+            })
     }
 
     /// Whether counter `n` counts alike in every context but a wait.
-    pub fn counts_alike(&self, n: usize) -> bool {
+    fn counts_alike(&self, n: usize) -> bool {
         let mut counts = running_contexts().map(|context| self.counts(n, context));
         let first = counts.next();
         counts.all(|count| Some(count) == first)

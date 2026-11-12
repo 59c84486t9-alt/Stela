@@ -920,6 +920,13 @@ impl Cpu {
         self.pmu_context_at(self.pstate.el, self.pstate.guarded, waiting)
     }
 
+    /// The contexts of the PE's states (`transition::STATES`, the EL in
+    /// bits 1:0 and the guarded level in bit 2) under its controls now:
+    /// those a native run passes through.
+    pub fn pmu_states(&self) -> [super::pmu::Context; super::pmu::STATES] {
+        core::array::from_fn(|state| self.pmu_context_at((state & 3) as u8, state & 4 != 0, false))
+    }
+
     /// [`Self::pmu_context`] at `el` and the guarded level `guarded`, the
     /// other controls as they are.
     pub fn pmu_context_at(&self, el: u8, guarded: bool, waiting: bool) -> super::pmu::Context {

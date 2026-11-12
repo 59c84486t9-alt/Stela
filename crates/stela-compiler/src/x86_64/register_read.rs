@@ -701,7 +701,10 @@ pub fn energy_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thun
 /// the sum wrapped to `mask`; `remainder` is below `frequency`. `open` is nonzero while these are the
 /// monitor's; `frequency` is never 0 then. `overflow` is the counter's
 /// overflow bit while its PMI is armed, else 0: a count with it set exits,
-/// so that the engine's read raises the PMI at the read.
+/// so that the engine's read raises the PMI at the read. `clocks` holds
+/// `clock` in each PE state, which a logged transition
+/// (`transition::CHAIN_LOGGED`) takes after it folds the count up to itself
+/// into `counter`, `synced` and `remainder`.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CycleCounter {
@@ -713,6 +716,7 @@ pub struct CycleCounter {
     pub frequency: u64,
     pub mask: u64,
     pub overflow: u64,
+    pub clocks: [u64; super::transition::STATES],
 }
 
 impl CycleCounter {
@@ -834,7 +838,9 @@ pub fn cycle_counter_thunk(
 /// does not), the sum wrapped to `mask`. `open` is nonzero while these are
 /// the monitor's. `overflow` is the counter's overflow bit while its PMI is
 /// armed, else 0: a count with it set exits, so that the engine's read
-/// raises the PMI at the read.
+/// raises the PMI at the read. `steps` holds `step` in each PE state, which
+/// a logged transition (`transition::CHAIN_LOGGED`) takes, moving `base` so
+/// that the count up to it stays.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionCounter {
@@ -843,6 +849,7 @@ pub struct InstructionCounter {
     pub step: u64,
     pub mask: u64,
     pub overflow: u64,
+    pub steps: [u64; super::transition::STATES],
 }
 
 impl InstructionCounter {
@@ -1826,6 +1833,7 @@ mod tests {
                 frequency: 3,
                 mask: u64::MAX >> 16,
                 overflow: 0,
+                clocks: [0; crate::x86_64::transition::STATES],
             },
         });
         let published = alloc::boxed::Box::new(CountState::default());
@@ -1957,6 +1965,7 @@ mod tests {
                 step: u64::MAX,
                 mask: u64::MAX >> 16,
                 overflow: 0,
+                steps: [0; crate::x86_64::transition::STATES],
             },
         });
         let mut control = alloc::boxed::Box::new(ChainControl {
@@ -2020,6 +2029,7 @@ mod tests {
             step: u64::MAX,
             mask: u64::MAX,
             overflow: 0,
+            steps: [0; crate::x86_64::transition::STATES],
         };
         control.retired = 7;
         let discard = instruction_counter_thunk(PC, 31, CELL, PLAIN, COUNTER, 0).unwrap();

@@ -457,24 +457,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Fill [`Mirrors::cycles`] and [`Mirrors::instructions`] as native code
     /// is entered: the monitor's PMC0 and PMC1, which no native code
     /// changes, PMC1 at the instructions retired so far, each unless a read
-    /// of it answers a degraded value instead of the count, or the run may
-    /// continue into a level where it counts otherwise
-    /// ([`transition::CHAIN_LOGGED`]): there only the engine knows the count.
+    /// of it answers a degraded value instead of the count. With the rate
+    /// each takes in each state, which a logged transition
+    /// ([`transition::CHAIN_LOGGED`]) moves it to.
     pub(super) fn enter_cycles(&mut self) {
-        let logged = self.mirrors.transitions.chain == transition::CHAIN_LOGGED;
         let closed = |index: usize| {
-            logged
+            !self.cpu.degraded.is_empty()
                 && self
                     .cpu
-                    .pmu
-                    .as_ref()
-                    .is_some_and(|pmu| !pmu.counts_alike(index))
-                || !self.cpu.degraded.is_empty()
-                    && self
-                        .cpu
-                        .degraded
-                        .contains_key(&MIRRORED[COUNTER_MIRRORS[index]].selector())
+                    .degraded
+                    .contains_key(&MIRRORED[COUNTER_MIRRORS[index]].selector())
         };
+        let states = self.cpu.pmu_states();
         let (cycles_closed, instructions_closed) = (closed(0), closed(1));
         let context = self.cpu.pmu_context(false);
         let retired = self.cpu.retired;
@@ -483,12 +477,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if cycles_closed {
                     Default::default()
                 } else {
-                    pmu.native_cycles()
+                    pmu.native_cycles(&states)
                 },
                 if instructions_closed {
                     Default::default()
                 } else {
-                    pmu.native_instructions(retired, context)
+                    pmu.native_instructions(retired, context, &states)
                 },
             ),
             None => Default::default(),

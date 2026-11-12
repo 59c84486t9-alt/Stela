@@ -511,6 +511,9 @@ fn levels_machine(pmc1: u64, armed: bool, cycles_armed: bool) -> Machine<FakeHos
     machine.cpu.pmu = Some(monitor);
     machine.cpu.retired = 10;
     machine.derived_changed();
+    // Records of the ERET to EL0 and the SVC back, the states a run
+    // reaches; they retire nothing and take no time.
+    warm(&mut machine);
     machine
 }
 
@@ -588,8 +591,8 @@ fn logged_transitions_count_each_segment_in_its_own_level() {
 /// Counters that tell the levels apart let a run continue through
 /// transitions only by logging them, where native code reads the count and
 /// no armed PMI could assert within the run in some level; counters that
-/// count alike let it continue freely. Under the log, native reads of a
-/// counter that counts otherwise in some level stay closed.
+/// count alike let it continue freely. Native reads stay open, with the
+/// rate each counter takes in each state.
 #[test]
 fn transitions_continue_logged_only_where_no_pmi_falls_within_the_run() {
     use stela_compiler::x86_64::transition::{CHAIN_FREE, CHAIN_LOGGED};
@@ -599,14 +602,18 @@ fn transitions_continue_logged_only_where_no_pmi_falls_within_the_run() {
     };
     let mut machine = native(levels_machine(1_000, true, false));
     assert_eq!(machine.transition_chain(), CHAIN_LOGGED);
-    machine.mirrors.transitions.chain = CHAIN_LOGGED;
+    // Native reads stay open, with each state's rate for the logged
+    // transitions to take: PMC0 counts at EL2 (state 2), PMC1 at EL0.
     machine.enter_cycles();
-    assert_eq!(machine.mirrors.cycles.open, 0);
-    assert_eq!(machine.mirrors.instructions.open, 0);
-    machine.mirrors.transitions.chain = 0;
-    machine.enter_cycles();
-    assert_ne!(machine.mirrors.cycles.open, 0);
-    assert_ne!(machine.mirrors.instructions.open, 0);
+    let (cycles, instructions) = (machine.mirrors.cycles, machine.mirrors.instructions);
+    assert_ne!(cycles.open, 0);
+    assert_ne!(instructions.open, 0);
+    assert_eq!(
+        (cycles.clock, cycles.clocks[2], cycles.clocks[0]),
+        (36_000_000, 36_000_000, 0)
+    );
+    assert_eq!((instructions.step, instructions.steps[2]), (0, 0));
+    assert_eq!(instructions.steps[0], u64::MAX);
     // PMC1's PMI within the run's instructions, though EL2 counts none.
     let mut machine = native(levels_machine(PMC_OVERFLOW - 25, true, false));
     assert_eq!(machine.transition_chain(), 0);
@@ -629,4 +636,253 @@ fn transitions_continue_logged_only_where_no_pmi_falls_within_the_run() {
     // Counting alike, or without a monitor.
     let mut machine = host();
     assert_eq!(machine.transition_chain(), CHAIN_FREE);
+}
+
+/// Only the states a run can reach, its own and those its records lead to,
+/// tell levels apart: PMC0 and PMC1 counting at EL0 and EL2 of the host let
+/// runs between them continue freely whatever PMCR1_EL12 (a VM's EL1&0
+/// filter, never written here) and PMCR1_GL1 say. Once a record leads to a
+/// guarded level, PMCR1_GL1 decides: counting there as at EL2 (SPTM writes
+/// 0x30300) keeps them free, counting nothing there logs the transitions.
+#[test]
+fn only_the_states_a_run_reaches_tell_levels_apart() {
+    use crate::machine::pmu::{self, Context, Filter, Pmu};
+    use stela_compiler::x86_64::transition::{CHAIN_FREE, CHAIN_LOGGED};
+    const AT_EL2: Context = Context {
+        el: 2,
+        filter: Filter::Host,
+        waiting: false,
+    };
+    let cases = [
+        (0x30300, false, CHAIN_FREE),
+        (0, false, CHAIN_FREE),
+        (0x30300, true, CHAIN_FREE),
+        (0, true, CHAIN_LOGGED),
+    ];
+    for (guarded, to_guarded, chain) in cases {
+        let mut machine = host();
+        warm(&mut machine);
+        let mut monitor = Pmu::new(36_000_000, 24_000_000);
+        monitor.write(pmu::PMCR1, 0x30300, 0, 0, AT_EL2).unwrap();
+        monitor.write(pmu::PMCR0, 0b11, 0, 0, AT_EL2).unwrap();
+        monitor.set_guarded_filter(guarded, 0, 0, AT_EL2);
+        assert!(!monitor.alike(), "PMCR1_EL12 counts nothing");
+        machine.cpu.pmu = Some(monitor);
+        machine.clock.native((0, 1 << 32));
+        if to_guarded {
+            // A GENTER from EL2 to GL2 recorded.
+            let table = &mut machine.mirrors.transitions;
+            table.records[2][transition::GUARDED_ENTER] = transition::Record {
+                generation: table.generation,
+                to: 6,
+                ..transition::Record::default()
+            };
+        }
+        let case = (guarded, to_guarded);
+        assert_eq!(machine.transition_chain(), chain, "{case:x?}");
+    }
+}
+
+/// MRS X10, PMC0 and MRS X10, PMC1.
+const MRS_PMC: [u32; 2] = [0xd53a_f00a, 0xd53a_f10a];
+
+/// PMC0 and PMC1 as the engine reads them at `retired` and count `now`.
+fn engine_counters(machine: &mut Machine<FakeHost, NoDevices>, retired: u64, now: u64) -> [u64; 2] {
+    machine.cpu.retired = retired;
+    machine.host.now = now;
+    MRS_PMC.map(|word| {
+        let pc = machine.cpu.pc;
+        machine.system_instruction(word).unwrap();
+        assert_eq!(machine.cpu.pc, pc + 4, "completed plainly");
+        machine.cpu.pc = pc;
+        machine.cpu.state.x[10]
+    })
+}
+
+/// Write the instructions a native run retired into the machine's chain
+/// control, as the blocks it left would have.
+fn run_retired(machine: &mut Machine<FakeHost, NoDevices>, retired: u64) {
+    let control = machine.chain.address() as *mut chain::ChainControl;
+    // SAFETY: the machine's own control, which no native code runs over
+    // meanwhile.
+    unsafe { core::ptr::addr_of_mut!((*control).retired).write(retired) };
+}
+
+/// PMC0 and PMC1 as their thunks read them within a native run, after it
+/// retired `retired` instructions, at count `now` of `clock`; `None` for
+/// one that exited.
+fn native_counters(
+    machine: &mut Machine<FakeHost, NoDevices>,
+    clock: &stela_compiler::x86_64::register_read::CountState,
+    retired: u64,
+    now: u64,
+) -> [Option<u64>; 2] {
+    use super::super::transitions::tests::call_native;
+    clock
+        .offset
+        .store(now, core::sync::atomic::Ordering::Relaxed);
+    run_retired(machine, retired);
+    let cycles = register_read::cycle_counter_thunk(
+        GuestAddress(BASE),
+        10,
+        cell_place(COUNTER_MIRRORS[0]),
+        cell_place(CYCLES_PLAIN),
+        CYCLES,
+        Place::new(Anchor::Count, 0),
+    );
+    let instructions = register_read::instruction_counter_thunk(
+        GuestAddress(BASE),
+        10,
+        cell_place(COUNTER_MIRRORS[1]),
+        cell_place(INSTRUCTIONS_PLAIN),
+        INSTRUCTION_COUNTER,
+        0,
+    )
+    .unwrap();
+    [cycles.code, instructions.code].map(|code| {
+        // Each read computes the count rather than take the value an
+        // earlier read opened its cell on.
+        machine.mirrors[COUNTER_MIRRORS[0]].readable = 0;
+        machine.mirrors[COUNTER_MIRRORS[1]].readable = 0;
+        machine.cpu.state.x[10] = 0xdead;
+        let exit = call_native(machine, &code);
+        (exit == (BASE + 4, ExitKind::Fallthrough as u64)).then_some(machine.cpu.state.x[10])
+    })
+}
+
+/// A run that continues through ERET, SVC and ERET, logging each
+/// ([`transition::CHAIN_LOGGED`]), reads PMC0 and PMC1 natively in every
+/// segment as a twin that takes every transition and read in the engine
+/// reads them at the same instructions and count: for counters that count
+/// at EL0 only, at EL2 only, and at both. The engine's synchronization at
+/// each logged transition after the run then agrees with what the reads
+/// returned.
+#[test]
+fn native_counter_reads_in_each_logged_segment_equal_the_engine_path() {
+    use super::super::transitions::tests::{call_native, enter_native};
+    use crate::machine::pmu::{self, Context, Filter, Pmu};
+    use core::sync::atomic::Ordering::Relaxed;
+    use stela_compiler::x86_64::register_read::{Count, CountState};
+    const AT_EL2: Context = Context {
+        el: 2,
+        filter: Filter::Host,
+        waiting: false,
+    };
+    const BEGUN: u64 = 1_000;
+    // The transitions' thunks, each of a one-instruction block.
+    let syndrome =
+        crate::machine::exception::syndrome(crate::machine::exception::Class::SupervisorCall, 0x80)
+            as u32;
+    let thunks = [
+        transition::exception_return_thunk(GuestAddress(ERET_PC), &TRANSITIONS, 1),
+        transition::supervisor_call_thunk(GuestAddress(USER), syndrome, &TRANSITIONS, 1),
+    ];
+    // (instructions retired since entry, count) of each segment's reads,
+    // then of the transition that ends it, ERET and SVC in turn. EL0 reads
+    // of the monitor trap (`pmu::Pmu::write`: no EL0 access), so the EL0
+    // segments only count.
+    type Reads = &'static [(u64, u64)];
+    let segments: [(Reads, Option<(u64, u64)>); 4] = [
+        (&[(10, 1_300), (40, 2_000)], Some((50, 2_500))),
+        (&[], Some((80, 3_600))),
+        (&[(85, 3_700), (90, 4_000)], Some((100, 4_400))),
+        (&[], None),
+    ];
+    // PMCR1: both counters at EL0, at EL2, or at both.
+    for filter in [0b11 << 8, 0b11 << 16, 0b11 << 8 | 0b11 << 16] {
+        let clock = alloc::boxed::Box::new(CountState::default());
+        clock.ceiling.store(u64::MAX, Relaxed);
+        let make = || {
+            let mut machine = host();
+            let mut monitor = Pmu::new(36_000_007, 24_000_000);
+            monitor.write(pmu::PMCR1, filter, 0, 0, AT_EL2).unwrap();
+            monitor.write(pmu::PMCR0, 0b11, 0, 0, AT_EL2).unwrap();
+            monitor.write(pmu::PMC[0], 1_000, 0, 0, AT_EL2).unwrap();
+            monitor.write(pmu::PMC[1], 2_000, 0, 0, AT_EL2).unwrap();
+            machine.cpu.pmu = Some(monitor);
+            machine.derived_changed();
+            machine
+        };
+        // Records name the frame where it stays.
+        let ready = |machine: &mut Machine<FakeHost, NoDevices>| {
+            machine.host.now = 100;
+            warm(machine);
+            // An engine read opens EL2's plain cells.
+            engine_counters(machine, 0, 100);
+            prepare(machine);
+            machine.cpu.retired = BEGUN;
+            machine.host.now = 1_000;
+        };
+        let (mut twin, mut native) = (make(), make());
+        ready(&mut twin);
+        ready(&mut native);
+        let reader = native.clock.reader() as *mut Count;
+        // SAFETY: the machine's own reader, which no native code runs over
+        // meanwhile; `clock` outlives every run of the case.
+        unsafe {
+            (*reader).per_tsc = 0;
+            (*reader).last = 0;
+            (*reader).state = &*clock as *const CountState as u64;
+        }
+        // The run: entered at EL2 with the records continuing (the host's
+        // view stays), each transition logged.
+        native.mirrors.lines_until = u64::MAX;
+        native.mirrors.transitions.chain = transition::CHAIN_LOGGED;
+        let generation = native.mirrors.transitions.contexts_generation;
+        for (state, kind) in [(2, EXCEPTION_RETURN), (0, SUPERVISOR_CALL)] {
+            let record = &mut native.mirrors.transitions.records[state][kind];
+            record.chain = 1;
+            record.contexts_generation = generation;
+        }
+        enter_native(&mut native);
+        for (index, (reads, transition)) in segments.iter().enumerate() {
+            for &(retired, now) in *reads {
+                let expected = engine_counters(&mut twin, BEGUN + retired, now);
+                let read = native_counters(&mut native, &clock, retired, now);
+                let at = (filter, index, retired);
+                assert_eq!(read, expected.map(Some), "{at:x?}");
+            }
+            let Some((retired, now)) = *transition else {
+                continue;
+            };
+            // The twin retires the transition's instruction, then takes it.
+            twin.cpu.retired = BEGUN + retired;
+            twin.host.now = now;
+            let word = [ERET, SVC_WORD][index % 2];
+            if word == ERET && index > 0 {
+                // The kernel returns to the thread with the SPSR and ELR it
+                // made, on both alike.
+                prepare(&mut twin);
+                prepare(&mut native);
+            }
+            twin.system_instruction(word).unwrap();
+            clock.offset.store(now, Relaxed);
+            run_retired(&mut native, retired - 1);
+            let exit = call_native(&mut native, &thunks[index % 2].code);
+            assert_eq!(
+                exit.1,
+                ExitKind::Return as u64,
+                "{filter:#x} transition {index}"
+            );
+        }
+        assert_eq!(native.mirrors.transitions.logged, 3, "{filter:#x}");
+        // The run ends at EL0 as `Machine::execute` leaves it.
+        let counts = native.mirrors.transitions.take_counts();
+        native.adopt_native_state();
+        native.adopt_segments();
+        native.cpu.pstate.daif = native.cpu.state.daif as u8;
+        native.cpu.pstate.sp = native.mirrors.selected != 0;
+        native.mirrors.leave(&mut native.cpu.pstate);
+        native.cpu.retired = BEGUN + 160;
+        native.host.now = 6_500;
+        native.adopt_transitions(counts, 0);
+        assert_eq!(native.mirror_state(), twin.mirror_state(), "{filter:#x}");
+        twin.cpu.retired = BEGUN + 160;
+        twin.host.now = 6_500;
+        twin.sync_monitor();
+        let expected = level_counts(&mut twin);
+        assert_eq!(level_counts(&mut native), expected, "{filter:#x}");
+        assert_ne!(expected.0, 1_000, "{filter:#x} PMC0 counted");
+        assert_ne!(expected.1, 2_000, "{filter:#x} PMC1 counted");
+    }
 }
