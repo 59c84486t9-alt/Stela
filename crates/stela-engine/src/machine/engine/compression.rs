@@ -74,6 +74,57 @@ impl Buffers {
     }
 }
 
+/// A part of an instruction [`Ticks`] times.
+#[derive(Clone, Copy)]
+enum Part {
+    Read,
+    Codec,
+    Write,
+}
+
+/// The profile clock's ticks of an instruction's parts, under step timing
+/// only (`step_timing::Compression`): each mark charges the ticks since the
+/// last to its part.
+struct Ticks {
+    timed: bool,
+    started: u64,
+    last: u64,
+    parts: [u64; 3],
+}
+
+impl Ticks {
+    fn start<H: Host, D: Devices>(machine: &mut Machine<H, D>) -> Self {
+        let timed = machine.step_timing.is_some();
+        let now = if timed {
+            machine.host.profile_ticks()
+        } else {
+            0
+        };
+        Self {
+            timed,
+            started: now,
+            last: now,
+            parts: [0; 3],
+        }
+    }
+
+    fn mark<H: Host, D: Devices>(&mut self, machine: &mut Machine<H, D>, part: Part) {
+        if self.timed {
+            let now = machine.host.profile_ticks();
+            self.parts[part as usize] += now.wrapping_sub(self.last);
+            self.last = now;
+        }
+    }
+
+    fn finish<H: Host, D: Devices>(self, machine: &mut Machine<H, D>, operation: Operation) {
+        if self.timed {
+            let whole = machine.host.profile_ticks().wrapping_sub(self.started);
+            let slot = usize::from(operation == Operation::Decompress);
+            machine.system_exits.compression[slot].add(whole, self.parts);
+        }
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     fn refuse_compression(&self, word: u32, detail: &str) -> Stop {
         self.unsupported(RequirementKind::Instruction {
@@ -100,11 +151,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let destination = self.cpu.state.x[usize::from(instruction.destination)] & destination_mask;
         let chip = self.profile.chip;
         let mut buffers = self.wkdm_buffers.take().unwrap_or_else(Buffers::new);
+        let mut ticks = Ticks::start(self);
         let outcome = match instruction.operation {
-            Operation::Compress => self.compress(word, source, destination, chip, &mut buffers),
-            Operation::Decompress => self.decompress(word, source, destination, chip, &mut buffers),
+            Operation::Compress => {
+                self.compress(word, source, destination, chip, &mut buffers, &mut ticks)
+            }
+            Operation::Decompress => {
+                self.decompress(word, source, destination, chip, &mut buffers, &mut ticks)
+            }
         };
         self.wkdm_buffers = Some(buffers);
+        if outcome.is_ok() {
+            ticks.finish(self, instruction.operation);
+        }
         match outcome {
             Ok(result) => {
                 self.cpu.state.x[usize::from(instruction.source)] = result;
@@ -125,16 +184,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         destination: u64,
         chip: Chip,
         buffers: &mut Buffers,
+        ticks: &mut Ticks,
     ) -> Result<u64, Blocked> {
         let Buffers { page, data } = buffers;
         self.transfer(word, source, &mut page[..], false)?;
+        ticks.mark(self, Part::Read);
         let page: &[u8; PAGE_BYTES] = page;
         let uncompressed = || wkdm::population(page);
         let counted = |written: &[u8]| match population_source(chip) {
             Population::Uncompressed => uncompressed(),
             Population::Compressed => wkdm::population(written),
         };
-        Ok(match codec::compress_into(page, data) {
+        let encoded = codec::compress_into(page, data);
+        ticks.mark(self, Part::Codec);
+        Ok(match encoded {
             Encoded::SingleValue => wkdm::result(Status::Complete, None, true, counted(&[])),
             Encoded::Incompressible => {
                 wkdm::result(Status::Incompressible, None, false, counted(&[]))
@@ -142,6 +205,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Encoded::Data(bytes) => {
                 self.check_disjoint(word, source, PAGE_BYTES, destination, bytes)?;
                 self.transfer(word, destination, &mut data[..bytes], true)?;
+                ticks.mark(self, Part::Write);
                 let units = bytes / UNIT_BYTES;
                 wkdm::result(
                     Status::Complete,
@@ -160,6 +224,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         destination: u64,
         chip: Chip,
         buffers: &mut Buffers,
+        ticks: &mut Ticks,
     ) -> Result<u64, Blocked> {
         let invalid = wkdm::result(Status::Incompressible, None, false, 0);
         let Buffers { page, data } = buffers;
@@ -170,11 +235,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let data = &mut data[..length];
         self.transfer(word, source, data, false)?;
-        if !codec::decompress_into(data, page) {
+        ticks.mark(self, Part::Read);
+        let decoded = codec::decompress_into(data, page);
+        ticks.mark(self, Part::Codec);
+        if !decoded {
             return Ok(invalid);
         }
         self.check_disjoint(word, source, length, destination, PAGE_BYTES)?;
         self.transfer(word, destination, &mut page[..], true)?;
+        ticks.mark(self, Part::Write);
         let population = match population_source(chip) {
             Population::Uncompressed => wkdm::population(&page[..]),
             Population::Compressed => wkdm::population(data),
@@ -580,6 +649,25 @@ mod tests {
                 "{name}: codec compress {compress} ns, decompress {decompress} ns; \
                  instruction compress {instruction} ns, decompress {restore} ns"
             );
+        }
+    }
+
+    #[test]
+    fn step_timing_splits_each_instruction_into_its_read_codec_and_write() {
+        let mut machine = machine(Chip::AppleM2);
+        assert!(machine.host.write_ram(PAGE, &page()));
+        run(&mut machine, COMPRESS_X0_X1, PAGE, COMPRESSED);
+        assert_eq!(machine.system_exits.compression[0].count, 0, "untimed");
+        machine.set_step_timing(true);
+        for (slot, word, source, destination) in [
+            (0, COMPRESS_X0_X1, PAGE, COMPRESSED),
+            (1, DECOMPRESS_X0_X1, COMPRESSED, RESTORED),
+        ] {
+            machine.cpu.pc = BASE;
+            run(&mut machine, word, source, destination);
+            let timed = machine.system_exits.compression[slot];
+            assert_eq!(timed.count, 1, "{word:#x}");
+            assert!(timed.read + timed.codec + timed.write <= timed.whole);
         }
     }
 

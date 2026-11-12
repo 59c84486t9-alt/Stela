@@ -163,6 +163,34 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     }
     numerical_exits_report(numerical, &exits.floating, tsc_hz);
     numerical_causes_report(&exits.floating_words);
+    compression_report(&exits.compression, tsc_hz);
+}
+
+/// `PES WKDM compress=count ns_each whole/read/codec/write`: the WKDMC and
+/// WKDMD instructions completed since the last beat, the mean nanoseconds
+/// of their handling and of its parts (`step_timing::Compression`).
+fn compression_report(compression: &[step_timing::Compression; 2], tsc_hz: u64) {
+    if compression.iter().all(|operation| operation.count == 0) {
+        return;
+    }
+    let mut line = String::from("PES WKDM count ns_each whole/read/codec/write");
+    for (name, operation) in ["compress", "decompress"].iter().zip(compression) {
+        let each = |ticks: u64| {
+            u128::from(ticks) * 1_000_000_000
+                / u128::from(tsc_hz.max(1))
+                / u128::from(operation.count.max(1))
+        };
+        line.push_str(&format!(
+            " {name}={} {}/{}/{}/{}",
+            operation.count,
+            each(operation.whole),
+            each(operation.read),
+            each(operation.codec),
+            each(operation.write),
+        ));
+    }
+    output::arguments(format_args!("{line}
+"));
 }
 
 /// The exits of `exits` past the first `shown`, summed, if any.

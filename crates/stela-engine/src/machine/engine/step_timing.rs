@@ -305,6 +305,8 @@ pub struct SystemExits {
     pub floating_words: FloatingWords,
     pub barriers: BarrierWaits,
     pub regimes: RegimeSyncs,
+    /// WKDMC, then WKDMD ([`Compression`]).
+    pub compression: [Compression; 2],
 }
 
 /// The host's regime changes ([`super::Host::set_regime`]) and prediction
@@ -458,6 +460,40 @@ impl BarrierWaits {
         }
         self.other.count += other.other.count;
         self.other.ticks += other.other.ticks;
+    }
+}
+
+/// WKDMC or WKDMD instructions the engine completed under step timing, and
+/// the ticks of their handling split: the whole handler; reading the source
+/// through translated guest memory; the codec; and writing the destination
+/// (the host's publication of the bytes into guest RAM). The rest of the
+/// handler is translation checks and the result; the rest of the exit, in
+/// `SYSTEM WORDS`, is leaving and entering the guest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Compression {
+    pub count: u64,
+    pub whole: u64,
+    pub read: u64,
+    pub codec: u64,
+    pub write: u64,
+}
+
+impl Compression {
+    /// Count one of `whole` ticks: `parts` are its read, codec and write.
+    pub fn add(&mut self, whole: u64, parts: [u64; 3]) {
+        self.count += 1;
+        self.whole += whole;
+        self.read += parts[0];
+        self.codec += parts[1];
+        self.write += parts[2];
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        self.whole += other.whole;
+        self.read += other.read;
+        self.codec += other.codec;
+        self.write += other.write;
     }
 }
 
@@ -947,6 +983,7 @@ impl Default for SystemExits {
             floating_words: FloatingWords::default(),
             barriers: BarrierWaits::default(),
             regimes: RegimeSyncs::default(),
+            compression: [Compression::default(); 2],
         }
     }
 }
@@ -982,6 +1019,9 @@ impl SystemExits {
         self.floating_words.merge(&exits.floating_words);
         self.barriers.merge(&exits.barriers);
         self.regimes.merge(&exits.regimes);
+        for (compression, other) in self.compression.iter_mut().zip(&exits.compression) {
+            compression.merge(other);
+        }
     }
 
     /// The keys with exits.
@@ -997,6 +1037,10 @@ impl SystemExits {
             && self.floating_words.is_empty()
             && self.barriers.waits == 0
             && self.regimes == RegimeSyncs::default()
+            && self
+                .compression
+                .iter()
+                .all(|compression| compression.count == 0)
     }
 }
 
