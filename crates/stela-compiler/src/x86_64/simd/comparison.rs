@@ -30,6 +30,16 @@ const ZERO_VECTOR: u8 = 3;
 const QWORD_EQUAL_VECTOR: u8 = 4;
 const MERGE_VECTOR: u8 = 6;
 const TEMP_VECTOR: u8 = 7;
+/// An S/D predicate's NaN lanes ([`nan_lanes`]).
+const NAN_VECTOR: u8 = 5;
+/// [`super::numerical::flush_subnormal_lanes`]' scratch, free before the
+/// predicate.
+const FLUSH_SCRATCH: [u8; 4] = [
+    ZERO_RESULT_VECTOR,
+    ZERO_VECTOR,
+    QWORD_EQUAL_VECTOR,
+    TEMP_VECTOR,
+];
 const SIGN_BITS: u8 = 1;
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - SIGN_BITS;
 const SINGLE_SIGN_SHIFT: u8 = u32::BITS as u8 - SIGN_BITS;
@@ -578,6 +588,9 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     else {
         unreachable!("predicate comparison dispatch");
     };
+    if format != Format::Half {
+        return emit_float_predicate(code, operand, pc);
+    }
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     if shape != Shape::Scalar
@@ -645,6 +658,175 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         floating_predicate(code, operation, format, shape)
     };
     helper_section(code, &helper, pc);
+    commit_predicate(code, format, shape, destination, result, merge, zero);
+}
+
+/// The NaN lanes of the inputs in NAN_VECTOR, which an S/D predicate's
+/// result lanes then exclude, and IOC in R11D where an active lane needs it:
+/// any NaN for the ordered predicates, a signalling one for FCMEQ.
+fn nan_lanes(code: &mut Code, operation: Predicate, format: Format, shape: Shape, right: bool) {
+    const UNORDERED: u8 = 3;
+    let lanes = if format == Format::Double {
+        FloatLanes::PackedDouble
+    } else {
+        FloatLanes::PackedSingle
+    };
+    let sources: &[u8] = if right {
+        &[LEFT_VECTOR, RIGHT_VECTOR]
+    } else {
+        &[LEFT_VECTOR]
+    };
+    packed(code, Host::Xor, NAN_VECTOR, NAN_VECTOR);
+    packed(code, Host::Xor, ZERO_VECTOR, ZERO_VECTOR);
+    // TEMP_VECTOR: lanes that raise IOC.
+    packed(code, Host::Xor, TEMP_VECTOR, TEMP_VECTOR);
+    for &source in sources {
+        packed(code, Host::MoveAligned, ZERO_RESULT_VECTOR, source);
+        code.asm()
+            .float_compare(lanes, ZERO_RESULT_VECTOR, Rm::Xmm(source), UNORDERED);
+        packed(code, Host::Or, NAN_VECTOR, ZERO_RESULT_VECTOR);
+        if operation == Predicate::Equal {
+            // Signalling: a NaN whose quiet bit is clear.
+            let quiet = 1u64 << (format.fraction_bits() - 1);
+            if format == Format::Double {
+                code.asm().mov_imm64(Gpr::Rax, quiet);
+                packed(code, Host::MoveGprQword, QWORD_EQUAL_VECTOR, 0);
+                packed(
+                    code,
+                    Host::UnpackLowQword,
+                    QWORD_EQUAL_VECTOR,
+                    QWORD_EQUAL_VECTOR,
+                );
+            } else {
+                let mut asm = code.asm();
+                asm.mov_imm32(Gpr::Rax, quiet as u32);
+                asm.movd_to_xmm(QWORD_EQUAL_VECTOR, Gpr::Rax);
+                super::shuffle(code, QWORD_EQUAL_VECTOR, QWORD_EQUAL_VECTOR, 0);
+            }
+            packed(code, Host::And, QWORD_EQUAL_VECTOR, source);
+            packed(code, Host::EqualDword, QWORD_EQUAL_VECTOR, ZERO_VECTOR);
+            if format == Format::Double {
+                super::shuffle(
+                    code,
+                    QWORD_EQUAL_VECTOR,
+                    QWORD_EQUAL_VECTOR,
+                    QWORD_HIGH_DWORDS,
+                );
+            }
+            packed(code, Host::And, QWORD_EQUAL_VECTOR, ZERO_RESULT_VECTOR);
+            packed(code, Host::Or, TEMP_VECTOR, QWORD_EQUAL_VECTOR);
+        }
+    }
+    let signalling = if operation == Predicate::Equal {
+        TEMP_VECTOR
+    } else {
+        NAN_VECTOR
+    };
+    Host::DwordSignMask.register(code, 0, signalling, TargetCpu::Baseline);
+    let active = if shape == Shape::Scalar {
+        1
+    } else {
+        active_mask(format, shape)
+    };
+    code.asm().test_imm(Size::Dword, Gpr::Rax, active as i32);
+    let none = branch(code, Condition::Zero);
+    code.asm().alu_imm32(
+        Alu::Or,
+        Size::Dword,
+        Gpr::R11,
+        crate::aarch64::floating::INVALID as i32,
+    );
+    let end = code.len();
+    resolve(code, none, end);
+}
+
+/// S/D FCMEQ, FCMGE, FCMGT, FCMLE, FCMLT, FACGE and FACGT, scalar and
+/// vector, by register and against zero. With AH clear every input
+/// completes inline: FZ or FIZ flush subnormal inputs to their signed zeros
+/// (FZ raising IDC), CMPSS/CMPPS and the zero tests order the rest as Arm
+/// does (subnormals included, unflushed), a NaN lane compares false, and
+/// IOC follows [`nan_lanes`]. AH=1 keeps the guards that send NaNs and
+/// subnormals to the helper. Only enabled traps exit otherwise.
+fn emit_float_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+    use crate::aarch64::floating::{FPCR_AH, FPCR_FIZ, FPCR_FZ};
+    let Operand::Predicate {
+        operation,
+        format,
+        shape,
+        destination,
+        left,
+        right,
+    } = *operand
+    else {
+        unreachable!("predicate comparison dispatch");
+    };
+    let mut helper = Vec::new();
+    exception_guard(code, &mut helper);
+    let zero = right == CompareSource::Zero;
+    let merge = shape == Shape::Scalar
+        && !zero
+        && (absolute(operation) || matches!(operation, Predicate::Less | Predicate::LessEqual));
+    if let CompareSource::Register(right) = right {
+        // Reversed operands let ordered LT/LE implement GT/GE, and keep Vm's
+        // upper bits for the scalar case.
+        read_numerical_vector(code, shape, right, LEFT_VECTOR);
+        read_numerical_vector(code, shape, left, RIGHT_VECTOR);
+        if merge {
+            packed(code, Host::MoveAligned, MERGE_VECTOR, LEFT_VECTOR);
+        }
+    } else {
+        read_numerical_vector(code, shape, left, LEFT_VECTOR);
+    }
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    let sources: &[u8] = if zero {
+        &[LEFT_VECTOR]
+    } else {
+        &[LEFT_VECTOR, RIGHT_VECTOR]
+    };
+    for &source in sources {
+        super::numerical::flush_subnormal_lanes(code, format, shape, source, FLUSH_SCRATCH);
+    }
+    let unflushed_start = code.len();
+    resolve(code, unflushed, unflushed_start);
+    nan_lanes(code, operation, format, shape, !zero);
+    let guarded = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    if zero {
+        if shape == Shape::Scalar {
+            scalar_zero_guard(code, format, LEFT_VECTOR, &mut helper);
+        } else {
+            vector_zero_guard(code, format, shape, &mut helper);
+        }
+    } else if shape == Shape::Scalar {
+        for source in [LEFT_VECTOR, RIGHT_VECTOR] {
+            scalar_zero_guard(code, format, source, &mut helper);
+        }
+    } else {
+        prepare_vector_input_range(code, format);
+        for source in [LEFT_VECTOR, RIGHT_VECTOR] {
+            vector_zero_or_normal_guard(code, format, shape, source, &mut helper);
+        }
+    }
+    packed(code, Host::Xor, NAN_VECTOR, NAN_VECTOR);
+    let guarded_start = code.len();
+    resolve(code, guarded, guarded_start);
+    let result = if zero {
+        zero_predicate(code, operation, format)
+    } else {
+        floating_predicate(code, operation, format, shape)
+    };
+    if zero {
+        // The integer zero tests order a NaN's bits; Arm's answer is false.
+        packed(code, Host::AndNot, NAN_VECTOR, result);
+        packed(code, Host::MoveAligned, result, NAN_VECTOR);
+    }
+    helper_section(code, &helper, pc);
+    super::numerical::commit_flush_status(code);
     commit_predicate(code, format, shape, destination, result, merge, zero);
 }
 

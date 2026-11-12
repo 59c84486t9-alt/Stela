@@ -473,7 +473,7 @@ mod numerical {
     }
 
     #[test]
-    fn vector_self_comparison_exits_only_for_exceptional_lanes() -> Result<()> {
+    fn vector_self_comparison_completes_nan_lanes_inline() -> Result<()> {
         let cache = tempfile::tempdir()?;
         let mut runtime = BlockRuntime::new_for_target(
             75,
@@ -507,7 +507,7 @@ mod numerical {
             // SAFETY: the program only operates on its own registered code and state.
             let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
             assert_eq!(report.reason, StopReason::StopAddress);
-            assert_eq!(report.floating_point_helpers, usize::from(exceptional));
+            assert_eq!(report.floating_point_helpers, 0);
             assert_eq!(thread.registers, expected);
         }
         Ok(())
@@ -583,19 +583,19 @@ mod numerical {
         Ok(())
     }
 
-    /// Vector ordered comparisons order zero and infinite lanes in compiled
-    /// code; a NaN (IOC) or a subnormal (FZ) lane still takes the helper.
+    /// Vector ordered comparisons order zero, infinite, NaN (IOC) and
+    /// subnormal lanes in compiled code.
     #[test]
     fn vector_comparisons_keep_zero_and_infinite_lanes_compiled() -> Result<()> {
         // FCMGE V4.4S,V7.4S,V18.4S; FCMGT V5.2D,V6.2D,V8.2D; FACGE V9.4S,V7.4S,V18.4S.
         let program = [ADD_ONE, 0x6e32_e4e4, 0x6ee8_e4c5, 0x6e32_ece9, ADD_ONE, RET];
         let cases = [
-            ([0x8000_0000_0000_0000, 0xff80_0000_7f80_0000], 0, false),
-            ([0x3f80_0000_7f80_0000, 0x0000_0000_bf80_0000], 0, false),
-            ([0x7fc0_0000_0000_0000, 0], INVALID, true),
-            ([0x0000_0001_0000_0000, 0], 0, true),
+            ([0x8000_0000_0000_0000, 0xff80_0000_7f80_0000], 0),
+            ([0x3f80_0000_7f80_0000, 0x0000_0000_bf80_0000], 0),
+            ([0x7fc0_0000_0000_0000, 0], INVALID),
+            ([0x0000_0001_0000_0000, 0], 0),
         ];
-        for (left, status, exceptional) in cases {
+        for (left, status) in cases {
             let mut thread = input(false);
             thread.registers.fpsr = 0;
             thread.registers.v[7] = left;
@@ -604,8 +604,7 @@ mod numerical {
             thread.registers.v[8] = [0x3ff0_0000_0000_0000, 0];
             let (native, reference, helpers) =
                 against_helper(&program, TargetCpu::detect(), &thread)?;
-            // FCMGE and FACGE both read the exceptional lane.
-            assert_eq!(helpers, 2 * usize::from(exceptional), "{left:x?}");
+            assert_eq!(helpers, 0, "{left:x?}");
             assert_eq!(native, reference, "{left:x?}");
             assert_eq!(native.fpsr, status, "{left:x?}");
         }
