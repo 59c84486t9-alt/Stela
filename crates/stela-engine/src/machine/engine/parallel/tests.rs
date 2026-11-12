@@ -3460,3 +3460,109 @@ fn plain_fast_ipi_writes_open_native_ones_and_native_wakes_reach_the_board() {
     assert_eq!(kicks.load(Ordering::Relaxed), 1);
     assert_eq!(machine.mirrors.fast_ipi.wakes, 0);
 }
+
+/// A register a read leaves plain, as an event register whose last event the
+/// read took: the device that raises events at 0x50 moves its epoch, as a
+/// bus does, before the event is there to read at 0x40.
+#[derive(Default)]
+struct Events {
+    epoch: Arc<AtomicU64>,
+    pending: u64,
+    raised: u64,
+    reads: usize,
+}
+impl Devices for Events {
+    fn plain_epoch(&self, physical: u64, bytes: u8) -> Option<(Arc<AtomicU64>, u64)> {
+        (physical == 0x40 && bytes == 4 && self.pending == 0)
+            .then(|| (Arc::clone(&self.epoch), self.epoch.load(Ordering::SeqCst)))
+    }
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        self.reads += 1;
+        if self.pending == 0 {
+            return Ok(0);
+        }
+        // Taking an event changes the model: the epoch moves first.
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.pending -= 1;
+        Ok(self.raised - self.pending)
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.pending += 1;
+        self.raised += 1;
+        Ok(())
+    }
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
+        Lines::default()
+    }
+}
+
+/// The read that takes the last event leaves the next read served without
+/// the lock; an event raised since reaches the next read.
+#[test]
+fn a_read_that_leaves_its_register_plain_serves_the_next_read_without_the_lock() {
+    let (hub, _) = hub(2);
+    let home = SharedDevices::new(Events::default(), hub);
+    let mut worker = home.worker();
+    let mut other = home.worker();
+    let reads = |home: &SharedDevices<Events>| home.with(|devices| devices.reads);
+    other.write(0, 0x50, 4, 0, 0).unwrap();
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 1), ScalarRead::Served(Ok(1)));
+    // The claim and the read after it under the same lock.
+    assert_eq!(reads(&home), 2);
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 2), ScalarRead::Served(Ok(0)));
+    assert_eq!(reads(&home), 2, "served without the devices");
+    // An event raised since moved the epoch: the next read takes it.
+    other.write(0, 0x50, 4, 0, 3).unwrap();
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 4), ScalarRead::Served(Ok(2)));
+    // Two pending: the first claim leaves the register not plain.
+    other.write(0, 0x50, 4, 0, 5).unwrap();
+    other.write(0, 0x50, 4, 0, 5).unwrap();
+    let before = reads(&home);
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 6), ScalarRead::Served(Ok(3)));
+    assert_eq!(reads(&home), before + 1);
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 7), ScalarRead::Served(Ok(4)));
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 8), ScalarRead::Served(Ok(0)));
+    assert_eq!(reads(&home), before + 3);
+}
+
+/// Events raised on one core while another reads: no event is lost or
+/// taken twice, and a read that began after a raise returned never finds
+/// none while that event is untaken.
+#[test]
+fn events_raised_while_their_register_is_served_plain_are_never_lost_or_late() {
+    const EVENTS: u64 = 20_000;
+    let (hub, _) = hub(2);
+    let home = SharedDevices::new(Events::default(), hub);
+    let raised = Arc::new(AtomicU64::new(0));
+    let mut raiser = home.worker();
+    let mut reader = home.worker();
+    let raising = {
+        let raised = Arc::clone(&raised);
+        std::thread::spawn(move || {
+            for _ in 0..EVENTS {
+                raiser.write(0, 0x50, 4, 0, 0).unwrap();
+                raised.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let mut taken = 0u64;
+    while taken < EVENTS {
+        let before = raised.load(Ordering::SeqCst);
+        match reader.read_scalar(1, 0x40, 4, 0) {
+            ScalarRead::Served(Ok(0)) => assert!(
+                taken >= before,
+                "a read found none with {} raised before it untaken",
+                before - taken
+            ),
+            ScalarRead::Served(Ok(event)) => {
+                taken += 1;
+                assert_eq!(event, taken, "events are taken once, in order");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    raising.join().unwrap();
+    assert_eq!(reader.read_scalar(1, 0x40, 4, 0), ScalarRead::Served(Ok(0)));
+    assert_eq!(home.with(|devices| devices.pending), 0);
+}

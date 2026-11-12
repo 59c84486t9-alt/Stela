@@ -814,10 +814,28 @@ impl<D: Devices> Devices for SharedDevices<D> {
             });
             return ScalarRead::Served(Ok(value));
         }
-        let (read, plain, until) = self.changing(Call::Access, cpu, now, |devices, now| {
+        let (read, plain, next, until) = self.changing(Call::Access, cpu, now, |devices, now| {
             let plain = devices.plain_epoch(physical, bytes);
             let read = devices.read_scalar(cpu, physical, bytes, now);
-            (read, plain, self.board.time.load(Ordering::Acquire))
+            // A read that changed its model can leave the register plain,
+            // such as an event register whose last event the read took: a
+            // read now changes nothing and gives what every read gives
+            // until the model changes, which moves the epoch under this
+            // lock before any effect of the change is seen. Read it once
+            // more, under the same lock, for the next read to be served.
+            let next =
+                match (&read, &plain) {
+                    (ScalarRead::Served(Ok(_)), None) => devices
+                        .plain_epoch(physical, bytes)
+                        .and_then(|(epoch, seen)| {
+                            match devices.read_scalar(cpu, physical, bytes, now) {
+                                ScalarRead::Served(Ok(value)) => Some((epoch, seen, value)),
+                                _ => None,
+                            }
+                        }),
+                    _ => None,
+                };
+            (read, plain, next, self.board.time.load(Ordering::Acquire))
         });
         if let (ScalarRead::Served(Ok(value)), Some((epoch, seen))) = (&read, plain)
             && self.plain.keep(physical, bytes, &epoch, seen, *value)
@@ -828,6 +846,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
                 value: *value,
                 until,
             });
+        }
+        if let Some((epoch, seen, value)) = next {
+            self.plain.keep(physical, bytes, &epoch, seen, value);
         }
         read
     }
