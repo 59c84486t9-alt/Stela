@@ -320,6 +320,24 @@ fn barrier_waits_report(waits: &step_timing::BarrierWaits, tsc_hz: u64) {
     output::arguments(format_args!("{line}\n"));
 }
 
+/// `PES REGIME`: the host's regime changes and prediction isolations, how
+/// many and the time each took.
+fn regime_syncs_report(regimes: &step_timing::RegimeSyncs, tsc_hz: u64) {
+    if regimes.syncs == 0 {
+        return;
+    }
+    let each = |count: u64, ticks: u64| {
+        u128::from(ticks) * 1_000_000_000 / u128::from(count.max(1)) / u128::from(tsc_hz.max(1))
+    };
+    output::arguments(format_args!(
+        "PES REGIME syncs={} ns_each={} isolations={} ns_each={}\n",
+        regimes.syncs,
+        each(regimes.syncs, regimes.sync_ticks),
+        regimes.isolations,
+        each(regimes.isolations, regimes.isolation_ticks),
+    ));
+}
+
 fn device_exits_report<H: Host>(
     machine: &Machine<H, parallel::Board>,
     exits: &step_timing::DeviceExits,
@@ -1845,6 +1863,7 @@ impl Heartbeat {
             let exits = parallel::system_exits(machine);
             system_exits_report(&exits, tsc_hz);
             barrier_waits_report(&exits.barriers, tsc_hz);
+            regime_syncs_report(&exits.regimes, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
             hot_blocks_report(

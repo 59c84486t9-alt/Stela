@@ -304,6 +304,28 @@ pub struct SystemExits {
     pub floating: [u64; FloatingReason::COUNT],
     pub floating_words: FloatingWords,
     pub barriers: BarrierWaits,
+    pub regimes: RegimeSyncs,
+}
+
+/// The host's regime changes ([`super::Host::set_regime`]) and prediction
+/// isolations ([`super::Host::isolate_predictions`]) under step timing: how
+/// many and their profile ticks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RegimeSyncs {
+    pub syncs: u64,
+    pub sync_ticks: u64,
+    pub isolations: u64,
+    pub isolation_ticks: u64,
+}
+
+impl RegimeSyncs {
+    /// Add every change `other` counts.
+    pub fn merge(&mut self, other: &Self) {
+        self.syncs += other.syncs;
+        self.sync_ticks += other.sync_ticks;
+        self.isolations += other.isolations;
+        self.isolation_ticks += other.isolation_ticks;
+    }
 }
 
 /// The [`BarrierWaits`] blocker of a PE in native code, or between its
@@ -881,6 +903,7 @@ impl Default for SystemExits {
             floating: [0; FloatingReason::COUNT],
             floating_words: FloatingWords::default(),
             barriers: BarrierWaits::default(),
+            regimes: RegimeSyncs::default(),
         }
     }
 }
@@ -915,6 +938,7 @@ impl SystemExits {
         }
         self.floating_words.merge(&exits.floating_words);
         self.barriers.merge(&exits.barriers);
+        self.regimes.merge(&exits.regimes);
     }
 
     /// The keys with exits.
@@ -929,6 +953,7 @@ impl SystemExits {
             && self.floating.iter().all(|&count| count == 0)
             && self.floating_words.is_empty()
             && self.barriers.waits == 0
+            && self.regimes == RegimeSyncs::default()
     }
 }
 
@@ -1851,6 +1876,33 @@ mod tests {
         assert_eq!(
             total + merged.other_registers.count,
             2 * (3 + DEVICE_REGISTERS as u64)
+        );
+    }
+
+    #[test]
+    fn regime_syncs_merge() {
+        let regimes = RegimeSyncs {
+            syncs: 3,
+            sync_ticks: 30,
+            isolations: 1,
+            isolation_ticks: 7,
+        };
+        let exits = SystemExits {
+            regimes,
+            ..SystemExits::default()
+        };
+        assert!(!exits.is_empty());
+        let mut merged = SystemExits::default();
+        merged.merge(&exits);
+        merged.merge(&exits);
+        assert_eq!(
+            merged.regimes,
+            RegimeSyncs {
+                syncs: 6,
+                sync_ticks: 60,
+                isolations: 2,
+                isolation_ticks: 14,
+            }
         );
     }
 

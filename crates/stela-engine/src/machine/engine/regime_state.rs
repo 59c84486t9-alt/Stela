@@ -270,12 +270,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tag_checks: self.tag_checks,
         };
         self.publish_translating(&regime.controls);
+        let syncing = self.timing_start();
         self.host.set_regime(&regime);
+        let synced = self.timing_since(syncing);
         let context = PredictionContext::of(&self.cpu);
+        let mut isolated = None;
         if self.prediction_context != Some(context) {
             self.prediction_context = Some(context);
             self.statistics.prediction_isolations += 1;
+            let isolating = self.timing_start();
             self.host.isolate_predictions();
+            isolated = Some(self.timing_since(isolating));
+        }
+        if self.step_timing.is_some() {
+            let regimes = &mut self.system_exits.regimes;
+            regimes.syncs += 1;
+            regimes.sync_ticks += synced;
+            if let Some(ticks) = isolated {
+                regimes.isolations += 1;
+                regimes.isolation_ticks += ticks;
+            }
         }
     }
 }
