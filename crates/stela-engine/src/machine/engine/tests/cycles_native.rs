@@ -196,3 +196,33 @@ fn native_cycle_reads_exit_unless_the_read_is_plain() {
         );
     }
 }
+
+/// Two reads in one state with a native entry between them and no
+/// exception differ by the cycles of the count between, as the engine's
+/// do, on a host that lends its TSC: each native entry closes the
+/// counter's cell, so the native read computes the count rather than
+/// answer the earlier read's. Without the TSC the cell stays.
+#[test]
+fn native_reads_after_a_native_entry_take_the_count_anew() {
+    for tsc in [Some((0, 0)), None] {
+        let clock = count_state();
+        let mut machine = counting_machine(&clock, true);
+        machine.host.tsc_counter = tsc;
+        let twin_clock = count_state();
+        let mut twin = counting_machine(&twin_clock, true);
+        at(&mut machine, &clock, 100);
+        at(&mut twin, &twin_clock, 100);
+        let first = engine(&mut machine);
+        assert_eq!(first, engine(&mut twin));
+        at(&mut machine, &clock, 400);
+        at(&mut twin, &twin_clock, 400);
+        let expected = engine(&mut twin);
+        assert!(expected > first);
+        let read = native(&mut machine);
+        assert_eq!(
+            read,
+            Some(if tsc.is_some() { expected } else { first }),
+            "{tsc:?}"
+        );
+    }
+}

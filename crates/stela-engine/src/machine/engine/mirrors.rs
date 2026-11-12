@@ -672,11 +672,13 @@ const _: () = assert!(matches!(
 /// they read the count of the last one, as exceptions are what a kernel
 /// charges to threads, and later reads never go back. Exactly: a read
 /// opens its cell on the count it took, and native reads in that state
-/// answer that value, across native runs, until the next exception entry
-/// or return there (the engine's takes the count anew, `cells_moved`; a
-/// native one closes the cell, the record's `close`) or a change of derived
-/// state closes every cell. Nothing else bounds how stale it is, in
-/// instructions or in time: a loop that takes no exception reads one value.
+/// answer that value until the cell closes: at the next native entry where
+/// native reads compute the count (`Machine::enter_cycles`), at an
+/// exception entry or return there (the engine's takes the count anew,
+/// `cells_moved`; a native one closes it, the record's `close`), or at a
+/// change of derived state. So a computed counter's value is at most one
+/// native run old; where native code cannot compute it (a degraded read,
+/// the cycle counter on a host without a TSC), until a transition.
 pub(super) const COUNTER_MIRRORS: [usize; 2] = [8, 9];
 const _: () = assert!(COUNTER_MIRRORS[0] == 8);
 

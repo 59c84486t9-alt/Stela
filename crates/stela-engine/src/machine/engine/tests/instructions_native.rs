@@ -118,9 +118,10 @@ fn native_instruction_reads_equal_the_engine_path_after_the_same_instructions() 
                 value: read
             }
         );
-        // The open cell keeps the count until the next transition, as for
-        // the existing cell thunk.
-        assert_eq!(native(&mut machine, chained + 5, before), Some(read));
+        // The next native entry closes the cell: a read there computes the
+        // count again, from the instructions retired at that entry.
+        let later = 1_000 + machine.cpu.retired + chained + 5 + u64::from(before);
+        assert_eq!(native(&mut machine, chained + 5, before), Some(later));
         // The rest of the block and the next run's entry.
         entered = at_read + 3;
     }
@@ -248,4 +249,22 @@ fn native_instruction_reads_with_the_pmi_armed_exit_at_the_overflow_bit() {
     machine.cpu.retired = 30;
     assert_eq!(engine(&mut machine), OVERFLOW);
     assert!(machine.cpu.pmu.as_ref().unwrap().asserted(now, 30));
+}
+
+/// Two reads in one state with a native entry between them and no
+/// exception differ by the instructions retired between, as the engine's
+/// do: each native entry closes the counter's cell, so the native read
+/// computes the count rather than answer the earlier read's.
+#[test]
+fn native_reads_after_a_native_entry_take_the_count_anew() {
+    let mut machine = counting_machine(true);
+    let mut twin = counting_machine(true);
+    let first = engine(&mut machine);
+    assert_eq!(first, engine(&mut twin));
+    assert_eq!(machine.mirrors[COUNTER_MIRRORS[1]].readable, 1);
+    machine.cpu.retired = 30;
+    twin.cpu.retired = 30;
+    let expected = engine(&mut twin);
+    assert_eq!(expected, first + 20);
+    assert_eq!(native(&mut machine, 0, 0), Some(expected));
 }

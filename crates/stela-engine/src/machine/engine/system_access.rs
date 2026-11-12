@@ -459,7 +459,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// changes, PMC1 at the instructions retired so far, each unless a read
     /// of it answers a degraded value instead of the count. With the rate
     /// each takes in each state, which a logged transition
-    /// ([`transition::CHAIN_LOGGED`]) moves it to.
+    /// ([`transition::CHAIN_LOGGED`]) moves it to. The state's counter cells
+    /// close where native reads compute the count from these (the cycle
+    /// counter only on a host with a TSC), so that a read answers a count
+    /// taken in this native run at the oldest ([`COUNTER_MIRRORS`]).
     pub(super) fn enter_cycles(&mut self) {
         let closed = |index: usize| {
             !self.cpu.degraded.is_empty()
@@ -487,6 +490,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ),
             None => Default::default(),
         };
+        let computed = [
+            // Its read computes only where the host lends the TSC, which
+            // installing it asks too.
+            self.mirrors.cycles.open != 0 && self.host.tsc_counter().is_some(),
+            self.mirrors.instructions.open != 0,
+        ];
+        for (index, computed) in COUNTER_MIRRORS.into_iter().zip(computed) {
+            if computed {
+                self.mirrors[index].readable = 0;
+            }
+        }
     }
 
     /// MRS or MSR of a [`GUARDED_MIRRORS`] register: in a guarded level, one
