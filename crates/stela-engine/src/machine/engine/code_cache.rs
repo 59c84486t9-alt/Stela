@@ -464,7 +464,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.mirrors.close(SPRR_PERM_MIRROR);
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
-        self.sync_host_regime();
+        self.sync_host_regime(step_timing::SyncSource::Translation);
     }
 
     /// Anything about translation may have changed: every lookup context
@@ -545,7 +545,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn table_base_changed(&mut self) {
         self.advance_table_generation();
         self.statistics.table_base_changes += 1;
-        self.sync_host_regime();
+        self.sync_host_regime(step_timing::SyncSource::TableBase);
     }
 
     /// Forget the blocks compiled from the page holding `physical`, which an

@@ -83,7 +83,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 _ => register_read::Cell::default(),
             };
         }
-        self.sync_host_regime();
+        self.sync_host_regime(step_timing::SyncSource::Transition);
     }
 
     /// What [`Self::derived_changed`] forgets but the mirrored reads and
@@ -243,15 +243,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     pub(super) fn sync_regime(&mut self) {
         self.derived_changed();
-        self.sync_host_regime();
+        self.sync_host_regime(step_timing::SyncSource::Derived);
     }
 
     /// The host's view of the regime (shadow root, requester, watchpoints and
     /// tag checks) and the PMU's and prediction contexts follow the PE, with
     /// state derived from System registers left as it is.
-    pub(super) fn sync_host_regime(&mut self) {
+    /// `source` asked for it ([`step_timing::RegimeSyncs::sources`]).
+    pub(super) fn sync_host_regime(&mut self, source: step_timing::SyncSource) {
         self.sync_monitor();
-        self.forget_device_reads();
         let watch = Watch {
             pass: self.watch.pass,
             ..Watch::from_ranges(&debug::watched(&self.cpu))
@@ -270,6 +270,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             watch,
             tag_checks: self.tag_checks,
         };
+        // Native device reads key the requester's state and PAN themselves.
+        let same = self.synced_regime == Some(regime);
+        if !self.synced_regime.is_some_and(|synced| {
+            synced.controls == regime.controls
+                && synced.watch == regime.watch
+                && synced.tag_checks == regime.tag_checks
+        }) {
+            self.forget_device_reads();
+        }
+        self.synced_regime = Some(regime);
         self.publish_translating(&regime.controls);
         let syncing = self.timing_start();
         self.host.set_regime(&regime);
@@ -287,6 +297,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let regimes = &mut self.system_exits.regimes;
             regimes.syncs += 1;
             regimes.sync_ticks += synced;
+            regimes.unchanged += u64::from(same && isolated.is_none());
+            regimes.sources[source as usize] += 1;
             if let Some(ticks) = isolated {
                 regimes.isolations += 1;
                 regimes.isolation_ticks += ticks;

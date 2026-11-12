@@ -282,7 +282,7 @@ fn parts() -> [(&'static str, Round); 6] {
             machine.host.regimes.clear();
         }),
         ("sync-host-regime", |machine| {
-            machine.sync_host_regime();
+            machine.sync_host_regime(super::super::step_timing::SyncSource::Other);
             machine.host.regimes.clear();
         }),
         ("reopen-pointers", |machine| machine.reopen_pointers()),

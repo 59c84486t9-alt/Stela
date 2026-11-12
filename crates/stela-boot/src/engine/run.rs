@@ -329,12 +329,17 @@ fn regime_syncs_report(regimes: &step_timing::RegimeSyncs, tsc_hz: u64) {
     let each = |count: u64, ticks: u64| {
         u128::from(ticks) * 1_000_000_000 / u128::from(count.max(1)) / u128::from(tsc_hz.max(1))
     };
+    let mut sources = String::new();
+    for (name, count) in step_timing::SyncSource::NAMES.iter().zip(regimes.sources) {
+        sources.push_str(&format!(" {name}={count}"));
+    }
     output::arguments(format_args!(
-        "PES REGIME syncs={} ns_each={} isolations={} ns_each={}\n",
+        "PES REGIME syncs={} ns_each={} isolations={} ns_each={} unchanged={} by{sources}\n",
         regimes.syncs,
         each(regimes.syncs, regimes.sync_ticks),
         regimes.isolations,
         each(regimes.isolations, regimes.isolation_ticks),
+        regimes.unchanged,
     ));
 }
 

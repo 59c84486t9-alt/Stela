@@ -1014,7 +1014,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ..before
         }) {
             if before.pan != after.pan {
-                self.sync_host_regime();
+                self.sync_host_regime(step_timing::SyncSource::Pan);
             }
             if self.host.pan_in_flags() {
                 self.mirrors[PAN_WRITES].readable = 1;

@@ -94,7 +94,7 @@ fn a_pe_publishes_the_context_it_translates() {
         hub.inboxes[0].translating.load(Ordering::Relaxed),
         ANY_CONTEXT
     );
-    machine.sync_host_regime();
+    machine.sync_host_regime(super::super::step_timing::SyncSource::Other);
     let controls = machine.cpu.controls(machine.cpu.regime());
     assert_eq!(
         hub.inboxes[0].translating.load(Ordering::Relaxed),

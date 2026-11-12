@@ -344,7 +344,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.mirrors.leave(&mut self.cpu.pstate);
         if self.cpu.pstate.pan != (self.cpu.state.pan != 0) {
             self.cpu.pstate.pan = !self.cpu.pstate.pan;
-            self.sync_host_regime();
+            self.sync_host_regime(step_timing::SyncSource::NativePan);
         }
         let remaining = self.chain.budget().load(Ordering::Relaxed);
         let (block, retired, hits, _) = self.chain.completed();

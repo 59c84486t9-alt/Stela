@@ -316,6 +316,39 @@ pub struct RegimeSyncs {
     pub sync_ticks: u64,
     pub isolations: u64,
     pub isolation_ticks: u64,
+    /// The syncs that gave the host the regime it had and isolated nothing.
+    pub unchanged: u64,
+    /// The syncs by what asked for them ([`SyncSource`]).
+    pub sources: [u64; SyncSource::COUNT],
+}
+
+/// What asked for a regime sync ([`RegimeSyncs::sources`]): a PAN change by
+/// MSR in the engine, a PAN change native code made, a translation change
+/// (an SPRR_PERM write and others), a TTBR0 write, an exception entry or
+/// return or GXF transition the engine made, a change of derived state, and
+/// anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncSource {
+    Pan,
+    NativePan,
+    Translation,
+    TableBase,
+    Transition,
+    Derived,
+    Other,
+}
+
+impl SyncSource {
+    pub const COUNT: usize = Self::Other as usize + 1;
+    pub const NAMES: [&str; Self::COUNT] = [
+        "pan",
+        "native_pan",
+        "translation",
+        "table_base",
+        "transition",
+        "derived",
+        "other",
+    ];
 }
 
 impl RegimeSyncs {
@@ -325,6 +358,10 @@ impl RegimeSyncs {
         self.sync_ticks += other.sync_ticks;
         self.isolations += other.isolations;
         self.isolation_ticks += other.isolation_ticks;
+        self.unchanged += other.unchanged;
+        for (count, more) in self.sources.iter_mut().zip(other.sources) {
+            *count += more;
+        }
     }
 }
 
@@ -1886,6 +1923,8 @@ mod tests {
             sync_ticks: 30,
             isolations: 1,
             isolation_ticks: 7,
+            unchanged: 2,
+            sources: [1, 0, 0, 0, 2, 0, 0],
         };
         let exits = SystemExits {
             regimes,
@@ -1902,6 +1941,8 @@ mod tests {
                 sync_ticks: 60,
                 isolations: 2,
                 isolation_ticks: 14,
+                unchanged: 4,
+                sources: [2, 0, 0, 0, 4, 0, 0],
             }
         );
     }

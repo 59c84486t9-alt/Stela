@@ -992,6 +992,8 @@ pub struct Machine<H: Host, D: Devices> {
     watch: Watch,
     /// The context the host last isolated predictions for.
     prediction_context: Option<PredictionContext>,
+    /// The regime the host was last given ([`Self::sync_host_regime`]).
+    synced_regime: Option<Regime>,
     /// The number of the running PE.
     current: usize,
     /// The WFI, WFE, WFIT or WFET the running PE waits in, until it wakes.
@@ -1412,6 +1414,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             system_decode: system_access::DecodeCache::default(),
             watch: Watch::default(),
             prediction_context: None,
+            synced_regime: None,
             current: boot_processor,
             waiting: None,
             peers: Vec::new(),
