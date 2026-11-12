@@ -4417,7 +4417,7 @@ fn machine_state_tail_stays_outside_guest_region() {
 
     let removed = uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert!(
-        removed.contains("install \"macOS\": disk1s2 keep macOS"),
+        removed.contains("install \"macOS\": macOS, its NVRAM and SEP state stay on disk1s2"),
         "{removed}"
     );
     assert_eq!(state_of(&f, REGION), state);

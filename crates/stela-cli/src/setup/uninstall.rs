@@ -86,7 +86,7 @@ pub(super) fn uninstall(
     for install in record.iter().flat_map(|r| r.installs.iter()) {
         writeln!(
             text,
-            "  keep     install \"{}\": {} keep macOS, its NVRAM and SEP state{}; delete them \
+            "  keep     install \"{}\": macOS, its NVRAM and SEP state stay on {}{}; delete them \
              with a disk utility when no longer wanted",
             install.name,
             install.disk.partitions(),
