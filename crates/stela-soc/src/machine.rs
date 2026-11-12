@@ -268,6 +268,9 @@ pub struct AppleDevices {
     /// DMA the current transfer runs ([`Devices::settle_write`]).
     last_write: Vec<Option<(u64, u8)>>,
     writer: Option<(u64, u8)>,
+    /// The SoC's sleep when [`Devices::take_pins_changed`] last ran; `None`
+    /// before its first call.
+    pins_asleep: Option<bool>,
     /// Whether DMA data copies are left to [`Devices::take_unlocked`].
     defer_dma: bool,
     /// The displays' composes left since the last
@@ -679,6 +682,7 @@ impl AppleDevices {
             passive: crate::passive::PassiveMap::default(),
             last_write: Vec::new(),
             writer: None,
+            pins_asleep: None,
             defer_dma: false,
             composes: Vec::new(),
         }
@@ -1200,6 +1204,20 @@ impl Devices for AppleDevices {
 
     fn take_signalled(&mut self, cpu: usize) -> bool {
         self.ipi.as_mut().is_some_and(|ipi| ipi.take_raised(cpu))
+    }
+
+    /// The latch's changed CPUs, those the fast IPIs raised, and every CPU
+    /// when the SoC's sleep changed (asleep, every latched pin reads low) or
+    /// on the first call.
+    fn take_pins_changed(&mut self) -> u64 {
+        let asleep = Some(self.sleep.asleep);
+        let slept = core::mem::replace(&mut self.pins_asleep, asleep) != asleep;
+        let raised = self
+            .ipi
+            .as_ref()
+            .map_or(0, crate::ipi::FastIpi::raised_mask);
+        let changed = self.latch.take_changed_pins() | raised;
+        if slept { u64::MAX } else { changed }
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {

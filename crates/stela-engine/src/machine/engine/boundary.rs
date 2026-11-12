@@ -619,6 +619,13 @@ pub trait Devices {
     fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
         self.pins(cpu)
     }
+    /// The PEs whose [`Self::latched_pins`] or [`Self::take_signalled`] may
+    /// have changed since the last call, by bit: bit `pe` for a PE below 64,
+    /// and every bit for a change past it. A shared board looks at those
+    /// alone after a call. The default, every bit, has it look at every PE.
+    fn take_pins_changed(&mut self) -> u64 {
+        u64::MAX
+    }
     /// Whether a call under the devices' lock raised PE `cpu`'s
     /// [`LocalRegisters::fiq`] since the last call for it: it must look at
     /// its lines again. Kept for every PE the board has.

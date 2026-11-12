@@ -125,6 +125,7 @@ impl<D: Devices> Board<D> {
             since,
             waited,
             wakes: 0,
+            changed: 0,
             pe: usize::MAX,
         }
     }
@@ -136,7 +137,8 @@ impl<D: Devices> Board<D> {
     /// store would still take each one's cache line from every reader.
     /// Whether the home machine must be woken, which the caller does once
     /// it has released the lock.
-    pub(super) fn publish(&self, devices: &mut D) -> bool {
+    /// Pins are published for the PEs of `changed` alone ([`may_change`]).
+    pub(super) fn publish(&self, devices: &mut D, changed: u64) -> bool {
         if let Some(reset) = devices.take_reset() {
             self.reset
                 .lock()
@@ -160,7 +162,7 @@ impl<D: Devices> Board<D> {
         }
         // The latched pins alone: each PE adds the FIQ its own handle
         // drives ([`LocalRegisters::fiq`]), which changes without the lock.
-        for pe in 0..self.pins.len() {
+        for pe in (0..self.pins.len()).filter(|&pe| may_change(changed, pe)) {
             self.publish_pins(pe, devices.latched_pins(pe));
         }
         let asleep = devices.waits_on_host();
@@ -201,6 +203,7 @@ impl<D: Devices> Board<D> {
             since: self.hub.ticks(),
             waited: 0,
             wakes: 0,
+            changed: 0,
             pe: usize::MAX,
         })
     }
@@ -241,6 +244,10 @@ pub(super) struct Held<'a, D: Devices> {
     /// wake can cost the host an interrupt to another core, which no other
     /// PE should wait for the lock behind.
     wakes: u64,
+    /// The PEs whose pins the call may have changed, by bit
+    /// ([`Devices::take_pins_changed`]), as [`Self::notify`] took them: its
+    /// release publishes theirs.
+    changed: u64,
     /// The PE whose call this is, or `usize::MAX` when the caller did not
     /// say: the host work its release leaves ([`Kick::released`]) runs only
     /// on a PE outside its run loop ([`Hub::serves_released`]).
@@ -261,7 +268,10 @@ impl<D: Devices> Held<'_, D> {
     /// Tell every PE but `cpu` whose lines changed since it last saw them.
     /// Every change reaches the devices under their lock, so a PE learns of
     /// each from the call that made it, and needs no device deadline of its
-    /// own: only the home machine advances the devices with time.
+    /// own: only the home machine advances the devices with time. Only the
+    /// PEs whose pins the devices say may have changed are looked at
+    /// ([`Devices::take_pins_changed`]); a change the others' pins never saw
+    /// leaves their lines as they last saw them.
     fn notify(&mut self, cpu: usize, now: u64) {
         let BoardState {
             devices,
@@ -277,7 +287,14 @@ impl<D: Devices> Held<'_, D> {
         // fired): they read it themselves, so only the epoch tells them.
         // The caller reads its own after the call.
         devices.take_signalled(cpu);
-        for pe in self.board.hub.others(cpu) {
+        let changed = devices.take_pins_changed();
+        self.changed |= changed;
+        for pe in self
+            .board
+            .hub
+            .others(cpu)
+            .filter(|&pe| may_change(changed, pe))
+        {
             // The latched pins alone: each PE adds the FIQ it reads itself
             // ([`LocalRegisters::fiq`]), which changes without the lock.
             let pins = devices.latched_pins(pe);
@@ -309,6 +326,13 @@ fn wake_bit(pe: usize) -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether PE `pe` is one of `changed` ([`Devices::take_pins_changed`]):
+/// a PE past the mask's width always may be.
+fn may_change(changed: u64, pe: usize) -> bool {
+    let bit = wake_bit(pe);
+    bit == 0 || changed & bit != 0
+}
+
 /// Wake each PE of `wakes` ([`wake_bit`]), after the lock is released.
 fn wake_after(hub: &Hub, wakes: u64) {
     let mut left = wakes;
@@ -333,7 +357,8 @@ impl<D: Devices> core::ops::DerefMut for Held<'_, D> {
 
 impl<D: Devices> Drop for Held<'_, D> {
     fn drop(&mut self) {
-        if self.board.publish(&mut self.state.devices) {
+        let changed = self.changed | self.state.devices.take_pins_changed();
+        if self.board.publish(&mut self.state.devices, changed) {
             let home = self.board.hub.home.load(Ordering::Acquire);
             match wake_bit(home) {
                 0 => self.board.hub.wake(home),

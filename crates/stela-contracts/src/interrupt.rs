@@ -93,6 +93,10 @@ pub struct CpuPins {
 pub struct InterruptLatch {
     asserted: BTreeSet<Wire>,
     aic_inputs: Vec<(AicInput, bool)>,
+    /// CPUs whose pins ([`Self::pins`]) changed since
+    /// [`Self::take_changed_pins`]: bit `cpu` for a CPU below 64, and every
+    /// bit once one at or past 64 changed.
+    changed: u64,
 }
 /// Retain space for ordinary wire traffic without keeping a large burst.
 const RETAINED_AIC_INPUTS: usize = 32;
@@ -124,6 +128,11 @@ impl InterruptLatch {
     pub fn is_asserted(&self, wire: Wire) -> bool {
         self.asserted.contains(&wire)
     }
+    /// The CPUs whose pins changed since the last call, as
+    /// [`Self::changed`] holds them, cleared.
+    pub fn take_changed_pins(&mut self) -> u64 {
+        core::mem::take(&mut self.changed)
+    }
     pub fn pins(&self, cpu: CpuIndex) -> CpuPins {
         CpuPins {
             irq: self.asserted.contains(&Wire::Irq(cpu)),
@@ -144,8 +153,12 @@ impl InterruptSink for InterruptLatch {
         } else {
             self.asserted.remove(&wire)
         };
-        if let (Wire::Aic(input), true) = (wire, changed) {
-            self.aic_inputs.push((input, asserted));
+        match (wire, changed) {
+            (Wire::Aic(input), true) => self.aic_inputs.push((input, asserted)),
+            (Wire::Irq(cpu) | Wire::Fiq(cpu, _), true) => {
+                self.changed |= 1u64.checked_shl(cpu as u32).unwrap_or(u64::MAX);
+            }
+            _ => {}
         }
     }
 }
@@ -167,6 +180,24 @@ mod tests {
         assert_eq!(AicInput::new(1, 0x5bf).vector(4096), 0x15bf);
         assert_eq!(AicInput::from_vector(1, 0), None);
         assert_eq!(AicInput::from_vector(256 * 32, 32), None);
+    }
+
+    #[test]
+    fn the_latch_reports_the_cpus_whose_pins_changed() {
+        let mut latch = InterruptLatch::new();
+        latch.set_level(Wire::Irq(2), true);
+        latch.set_level(Wire::Fiq(5, FiqSource::VirtualTimer), true);
+        latch.set_level(Wire::Aic(AicInput::new(0, 3)), true);
+        assert_eq!(latch.take_changed_pins(), 1 << 2 | 1 << 5);
+        assert_eq!(latch.take_changed_pins(), 0);
+        // A level already held changes nothing.
+        latch.set_level(Wire::Irq(2), true);
+        assert_eq!(latch.take_changed_pins(), 0);
+        latch.set_level(Wire::Irq(2), false);
+        assert_eq!(latch.take_changed_pins(), 1 << 2);
+        // Past the mask's width, every CPU may have changed.
+        latch.set_level(Wire::Irq(70), true);
+        assert_eq!(latch.take_changed_pins(), u64::MAX);
     }
 
     #[test]

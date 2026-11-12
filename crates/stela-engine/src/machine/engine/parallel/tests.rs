@@ -2037,6 +2037,72 @@ fn a_pe_without_a_machine_waits_for_its_first_start() {
     assert_eq!(halts, 0);
 }
 
+/// A call looks only at the PEs whose pins the devices say may have
+/// changed: the others' pins are neither read nor published, and the PE
+/// whose line rose is told once and reads it without the lock.
+#[test]
+fn a_call_looks_only_at_the_pes_whose_pins_changed() {
+    #[derive(Default)]
+    struct Masked {
+        pins: [Lines; 4],
+        changed: u64,
+        reads: [usize; 4],
+    }
+    impl Devices for Masked {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            value: u64,
+            _: u64,
+        ) -> Result<(), DeviceError> {
+            let pins = &mut self.pins[value as usize];
+            if !pins.irq {
+                pins.irq = true;
+                self.changed |= 1 << value;
+            }
+            Ok(())
+        }
+        fn lines(&mut self, pe: usize, _: u64) -> Lines {
+            self.pins[pe]
+        }
+        fn pins(&mut self, pe: usize) -> Option<Lines> {
+            Some(self.pins[pe])
+        }
+        fn latched_pins(&mut self, pe: usize) -> Option<Lines> {
+            self.reads[pe] += 1;
+            Some(self.pins[pe])
+        }
+        fn take_pins_changed(&mut self) -> u64 {
+            core::mem::take(&mut self.changed)
+        }
+    }
+    let (hub, _) = hub(4);
+    let home = SharedDevices::new(Masked::default(), Arc::clone(&hub));
+    let mut worker = home.worker();
+    let told: Vec<u64> = (0..4)
+        .map(|pe| hub.inboxes[pe].lines.load(Ordering::SeqCst))
+        .collect();
+    worker.write(1, 0, 4, 2, 0).unwrap();
+    let reads = home.with(|devices| core::mem::take(&mut devices.reads));
+    // PE 1 updates its own; PE 2 is read to tell it and to publish it.
+    assert_eq!((reads[0], reads[1], reads[3]), (0, 1, 0), "{reads:?}");
+    assert!(reads[2] >= 1, "{reads:?}");
+    let now: Vec<u64> = (0..4)
+        .map(|pe| hub.inboxes[pe].lines.load(Ordering::SeqCst))
+        .collect();
+    assert_eq!(now, [told[0], told[1], told[2] + 1, told[3]]);
+    assert!(worker.lines(2, 0).irq, "published for a lock-free read");
+    // A call that changed no pins reads none of the others'.
+    worker.write(1, 0, 4, 2, 0).unwrap();
+    let reads = home.with(|devices| devices.reads);
+    assert_eq!((reads[0], reads[2], reads[3]), (0, 0, 0), "{reads:?}");
+}
+
 /// A write and its settlement take the board's lock once: one release
 /// publishes, and another PE whose line the write raised is told once. The
 /// copy the settlement deferred runs after that release, and the transfer

@@ -325,3 +325,18 @@ fn core_counter_loads_read_the_msr_view_passively() {
     assert_eq!(passive.read(IMPL + 0x6050, 8), None);
     assert_eq!(passive.read(IMPL + 0x4008, 8), None);
 }
+
+/// The PEs whose pins may have changed: every PE at first, none until a
+/// wire changes, every PE when the SoC's sleep changes.
+#[test]
+fn pins_changed_starts_full_and_follows_the_latch_and_sleep() {
+    use stela_contracts::interrupt::{InterruptSink, Wire};
+    let mut d = AppleDevices::new();
+    assert_eq!(d.take_pins_changed(), u64::MAX);
+    assert_eq!(d.take_pins_changed(), 0);
+    d.latch.set_level(Wire::Irq(3), true);
+    assert_eq!(d.take_pins_changed(), 1 << 3);
+    d.sleep.asleep = true;
+    assert_eq!(d.take_pins_changed(), u64::MAX);
+    assert_eq!(d.take_pins_changed(), 0);
+}

@@ -201,6 +201,15 @@ impl FastIpi {
     pub fn fiq(&self, cpu: CpuIndex) -> bool {
         self.signals.pending(cpu) != 0
     }
+    /// The CPUs [`Self::take_raised`] would report, without taking them:
+    /// bit `cpu` for a CPU below 64, every bit while one past it is set.
+    pub fn raised_mask(&self) -> u64 {
+        match self.raised.split_first() {
+            None => 0,
+            Some((&first, rest)) if rest.iter().all(|&word| word == 0) => first,
+            Some(_) => u64::MAX,
+        }
+    }
     /// Whether a locked access or advance raised `cpu`'s FIQ since the
     /// last call for it.
     pub fn take_raised(&mut self, cpu: CpuIndex) -> bool {
