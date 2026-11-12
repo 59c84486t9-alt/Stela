@@ -316,7 +316,7 @@ fn write_from(
             Ok(())
         })?;
         file.sync_all().with_context(writing)?;
-        crate::progress::drop_cached(&file);
+        crate::progress::drop_cached(&file).with_context(writing)?;
         offset += size;
         position = offset;
         let (sha256, blocks) = hashes.finish();
