@@ -611,6 +611,12 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
 }
 
 /// The actions that find their USB when `--usb` is not given.
+/// Whether `action` may write to a disk: every one but the two that only
+/// read, `status` and `boot-log`.
+fn writes_disks(action: &Action) -> bool {
+    !matches!(action, Action::Status | Action::BootLog)
+}
+
 fn finds_usb(action: &Action) -> bool {
     matches!(
         action,
@@ -679,19 +685,31 @@ impl Request {
         if finds_usb(&self.action) && self.usb.as_os_str().is_empty() {
             self.usb = choose_setup(&host::System)?;
         }
-        // A Windows relaunch opens its own window, which only the wizard
-        // and `boot-log`, whose raw disk reads need administrator rights,
-        // want.
+        // The rights to write disks, before anything is downloaded or
+        // changed. A Windows relaunch opens its own window, which only the
+        // wizard and `boot-log`, whose raw disk reads need administrator
+        // rights, want.
         let boot_log = matches!(self.action, Action::BootLog);
-        let elevate = cfg!(unix) || self.usb.as_os_str().is_empty() || boot_log;
-        if elevate && !self.dry_run && elevation::relaunch()? {
-            if boot_log {
-                eprintln!(
-                    "Reading the disks needs administrator rights: the boot log opens in a new \
-                     window."
-                );
+        let rights = elevation::rights(elevation::Situation {
+            windows: cfg!(windows),
+            administrator: elevation::is_administrator(),
+            dry_run: self.dry_run,
+            own_window: self.usb.as_os_str().is_empty() || boot_log,
+            writes_disks: writes_disks(&self.action),
+        });
+        match rights {
+            elevation::Rights::Enough => {}
+            elevation::Rights::Relaunch => {
+                elevation::relaunch()?;
+                if boot_log {
+                    eprintln!(
+                        "Reading the disks needs administrator rights: the boot log opens in a \
+                         new window."
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
+            elevation::Rights::Refuse => bail!(elevation::REFUSED),
         }
         // Without a USB, `boot-log` reads every disk.
         if boot_log && self.usb.as_os_str().is_empty() {

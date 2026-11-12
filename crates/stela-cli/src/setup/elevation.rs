@@ -6,15 +6,83 @@ use anyhow::Result;
 #[cfg(windows)]
 static RELAUNCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Becomes root through `sudo` in this terminal, or returns if it already is.
+/// How a command gets the rights it needs before it downloads or changes
+/// anything.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Rights {
+    /// It has them, or needs none.
+    Enough,
+    /// It runs again with them: through `sudo` in the same terminal, or on
+    /// Windows in a new administrator window.
+    Relaunch,
+    /// It stops and says how to run it with them ([`REFUSED`]).
+    Refuse,
+}
+
+/// What [`rights`] decides from.
+pub(super) struct Situation {
+    pub(super) windows: bool,
+    /// Root on Unix, an elevated administrator on Windows.
+    pub(super) administrator: bool,
+    pub(super) dry_run: bool,
+    /// The wizard and `boot-log`, whose output a new window may carry.
+    pub(super) own_window: bool,
+    /// It may write to a disk, as every command but `status` and
+    /// `boot-log` does.
+    pub(super) writes_disks: bool,
+}
+
+/// A command's way to the rights it needs. A dry run changes nothing and
+/// needs none. On Unix, `sudo` runs the same command in the same terminal.
+/// On Windows, a relaunch opens a new window, which loses a scripted
+/// command's output and exit status, so only the wizard and `boot-log` are
+/// relaunched; any other command that writes a disk stops before it
+/// downloads or changes anything.
+pub(super) fn rights(situation: Situation) -> Rights {
+    let Situation {
+        windows,
+        administrator,
+        dry_run,
+        own_window,
+        writes_disks,
+    } = situation;
+    if administrator || dry_run {
+        Rights::Enough
+    } else if !windows || own_window {
+        Rights::Relaunch
+    } else if writes_disks {
+        Rights::Refuse
+    } else {
+        Rights::Enough
+    }
+}
+
+/// Why a command stopped at [`Rights::Refuse`], and how to run it.
+pub(super) const REFUSED: &str = "this command writes to disks, which Windows allows only to an \
+    administrator. Open Terminal or Command Prompt with Run as administrator and run the same \
+    command there. Nothing was downloaded or changed.";
+
+/// Whether this process has the rights to write disks: root.
 #[cfg(not(windows))]
-pub(super) fn relaunch() -> Result<bool> {
+pub(super) fn is_administrator() -> bool {
+    // SAFETY: reads this process's credentials; no pointer arguments.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Whether this process has the rights to write disks: an elevated
+/// administrator.
+#[cfg(windows)]
+pub(super) fn is_administrator() -> bool {
+    // SAFETY: queries the calling process's token; no pointer arguments.
+    unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
+}
+
+/// Becomes root through `sudo` in this terminal: returns only when sudo
+/// could not start.
+#[cfg(not(windows))]
+pub(super) fn relaunch() -> Result<()> {
     use anyhow::Context;
     use std::os::unix::process::CommandExt;
-    // SAFETY: reads this process's credentials; no pointer arguments.
-    if unsafe { libc::geteuid() } == 0 {
-        return Ok(false);
-    }
     let error = std::process::Command::new("sudo")
         .arg("--")
         .args(kept_environment(std::env::vars_os()))
@@ -46,6 +114,47 @@ fn kept_environment(
             word
         })
         .collect()
+}
+
+#[cfg(test)]
+mod rights_tests {
+    use super::{Rights, Situation, rights};
+
+    fn decide(windows: bool, administrator: bool, dry_run: bool, own_window: bool) -> Rights {
+        rights(Situation {
+            windows,
+            administrator,
+            dry_run,
+            own_window,
+            writes_disks: true,
+        })
+    }
+
+    #[test]
+    fn unix_runs_every_real_command_through_sudo() {
+        assert_eq!(decide(false, false, false, false), Rights::Relaunch);
+        assert_eq!(decide(false, false, false, true), Rights::Relaunch);
+        assert_eq!(decide(false, true, false, false), Rights::Enough);
+        assert_eq!(decide(false, false, true, false), Rights::Enough);
+    }
+
+    #[test]
+    fn windows_relaunches_only_windowed_commands_and_refuses_other_disk_writes() {
+        assert_eq!(decide(true, false, false, true), Rights::Relaunch);
+        assert_eq!(decide(true, false, false, false), Rights::Refuse);
+        assert_eq!(decide(true, true, false, false), Rights::Enough);
+        assert_eq!(decide(true, true, false, true), Rights::Enough);
+        assert_eq!(decide(true, false, true, false), Rights::Enough);
+        // `status` writes no disk and runs with the rights it has.
+        let status = rights(Situation {
+            windows: true,
+            administrator: false,
+            dry_run: false,
+            own_window: false,
+            writes_disks: false,
+        });
+        assert_eq!(status, Rights::Enough);
+    }
 }
 
 #[cfg(all(test, not(windows)))]
@@ -96,18 +205,13 @@ pub(crate) fn hold_window(success: bool) {
     let _ = console::Term::stderr().read_key();
 }
 
+/// Runs this command again in a new administrator window, through the UAC
+/// consent dialog.
 #[cfg(windows)]
-pub(super) fn relaunch() -> Result<bool> {
+pub(super) fn relaunch() -> Result<()> {
     use anyhow::ensure;
     use std::{os::windows::ffi::OsStrExt, ptr};
-    use windows_sys::Win32::UI::{
-        Shell::{IsUserAnAdmin, ShellExecuteW},
-        WindowsAndMessaging::SW_SHOWNORMAL,
-    };
-    // SAFETY: queries the calling process's token; no pointer arguments.
-    if unsafe { IsUserAnAdmin() } != 0 {
-        return Ok(false);
-    }
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
     let exe: Vec<u16> = std::env::current_exe()?
         .as_os_str()
         .encode_wide()
@@ -137,7 +241,7 @@ pub(super) fn relaunch() -> Result<bool> {
         "administrator access was cancelled or unavailable; your USB was not changed"
     );
     RELAUNCHED.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(windows)]

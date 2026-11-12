@@ -1285,6 +1285,27 @@ fn install_and_repair_unmount_target_filesystems() {
 }
 
 #[test]
+fn only_status_and_boot_log_leave_disks_unwritten() {
+    for action in [Action::Status, Action::BootLog] {
+        assert!(!writes_disks(&action));
+    }
+    for action in [
+        Action::Create,
+        Action::Repair,
+        Action::UpdateStela,
+        Action::UpdateOs,
+        Action::Uninstall,
+        Action::ResetNvram,
+        Action::BackupState(PathBuf::new()),
+        Action::RestoreState(PathBuf::new()),
+        Action::Configure,
+        Action::HostFirmwareInstall(PathBuf::new()),
+    ] {
+        assert!(writes_disks(&action));
+    }
+}
+
+#[test]
 fn the_last_word_on_the_network_follows_the_installer() {
     let run = |kind: InstallImage| {
         let mut f = fixture(64 * GIB, false);
