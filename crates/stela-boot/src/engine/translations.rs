@@ -606,12 +606,16 @@ struct Available {
     shared_bound: AtomicUsize,
     /// The fetch pages the machines keep in all ([`Translations::kept_pages`]).
     kept_pages: AtomicUsize,
+    /// The writer sheds new entries, the heap being short
+    /// ([`writer::Entries::shed`]): offers skip making their stored form.
+    shed: AtomicBool,
 }
 
 static AVAILABLE: Available = Available {
     capabilities: AtomicU8::new(0),
     shared_bound: AtomicUsize::new(0),
     kept_pages: AtomicUsize::new(0),
+    shed: AtomicBool::new(false),
 };
 const READ_PACK: u8 = 1 << 0;
 const WRITE_PACK: u8 = 1 << 1;
@@ -693,13 +697,21 @@ impl Shared {
     /// share its block.
     fn publish_writable(offer: Offer) {
         let bound = AVAILABLE.shared_bound.load(Ordering::Acquire) / PARTS;
-        let entry = offer.entry();
         let lock = part(&offer.key());
-        lock.with(|store| {
-            if let Some(store) = store {
-                store.keep(&offer, entry);
-            }
-        });
+        if AVAILABLE.shed.load(Ordering::Relaxed) {
+            lock.with(|store| {
+                if let Some(store) = store {
+                    store.count_shed(&offer);
+                }
+            });
+        } else {
+            let entry = offer.entry();
+            lock.with(|store| {
+                if let Some(store) = store {
+                    store.keep(&offer, entry);
+                }
+            });
+        }
         let Some(mut staged) = StagedOffer::new(offer, bound) else {
             return;
         };
@@ -1048,14 +1060,15 @@ fn report(counters: &pack::Counters) {
     }
     let checks = stela_engine::machine::entry_checks();
     output::arguments(format_args!(
-        "TRANSLATIONS added={} unstorable={} unkept={} unkept_entries={} retaken={} checked={} \
-         differed={} loaded={} absent={} invalid={} locks acquired={acquired} \
+        "TRANSLATIONS added={} unstorable={} unkept={} unkept_entries={} retaken={} shed={} \
+         checked={} differed={} loaded={} absent={} invalid={} locks acquired={acquired} \
          contended={contended} spin_ms={}\n",
         counters.added,
         counters.unstorable,
         counters.unkept,
         counters.unkept_entries,
         counters.retaken,
+        counters.shed,
         checks.checked,
         checks.differed,
         counters.loaded,
@@ -1119,6 +1132,24 @@ impl Entries for Parts {
             .iter()
             .any(|lock| lock.with(|store| store.as_ref().is_some_and(Store::added_pressed)))
     }
+
+    fn heap(&mut self) -> Option<writer::Heap> {
+        Some(writer::Heap {
+            total: crate::ALLOCATOR.total() as u64,
+            room: crate::ALLOCATOR.room() as u64,
+        })
+    }
+
+    fn shed(&mut self, shed: bool) {
+        AVAILABLE.shed.store(shed, Ordering::Relaxed);
+        for lock in &STORES {
+            lock.with(|store| {
+                if let Some(store) = store {
+                    store.shed(shed);
+                }
+            });
+        }
+    }
 }
 
 /// Report what a writer step did.
@@ -1151,6 +1182,18 @@ fn report_event(event: &Event) {
         )),
         Event::Lost { records } => output::arguments(format_args!(
             "TRANSLATIONS segment of {records} records left out: larger than the file holds\n"
+        )),
+        Event::Shed { room, resident } => output::arguments(format_args!(
+            "TRANSLATIONS shed room={}M resident={}M: new translations are not kept while \
+             the heap is short\n",
+            room >> 20,
+            resident >> 20
+        )),
+        Event::Released { room, bytes, lost } => output::arguments(format_args!(
+            "TRANSLATIONS released room={}M bytes={}M lost={lost}: the heap is nearly full; \
+             the segments stay in the file and no more are added this boot\n",
+            room >> 20,
+            bytes >> 20
         )),
     }
 }
@@ -1212,7 +1255,7 @@ pub fn write() {
         let stats = held.writer.stats();
         output::arguments(format_args!(
             "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} \
-             pressed={} held={} pairs={} merges={}\n",
+             pressed={} held={} pairs={} merges={} sheds={} resident_peak={}M released={}\n",
             held.steps,
             held.longest * 1_000_000 / super::host::COUNTER_HZ,
             stats.deltas,
@@ -1222,6 +1265,9 @@ pub fn write() {
             stats.held,
             stats.pairs,
             stats.merges,
+            stats.sheds,
+            stats.resident_peak >> 20,
+            held.writer.shedding().1,
         ));
         let name = pack_name(&translations::translator_id());
         let stopped = held.writer.stop(&mut Parts, &mut |execution| {

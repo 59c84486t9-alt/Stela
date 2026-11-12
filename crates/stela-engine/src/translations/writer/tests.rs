@@ -68,7 +68,9 @@ impl Target for Disk {
 
 /// What a boot's store hands the writer: entries added, keys found. Like
 /// the store, it keeps at most `bound` entries between takes and counts
-/// those it refused.
+/// those it refused, and those it shed. Its heap, when measured, holds
+/// `heap_total` bytes, of which the rest of the boot takes `filler` and
+/// the writer's segments `resident`.
 struct Boot {
     added: BTreeMap<Digest, Record>,
     found: Vec<Digest>,
@@ -76,6 +78,11 @@ struct Boot {
     total: u64,
     bound: usize,
     unkept: u64,
+    heap_total: u64,
+    filler: u64,
+    resident: u64,
+    shedding: bool,
+    shed: u64,
 }
 
 impl Boot {
@@ -89,7 +96,20 @@ impl Boot {
             total: 0,
             bound: usize::MAX,
             unkept: 0,
+            heap_total: 0,
+            filler: 0,
+            resident: 0,
+            shedding: false,
+            shed: 0,
         }
+    }
+
+    /// The heap's room the boot measures: what the rest, the writer's
+    /// segments and the entries added leave.
+    fn room(&self) -> u64 {
+        let added = self.added.len() as u64 * ENTRY_HEAP_BYTES;
+        self.heap_total
+            .saturating_sub(self.filler + self.resident + added)
     }
 
     /// Add `count` entries of new pages: the keys of those kept.
@@ -98,6 +118,10 @@ impl Boot {
         let mut kept = Vec::new();
         for _ in 0..count {
             self.next += 1;
+            if self.shedding {
+                self.shed += 1;
+                continue;
+            }
             if self.added.len() >= self.bound {
                 self.unkept += 1;
                 continue;
@@ -124,7 +148,19 @@ impl Entries for Boot {
     fn pressed(&mut self) -> bool {
         !self.added.is_empty() && self.added.len().saturating_mul(2) >= self.bound
     }
+    fn heap(&mut self) -> Option<Heap> {
+        (self.heap_total != 0).then(|| Heap {
+            total: self.heap_total,
+            room: self.room(),
+        })
+    }
+    fn shed(&mut self, shed: bool) {
+        self.shedding = shed;
+    }
 }
+
+/// The heap bytes an added entry of [`Boot::add`] takes.
+const ENTRY_HEAP_BYTES: u64 = 256;
 
 /// The pack file as a boot's loader reads it: the newest commit, whose
 /// blobs must read back whole, and its segments and lists.
@@ -201,6 +237,7 @@ impl<'a> Run<'a> {
     fn run(&mut self, disk: &mut Disk, seconds: u64) -> Result<(), String> {
         for _ in 0..seconds * STEPS_PER_SECOND {
             let now = self.now;
+            self.boot.resident = self.writer.resident();
             let events =
                 self.writer
                     .step(&mut || now, now + 1, &mut self.boot, &mut |execution| {
@@ -518,4 +555,76 @@ fn entries_that_press_while_a_write_waits_are_held_for_the_next_segment() {
     run.run(&mut disk, 5).unwrap();
     run.stop(&mut disk).unwrap();
     assert_eq!(keys(&disk.bytes), added);
+}
+
+#[test]
+fn a_filling_heap_sheds_the_stores_entries_and_then_lets_the_segments_go() {
+    const HEAP: u64 = 8 << 20;
+    let mut disk = Disk::new(FILE_BYTES);
+    let mut run = Run::new(load(&disk.bytes.clone(), u64::MAX), 1);
+    run.boot.heap_total = HEAP;
+    run.boot.filler = HEAP / 4;
+    run.boot.bound = 2000;
+    let shed = |run: &Run| {
+        run.events
+            .iter()
+            .filter(|event| matches!(event, Event::Shed { .. }))
+            .count()
+    };
+
+    // The heap's room dips under its shed share: the store keeps no entry
+    // until the room is back a release share above it.
+    let mut committed: BTreeSet<Digest> = run.boot.add(2000).into_iter().collect();
+    run.run(&mut disk, QUIET_SECONDS + 2).unwrap();
+    assert_eq!(keys(&disk.bytes), committed);
+    run.boot.filler = HEAP - HEAP / SHED_SHARE - run.writer.resident() + 1;
+    run.run(&mut disk, 1).unwrap();
+    assert!(run.boot.shedding);
+    assert_eq!(shed(&run), 1, "{:?}", run.events);
+    assert!(run.boot.add(100).is_empty());
+    run.boot.filler =
+        HEAP - HEAP / SHED_SHARE - HEAP / RELEASE_SHARE - run.writer.resident() - (1 << 20);
+    run.run(&mut disk, 1).unwrap();
+    assert!(!run.boot.shedding);
+
+    // Entries keep coming with room to spare: the segments laid out grow to
+    // their share of the heap, then the store sheds; they never pass it by
+    // more than the segment that reached it.
+    run.boot.filler = HEAP / 4;
+    let cap = HEAP / RESIDENT_SHARE;
+    let mut most = 0;
+    for _ in 0..4 * FIRST_DELTA_SECONDS {
+        committed.extend(run.boot.add(3000));
+        run.run(&mut disk, 1).unwrap();
+        most = most.max(run.writer.resident());
+    }
+    assert!(run.boot.shedding && run.boot.shed > 100);
+    assert!(most >= cap / 2 && most < cap * 2, "{most} of {cap}");
+    assert_eq!(shed(&run), 1, "reported once: {:?}", run.events);
+    assert!(run.writer.stats().sheds >= 2);
+    let written = keys(&disk.bytes);
+    assert!(!written.is_empty());
+
+    // The rest of the boot fills the heap: the writer lets its segments go
+    // and the store sheds for the rest of the boot, room or not.
+    run.boot.filler = HEAP - HEAP / RELEASE_SHARE + 1;
+    run.run(&mut disk, 1).unwrap();
+    assert_eq!(run.writer.resident(), 0);
+    assert!(
+        run.events
+            .iter()
+            .any(|event| matches!(event, Event::Released { .. })),
+        "{:?}",
+        run.events
+    );
+    run.boot.filler = 0;
+    run.run(&mut disk, 2 * FIRST_DELTA_SECONDS).unwrap();
+    assert_eq!(run.writer.shedding(), (true, true));
+    assert!(run.boot.add(100).is_empty());
+    assert_eq!(run.writer.resident(), 0);
+
+    // What the file held stays whole; the stop writes the boot's list.
+    let stopped = run.stop(&mut disk).unwrap();
+    assert!(keys(&disk.bytes).is_superset(&written));
+    assert_eq!(stopped.lists, 1);
 }

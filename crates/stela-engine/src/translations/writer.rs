@@ -33,6 +33,14 @@
 //! At a stop, a new segment's write in flight is finished, a merge not yet
 //! committed is left, and what is left and the boot's used-key list are
 //! written.
+//!
+//! The segments this boot laid out stay in the heap, beside everything the
+//! guest and the GPU need from it, so the writer bounds them by the heap
+//! ([`Entries::heap`]): the store sheds new entries while the heap's room is
+//! under [`SHED_SHARE`] or the laid-out segments reach [`RESIDENT_SHARE`]
+//! of it, and once the room falls under [`RELEASE_SHARE`] the writer lets
+//! every segment it holds go, for the rest of the boot: they stay in the
+//! file, and no merge runs, as one would leave them out.
 use super::pack::{
     Delta, JOURNAL_DOMAIN, Layout, MAX_SEGMENTS, MAX_USED_KEYS, MAX_USED_LISTS, Merge, Merged,
     Pack, SEGMENT_BLOB, Segment, USED_BLOB, UsedKeys,
@@ -71,6 +79,23 @@ const LOOKS_PER_SECOND: u64 = 10;
 pub const STEP_WORK: usize = 32;
 /// The most bytes a write step queues.
 pub const PIECE_BYTES: u64 = 512 << 10;
+/// The share of the heap (a fraction's denominator) the segments laid out
+/// this boot may hold.
+pub const RESIDENT_SHARE: u64 = 16;
+/// The store sheds new entries while the heap's room is under this share
+/// of it, and keeps them again once the room is a [`RELEASE_SHARE`] more.
+pub const SHED_SHARE: u64 = 16;
+/// Under this share of room, the writer lets its laid-out segments go.
+pub const RELEASE_SHARE: u64 = 32;
+
+/// The heap the writer's segments and the store's entries share with the
+/// rest of the boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heap {
+    pub total: u64,
+    /// The bytes a large request can still find.
+    pub room: u64,
+}
 
 /// What the writer asks of the boot's store.
 pub trait Entries {
@@ -83,6 +108,10 @@ pub trait Entries {
     /// Whether the entries held for the next segment reached half the
     /// bound past which new ones are refused.
     fn pressed(&mut self) -> bool;
+    /// The heap, when the boot measures it.
+    fn heap(&mut self) -> Option<Heap>;
+    /// Keep no new entry (`true`), the heap being short, or keep them again.
+    fn shed(&mut self, shed: bool);
 }
 
 /// Why a new segment started.
@@ -123,6 +152,13 @@ pub enum Event {
     /// A waiting segment found no room after a merge either: it is larger
     /// than the file holds beside the merged content, and left out.
     Lost { records: usize },
+    /// The store began shedding new entries for the first time this boot:
+    /// the heap's room, and the bytes the laid-out segments hold.
+    Shed { room: u64, resident: u64 },
+    /// The heap's room fell under [`RELEASE_SHARE`]: the writer let its
+    /// laid-out segments go (`bytes`), and the records of those not yet
+    /// written and of the entries held (`lost`).
+    Released { room: u64, bytes: u64, lost: usize },
 }
 
 /// What the writer did while the guest ran.
@@ -138,6 +174,10 @@ pub struct Stats {
     /// Merges of the newest two segments, and full merges.
     pub pairs: u64,
     pub merges: u64,
+    /// Times the store began shedding, and the most bytes the laid-out
+    /// segments held.
+    pub sheds: u64,
+    pub resident_peak: u64,
 }
 
 /// What [`Writer::stop`] wrote: the segments in the file after it, the
@@ -217,6 +257,9 @@ pub struct Writer<'a> {
     /// Entries taken while pressed and busy, for the next segment.
     held: BTreeMap<Digest, Record>,
     quiet_since: Option<u64>,
+    /// The store sheds new entries; the writer let its segments go.
+    shedding: bool,
+    released: bool,
     failed: bool,
     stats: Stats,
 }
@@ -259,6 +302,8 @@ impl<'a> Writer<'a> {
             pressed: false,
             held: BTreeMap::new(),
             quiet_since: None,
+            shedding: false,
+            released: false,
             failed: false,
             stats: Stats::default(),
         }
@@ -274,6 +319,76 @@ impl<'a> Writer<'a> {
 
     pub fn idle(&self) -> bool {
         matches!(self.task, Task::Idle)
+    }
+
+    /// The heap bytes of the segments laid out this boot that memory holds
+    /// for merges and writes.
+    pub fn resident(&self) -> u64 {
+        let laid = self.segments.iter().filter_map(|segment| match segment {
+            Segment::Laid(layout) => Some(layout.owned()),
+            Segment::Packed(_) => None,
+        });
+        let waiting = self.waiting.iter().map(|layout| layout.owned());
+        laid.chain(waiting).sum()
+    }
+
+    /// Whether the store sheds new entries, and whether the writer let its
+    /// segments go.
+    pub fn shedding(&self) -> (bool, bool) {
+        (self.shedding, self.released)
+    }
+
+    /// Keep the store's entries and the segments laid out within the heap:
+    /// shed new entries while its room or the segments press, and let the
+    /// segments go once its room is nearly gone.
+    fn govern(&mut self, entries: &mut dyn Entries) -> Option<Event> {
+        let Heap { total, room } = entries.heap()?;
+        let resident = self.resident();
+        self.stats.resident_peak = self.stats.resident_peak.max(resident);
+        if !self.released && room < total / RELEASE_SHARE {
+            return Some(self.release(entries, room, resident));
+        }
+        let cap = total / RESIDENT_SHARE;
+        let shed = room < total / SHED_SHARE || resident >= cap;
+        let keep = room >= total / SHED_SHARE + total / RELEASE_SHARE && resident < cap;
+        if shed && !self.shedding {
+            self.shedding = true;
+            entries.shed(true);
+            self.stats.sheds += 1;
+            return (self.stats.sheds == 1).then_some(Event::Shed { room, resident });
+        }
+        if keep && self.shedding && !self.released {
+            self.shedding = false;
+            entries.shed(false);
+        }
+        None
+    }
+
+    /// Let every segment laid out go, with a merge in progress, the entries
+    /// held and those the store holds, and shed new ones for the rest of
+    /// the boot. A segment being laid out or written finishes; it is let go
+    /// once written.
+    fn release(&mut self, entries: &mut dyn Entries, room: u64, bytes: u64) -> Event {
+        self.released = true;
+        if !self.shedding {
+            self.shedding = true;
+            self.stats.sheds += 1;
+        }
+        entries.shed(true);
+        let mut lost = self.waiting.iter().map(|layout| layout.records()).sum();
+        self.waiting.clear();
+        self.merged_since_wait = false;
+        lost += self.held.len();
+        self.held = BTreeMap::new();
+        lost += entries.take_added().len();
+        if let Task::Merge(..) = self.task {
+            self.task = Task::Idle;
+        }
+        self.segments
+            .retain(|segment| matches!(segment, Segment::Packed(_)));
+        // Merges read segments from memory: with some let go, none runs.
+        self.partial = true;
+        Event::Released { room, bytes, lost }
     }
 
     /// The file's newest commit, as the writer last committed or read it.
@@ -417,7 +532,7 @@ impl<'a> Writer<'a> {
             }
         }
         self.look(now, entries);
-        if self.full_merge_due() && !self.segments.is_empty() {
+        if self.full_merge_due() && !self.segments.is_empty() && !self.released {
             self.merged = true;
             // Beside the file's content, so its commit keeps that content
             // until the merged segment is whole; within its share of the
@@ -546,7 +661,9 @@ impl<'a> Writer<'a> {
                 let (records, bytes) = (layout.records(), layout.bytes());
                 self.stats.deltas += 1;
                 self.stats.delta_bytes += bytes;
-                self.segments.push(Segment::Laid(layout));
+                if !self.released {
+                    self.segments.push(Segment::Laid(layout));
+                }
                 Event::Segment {
                     records,
                     bytes,
@@ -555,13 +672,19 @@ impl<'a> Writer<'a> {
             }
             Done::Merge(layout, Merging::Pair(_)) => {
                 self.stats.pairs += 1;
-                self.segments.push(Segment::Laid(layout));
+                if !self.released {
+                    self.segments.push(Segment::Laid(layout));
+                }
                 Event::MergeCommitted { full: false }
             }
             Done::Merge(layout, Merging::Full) => {
                 self.stats.merges += 1;
                 self.merged_since_wait = !self.waiting.is_empty();
-                self.segments = vec![Segment::Laid(layout)];
+                self.segments = if self.released {
+                    Vec::new()
+                } else {
+                    vec![Segment::Laid(layout)]
+                };
                 self.used.clear();
                 Event::MergeCommitted { full: true }
             }
@@ -582,6 +705,7 @@ impl<'a> Writer<'a> {
         if self.failed {
             return Ok(events);
         }
+        events.extend(self.govern(entries));
         if self.idle() {
             events.extend(self.begin(clock(), entries));
         } else {

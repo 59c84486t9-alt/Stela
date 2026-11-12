@@ -792,8 +792,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             );
             self.code.rebases.keep(key, offset as u16, context, entry);
         }
-        // A store keeps an offer's stored form within its own bound, which
-        // the heap's budget sets aside: memory low, as the heap rests once
+        // A store keeps an offer's stored form within its own bound, and its
+        // pack writer sheds offers before the heap runs short (writer
+        // `govern`): memory low, as the heap rests once
         // the engine's caches have grown, still keeps it, or the pack would
         // miss every block compiled after that. The other PEs take the block
         // either way.

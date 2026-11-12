@@ -525,6 +525,8 @@ pub struct Layout<'a> {
     /// Each record's offset and bytes, by offset.
     records: Vec<(u64, Piece<'a>)>,
     length: u64,
+    /// The heap bytes it holds ([`Layout::owned`]).
+    owned: u64,
 }
 
 /// Zeros for the room between records.
@@ -578,15 +580,35 @@ impl<'a> Layout<'a> {
             .into_iter()
             .map(|(_, offset, piece)| (offset, piece))
             .collect();
+        Self::of(prefix, records, offset)
+    }
+
+    /// The layout of `prefix` and `records`, `length` bytes long.
+    fn of(prefix: Vec<u8>, records: Vec<(u64, Piece<'a>)>, length: u64) -> Self {
+        let pieces: usize = records
+            .iter()
+            .map(|(_, piece)| match piece {
+                Piece::Kept(_) => 0,
+                Piece::New(bytes) => bytes.capacity(),
+            })
+            .sum();
+        let owned = prefix.capacity() + records.capacity() * size_of::<(u64, Piece<'a>)>() + pieces;
         Self {
             prefix,
             records,
-            length: offset,
+            length,
+            owned: owned as u64,
         }
     }
 
     pub fn records(&self) -> usize {
         self.records.len()
+    }
+
+    /// The heap bytes it holds, as laid out: its index and the records
+    /// encoded for it. Those kept from a pack read are the pack's.
+    pub fn owned(&self) -> u64 {
+        self.owned
     }
 
     /// The pack's length in bytes.
@@ -1078,11 +1100,8 @@ impl<'a> Merge<'a> {
                         let checksum = core::mem::replace(hasher, Sha256::new()).finalize();
                         let mut prefix = core::mem::take(prefix);
                         prefix.extend(checksum);
-                        self.phase = Phase::Done(Layout {
-                            prefix,
-                            records: core::mem::take(placed),
-                            length: *offset,
-                        });
+                        self.phase =
+                            Phase::Done(Layout::of(prefix, core::mem::take(placed), *offset));
                         self.records = Vec::new();
                         return true;
                     };
@@ -1149,6 +1168,8 @@ pub struct Counters {
     /// this boot, not added again.
     pub unkept_entries: u64,
     pub retaken: u64,
+    /// Offers not kept because the heap was short ([`Store::shed`]).
+    pub shed: u64,
     /// Shared lookups that found a block, and why the others missed: no
     /// offer of it, an offer of its PC and page in another context, its
     /// offer evicted, or another machine compiling it at that moment.
@@ -1174,6 +1195,7 @@ impl Counters {
             unkept,
             unkept_entries,
             retaken,
+            shed,
             shared_hits,
             shared_absent,
             shared_other_context,
@@ -1191,6 +1213,7 @@ impl Counters {
         self.unkept += unkept;
         self.unkept_entries += unkept_entries;
         self.retaken += retaken;
+        self.shed += shed;
         self.shared_hits += shared_hits;
         self.shared_absent += shared_absent;
         self.shared_other_context += shared_other_context;
@@ -1546,6 +1569,8 @@ pub struct Store<'a> {
     /// add, and those the bound left out, counted once each.
     taken: SeenFilter,
     refused: SeenFilter,
+    /// The heap is short: offers are counted, not kept ([`Self::shed`]).
+    shedding: bool,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
@@ -1635,6 +1660,7 @@ impl<'a> Store<'a> {
             misses: MissTables::default(),
             taken: SeenFilter::default(),
             refused: SeenFilter::default(),
+            shedding: false,
             counters: Counters::default(),
         }
     }
@@ -1748,6 +1774,25 @@ impl<'a> Store<'a> {
         }
     }
 
+    /// Keep no offer while `shed`, the heap being short, or keep them again:
+    /// the writer sheds the store's work before anything else's.
+    pub fn shed(&mut self, shed: bool) {
+        self.shedding = shed;
+    }
+
+    /// Whether offers are shed.
+    pub fn shedding(&self) -> bool {
+        self.shedding
+    }
+
+    /// Count an offer not kept while shedding, whose stored form was never
+    /// made.
+    pub fn count_shed(&mut self, offer: &Offer) {
+        self.misses
+            .offered(shared_key(&offer.key(), offer.pc(), &offer.context()));
+        self.counters.shed += 1;
+    }
+
     /// Keep `entry`, the stored form of `offer` ([`Offer::entry`], made
     /// before the store's lock is taken), for the next pack while the added
     /// bound has room.
@@ -1755,6 +1800,10 @@ impl<'a> Store<'a> {
         let key = offer.key();
         self.misses
             .offered(shared_key(&key, offer.pc(), &offer.context()));
+        if self.shedding {
+            self.counters.shed += 1;
+            return;
+        }
         let Some(entry) = entry else {
             self.counters.unstorable += 1;
             return;
