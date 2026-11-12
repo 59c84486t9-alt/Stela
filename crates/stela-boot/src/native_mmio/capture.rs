@@ -157,7 +157,14 @@ pub(crate) struct Sealed {
 pub(crate) struct CaptureHandoff {
     sealed: Option<Sealed>,
     claimed: AtomicBool,
+    /// Why there is no sealed capture, for the engine's screen.
+    refusal: [u8; REFUSAL_BYTES],
+    refusal_bytes: usize,
 }
+
+/// The longest refusal the handoff carries; longer ones are cut at a
+/// character boundary.
+const REFUSAL_BYTES: usize = 256;
 
 /// Unique native source origin backed by the actual kept loader allocation.
 pub(super) struct Origin {
@@ -165,11 +172,35 @@ pub(super) struct Origin {
 }
 
 impl CaptureHandoff {
-    pub(crate) fn new(sealed: Option<Sealed>) -> Self {
+    pub(crate) fn new(sealed: Sealed) -> Self {
         Self {
-            sealed,
+            sealed: Some(sealed),
             claimed: AtomicBool::new(false),
+            refusal: [0; REFUSAL_BYTES],
+            refusal_bytes: 0,
         }
+    }
+
+    /// No capture, for the reason `why`.
+    pub(crate) fn refused(why: &str) -> Self {
+        let mut refusal = [0; REFUSAL_BYTES];
+        let mut bytes = why.len().min(REFUSAL_BYTES);
+        while !why.is_char_boundary(bytes) {
+            bytes -= 1;
+        }
+        refusal[..bytes].copy_from_slice(&why.as_bytes()[..bytes]);
+        Self {
+            sealed: None,
+            claimed: AtomicBool::new(false),
+            refusal,
+            refusal_bytes: bytes,
+        }
+    }
+
+    /// Why there is no capture; empty when there is one.
+    pub(crate) fn refusal(&self) -> &str {
+        core::str::from_utf8(&self.refusal[..self.refusal_bytes.min(REFUSAL_BYTES)])
+            .unwrap_or("the reason is not readable")
     }
 
     pub(crate) fn region(&self) -> Option<Region> {
@@ -328,6 +359,27 @@ impl Prepared {
         wire.cores = u32::try_from(cores).map_err(|_| refuse!("MMIO core count overflow"))?;
         wire.levels = crate::layout::top_level() + 1;
         Ok(())
+    }
+    /// Before ExitBootServices, after every owned allocation: seal the
+    /// current memory map as [`Self::finish`] seals the final one, and say
+    /// how it went, for the boot log, which a refusal of the final map no
+    /// longer reaches. The inventory is emptied again for the final map.
+    pub(crate) fn rehearse(&mut self) -> alloc::string::String {
+        // SAFETY: sole loader writer, not published to the engine until sealed.
+        let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
+        let line = match boot::memory_map(boot::MemoryType::LOADER_DATA) {
+            Ok(map) => match wire.seal(&map) {
+                Ok(sealed) => alloc::format!(
+                    "{} entries kept of {MAX_MEMORY}, {} without pages left out",
+                    sealed.kept,
+                    sealed.empty
+                ),
+                Err(error) => alloc::format!("refused: {error}"),
+            },
+            Err(error) => alloc::format!("memory map unavailable: {:?}", error.status()),
+        };
+        wire.memory_count = 0;
+        line
     }
     /// Seal from the successful ExitBootServices map, after every owned
     /// allocation. On overflow magic stays absent and post-EBS admission refuses.

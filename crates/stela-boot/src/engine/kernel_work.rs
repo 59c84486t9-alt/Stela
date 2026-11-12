@@ -41,6 +41,9 @@ use plan::Plan;
 #[derive(Debug)]
 pub(crate) enum Error {
     Inventory,
+    /// The loader's copy of the firmware's final memory map and PCI and
+    /// ACPI settings is missing, for this reason.
+    Capture(alloc::string::String),
     /// The CPUID topology APIC ID observed now differs from the firmware's
     /// MP-services processor ID of the boot processor, which the loader
     /// proved equal to the same CPUID observation at capture.
@@ -66,6 +69,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Inventory => f.write_str("sealed loader stack inventory unavailable"),
+            Self::Capture(why) => f.write_str(why),
             Self::WrongCpu { observed, captured } => write!(
                 f,
                 "kernel work requires the actual BSP: CPUID topology APIC ID {observed:#x?} \
@@ -100,6 +104,7 @@ impl Error {
             | Self::AlreadyOwned
             | Self::NoKernelStacks
             | Self::Pages(_) => Cause::Records,
+            Self::Capture(_) => Cause::Capture,
             Self::WrongCpu { .. } => Cause::Processor,
             Self::Clock => Cause::Clock,
             Self::Allocation => Cause::Memory,
@@ -399,9 +404,10 @@ impl KernelWork {
         stage: &Cell<&'static str>,
     ) -> Result<Self, Error> {
         plan.validate(handoff)?;
-        stage.set("root identity");
+        stage.set("firmware records");
         // SAFETY: inherited handoff/physmap lifetime and sealed capture.
-        let wire = unsafe { native_mmio::captured(handoff) }.map_err(|_| Error::Inventory)?;
+        let wire = unsafe { native_mmio::captured(handoff) }.map_err(Error::Capture)?;
+        stage.set("root identity");
         let identity = owner.root_identity().map_err(Error::Work)?;
         if let Some(clock) = clock {
             stage.set("service clock identity");

@@ -11,6 +11,10 @@ pub enum Cause {
     /// The loader's records of the stacks, processors or pages differ from
     /// what the engine finds: a Stela fault, not a setting.
     Records,
+    /// The loader did not keep the firmware's final memory map and its PCI
+    /// and ACPI settings, which every native device service and the stacks'
+    /// checks read: a Stela fault, named by its detail.
+    Capture,
     /// The engine is not running on the processor the firmware booted.
     Processor,
     /// The time-stamp counter's rate was not measured.
@@ -32,6 +36,9 @@ pub enum Cause {
 pub fn reason(cause: Cause, detail: &str) -> String {
     let what = match cause {
         Cause::Records => "the loader's records of its work stacks are not intact (a Stela fault)",
+        Cause::Capture => {
+            "Stela did not keep the firmware's memory map and PCI and ACPI settings (a Stela fault)"
+        }
         Cause::Processor => "the engine is not on the processor the firmware booted",
         Cause::Clock => "the processor's time-stamp counter rate was not measured",
         Cause::Mapping => "the work stacks are not mapped as the loader left them",
@@ -104,6 +111,7 @@ mod tests {
     fn every_cause_names_itself_and_its_detail() {
         for cause in [
             Cause::Records,
+            Cause::Capture,
             Cause::Processor,
             Cause::Clock,
             Cause::Mapping,
@@ -118,6 +126,16 @@ mod tests {
         }
         assert!(reason(Cause::Cache, "x").contains("MTRRs"));
         assert!(reason(Cause::Cache, "x").contains("firmware (BIOS) update"));
+        assert_eq!(
+            reason(
+                Cause::Capture,
+                "firmware records: the firmware's final memory map has 700 entries, more \
+                 than the 512 Stela keeps"
+            ),
+            "Stela did not keep the firmware's memory map and PCI and ACPI settings (a Stela \
+             fault) (firmware records: the firmware's final memory map has 700 entries, \
+             more than the 512 Stela keeps)"
+        );
     }
 
     #[test]

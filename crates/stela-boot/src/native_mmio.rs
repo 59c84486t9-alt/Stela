@@ -36,30 +36,47 @@ fn failed<T>(_: T) -> Error {
 /// # Safety
 /// The real post-EBS main owns this handoff and native physmap. Its loader
 /// allocations remain pinned, and no source bytes have been reconstructed.
-pub(crate) unsafe fn captured(handoff: &crate::handoff::Handoff) -> Result<&'static Wire, Error> {
+pub(crate) unsafe fn captured(
+    handoff: &crate::handoff::Handoff,
+) -> Result<&'static Wire, alloc::string::String> {
+    use alloc::{format, string::String};
     let region = handoff
         .native_mmio_capture
         .region()
-        .ok_or(Error::Unavailable)?;
+        .ok_or_else(|| String::from(handoff.native_mmio_capture.refusal()))?;
+    let bytes = size_of::<Wire>().next_multiple_of(PAGE as usize) as u64;
     if region.physical != handoff.native_mmio.physical
         || region.bytes != handoff.native_mmio.bytes
         || region.physical == 0
         || !region.physical.is_multiple_of(PAGE)
-        || region.bytes != size_of::<Wire>().next_multiple_of(PAGE as usize) as u64
+        || region.bytes != bytes
         || region.physical.checked_add(region.bytes).is_none()
     {
-        return Err(Error::Unavailable);
+        return Err(format!(
+            "the native capture at {:#x} ({:#x} bytes) is not the handoff's {:#x} ({:#x} \
+             bytes, {bytes:#x} expected)",
+            region.physical, region.bytes, handoff.native_mmio.physical, handoff.native_mmio.bytes
+        ));
     }
     // SAFETY: loader reserved this exact owned region; caller keeps
     // its physmap rather than treating the numeric PA as permission.
     let wire = unsafe { &*(crate::layout::physical(region.physical) as *const Wire) };
-    if !wire.valid()
-        || wire.root != handoff.root
-        || !(region.physical..region.physical + region.bytes)
-            .step_by(PAGE as usize)
-            .all(|page| wire.table_owned(page))
+    if !wire.valid() {
+        return Err(String::from("the native capture's records are not intact"));
+    }
+    if wire.root != handoff.root {
+        return Err(format!(
+            "the native capture names page root {:#x}, not the handoff's {:#x}",
+            wire.root, handoff.root
+        ));
+    }
+    if let Some(page) = (region.physical..region.physical + region.bytes)
+        .step_by(PAGE as usize)
+        .find(|&page| !wire.table_owned(page))
     {
-        return Err(Error::Unavailable);
+        return Err(format!(
+            "the native capture's page {page:#x} is not loader data in the final memory map"
+        ));
     }
     Ok(wire)
 }
@@ -71,6 +88,9 @@ unsafe fn claim_capture(
     handoff: &'static crate::handoff::Handoff,
 ) -> Result<(&'static Wire, capture::Origin), Error> {
     // SAFETY: the caller supplies the original handoff and physmap.
-    let wire = unsafe { captured(handoff) }?;
+    let wire = unsafe { captured(handoff) }.map_err(|why| {
+        crate::output::arguments(format_args!("NATIVE MMIO unavailable: {why}\n"));
+        Error::Unavailable
+    })?;
     Ok((wire, handoff.native_mmio_capture.claim()?))
 }

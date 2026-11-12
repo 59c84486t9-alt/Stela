@@ -740,13 +740,10 @@ fn load(
     let remapping = crate::native_dma::firmware_units()?;
     let amd_tables = crate::native_dma::reserve_amd_tables(&remapping);
 
-    let mut native_mmio = match crate::native_mmio::Prepared::capture() {
-        Ok(prepared) => Some(prepared),
-        Err(error) => {
-            output::arguments(format_args!("NATIVE MMIO unavailable capture={error}\n"));
-            None
-        }
-    };
+    let mut native_mmio = crate::native_mmio::Prepared::capture().map_err(|error| {
+        output::arguments(format_args!("NATIVE MMIO unavailable capture={error}\n"));
+        alloc::format!("the firmware's PCI and ACPI settings were not copied: {error}")
+    });
 
     let runtime = Runtime::capture()?;
     let storage = memory::map(
@@ -754,7 +751,7 @@ fn load(
         &mut memory,
         &runtime,
         storage.as_ref(),
-        native_mmio.as_mut(),
+        native_mmio.as_mut().ok(),
         &host_firmware,
     )?;
     let memory::EngineImage {
@@ -820,6 +817,13 @@ fn load(
     let capture = unsafe {
         crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
     };
+    // The final map's seal runs after the log closes; this one is its record.
+    if let Ok(prepared) = native_mmio.as_mut() {
+        output::arguments(format_args!(
+            "NATIVE MMIO memory map before exit: {}\n",
+            prepared.rehearse()
+        ));
+    }
     crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
@@ -834,14 +838,14 @@ fn load(
     let inactive_firmware_units =
         unsafe { crate::native_dma::release_firmware_units(remapping, tsc_hz) };
     let native_mmio_capture = match native_mmio {
-        Some(prepared) => match prepared.finish(&mut exit) {
-            Ok(sealed) => crate::native_mmio::CaptureHandoff::new(Some(sealed)),
+        Ok(prepared) => match prepared.finish(&mut exit) {
+            Ok(sealed) => crate::native_mmio::CaptureHandoff::new(sealed),
             Err(error) => {
                 output::arguments(format_args!("NATIVE MMIO unavailable final-map={error}\n"));
-                crate::native_mmio::CaptureHandoff::new(None)
+                crate::native_mmio::CaptureHandoff::refused(&alloc::format!("{error}"))
             }
         },
-        None => crate::native_mmio::CaptureHandoff::new(None),
+        Err(why) => crate::native_mmio::CaptureHandoff::refused(&why),
     };
     // SAFETY: Stop every enabled firmware AP before offering its former code/data to
     // guest RAM, including workers that will later receive their owned SIPI.
