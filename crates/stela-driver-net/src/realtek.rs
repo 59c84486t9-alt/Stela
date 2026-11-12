@@ -105,7 +105,14 @@ impl fmt::Display for Error {
             Self::Device(e) => e.fmt(f),
             Self::Firmware(e) => e.fmt(f),
             Self::Script(e) => write!(f, "Realtek firmware/PHY: {e}"),
-            Self::UnknownMac(tx) => write!(f, "unknown Realtek MAC TxConfig {tx:#010x}"),
+            Self::UnknownMac(u32::MAX) => {
+                f.write_str("Realtek registers read all ones: the chip does not answer")
+            }
+            Self::UnknownMac(tx) => write!(
+                f,
+                "unknown Realtek chip revision XID {:03x} (TxConfig {tx:#010x})",
+                (tx >> 20) & 0xfcf
+            ),
             Self::UnknownExtendedMac { primary, extended } => write!(
                 f,
                 "unknown Realtek MAC XID {primary:03x} extended {extended:08x} (classification {:08x})",

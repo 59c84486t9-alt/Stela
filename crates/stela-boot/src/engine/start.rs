@@ -2604,6 +2604,9 @@ fn wifi_network(
 /// The whole disk and USB start's bound, which only a stall outside every
 /// PCI function's own budget reaches.
 const DEVICES_START_US: u64 = 300_000_000;
+/// The most network adapters the screen names when none started; the boot
+/// log has them all.
+const NETWORK_ACCOUNT_LINES: usize = 6;
 
 /// The fail line for a disk and USB start the owned call did not complete.
 fn devices_failed(error: &kernel_work::Error) -> alloc::string::String {
@@ -2800,6 +2803,7 @@ fn start_devices(
                 fdr,
                 inputs,
                 mut links,
+                network_account,
                 gpus,
                 usb,
                 bluetooth: host_controller,
@@ -2868,6 +2872,13 @@ fn start_devices(
             host_usb = Some(usb);
             // The guest's controller hangs off the hub of its keyboard.
             host_bluetooth = host_controller.filter(|_| options.input);
+            // With no adapter started, the screen names each one found and
+            // why it stayed off, before the steps that need one say so.
+            if links.devices.is_empty() && (wants_network || options.guest_network) {
+                for line in network_account.iter().take(NETWORK_ACCOUNT_LINES) {
+                    crate::status::info(&format!("Network adapter not started: {line}."));
+                }
+            }
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
             // is reported once.

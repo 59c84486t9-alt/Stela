@@ -79,8 +79,8 @@ fn subsystem(error: &stela_drivers::probe::Error) -> &'static str {
     match error {
         Error::Enumeration(_) => "PCI",
         Error::Vmd(_) => "storage",
-        Error::Realtek(_) => "card reader",
-        Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
+        // The r8169 Ethernet driver's; a Realtek card reader fails as a device.
+        Error::Realtek(_) | Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
         Error::IntelWifi(_) | Error::MediatekWifi(_) | Error::RealtekWifi(_) => "Wi-Fi",
         Error::IntelBluetooth(_) | Error::Bcm4377(_) => "Bluetooth",
         Error::Sfh(_) | Error::SfhCold(_) | Error::Ish(_) | Error::IshCold(_) => "sensors",
@@ -94,10 +94,7 @@ fn subsystem(error: &stela_drivers::probe::Error) -> &'static str {
 /// Whether a function whose probe failed this way could hold a disk: a
 /// storage, USB or unnamed device's failure.
 pub(crate) fn may_hold_disks(error: &stela_drivers::probe::Error) -> bool {
-    matches!(
-        subsystem(error),
-        "storage" | "card reader" | "USB" | "device"
-    )
+    matches!(subsystem(error), "storage" | "USB" | "device")
 }
 
 /// Report a PCI function probe could not bring up, by its subsystem.

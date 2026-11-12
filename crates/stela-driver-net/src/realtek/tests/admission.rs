@@ -51,6 +51,19 @@ fn firmware_requests_name_every_admitted_chips_file_and_target() {
 }
 
 #[test]
+fn an_unknown_chip_names_its_xid_and_a_silent_one_says_so() {
+    use alloc::string::ToString;
+    assert_eq!(
+        Error::UnknownMac(0x5450_0000).to_string(),
+        "unknown Realtek chip revision XID 545 (TxConfig 0x54500000)"
+    );
+    assert_eq!(
+        Error::UnknownMac(u32::MAX).to_string(),
+        "Realtek registers read all ones: the chip does not answer"
+    );
+}
+
+#[test]
 fn exact_ordered_revision_fixtures_refuse_unknown_ancient_and_wrong_pci_family() {
     // Independent source-table cases include overlapping specific/generic masks.
     for (xid, version, fw) in [

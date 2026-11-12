@@ -1247,6 +1247,10 @@ pub unsafe fn open(
     for (location, why) in &devices.usb_unused {
         output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
     }
+    let network_account = devices.network_account();
+    for line in &network_account {
+        output::arguments(format_args!("HOST NETWORK not started: {line}\n"));
+    }
     let inputs = Inputs {
         devices: core::mem::take(&mut devices.inputs),
         root,
@@ -1481,6 +1485,7 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        network_account,
         bluetooth: super::bluetooth::HostBluetooth::first(
             core::mem::take(&mut devices.bluetooth),
             core::mem::take(&mut devices.pcie_bluetooth),
@@ -1725,6 +1730,9 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// Each network adapter found and not started, and why
+    /// (`Devices::network_account`), for the screen when none started.
+    pub network_account: alloc::vec::Vec<alloc::string::String>,
     /// The host's Bluetooth controller, for the guest's.
     pub bluetooth: Option<super::bluetooth::HostBluetooth>,
     /// The display controllers probe left for their own drivers.

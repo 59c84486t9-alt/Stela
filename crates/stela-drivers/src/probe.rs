@@ -578,11 +578,11 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x01, 0x06, _] => Some("SATA controller without the AHCI interface"),
         [0x01, 0x08, _] => Some("non-NVMe non-volatile memory controller"),
         [0x01, ..] => Some("storage controller"),
-        [0x02, 0x00, _] => Some("Ethernet controller"),
+        [0x02, 0x00, _] => Some("Ethernet controller whose ID no driver here takes"),
         [0x02, 0x80, _] => {
             Some("Wi-Fi controller other than Intel's, MediaTek's MT7925 and Realtek's RTL8822C")
         }
-        [0x02, ..] => Some("network controller"),
+        [0x02, ..] => Some("network controller whose ID no driver here takes"),
         // Admitted identities attach through the mount's native services.
         [0x04, 0x03, _] => Some("HD Audio controller outside the supported identities"),
         // EHCI attaches through the mount's native services.
@@ -645,6 +645,9 @@ pub struct Devices {
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
+    /// Every network-class PCI function the scan found (class 02), started
+    /// or not, for [`Devices::network_account`].
+    pub network_functions: Vec<crate::bus::pci::Identity>,
     /// The regulatory database, once probe found a Wi-Fi adapter (a PCI
     /// network controller of class 02/80) while a network is configured:
     /// `Err` reports once that it is missing, and no Wi-Fi adapter then
@@ -821,6 +824,64 @@ impl Devices {
             Some((hci.location.as_str(), error))
         });
         usb.chain(pcie)
+    }
+
+    /// One plain line for each network adapter the drivers found and did
+    /// not start, with its PCI address, IDs and why, or the one line that
+    /// says none answered at all. Started adapters have none.
+    pub fn network_account(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for function in &self.network_functions {
+            let address = function.address;
+            let at = alloc::format!("{address}");
+            let started = self
+                .nics
+                .iter()
+                .any(|nic| nic.location().split(' ').next() == Some(at.as_str()));
+            let failure = self.failures.iter().find(|(found, _)| *found == address);
+            let abandoned = self.abandoned.iter().any(|(found, _)| *found == address);
+            let why = match (failure, abandoned) {
+                (Some((_, error)), false) => alloc::format!("{error}"),
+                (Some((_, error)), true) => alloc::format!(
+                    "{error} (its start took over {} s and was given up)",
+                    DEVICE_START_US / 1_000_000
+                ),
+                (None, true) => alloc::format!(
+                    "its start took over {} s and was given up",
+                    DEVICE_START_US / 1_000_000
+                ),
+                (None, false) if started => continue,
+                (None, false) => match self
+                    .unsupported
+                    .iter()
+                    .find(|(found, ..)| *found == address)
+                {
+                    Some((_, _, why)) => String::from(*why),
+                    None => String::from("no driver started it"),
+                },
+            };
+            let kind = match function.class[1] {
+                0x00 => "Ethernet",
+                0x80 => "Wi-Fi",
+                _ => "network controller",
+            };
+            lines.push(alloc::format!(
+                "{at} {:04x}:{:04x} {kind}: {why}",
+                function.vendor,
+                function.device
+            ));
+        }
+        lines.extend(
+            self.usb_vendor_failures
+                .iter()
+                .map(|(location, error)| alloc::format!("USB {location} Ethernet: {error}")),
+        );
+        if lines.is_empty() && self.nics.is_empty() {
+            lines.push(String::from(
+                "no network-class device answered on PCI, and no USB network adapter was found",
+            ));
+        }
+        lines
     }
 }
 
@@ -1186,6 +1247,9 @@ pub unsafe fn probe_with_provider(
     for found in scanned {
         for mut function in found {
             let address = function.address;
+            if function.class[0] == 0x02 {
+                devices.network_functions.push(function.identity());
+            }
             // A network adapter joins the links, or its failure is recorded.
             macro_rules! attach_link {
                 ($attached:expr, $variant:path) => {{
@@ -2226,6 +2290,63 @@ mod tests {
             device,
             class: [(class >> 16) as u8, (class >> 8) as u8, class as u8],
         }
+    }
+
+    /// Every network-class function a boot found and did not start has its
+    /// line, whatever stopped it, and a boot with none says so.
+    #[test]
+    fn the_network_account_names_each_adapter_that_did_not_start() {
+        let none = Devices::default();
+        assert_eq!(
+            none.network_account(),
+            ["no network-class device answered on PCI, and no USB network adapter was found"]
+        );
+        let r8168 = identity(3, 0, 0x10ec, 0x8168, 0x02_00_00);
+        let unknown = identity(4, 0, 0x8086, 0x1234, 0x02_00_00);
+        let wifi = identity(5, 0, 0x8086, 0xa370, 0x02_80_00);
+        let silent = identity(6, 0, 0x14e4, 0x1686, 0x02_00_00);
+        let mut devices = Devices {
+            network_functions: alloc::vec![r8168, unknown, wifi, silent],
+            ..Devices::default()
+        };
+        devices.failures.push((
+            r8168.address,
+            Error::Realtek(realtek::Error::Firmware(firmware::Error {
+                name: firmware::ErrorName::Available("rtl_nic/rtl8168g-2.fw".into()),
+                kind: firmware::ErrorKind::Missing,
+            })),
+        ));
+        devices.unsupported.push((
+            unknown.address,
+            unknown.class,
+            unsupported(unknown.class).unwrap(),
+        ));
+        devices.unsupported.push((
+            wifi.address,
+            wifi.class,
+            "Intel Wireless-AC 9000 series (Linux iwlwifi): this generation has no driver here",
+        ));
+        assert_eq!(
+            devices.network_account(),
+            [
+                "0000:03:00.0 10ec:8168 Ethernet: firmware \"rtl_nic/rtl8168g-2.fw\": not supplied",
+                "0000:04:00.0 8086:1234 Ethernet: Ethernet controller whose ID no driver here takes",
+                "0000:05:00.0 8086:a370 Wi-Fi: Intel Wireless-AC 9000 series (Linux iwlwifi): this \
+                 generation has no driver here",
+                "0000:06:00.0 14e4:1686 Ethernet: no driver started it",
+            ]
+        );
+        // A start past its budget is named with what it ended in.
+        devices.abandoned.push((
+            r8168.address,
+            budget::Expiry {
+                budget_us: DEVICE_START_US,
+                at: None,
+            },
+        ));
+        assert!(
+            devices.network_account()[0].ends_with("(its start took over 30 s and was given up)")
+        );
     }
 
     #[test]
