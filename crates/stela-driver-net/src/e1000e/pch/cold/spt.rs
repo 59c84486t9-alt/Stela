@@ -177,9 +177,13 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.identity = self.phy.identify()?;
         // The donor releases SWFLAG before this hardware PHY reset. No PHY
         // transaction wrapper may span it, or the later full-chip reset.
-        let reset = self.reset_phy()?;
-        self.configuration_done(reset)?;
-        self.post_reset()?;
+        // A reset the ME blocks is left out with its configuration wait and
+        // post-reset steps, as `e1000e_phy_hw_reset_generic` and
+        // `e1000_post_phy_reset_ich8lan` return at once then.
+        if self.reset_phy()? {
+            self.configuration_done(true)?;
+            self.post_reset()?;
+        }
         self.phy.wait_minimum(50_000)?;
         self.identity = self.phy.identify()?;
         // The ME keeps the ULP configuration and the interconnect of an
@@ -198,9 +202,11 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         // The source initialization flow follows forced ULP exit with another
         // generic PHY reset before normal MAC reset/PHY post-configuration.
         let reset = self.reset_phy()?;
-        self.configuration_done(reset)?;
+        if reset {
+            self.configuration_done(true)?;
+        }
         self.mtp_initial_k1(false)?;
-        if self.reset_blocked()? && reset {
+        if reset && self.reset_blocked()? {
             return Err(Error::BlockedAfterReset);
         }
         self.identity = self.phy.identify()?;

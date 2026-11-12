@@ -392,6 +392,30 @@ fn a_phy_left_in_ulp_answers_after_the_lanphypc_toggle() {
     }
 }
 
+/// A PHY reset the ME blocks is left out with its configuration wait and
+/// post-reset steps, and the adapter starts. The check that the ME blocks
+/// a reset right after one runs only after a reset that ran: the ME is
+/// waited for 300 ms (31 reads) once per reset left out, two PHY resets
+/// and the PHY part of the global reset, and never for a reset that did
+/// not happen (the old order spent a fifth wait there).
+#[test]
+fn a_blocked_phy_reset_spends_no_wait_on_the_after_reset_check() {
+    let (state, _, io, timer) = fixture_spt();
+    state.borrow_mut().mac.insert(super::super::super::FWSM, 0);
+    let controller = start_spt(0x1570, io, timer).unwrap();
+    let fwsm_reads = state
+        .borrow()
+        .operations
+        .iter()
+        .filter(|o| o[0] == 0 && o[1] == super::super::super::FWSM)
+        .count();
+    // A fourth wait is the OEM bits' autonegotiation restart after the
+    // global reset; the two single reads are `managed`'s, at the start and
+    // in the post-reset steps.
+    assert_eq!(fwsm_reads, 4 * 31 + 2);
+    drop(controller);
+}
+
 /// An I219 the Intel ME manages: the ME takes its PHY out of ULP on the
 /// host's H2ME request, so no LANPHYPC toggle runs, and the adapter starts.
 #[test]
