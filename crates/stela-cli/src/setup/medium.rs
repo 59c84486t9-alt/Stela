@@ -241,15 +241,14 @@ pub(super) fn locate(
 }
 
 /// What writing the medium needs: the IPSW's pieces not already on
-/// `volume` with their sizes, the hash files and a margin.
+/// `volume` with their sizes, less what removing a damaged piece frees
+/// ([`write`] removes it first), the hash files and a margin.
 pub(super) fn needed_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_bytes: u64) -> u64 {
     let directory = directory(volume, build);
     let mut need = MARGIN;
     for (index, size) in piece_sizes(ipsw_bytes, piece_bytes).into_iter().enumerate() {
-        let present = fs::metadata(directory.join(piece_name(index))).map(|m| m.len());
-        if present.ok() != Some(size) {
-            need += size;
-        }
+        let present = fs::metadata(directory.join(piece_name(index))).map_or(0, |m| m.len());
+        need += size.saturating_sub(present);
         // Its block hashes in pieces.bin.
         need += size.div_ceil(HASH_BLOCK_BYTES) * 32;
     }
@@ -468,6 +467,11 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
         let path = directory.join(&name);
         let partial = directory.join(format!("{name}.partial"));
         let present = fs::metadata(&path).is_ok_and(|m| m.len() == size);
+        // A piece of another size is damaged: it goes first, so a full USB
+        // has room for its replacement.
+        if !present && path.exists() {
+            fs::remove_file(&path)?;
+        }
         // The IPSW's bytes for this piece, read once: hashed, added to the
         // IPSW's digests, and written when the piece is not there yet.
         let mut hashes = Hashes::default();
@@ -493,7 +497,9 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
             written.kept += 1;
         } else {
             if present {
-                // A complete piece whose bytes differ: written again.
+                // A complete piece whose bytes differ: removed first, as a
+                // piece of another size is, and written again.
+                fs::remove_file(&path)?;
                 progress.add_work(size * 2);
                 read_piece(&mut file, offset, size, Some(&partial), &progress, |_| {})?;
             }
@@ -747,6 +753,22 @@ pub(super) mod tests {
             .collect();
         assert_eq!(joined, bytes);
 
+        // A short piece is rewritten too.
+        fs::write(directory.join(piece_name(0)), b"short").unwrap();
+        let short = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &expected(&ipsw),
+            piece_bytes: PIECE_BYTES,
+        })
+        .unwrap();
+        assert_eq!((short.kept, short.wrote), (count - 1, 1));
+        assert_eq!(
+            fs::read(directory.join(piece_name(0))).unwrap(),
+            bytes[..PIECE_BYTES as usize]
+        );
+
         let manual = write(WriteOptions {
             volume: &volume,
             ipsw: &ipsw,
@@ -885,6 +907,13 @@ pub(super) mod tests {
         assert_eq!(
             needed_bytes(volume, build, bytes, PIECE_BYTES),
             all - PIECE_BYTES
+        );
+        // A short piece is removed before its replacement is written: only
+        // the bytes it lacks are needed.
+        fs::write(directory.join(piece_name(1)), vec![0; 100]).unwrap();
+        assert_eq!(
+            needed_bytes(volume, build, bytes, PIECE_BYTES),
+            all - PIECE_BYTES - 100
         );
     }
 }

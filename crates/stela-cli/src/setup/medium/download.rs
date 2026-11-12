@@ -132,6 +132,41 @@ fn recorded(directory: &Path, record: &Resume) -> Vec<Piece> {
     previous.done
 }
 
+/// The pieces of a complete medium of the same image in `manifest_path`
+/// (an earlier setup's, downloaded or copied from a local IPSW): a repair
+/// checks them as a stopped download's and downloads only the missing or
+/// damaged ones. Empty for another image or piece size.
+fn finished(manifest_path: &Path, image: &restore::Image, total: u64, sizes: &[u64]) -> Vec<Piece> {
+    let Some(manifest) = fs::read(manifest_path)
+        .ok()
+        .and_then(|bytes| stela_formats::payload::PayloadManifest::parse(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    let Layout::Pieces { pieces, .. } = manifest.layout else {
+        return Vec::new();
+    };
+    // A medium copied from a local IPSW names no catalog digest; the whole
+    // image's is checked against the catalog's all the same.
+    let same_image = manifest.source.bytes == total
+        && manifest.product_build == image.build
+        && manifest.source.catalog_sha1.as_ref().is_none_or(|digest| {
+            image
+                .sha1
+                .as_ref()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(digest))
+        });
+    match same_image
+        && pieces
+            .iter()
+            .map(|piece| piece.bytes)
+            .eq(sizes.iter().copied())
+    {
+        true => pieces,
+        false => Vec::new(),
+    }
+}
+
 /// Whether the piece `index` a stopped download recorded is on the USB as
 /// recorded: read back once, its bytes go into the whole image's hashes and
 /// its block hashes into `blocks`. A piece already promoted by a stop
@@ -196,6 +231,7 @@ fn write_from(
     let directory = directory(volume, &image.build);
     fs::create_dir_all(&directory)?;
     let manifest_path = directory.join(MANIFEST_FILE);
+    let written = finished(&manifest_path, image, total, &sizes);
     if manifest_path.exists() {
         fs::remove_file(&manifest_path)?;
     }
@@ -212,6 +248,9 @@ fn write_from(
     // The record keeps every piece a stopped download synced, also those
     // after a damaged one, until each is checked or downloaded again.
     record.done = recorded(&directory, &record);
+    if record.done.is_empty() {
+        record.done = written;
+    }
     if !record.done.is_empty() {
         eprintln!(
             "note: checking the {} of {} pieces already on the USB; only missing or damaged \
@@ -245,6 +284,12 @@ fn write_from(
         progress.position(offset);
         if position != offset {
             source.seek(SeekFrom::Start(offset))?;
+        }
+        // A piece of the medium that was not kept is replaced: it goes
+        // first, so a full USB has room for the new one.
+        let promoted = directory.join(piece_name(index));
+        if promoted.exists() {
+            fs::remove_file(&promoted)?;
         }
         let mut file = fs::File::create(partial_path(&directory, index))?;
         let mut hashes = Hashes::default();
@@ -684,6 +729,38 @@ mod tests {
         for (index, part) in bytes.chunks(piece as usize).enumerate() {
             assert_eq!(fs::read(path.join(piece_name(index)))?, part);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_repair_of_a_complete_medium_downloads_only_its_damaged_pieces() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (bytes, image) = padded(temp.path(), 4 * HASH_BLOCK_BYTES as usize)?;
+        let piece = HASH_BLOCK_BYTES;
+        let volume = temp.path().join("usb");
+        let path = directory(&volume, &image.build);
+        write(&volume, &image, ETAG, &mut Tracked::new(&bytes, None))?;
+        assert!(!path.join(RESUME_FILE).exists());
+        // One piece's bytes changed, another cut short.
+        fs::write(path.join(piece_name(1)), vec![0; piece as usize])?;
+        fs::write(path.join(piece_name(3)), b"short")?;
+        let mut again = Tracked::new(&bytes, None);
+        let written = write(&volume, &image, ETAG, &mut again)?;
+        // The two pieces, then the end, to find nothing after it.
+        assert_eq!(again.seeks, [piece, 3 * piece, bytes.len() as u64]);
+        assert_eq!(again.read, 2 * piece);
+        let count = bytes.len().div_ceil(piece as usize);
+        assert_eq!((written.kept, written.wrote), (count - 2, 2));
+        for (index, part) in bytes.chunks(piece as usize).enumerate() {
+            assert_eq!(fs::read(path.join(piece_name(index)))?, part);
+        }
+        // A medium of another image keeps nothing.
+        let elsewhere = tempfile::tempdir()?;
+        let (other, mut changed) = padded(elsewhere.path(), 5 * HASH_BLOCK_BYTES as usize)?;
+        changed.sha1 = Some(hex::encode(Sha1::digest(&other)));
+        let mut fresh = Tracked::new(&other, None);
+        assert_eq!(write(&volume, &changed, ETAG, &mut fresh)?.kept, 0);
+        assert_eq!(fresh.read, other.len() as u64);
         Ok(())
     }
 
