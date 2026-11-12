@@ -8,9 +8,10 @@
 //! propagation, invalid operations, subnormal inputs and results, UFC, OFC
 //! and DZC included, but for FMULX's infinity times zero and a minimum
 //! normal quotient; FMA lanes complete likewise with FMA3 but for a
-//! minimum normal result, and on every tier a lane with an infinite or NaN
-//! operand completes inline beside lanes the exact product completes.
-//! Under FZ a fused result Arm flushes to zero takes the helper.
+//! minimum normal result (but under FZ), and on every tier a lane with an
+//! infinite or NaN operand completes inline beside lanes the exact product
+//! completes. Under FZ a fused result Arm flushes to zero completes inline
+//! as the zero of its sign with UFC.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -433,24 +434,10 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                                         format, operation, fpcr, addend, left, right,
                                     )
                                     .is_ok_and(|outcome| {
-                                        magnitude(outcome.bits) != 1 << format.fraction_bits()
-                                    }) && !flushed_output(
-                                        format,
-                                        fpcr,
-                                        floating::fused::evaluate(
-                                            format, operation, fpcr, addend, left, right,
-                                        )
-                                        .map_or(0, |outcome| outcome.exceptions),
-                                        floating::fused::evaluate(
-                                            format,
-                                            operation,
-                                            input_flushing(fpcr),
-                                            addend,
-                                            left,
-                                            right,
-                                        )
-                                        .map_or(0, |outcome| outcome.bits),
-                                    )
+                                        fpcr & FPCR_FZ != 0
+                                            || magnitude(outcome.bits)
+                                                != 1 << format.fraction_bits()
+                                    })
                                 });
                         let mut actual = initial.clone();
                         let exit = run(&code, &mut actual);
@@ -801,13 +788,163 @@ fn fused_special_lanes_complete_inline_beside_ordinary_lanes() {
     assert!(runs > 0);
 }
 
+/// Under FZ with AH clear, fused results tiny before rounding in lane 0
+/// and the last lane, beside ordinary lanes: inexact ones rounding to
+/// zero, to a subnormal or up to the minimum normal, exact subnormal sums,
+/// values just at and above the minimum normal, and exact zeros, for
+/// FMLA and FMLS by vector and by element and FMADD, under FZ, FZ|DN and
+/// FZ with each directed rounding. With FMA3 every vector completes
+/// inline; without it, a vector whose products are exact (its tiny sums
+/// exact) does. Every completion matches the reference in every lane and
+/// FPSR: the flushed lanes the zero of their sign with UFC and no IXC.
+#[test]
+fn fused_tiny_results_flush_inline_under_fz() {
+    let controls = [
+        FPCR_FZ,
+        FPCR_FZ | FPCR_DN,
+        FPCR_FZ | 1 << FPCR_ROUNDING_SHIFT,
+        FPCR_FZ | 2 << FPCR_ROUNDING_SHIFT,
+        FPCR_FZ | 3 << FPCR_ROUNDING_SHIFT,
+    ];
+    let mut runs = 0;
+    for target in targets() {
+        if target.data_independent_timing() {
+            continue;
+        }
+        let fma = target.supports(TargetCpu::Fma);
+        for format in [Format::Single, Format::Double] {
+            let fraction_bits = format.fraction_bits();
+            let sign = format.sign_mask();
+            let bias = u64::from(format.exponent_bias());
+            let minimum = 1u64 << fraction_bits;
+            let one = bias << fraction_bits;
+            let half = (bias - 1) << fraction_bits;
+            let minus_one = sign | one;
+            let quarter = (bias - 2) << fraction_bits;
+            // 1 + 2^-fraction_bits: a product that is not representable.
+            let one_up = one + 1;
+            // (left, right, addend): the exact value addend + left * right.
+            let tiny = [
+                // Exact: 1.5 mn - mn = mn / 2.
+                (minimum, minus_one, minimum | minimum >> 1, true),
+                // Exact: -(mn + ulp) + mn = -ulp.
+                (minimum + 1, minus_one, minimum, true),
+                // Inexact product rounding to zero: mn * 2^-bits-ish.
+                (
+                    minimum,
+                    (bias - u64::from(fraction_bits) - 3) << fraction_bits,
+                    0,
+                    false,
+                ),
+                // Just below mn: mn * (1 - 2^-p) rounds up to mn.
+                (
+                    minimum,
+                    (bias - 1) << fraction_bits | (minimum - 1),
+                    0,
+                    false,
+                ),
+                // Exactly mn + ulp, not tiny (without FMA3, a result
+                // this small takes the helper).
+                (minimum + 1, one, 0, false),
+                // (mn + ulp) * (1 + ulp) - ulp-sized: just above mn.
+                (minimum + 1, one_up, 0, false),
+                // Exact cancellation to zero.
+                (minimum, minus_one, minimum, true),
+                // mn/2 + a tiny inexact product.
+                (minimum + 3, half, sign | minimum, false),
+            ];
+            let ordinary = [one | minimum >> 1, minus_one, half, quarter];
+            let lanes = if format == Format::Double { 2 } else { 4 };
+            let last = lanes as usize - 1;
+            let forms = [
+                Form::Vector(false, lanes),
+                Form::Vector(true, lanes),
+                Form::Element(lanes),
+                Form::Scalar,
+            ];
+            for form in forms {
+                let code = compile(fused_word(form, format), target);
+                for (first, &(left, right, addend, exact)) in tiny.iter().enumerate() {
+                    let (other_left, other_right, other_addend, other_exact) =
+                        tiny[(first * 3 + 1) % tiny.len()];
+                    for signs in 0..4u64 {
+                        let mut vectors = [[0u64; 2]; 3];
+                        for (which, vector) in vectors.iter_mut().enumerate() {
+                            for index in 0..lanes as usize {
+                                set_lane(vector, format, index, ordinary[(index + which) % 4]);
+                            }
+                        }
+                        let flip = |bits: u64, bit: u64| bits ^ (((signs >> bit) & 1) * sign);
+                        let lane_values = [
+                            (flip(left, 0), right, flip(addend, 0)),
+                            (other_left, flip(other_right, 1), flip(other_addend, 1)),
+                        ];
+                        for (index, (l, r, a)) in [0, last].into_iter().zip(lane_values) {
+                            set_lane(&mut vectors[1], format, index, l);
+                            set_lane(&mut vectors[2], format, index, r);
+                            set_lane(&mut vectors[0], format, index, a);
+                        }
+                        if matches!(form, Form::Element(_)) {
+                            // Element 1 of Vm multiplies every lane: the
+                            // first tiny value's.
+                            set_lane(&mut vectors[2], format, 1, lane_values[0].1);
+                        }
+                        // Ordinary lanes' products are exact without
+                        // FMA3 too (small dyadic values).
+                        let must_inline =
+                            fma || (exact && other_exact && !matches!(form, Form::Element(_)));
+                        for fpcr in controls {
+                            let mut initial = GuestState {
+                                fpcr,
+                                fpsr: 0x0800_0000,
+                                ..GuestState::default()
+                            };
+                            initial.x[30] = RETURN;
+                            initial.v[D as usize] = vectors[0];
+                            initial.v[A as usize] = vectors[0];
+                            initial.v[N as usize] = vectors[1];
+                            initial.v[M as usize] = vectors[2];
+                            let label = alloc::format!(
+                                "{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}"
+                            );
+                            let mut actual = initial.clone();
+                            let exit = run(&code, &mut actual);
+                            runs += 1;
+                            if exit == PC.0 {
+                                assert_eq!(actual, initial, "{label}");
+                                assert!(!must_inline, "exited: {label}");
+                                continue;
+                            }
+                            assert_eq!(exit, RETURN, "{label}");
+                            let mut expected = initial.clone();
+                            let mut result = [0; 2];
+                            for (index, (operation, addend, left, right)) in
+                                fused_lanes(form, format, &initial).into_iter().enumerate()
+                            {
+                                let outcome = floating::fused::evaluate(
+                                    format, operation, fpcr, addend, left, right,
+                                )
+                                .unwrap();
+                                expected.fpsr |= outcome.exceptions;
+                                set_lane(&mut result, format, index, outcome.bits);
+                            }
+                            expected.v[D as usize] = result;
+                            assert_eq!(actual, expected, "{label}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 0);
+}
+
 /// FZ (with IDC) and FIZ (without) flush subnormal inputs inline, ahead of
 /// NaN and division-by-zero handling; under FIZ an inexact subnormal result stays
-/// inline with UFC, and under FZ a product Arm flushes completes inline as
-/// the signed zero with UFC, while a fused one takes the helper, leaving
-/// the state unchanged.
+/// inline with UFC, and under FZ a product or (with FMA3) a fused result
+/// Arm flushes completes inline as the signed zero with UFC.
 #[test]
-fn flushed_inputs_complete_inline_and_flushed_results_exit() {
+fn flushed_inputs_and_flushed_results_complete_inline() {
     const SUBNORMAL: u64 = 0x0000_0003;
     const MINIMUM_ODD: u64 = 0x0080_0001;
     const HALF: u64 = 0x3f00_0000;
@@ -848,7 +985,7 @@ fn flushed_inputs_complete_inline_and_flushed_results_exit() {
         // A flushed addend beside a normal product.
         (fmla, FPCR_FZ, [ONE, HALF, SUBNORMAL], true),
         // A product Arm flushes to zero.
-        (fmla, FPCR_FZ, [MINIMUM_ODD, HALF, 0], false),
+        (fmla, FPCR_FZ, [MINIMUM_ODD, HALF, 0], true),
     ];
     for target in targets() {
         let fma = target.supports(TargetCpu::Fma) && !target.data_independent_timing();

@@ -946,6 +946,92 @@ pub(super) fn capture_environment_status(code: &mut Code) {
     asm.mov_load(Size::Dword, Rcx, frame(MXCSR_STATUS_OFFSET));
 }
 
+/// In the private environment: the control's masks with `rounding`'s
+/// direction for the next stage, through the status slot, which
+/// [`restore_environment`] and [`capture_environment_status`] rewrite;
+/// [`clear_environment_status`] returns to the control. Clobbers EAX.
+pub(super) fn environment_directed(code: &mut Code, rounding: Rounding) {
+    let direction = match rounding {
+        Rounding::NearestEven => 0,
+        Rounding::Positive => MXCSR_POSITIVE_ROUNDING,
+        Rounding::Negative => MXCSR_NEGATIVE_ROUNDING,
+        Rounding::Zero => MXCSR_POSITIVE_ROUNDING | MXCSR_NEGATIVE_ROUNDING,
+        Rounding::Fpcr => unreachable!("a directed rounding"),
+    };
+    let mut asm = code.asm();
+    asm.mov_load(Size::Dword, Rax, frame(MXCSR_CONTROL_OFFSET));
+    asm.alu_accumulator_imm32(
+        Alu::And,
+        Size::Dword,
+        !(MXCSR_POSITIVE_ROUNDING | MXCSR_NEGATIVE_ROUNDING) as i32,
+    );
+    asm.alu_accumulator_imm32(Alu::Or, Size::Dword, direction as i32);
+    asm.mov_store(Size::Dword, frame(MXCSR_STATUS_OFFSET), Rax);
+    asm.ldmxcsr(frame(MXCSR_STATUS_OFFSET));
+}
+
+/// Set `destination` to all ones in each S/D lane of `source` that is
+/// subnormal: a zero exponent field (a Double's in its high dword) and a
+/// nonzero magnitude. Integer compares alone, so no host status. Clobbers
+/// `scratch` and EAX.
+pub(super) fn subnormal_lanes(
+    code: &mut Code,
+    format: Format,
+    destination: u8,
+    source: u8,
+    scratch: [u8; 2],
+) {
+    const BROADCAST_LOW_DWORD: u8 = 0;
+    let [zero, magnitude] = scratch;
+    packed(code, Host::Xor, zero, zero);
+    packed(code, Host::EqualDword, magnitude, magnitude);
+    if format == Format::Double {
+        ShiftOpcode::RightQword.emit(code, magnitude, 1);
+    } else {
+        ShiftOpcode::RightDword.emit(code, magnitude, 1);
+    }
+    packed(code, Host::And, magnitude, source);
+    // MAGNITUDE: all ones in each zero lane.
+    packed(code, Host::EqualDword, magnitude, zero);
+    if format == Format::Double {
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            destination,
+            magnitude,
+            SWAP_DWORD_PAIRS,
+        );
+        packed(code, Host::And, magnitude, destination);
+    }
+    let exponent = if format == Format::Double {
+        0x7ff0_0000
+    } else {
+        0x7f80_0000
+    };
+    code.asm().mov_imm32(Rax, exponent);
+    code.asm().movd_to_xmm(destination, Rax);
+    packed_imm(
+        code,
+        Host::ShuffleDword,
+        destination,
+        destination,
+        BROADCAST_LOW_DWORD,
+    );
+    packed(code, Host::And, destination, source);
+    packed(code, Host::EqualDword, destination, zero);
+    if format == Format::Double {
+        packed_imm(
+            code,
+            Host::ShuffleDword,
+            destination,
+            destination,
+            REPLICATE_HIGH_DWORDS,
+        );
+    }
+    packed(code, Host::AndNot, magnitude, destination);
+    packed(code, Host::MoveAligned, destination, magnitude);
+}
+
 /// Discard private scratch-operation status before the next arithmetic stage.
 pub(super) fn clear_environment_status(code: &mut Code) {
     code.asm().ldmxcsr(frame(MXCSR_CONTROL_OFFSET));
