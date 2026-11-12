@@ -26,7 +26,7 @@ use alloc::{sync::Arc, vec::Vec};
 use ash::vk;
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_crypto::{Sha256, digest::Digest};
 
@@ -469,6 +469,82 @@ impl Store {
             payload: Arc::new(payload),
         })
     }
+}
+
+/// Pipelines created through the store's cache since the last
+/// [`Lookups::take`]: those the cache held and those compiled, with the
+/// driver's creation time of each kind and the longest compile.
+pub struct Lookups {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    hit_ns: AtomicU64,
+    miss_ns: AtomicU64,
+    miss_longest_ns: AtomicU64,
+}
+
+/// What [`Lookups::take`] answers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LookupCounts {
+    pub hits: u64,
+    pub misses: u64,
+    pub hit_ns: u64,
+    pub miss_ns: u64,
+    pub miss_longest_ns: u64,
+}
+
+impl Lookups {
+    pub const fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            hit_ns: AtomicU64::new(0),
+            miss_ns: AtomicU64::new(0),
+            miss_longest_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// A creation of `ns` nanoseconds, `hit` when the cache held it.
+    pub fn note(&self, hit: bool, ns: u64) {
+        if hit {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hit_ns.fetch_add(ns, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            self.miss_ns.fetch_add(ns, Ordering::Relaxed);
+            self.miss_longest_ns.fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// The counts since the last call, cleared.
+    pub fn take(&self) -> LookupCounts {
+        let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
+        LookupCounts {
+            hits: take(&self.hits),
+            misses: take(&self.misses),
+            hit_ns: take(&self.hit_ns),
+            miss_ns: take(&self.miss_ns),
+            miss_longest_ns: take(&self.miss_longest_ns),
+        }
+    }
+}
+
+impl Default for Lookups {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static LOOKUPS: Lookups = Lookups::new();
+
+/// The boot's pipeline creations through the store's cache since the last
+/// call: what the platform reports (`GPU STORE`).
+pub fn take_lookups() -> LookupCounts {
+    LOOKUPS.take()
+}
+
+/// Counts a creation through the store's cache.
+pub(super) fn note_lookup(hit: bool, ns: u64) {
+    LOOKUPS.note(hit, ns);
 }
 
 /// The boot's store, behind a lock no interrupt handler takes.

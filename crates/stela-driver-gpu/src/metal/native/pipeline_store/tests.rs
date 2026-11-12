@@ -245,3 +245,23 @@ fn damaged_nir_is_dropped_and_the_cache_kept() {
     assert_eq!(payload(&bytes, &key, MAX_BYTES), Ok(&b"cache"[..]));
     assert!(nir_section(&bytes, &key, MAX_BYTES).is_empty());
 }
+
+#[test]
+fn lookups_count_hits_and_compiles_apart_and_clear_when_taken() {
+    let lookups = Lookups::new();
+    lookups.note(true, 10);
+    lookups.note(false, 300);
+    lookups.note(false, 1_000);
+    lookups.note(true, 20);
+    assert_eq!(
+        lookups.take(),
+        LookupCounts {
+            hits: 2,
+            misses: 2,
+            hit_ns: 30,
+            miss_ns: 1_300,
+            miss_longest_ns: 1_000,
+        }
+    );
+    assert_eq!(lookups.take(), LookupCounts::default());
+}
