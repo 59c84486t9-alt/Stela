@@ -31,6 +31,11 @@ impl Mmio {
         self.bytes == 0
     }
 
+    /// CPU address used for a register access at `offset`.
+    pub fn address(&self, offset: usize) -> usize {
+        self.at(offset, 0)
+    }
+
     /// The address of the `size`-byte register at `offset`, which must lie
     /// inside the window.
     fn at(&self, offset: usize, size: usize) -> usize {
@@ -88,3 +93,4 @@ impl Mmio {
 
 #[cfg(test)]
 mod tests;
+

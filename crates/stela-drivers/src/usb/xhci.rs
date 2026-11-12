@@ -61,7 +61,7 @@ use crate::{
 use alloc::{boxed::Box, format, rc::Rc, string::String, vec, vec::Vec};
 use core::{
     cell::RefCell,
-    sync::atomic::{Ordering, fence},
+    sync::atomic::{AtomicU64, Ordering, fence},
 };
 
 mod bind;
@@ -330,10 +330,53 @@ pub trait Registers {
 struct Bar {
     mmio: Mmio,
     bytes: usize,
+    address: crate::bus::pci::Address,
+    physical_base: u64,
+}
+
+/// Last native xHCI BAR read, retained for fatal page-fault reports.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiagnosticRead {
+    pub segment: u64,
+    pub bus: u64,
+    pub device: u64,
+    pub function: u64,
+    pub physical_base: u64,
+    pub cpu_address: u64,
+    pub offset: u64,
+}
+
+static DIAGNOSTIC_SEGMENT: AtomicU64 = AtomicU64::new(u64::MAX);
+static DIAGNOSTIC_BUS: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_DEVICE: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_FUNCTION: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_BAR: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_CPU: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+pub fn diagnostic_read() -> Option<DiagnosticRead> {
+    let segment = DIAGNOSTIC_SEGMENT.load(Ordering::Relaxed);
+    (segment != u64::MAX).then(|| DiagnosticRead {
+        segment,
+        bus: DIAGNOSTIC_BUS.load(Ordering::Relaxed),
+        device: DIAGNOSTIC_DEVICE.load(Ordering::Relaxed),
+        function: DIAGNOSTIC_FUNCTION.load(Ordering::Relaxed),
+        physical_base: DIAGNOSTIC_BAR.load(Ordering::Relaxed),
+        cpu_address: DIAGNOSTIC_CPU.load(Ordering::Relaxed),
+        offset: DIAGNOSTIC_OFFSET.load(Ordering::Relaxed),
+    })
 }
 
 impl Registers for Bar {
     fn read32(&mut self, offset: usize) -> u32 {
+        let address = self.mmio.address(offset);
+        DIAGNOSTIC_SEGMENT.store(u64::from(self.address.segment), Ordering::Relaxed);
+        DIAGNOSTIC_BUS.store(u64::from(self.address.bus), Ordering::Relaxed);
+        DIAGNOSTIC_DEVICE.store(u64::from(self.address.device), Ordering::Relaxed);
+        DIAGNOSTIC_FUNCTION.store(u64::from(self.address.function), Ordering::Relaxed);
+        DIAGNOSTIC_BAR.store(self.physical_base, Ordering::Relaxed);
+        DIAGNOSTIC_CPU.store(address as u64, Ordering::Relaxed);
+        DIAGNOSTIC_OFFSET.store(offset as u64, Ordering::Relaxed);
         self.mmio.read32(offset)
     }
     fn write32(&mut self, offset: usize, value: u32) {
@@ -1221,6 +1264,10 @@ pub fn attach_with_firmware_diagnostics(
     let registers = Bar {
         mmio: registers(handoff, bars[0], 0, bytes)?,
         bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+        address: function.address,
+        physical_base: bars[0]
+            .and_then(|bar| bar.memory())
+            .map_or(0, |range| range.start),
     };
     function.enable_polled()?;
     // xhci_try_enable_msi: MSI-X, otherwise MSI, for interrupter 0.
@@ -1619,3 +1666,4 @@ mod tests {
         assert_eq!(model.borrow().seen.len(), count);
     }
 }
+

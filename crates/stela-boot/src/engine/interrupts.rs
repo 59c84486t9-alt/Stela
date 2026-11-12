@@ -692,7 +692,7 @@ pub fn fatal(frame: &Frame) -> ! {
     output::fatal(format_args!(
         "unexpected x86 exception in the system engine: vector={} error={:#x} rip={:#x} \
          (image+{:#x}) cr2={:#x} cr3={:#x} rax={:#x} rdx={:#x} \
-         stage={} drivers={drivers} stack={callers}",
+         stage={} drivers={drivers} {} stack={callers}",
         frame.vector,
         frame.error,
         frame.rip,
@@ -701,8 +701,32 @@ pub fn fatal(frame: &Frame) -> ! {
         cr3(),
         frame.rax,
         frame.rdx,
-        diagnostic_stage_name()
+        diagnostic_stage_name(),
+        xhci_diagnostic()
     ))
+}
+
+fn xhci_diagnostic() -> impl core::fmt::Display {
+    struct Context(Option<stela_drivers::usb::xhci::DiagnosticRead>);
+    impl core::fmt::Display for Context {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self.0 {
+                Some(read) => write!(
+                    formatter,
+                    "xhci={:04x}:{:02x}:{:02x}.{} bar0={:#x} cpu={:#x} offset={:#x}",
+                    read.segment,
+                    read.bus,
+                    read.device,
+                    read.function,
+                    read.physical_base,
+                    read.cpu_address,
+                    read.offset
+                ),
+                None => formatter.write_str("xhci=none"),
+            }
+        }
+    }
+    Context(stela_drivers::usb::xhci::diagnostic_read())
 }
 
 /// Print an x86 exception's detail, straight to the port: whatever raised it
@@ -724,3 +748,4 @@ pub fn report(frame: &Frame) {
         diagnostic_stage_name()
     );
 }
+

@@ -2,18 +2,18 @@ name: diagnostic EFI
 
 on:
   push:
-    branches:
-      - codex/diagnose-mmio-page-fault
+    branches: [codex/diagnose-mmio-page-fault]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: diagnostic-efi-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  build:
+  efi:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:
@@ -22,32 +22,43 @@ jobs:
       - name: Install Clang 21
         run: |
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          echo "deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends clang-21 lld-21 llvm-21 libclang-21-dev
           echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-diagnostic-efi-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/stela-boot/Cargo.lock') }}
+          restore-keys: cargo-diagnostic-efi-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Install Rust
         run: |
           rustup toolchain install
           rustc --version
-          clang --version
+          clang --version | head -1
 
-      - name: Fetch pinned GPU sources
+      - name: Fetch GPU sources
         run: cargo xtask gpu fetch
 
-      - name: Build diagnostic UEFI image
+      - name: Build diagnostic EFI
         run: |
           cargo xtask boot build --release
           efi=target/boot/x86_64-unknown-uefi/release/stela-deploy.efi
           [[ "$(head -c 2 "$efi")" == MZ ]]
           mkdir -p dist
           cp "$efi" dist/stela-diagnostic.efi
-          sha256sum dist/stela-diagnostic.efi
+          sha256sum dist/stela-diagnostic.efi | tee dist/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
           name: stela-diagnostic-efi
-          path: dist/stela-diagnostic.efi
+          path: dist/
           if-no-files-found: error
           retention-days: 14
+
