@@ -301,6 +301,7 @@ pub struct Writer<'a> {
     pressed: bool,
     /// Entries taken while pressed and busy, for the next segment.
     held: BTreeMap<Digest, Record>,
+    held_bytes: u64,
     quiet_since: Option<u64>,
     /// The store sheds new entries, the reasons reported so far (a bit
     /// each), and whether the writer let its segments go.
@@ -358,6 +359,7 @@ impl<'a> Writer<'a> {
             looked: None,
             pressed: false,
             held: BTreeMap::new(),
+            held_bytes: 0,
             quiet_since: None,
             shedding: false,
             reported: 0,
@@ -542,12 +544,7 @@ impl<'a> Writer<'a> {
             } => layout.bytes(),
             _ => 0,
         };
-        let held: u64 = self
-            .held
-            .values()
-            .map(|record| record.retained_bytes() as u64)
-            .sum();
-        self.segment_bytes() + waiting + task + held + entries.added_bytes()
+        self.segment_bytes() + waiting + task + self.held_bytes + entries.added_bytes()
     }
 
     /// Let every segment laid out go, with a merge in progress, the entries
@@ -566,6 +563,7 @@ impl<'a> Writer<'a> {
         self.merged_since_wait = false;
         lost += self.held.len();
         self.held = BTreeMap::new();
+        self.held_bytes = 0;
         lost += entries.take_added().len();
         if let Task::Merge(..) = self.task {
             self.task = Task::Idle;
@@ -753,6 +751,7 @@ impl<'a> Writer<'a> {
         // A batch taken while busy goes before any merge of the newest two.
         if !self.held.is_empty() && self.count(SEGMENT_BLOB) + 1 < MAX_SEGMENTS {
             let held = core::mem::take(&mut self.held);
+            self.held_bytes = 0;
             return self.start_delta(now, held, entries, Trigger::Pressed);
         }
         if let Some(offsets) = self.pair_due() {
@@ -770,6 +769,7 @@ impl<'a> Writer<'a> {
             return None;
         }
         let held = core::mem::take(&mut self.held);
+        self.held_bytes = 0;
         self.start_delta(now, held, entries, trigger)
     }
 
@@ -805,16 +805,32 @@ impl<'a> Writer<'a> {
         None
     }
 
-    /// While busy: take the entries added at once when they press, as one
-    /// batch held for the next segment.
+    /// While busy: take the entries added at once when they press, into
+    /// the batch held for the next segment, while it stays within its share
+    /// of the heap ([`RESIDENT_SHARE`]; one batch where the heap is not
+    /// known), so a long merge or write does not leave the store's bound
+    /// full and its new entries unkept.
     fn hold(&mut self, now: u64, entries: &mut dyn Entries) {
         self.look(now, entries);
-        if self.pressed && self.held.is_empty() {
+        let share = entries
+            .heap()
+            .map_or(0, |Heap { total, .. }| total / RESIDENT_SHARE);
+        if self.pressed && (self.held.is_empty() || self.held_bytes < share) {
             self.pressed = false;
-            let held = entries.take_added();
-            self.note_added(&held);
-            self.stats.held += u64::from(!held.is_empty());
-            self.held = held;
+            let taken = entries.take_added();
+            self.note_added(&taken);
+            self.stats.held += u64::from(!taken.is_empty());
+            for (key, record) in taken {
+                self.held_bytes += record.retained_bytes() as u64;
+                match self.held.entry(key) {
+                    alloc::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(record);
+                    }
+                    alloc::collections::btree_map::Entry::Occupied(mut slot) => {
+                        slot.get_mut().merge(record);
+                    }
+                }
+            }
         }
     }
 
@@ -1048,6 +1064,7 @@ impl<'a> Writer<'a> {
             Task::Idle => {}
         }
         let mut added = core::mem::take(&mut self.held);
+        self.held_bytes = 0;
         let taken = entries.take_added();
         self.note_added(&taken);
         join(&mut added, taken);

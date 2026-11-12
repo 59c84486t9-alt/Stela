@@ -1117,3 +1117,33 @@ fn a_compacted_arena_keeps_the_records_of_the_layouts_given() {
         before
     );
 }
+
+/// Batch after batch that presses while a write waits joins the batch held,
+/// within its share of the heap: the store refuses none. Without a known
+/// heap, one batch is held and the rest wait in the store's bound.
+#[test]
+fn batches_that_press_through_a_long_wait_join_the_batch_held() {
+    for heap_total in [1u64 << 30, 0] {
+        let mut disk = Disk::new(FILE_BYTES);
+        let mut run = Run::new(load(&disk.bytes.clone(), u64::MAX), 1);
+        run.boot.heap_total = heap_total;
+        run.boot.bound = 1000;
+        let mut added: BTreeSet<Digest> = run.boot.add(400).into_iter().collect();
+        run.stall(QUIET_SECONDS + 2);
+        assert!(!run.writer.idle());
+        for _ in 0..6 {
+            added.extend(run.boot.add(600));
+            run.stall(1);
+        }
+        if heap_total == 0 {
+            assert_eq!(run.writer.stats().held, 1);
+            assert!(run.boot.unkept > 0);
+            continue;
+        }
+        assert_eq!(run.boot.unkept, 0);
+        assert_eq!(run.writer.stats().held, 6);
+        run.run(&mut disk, 10).unwrap();
+        run.stop(&mut disk).unwrap();
+        assert_eq!(keys(&disk.bytes), added);
+    }
+}
