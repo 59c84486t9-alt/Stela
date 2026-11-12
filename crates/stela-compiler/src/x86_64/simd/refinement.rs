@@ -1,6 +1,6 @@
-//! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half.
+//! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half;
+//! S/D FRECPS with FMA3 and FPCR.AH clear for every input.
 use super::super::isa::ShiftOpcode;
-use super::numerical::jump;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
     RESULT_MINIMUM_EXPONENT, branch, clear_scalar, commit_ah0_inexact, emit_fma, emit_opcode_to,
@@ -9,12 +9,16 @@ use super::numerical::{
     reject_other_status, reject_product_status, resolve, restore_environment,
     restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
+use super::numerical::{
+    NanRegisters, commit_flush_status, commit_invalid_lanes, commit_rounded_status, environment,
+    flush_subnormal_lanes, jump, merge_nans, select_input_nans,
+};
 use super::{Host, commit, half, packed};
 use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_AH, FPCR_NEP, Format},
+        floating::{FPCR_AH, FPCR_FIZ, FPCR_FZ, FPCR_NEP, Format},
         simd::{
             arithmetic::Shape,
             refinement::{Kind, Operand},
@@ -251,6 +255,8 @@ fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, targ
         // addend's (Intel SDM, VFNMADD132SS/SD). LEFT still holds Vn.
         LEFT
     };
+    let rounded = (native_fma && operand.kind == Kind::Reciprocal)
+        .then(|| rounded_reciprocal_step(code, operand, target));
     normal_sources(code, operand, &mut helper);
     if operand.kind == Kind::ReciprocalSquareRoot {
         prehalve(code, operand);
@@ -316,6 +322,10 @@ fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, targ
     }
     resolve(code, success, success_start);
     commit_ah0_inexact(code);
+    if let Some(rounded) = rounded {
+        let rounded_start = code.len();
+        resolve(code, rounded, rounded_start);
+    }
     if operand.shape == Shape::Scalar {
         if merge != result {
             if operand.format == Format::Single {
@@ -337,6 +347,92 @@ fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, targ
         }
         commit(code, operand.destination, result);
     }
+}
+
+/// [`rounded_reciprocal_step`]'s NaN registers, apart from LEFT, RIGHT and
+/// CONSTANT.
+const NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 2,
+    inputs: 3,
+    invalid: 4,
+    mask: 5,
+    temporary: 7,
+};
+const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+const SCRATCH: u8 = 7;
+
+/// S/D FRECPS with FMA3 and FPCR.AH clear, for every input: FZ or FIZ flush
+/// subnormal inputs first (FZ raising IDC); Arm's FPMulAdd(2, -Vn, Vm) is
+/// one host FMA in Arm's rounding, whose status is FPSR's (a result is
+/// never tiny: a nonzero 2 - Vn*Vm is a multiple of a product of two ulps
+/// far above the minimum normal), infinities and zeros included. A NaN
+/// propagates by Arm's rules from the negated Vn and Vm
+/// ([`select_input_nans`], [`merge_nans`]); infinity times zero, the only
+/// invalid product, gives 2 without IOC. Leaves the result in LEFT, whose
+/// other bits stay for a scalar, and returns the jump past the commit's
+/// status; AH continues past it.
+fn rounded_reciprocal_step(code: &mut Code, operand: &Operand, target: TargetCpu) -> usize {
+    let (format, shape) = (operand.format, operand.shape);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    for source in [LEFT, RIGHT] {
+        flush_subnormal_lanes(code, format, shape, source, FLUSH_SCRATCH);
+    }
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    // Arm negates Vn before its NaN selection: only the active lanes, so
+    // that a scalar keeps Vn's other bits.
+    if shape == Shape::Scalar {
+        let mut asm = code.asm();
+        asm.mov_imm64(Rax, format.sign_mask());
+        asm.movq_to_xmm(SCRATCH, Rax);
+    } else {
+        packed(code, Host::EqualDword, SCRATCH, SCRATCH);
+        let shift = if format == Format::Single {
+            ShiftOpcode::LeftDword
+        } else {
+            ShiftOpcode::LeftQword
+        };
+        shift.emit(code, SCRATCH, (format.bits() - SIGN_BITS) as u8);
+    }
+    packed(code, Host::Xor, LEFT, SCRATCH);
+    environment(code);
+    select_input_nans(code, format, shape, &[LEFT, RIGHT], NAN_REGISTERS);
+    constant(code, format, Kind::Reciprocal, CONSTANT);
+    emit_fma(code, format, shape, FusedOpcode::MultiplyAdd, target);
+    merge_nans(code, format, shape, LEFT, NAN_REGISTERS);
+    // Infinity times zero: 2 (CONSTANT), and no IOC.
+    packed(code, Host::MoveAligned, SCRATCH, NAN_REGISTERS.mask);
+    packed(code, Host::AndNot, SCRATCH, LEFT);
+    packed(code, Host::And, CONSTANT, NAN_REGISTERS.mask);
+    packed(code, Host::Or, SCRATCH, CONSTANT);
+    if shape == Shape::Scalar {
+        let lane = if format == Format::Single {
+            Host::MoveScalarSingle
+        } else {
+            Host::MoveScalarDouble
+        };
+        lane.register(code, LEFT, SCRATCH, TargetCpu::Baseline);
+    } else {
+        packed(code, Host::MoveAligned, LEFT, SCRATCH);
+    }
+    packed(
+        code,
+        Host::AndNot,
+        NAN_REGISTERS.mask,
+        NAN_REGISTERS.invalid,
+    );
+    restore_environment(code);
+    commit_flush_status(code);
+    commit_invalid_lanes(code, format, shape, NAN_REGISTERS.mask);
+    commit_rounded_status(code);
+    let done = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    done
 }
 
 fn emit_half(code: &mut Code, operand: &Operand, pc: GuestAddress) {
