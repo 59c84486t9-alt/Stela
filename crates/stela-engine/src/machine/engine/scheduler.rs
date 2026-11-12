@@ -415,7 +415,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
                     *count += 1;
                 }
-                if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
+                let probed = self.lookup_miss(last, next_pc, kind, remaining > budget);
+                if let Some(miss) = probed {
                     self.statistics.lookup_misses[miss] += 1;
                 }
                 let mut slot = kind as usize;
@@ -433,7 +434,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let spent = remaining > budget;
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok()
-                    && let Some(miss) = self.branch_miss(last, next_pc, kind, spent)
+                    && let Some(miss) = self.branch_miss(last, next_pc, kind, spent, probed)
                 {
                     let counts = &mut self.statistics.branch_misses[kind as usize];
                     counts[miss as usize] += 1;
@@ -477,14 +478,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Why the run that ended at block `index`'s branch-kind exit of `kind`
     /// to `next_pc` took no transfer there, after the exit completed:
-    /// `spent` when the budget ran out. `None` for other kinds and single
-    /// runs.
+    /// `spent` when the budget ran out, `probed` what [`Self::lookup_miss`]
+    /// found before the exit, in the contexts the run's probe used, which
+    /// spares probing again but for the entry's BTYPE. `None` for other
+    /// kinds and single runs.
     pub(super) fn branch_miss(
         &self,
         index: usize,
         next_pc: u64,
         kind: u64,
         spent: bool,
+        probed: Option<usize>,
     ) -> Option<BranchMiss> {
         if kind as usize >= super::reports::BRANCH_KINDS
             || self.variants[self.code.blocks[index].variant.0 as usize].single
@@ -497,9 +501,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.chain.interrupt_moved() {
             return Some(BranchMiss::Interrupt);
         }
-        let probed = self.lookup_miss(index, next_pc, kind, false);
-        if probed == Some(0) {
-            return Some(BranchMiss::Unlinked);
+        match probed {
+            Some(0) => return Some(BranchMiss::Unlinked),
+            Some(1) => return Some(BranchMiss::Itlb),
+            Some(2) => return Some(BranchMiss::Table),
+            _ => {}
         }
         let Some(key) = self.current_key(next_pc) else {
             return Some(BranchMiss::Itlb);
