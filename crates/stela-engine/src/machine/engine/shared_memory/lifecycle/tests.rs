@@ -70,6 +70,9 @@ impl Devices for Board {
     }
 }
 fn fixture(count: usize) -> (Machine<Local, Board>, Vec<WorkerOwner>) {
+    fixture_with(count, Board { power: Vec::new() })
+}
+fn fixture_with<D: Devices>(count: usize, devices: D) -> (Machine<Local, D>, Vec<WorkerOwner>) {
     let (cpu, mut profile, missing, ram) = super::super::policy::tests::fixture();
     profile.processors = (0..count)
         .map(|pe| stela_contracts::identity::Identity {
@@ -79,13 +82,7 @@ fn fixture(count: usize) -> (Machine<Local, Board>, Vec<WorkerOwner>) {
             caches: None,
         })
         .collect();
-    let mut machine = Machine::new(
-        cpu,
-        Local(0),
-        Board { power: Vec::new() },
-        profile,
-        ram.target(),
-    );
+    let mut machine = Machine::new(cpu, Local(0), devices, profile, ram.target());
     machine.profile_missing = missing;
     machine
         .install_shared_memory_for_active_processors(
@@ -111,7 +108,7 @@ fn fixture(count: usize) -> (Machine<Local, Board>, Vec<WorkerOwner>) {
 }
 // This is the real publication state machine with non-executing owner-local
 // test Hosts. It proves lifecycle permission, not physical/native execution.
-fn hold(machine: &mut Machine<Local, Board>, owners: &mut [WorkerOwner]) -> StoppedWorkers {
+fn hold<D: Devices>(machine: &mut Machine<Local, D>, owners: &mut [WorkerOwner]) -> StoppedWorkers {
     let members: Vec<_> = owners.iter().map(|owner| owner.binding().pe).collect();
     hold_members(
         machine.native_publication.as_mut().unwrap(),
@@ -706,4 +703,74 @@ fn warm_reset_keeps_registered_ram_and_other_pe_event_identity() {
         .unwrap()
         .require_all_held(&held)
         .unwrap();
+}
+
+/// A serialized PE's plain device write takes the one-call path other PEs
+/// take: the write and one settlement after it. Only a write the canonical
+/// path must serve settles the devices before it and goes through the
+/// canonical owners.
+#[test]
+fn a_serialized_pe_writes_plain_registers_without_settling_first() {
+    const CANONICAL: u64 = 0x10;
+    #[derive(Default)]
+    struct Counted {
+        log: Vec<&'static str>,
+    }
+    impl Devices for Counted {
+        fn read(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+        ) -> Result<u64, crate::machine::DeviceError> {
+            Err(crate::machine::DeviceError::NoDevice)
+        }
+        fn write(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+            _: u64,
+        ) -> Result<(), crate::machine::DeviceError> {
+            self.log.push("write");
+            Ok(())
+        }
+        fn requires_canonical_write(&self, _: usize, physical: u64, _: u8) -> bool {
+            physical == CANONICAL
+        }
+        fn write_canonical(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+            _: u64,
+            _: &mut dyn crate::machine::engine::CanonicalDeviceWrite,
+        ) -> Result<crate::machine::engine::ConsumedWrite, crate::machine::DeviceError> {
+            self.log.push("canonical");
+            Ok(crate::machine::engine::ConsumedWrite::Complete { settlement: Ok(()) })
+        }
+        fn transfer(
+            &mut self,
+            _: usize,
+            _: &mut dyn crate::machine::engine::Memory,
+            _: u64,
+        ) -> Result<(), crate::machine::DeviceError> {
+            self.log.push("transfer");
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> crate::machine::engine::Lines {
+            Default::default()
+        }
+    }
+    let (mut machine, mut owners) = fixture_with(1, Counted::default());
+    let held = hold(&mut machine, &mut owners);
+    machine.serial_hold = Some(held);
+    assert!(machine.device_write(0x20, 4, 1, 0).is_ok());
+    assert_eq!(machine.devices.log, ["write", "transfer"]);
+    machine.devices.log.clear();
+    assert!(machine.device_write(CANONICAL, 4, 1, 0).is_ok());
+    assert_eq!(machine.devices.log, ["transfer", "canonical", "transfer"]);
 }
