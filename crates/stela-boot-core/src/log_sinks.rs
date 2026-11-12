@@ -65,11 +65,6 @@ impl Lost {
         self.0 |= log.bit();
         first.then(|| log.lost_notice())
     }
-
-    /// Whether `log` was lost this boot.
-    pub fn is_lost(&self, log: Log) -> bool {
-        self.0 & log.bit() != 0
-    }
 }
 
 #[cfg(test)]
@@ -77,13 +72,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_lost_machine_log_is_reported_once_and_does_not_stop() {
+    fn a_lost_machine_log_is_reported_once() {
         let mut lost = Lost::default();
-        assert!(!lost.is_lost(Log::Machine));
         assert_eq!(lost.lose(Log::Machine), Some(Log::Machine.lost_notice()));
-        assert!(lost.is_lost(Log::Machine));
         assert_eq!(lost.lose(Log::Machine), None);
-        assert!(!lost.is_lost(Log::Usb));
+        assert_eq!(lost.lose(Log::Usb), Some(Log::Usb.lost_notice()));
     }
 
     #[test]
@@ -91,7 +84,7 @@ mod tests {
         let mut lost = Lost::default();
         assert!(lost.lose(Log::Firmware).is_some());
         assert_eq!(lost.lose(Log::Usb), None);
-        assert!(lost.is_lost(Log::Usb));
+        assert_eq!(lost.lose(Log::Firmware), None);
         assert!(lost.lose(Log::Machine).is_some());
     }
 
