@@ -293,9 +293,10 @@ fn the_job_installs_only_on_the_kexts_staged_report() {
     assert!(status.success(), "the script is not POSIX shell");
 }
 
-/// Builds `guest/stela-gpu/kext/tests/<name>.c` with the host's clang.
+/// Builds `guest/stela-gpu/kext/tests/<name>.c` with the `clang` on PATH, a
+/// hosted program that needs none of the build's other LLVM tools.
 fn kext_test(name: &str, built: &Path) -> PathBuf {
-    let clang = crate::tools::which("clang").expect("clang, which `cargo xtask guest` also needs");
+    let clang = crate::tools::which("clang").expect("a clang on PATH for the kext's host tests");
     let source = crate::tools::root().join(format!("guest/stela-gpu/kext/tests/{name}.c"));
     let program = built.join(name);
     crate::tools::exec(
