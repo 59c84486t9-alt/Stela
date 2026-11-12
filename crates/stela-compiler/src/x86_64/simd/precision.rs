@@ -10,6 +10,10 @@ use super::numerical::{
     reject_other_status_but_underflow, resolve, restore_environment, scalar_range_or_zero,
     single_vector_arithmetic, test_control, vector_exponent_range, vector_normal_or_zero_range,
 };
+use super::numerical::{
+    commit_flush_status, commit_rounded_status, exceptional_lane_mask, flush_subnormal_lanes,
+    reject_exceptional_lanes, reject_invalid, scalar_ordered_range,
+};
 use super::{Host, commit, encode::guest, packed, read_vector, vector_offset};
 use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{
@@ -20,8 +24,9 @@ use crate::{
     aarch64::{
         FloatingPointOperation, Instruction, Operation,
         floating::{
-            FPCR_AH, FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_MASK,
-            FPCR_ROUNDING_SHIFT, Format, UNDERFLOW, precision::PrecisionRounding,
+            FPCR_AH, FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP,
+            FPCR_ROUNDING_MASK, FPCR_ROUNDING_SHIFT, Format, UNDERFLOW,
+            precision::PrecisionRounding,
         },
         simd::{
             arithmetic::Shape,
@@ -40,6 +45,10 @@ const JAM_VECTOR: u8 = 6;
 const HALF_LANE_VECTOR: u8 = 6;
 /// The zero classifier's scratch in vector Half narrowing.
 const NARROW_ZERO_SCRATCH: u8 = 7;
+/// [`flush_subnormal_lanes`]' scratch for a scalar conversion.
+const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+/// [`exceptional_lane_mask`]'s scratch for a scalar conversion.
+const EXCEPTIONAL_SCRATCH: [u8; 3] = [2, 3, 4];
 /// VCVTPS2PH's immediate: round by MXCSR.RC.
 const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const COMPARE_EQUAL: u8 = 0;
@@ -192,6 +201,7 @@ fn emit_scalar(
     pc: GuestAddress,
 ) {
     let mut helper = Vec::new();
+    let mut rounded = None;
     exception_guard(code, &mut helper);
     read_vector(code, operand.source, SOURCE_VECTOR);
     // Precision conversions merge old Vd, unlike binary arithmetic's Vn merge.
@@ -223,10 +233,13 @@ fn emit_scalar(
             );
         }
     } else if destination == Format::Double {
-        // Normal or zero S→D is exact, unaffected by ambient RC/DAZ/FTZ/masks,
-        // and raises neither Intel Invalid nor Denormal, nor any FPSR status
-        // (a zero is no denormal input, whatever FZ holds). Preserve MXCSR.
-        helper.push(scalar_range_or_zero(
+        // Normal, zero or infinite S→D is exact, unaffected by ambient
+        // RC/DAZ/FTZ/masks, and raises neither Intel Invalid nor Denormal,
+        // nor any FPSR status (a zero is no denormal input, whatever FZ
+        // holds). Preserve MXCSR. FZ or FIZ with AH clear flush a subnormal
+        // input first, FZ raising IDC.
+        flush_inputs(code, source);
+        helper.push(scalar_ordered_range(
             code,
             source,
             SOURCE_VECTOR,
@@ -234,8 +247,16 @@ fn emit_scalar(
         ));
         code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
     } else {
-        exponent_range(code, source, SOURCE_VECTOR, INPUT_MINIMUM_EXPONENT);
-        helper.push(branch(code, Condition::AboveOrEqual));
+        rounded = (rounding == PrecisionRounding::Fpcr).then(|| rounded_narrow(code, &mut helper));
+        flush_inputs(code, source);
+        // A zero converts to the zero of its sign, without status; a
+        // nonzero result rounded to zero raised underflow.
+        helper.push(scalar_range_or_zero(
+            code,
+            source,
+            SOURCE_VECTOR,
+            INPUT_MINIMUM_EXPONENT,
+        ));
         environment_round(
             code,
             if rounding == PrecisionRounding::ToOdd {
@@ -247,8 +268,12 @@ fn emit_scalar(
         code.asm().cvtsd2ss(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
         restore_environment(code);
         helper.push(reject_other_status(code));
-        exponent_range(code, destination, RESULT_VECTOR, RESULT_MINIMUM_EXPONENT);
-        helper.push(branch(code, Condition::AboveOrEqual));
+        helper.push(scalar_range_or_zero(
+            code,
+            destination,
+            RESULT_VECTOR,
+            RESULT_MINIMUM_EXPONENT,
+        ));
         if rounding == PrecisionRounding::ToOdd {
             scalar_odd_jam(code);
         }
@@ -257,7 +282,62 @@ fn emit_scalar(
     if source == Format::Double && destination == Format::Single {
         commit_inexact(code);
     }
+    if source != Format::Half {
+        commit_flush_status(code);
+    }
+    if let Some(rounded) = rounded {
+        let tail = code.len();
+        resolve(code, rounded, tail);
+    }
     scalar_commit(code, operand.destination, destination);
+}
+
+/// Clear R11D, then with FZ or FIZ and AH clear flush a subnormal S/D
+/// scalar input to its signed zero, FZ adding IDC to R11D
+/// ([`commit_flush_status`]).
+fn flush_inputs(code: &mut Code, source: Format) {
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(code, source, Shape::Scalar, SOURCE_VECTOR, FLUSH_SCRATCH);
+    let end = code.len();
+    resolve(code, alternative, end);
+    resolve(code, unflushed, end);
+}
+
+/// Scalar D→S with FPCR.FZ, FIZ and AH clear: subnormal inputs and tiny,
+/// overflowing, zero and infinite results are exact on the host, whose
+/// unflushed rounding in Arm's mode is the guest's and whose status FPSR's
+/// ([`commit_rounded_status`]). A NaN (whose payload and DN Arm's
+/// conversion applies) and invalid status take `helper`. Returns the jump
+/// to the commit, past the other checks.
+fn rounded_narrow(code: &mut Code, helper: &mut Vec<usize>) -> usize {
+    test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+    let strict = branch(code, Condition::NotZero);
+    environment_round(code, Rounding::Fpcr);
+    code.asm().cvtsd2ss(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
+    exceptional_lane_mask(
+        code,
+        Format::Single,
+        Shape::Scalar,
+        RESULT_VECTOR,
+        EXCEPTIONAL_SCRATCH,
+        true,
+    );
+    restore_environment(code);
+    helper.push(reject_exceptional_lanes(
+        code,
+        Format::Single,
+        Shape::Scalar,
+    ));
+    helper.push(reject_invalid(code));
+    commit_rounded_status(code);
+    let done = jump(code);
+    let strict_start = code.len();
+    resolve(code, strict, strict_start);
+    done
 }
 
 /// Branch if any exponent is outside the normal IEEE half range. Keep the
