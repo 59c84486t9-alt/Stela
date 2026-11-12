@@ -165,8 +165,36 @@ fn suffix(clang: &Path) -> String {
     name.strip_prefix("clang").unwrap_or_default().to_owned()
 }
 
+/// Whether a file's name is a Clang driver's, not a wrapper's such as
+/// ccache's.
+fn is_clang(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().starts_with("clang"))
+}
+
+/// The compiler `clang` runs, with links resolved: through a wrapper that
+/// a link of Clang's name leads to, as ccache's directory of links on PATH
+/// does, the Clang of the same name later on PATH. The build still runs
+/// `clang` by the name it was found under; this locates its install.
+fn real_compiler(host: &dyn Host, clang: &Path) -> PathBuf {
+    let real = host.canonical(clang);
+    if is_clang(&real) {
+        return real;
+    }
+    let Some(name) = clang.file_name() else {
+        return real;
+    };
+    host.path()
+        .into_iter()
+        .map(|directory| directory.join(name))
+        .filter(|path| path != clang && host.is_file(path))
+        .map(|path| host.canonical(&path))
+        .find(|path| is_clang(path))
+        .unwrap_or(real)
+}
+
 /// Every Clang this computer has: `CLANG` alone when it is set, else the
-/// versioned installs' and PATH's, each once.
+/// versioned installs' and PATH's, each once by the compiler it runs.
 pub fn candidates(host: &dyn Host) -> Vec<Found> {
     let mut paths = Vec::new();
     let explicit = host.var(VARIABLE).filter(|value| !value.is_empty());
@@ -233,11 +261,11 @@ pub fn candidates(host: &dyn Host) -> Vec<Found> {
             }
             continue;
         }
-        let canonical = host.canonical(&clang);
-        if seen.contains(&canonical) {
+        let real = real_compiler(host, &clang);
+        if seen.contains(&real) {
             continue;
         }
-        seen.push(canonical);
+        seen.push(real);
         let report = host.version_report(&clang).unwrap_or_default();
         found.push(Found {
             clang,
@@ -287,7 +315,9 @@ pub fn select(host: &dyn Host) -> Result<Toolset, Problems> {
     let mut problems = Vec::new();
     let clang = chosen.clang.clone();
     let directory = clang.parent().unwrap_or(Path::new("")).to_path_buf();
-    let real = host.canonical(&clang);
+    // The install's tools and libclang are found beside the compiler it
+    // runs, never beside a wrapper.
+    let real = real_compiler(host, &clang);
     let real_directory = real.parent().unwrap_or(Path::new("")).to_path_buf();
     let suffix = suffix(&clang);
 
@@ -369,10 +399,12 @@ pub fn select(host: &dyn Host) -> Result<Toolset, Problems> {
         {
             Ok(Toolset {
                 version,
-                clang: real,
-                // Clang picks C++ by the name it runs under: Homebrew's
-                // `clang++` is a link to `clang-NN`, which run by its own name
-                // links no C++ library.
+                // Both drivers run by the names they were found under: a
+                // wrapper such as ccache stays in front of the compiler, and
+                // Clang picks C++ by the name it runs under (Homebrew's
+                // `clang++` is a link to `clang-NN`, which run by its own
+                // name links no C++ library).
+                clang,
                 clangxx,
                 linker,
                 archiver,

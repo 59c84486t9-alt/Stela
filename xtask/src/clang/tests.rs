@@ -496,6 +496,36 @@ fn the_cxx_driver_keeps_its_name() {
         },
     ));
     let toolset = select(&host).unwrap();
-    assert_eq!(toolset.clang, path(&format!("{cellar}/clang-23")));
+    assert_eq!(toolset.clang, path("/opt/homebrew/opt/llvm/bin/clang"));
     assert_eq!(toolset.clangxx, path("/opt/homebrew/opt/llvm/bin/clang++"));
+    assert_eq!(
+        toolset.libclang,
+        path("/opt/homebrew/Cellar/llvm/23.1.4/lib/libclang.dylib")
+    );
+}
+
+/// ccache's directory of links first on PATH, as Fedora sets it: the build
+/// runs the compilers through ccache, by the names found there, and finds
+/// the tools and libclang beside the Clang behind it.
+#[test]
+fn a_ccache_wrapper_stays_in_front_of_the_real_install() {
+    let host = Fake::new(&["/usr/lib64/ccache", "/usr/bin"])
+        // ccache answers `--version` with the compiler's report.
+        .tool("/usr/bin/ccache", "clang version 21.1.8\n")
+        .link("/usr/lib64/ccache/clang", "/usr/bin/ccache")
+        .link("/usr/lib64/ccache/clang++", "/usr/bin/ccache")
+        .llvm("/usr/lib64/llvm21/bin", 21)
+        .link("/usr/bin/clang", "/usr/lib64/llvm21/bin/clang")
+        .file("/usr/lib64/llvm21/lib64/libclang.so.21.1");
+    let toolset = select(&host).unwrap();
+    assert_eq!(toolset.clang, path("/usr/lib64/ccache/clang"));
+    assert_eq!(toolset.clangxx, path("/usr/lib64/ccache/clang++"));
+    assert_eq!(toolset.linker, path("/usr/lib64/llvm21/bin/ld.lld"));
+    assert_eq!(
+        toolset.libclang,
+        path("/usr/lib64/llvm21/lib64/libclang.so.21.1")
+    );
+    // The wrapper and the compiler it runs are one candidate.
+    let found = candidates(&host);
+    assert_eq!(found.len(), 1, "{found:?}");
 }
