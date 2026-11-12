@@ -233,13 +233,12 @@ fn complete_initialization_replaces_inherited_phy_and_mac_state_for_all_declared
 
 #[test]
 fn drain_mac_reset_autoload_and_phy_reset_deadlines_never_look_successful() {
-    for failure in 0..4 {
+    for failure in 0..3 {
         let model = Model::ready(false);
         match failure {
             0 => model.master_stuck.set(true),
             1 => model.reset_stuck.set(true),
-            2 => model.autoload_stuck.set(true),
-            _ => model.phy_reset_stuck.set(true),
+            _ => model.autoload_stuck.set(true),
         }
         let mut hw = Hardware::new(&model, &model).unwrap();
         assert_eq!(hw.initialize(), Err(BlockError::Timeout));
@@ -255,6 +254,21 @@ fn drain_mac_reset_autoload_and_phy_reset_deadlines_never_look_successful() {
         }
         assert!(model.elapsed.get() < 2_000_000);
     }
+}
+
+#[test]
+fn a_phy_reset_completion_that_never_comes_is_waited_for_then_passed() {
+    // igc_phy_hw_reset logs the missing PHY_RST_COMP and carries on; the
+    // PHY identity read that follows still proves the PHY answers.
+    let model = Model::ready(false);
+    model.phy_reset_stuck.set(true);
+    assert_eq!(
+        Hardware::new(&model, &model).unwrap().initialize(),
+        Ok(0x67c9_dc01)
+    );
+    assert!(model.elapsed.get() >= 10_000 && model.elapsed.get() < 2_000_000);
+    // Powered up (BMCR power-down clear), autonegotiation restarted.
+    assert_eq!(model.state.borrow().phy[&0] & 0x1a00, 0x1200);
 }
 
 #[test]
@@ -290,13 +304,39 @@ fn mdio_failures_release_software_ownership() {
 }
 
 #[test]
+fn management_owned_phy_is_neither_reset_nor_renegotiated() {
+    // igc_check_reset_block: SOL/IDE-R firmware owns the PHY and its link;
+    // Linux skips the PHY reset and the link setup and starts the MAC.
+    let model = Model::ready(false);
+    model
+        .state
+        .borrow_mut()
+        .registers
+        .insert(MANC, MANC_BLOCK_PHY_RESET);
+    let advertised = model.state.borrow().phy[&4];
+    assert_eq!(
+        Hardware::new(&model, &model).unwrap().initialize(),
+        Ok(0x67c9_dc01)
+    );
+    let state = model.state.borrow();
+    assert!(
+        !state
+            .writes
+            .iter()
+            .any(|&(r, v)| r == CTRL && v & PHY_RESET != 0)
+    );
+    assert_eq!(state.phy[&4], advertised);
+    // igc_power_up_link still powers the PHY up; autonegotiation is not
+    // restarted under the firmware's link.
+    assert_eq!(state.phy[&0], 0);
+    assert!(state.writes.iter().any(|&(r, _)| r == RXPBS));
+}
+
+#[test]
 fn firmware_management_and_semaphore_refusals_cannot_be_bypassed() {
-    for failure in 0..4 {
+    for failure in 1..4 {
         let model = Model::ready(false);
         match failure {
-            0 => {
-                model.state.borrow_mut().registers.insert(MANC, 1 << 18);
-            }
             1 => model.firmware_busy.set(true),
             2 => model.software_busy.set(true),
             _ => model.sw_semaphore_refused.set(true),

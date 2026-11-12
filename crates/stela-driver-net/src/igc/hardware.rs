@@ -110,6 +110,10 @@ const STATUS_SPEED_2500: u32 = 1 << 22;
 const CTRL_RFCE: u32 = 1 << 27;
 const CTRL_TFCE: u32 = 1 << 28;
 const MANC_RCV_TCO_EN: u32 = 1 << 17;
+/// IGC_MANC_BLK_PHY_RST_ON_IDE.
+const MANC_BLOCK_PHY_RESET: u32 = 1 << 18;
+/// IGC_PHY_RST_COMP in PHPM.
+const PHY_RESET_COMPLETE: u32 = 1 << 8;
 const RFCTL_IPV6_EX_DIS: u32 = 1 << 16;
 const RFCTL_LEF: u32 = 1 << 18;
 const RCTL_EN: u32 = 1 << 1;
@@ -546,23 +550,29 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
     }
 
     fn phy(&mut self) -> Result<u32, BlockError> {
-        if self.read(MANC)? & (1 << 18) != 0 {
-            return Err(BlockError::Unsupported(
-                "igc PHY reset blocked by management firmware",
-            ));
+        // igc_check_reset_block: management firmware (SOL/IDE-R) owns the
+        // PHY. igc_phy_hw_reset then skips the reset and igc_setup_link the
+        // link setup: the firmware has already brought the link up.
+        let blocked = self.read(MANC)? & MANC_BLOCK_PHY_RESET != 0;
+        if !blocked {
+            self.synchronized(PHY_SYNC, |hw| {
+                let ctrl = hw.read(CTRL)?;
+                hw.registers.write(CTRL, ctrl | PHY_RESET);
+                hw.read(STATUS)?;
+                hw.timer.delay(100)?;
+                hw.registers.write(CTRL, ctrl);
+                hw.read(STATUS)?;
+                hw.timer.delay(100)?;
+                // igc_phy_hw_reset only logs a reset completion that never
+                // came; the identity read below still proves the PHY answers.
+                match hw.poll(PHPM, PHY_RESET_COMPLETE, true, 10_000, 1) {
+                    Ok(_) | Err(BlockError::Timeout) => {}
+                    Err(error) => return Err(error),
+                }
+                hw.timer.delay(100)?;
+                Ok(())
+            })?;
         }
-        self.synchronized(PHY_SYNC, |hw| {
-            let ctrl = hw.read(CTRL)?;
-            hw.registers.write(CTRL, ctrl | PHY_RESET);
-            hw.read(STATUS)?;
-            hw.timer.delay(100)?;
-            hw.registers.write(CTRL, ctrl);
-            hw.read(STATUS)?;
-            hw.timer.delay(100)?;
-            hw.poll(PHPM, 1 << 8, true, 10_000, 1)?;
-            hw.timer.delay(100)?;
-            Ok(())
-        })?;
         self.synchronized(PHY_SYNC, |hw| {
             let upper = hw.mdio(2, None)?;
             hw.timer.delay(200)?;
@@ -574,6 +584,9 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             // Source igc_power_up_phy_copper, followed by advertisement.
             let control = hw.mdio(PHY_CONTROL, None)?;
             hw.mdio(PHY_CONTROL, Some(control & !(1 << 11)))?;
+            if blocked {
+                return Ok(identity);
+            }
             let adv = hw.mdio(PHY_ADVERTISEMENT, None)?;
             let gigabit = hw.mdio(PHY_GIGABIT, None)?;
             let multigig = hw.mmd(MMD_AN, MMD_MULTIGIG, None)?;

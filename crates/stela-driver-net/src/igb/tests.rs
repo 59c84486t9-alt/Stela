@@ -460,20 +460,43 @@ fn i210_recovers_a_stale_smbi_latch_only_once() {
 }
 
 #[test]
-fn unknown_phy_media_and_firmware_owned_reset_do_not_start_a_link() {
+fn unknown_phy_and_media_do_not_start_a_link() {
     let unknown = Model::new(Chip::I82576, 0x1234_5670, true);
     assert!(initialize(&unknown, Chip::I82576).is_err());
     assert_eq!(unknown.phy_value(PHY_ADVERTISE), 0);
-    let firmware_owned = Model::new(Chip::I82576, PHY_IGP3, true);
-    firmware_owned.set(MANC, MANC_BLOCK_PHY);
-    assert!(initialize(&firmware_owned, Chip::I82576).is_err());
-    assert!(firmware_owned.mdio_writes.borrow().is_empty());
     let media = Model::new(Chip::I82576, PHY_IGP3, true);
     media.set(CTRL_EXT, CTRL_EXT_MODE);
     assert!(initialize(&media, Chip::I82576).is_err());
     assert!(media.nvm_reads.borrow().is_empty());
     let mismatch = Model::new(Chip::I350, PHY_82580, true);
     assert!(initialize(&mismatch, Chip::I350).is_err());
+}
+
+#[test]
+fn a_management_owned_phy_is_powered_up_but_neither_reset_nor_renegotiated() {
+    // igb_check_reset_block: an SOL/IDE-R session owns the PHY and its link.
+    // Linux skips igb_phy_hw_reset and igb_setup_link, and starts the MAC.
+    for (chip, phy) in [
+        (Chip::I82576, PHY_IGP3),
+        (Chip::I350, PHY_I350),
+        (Chip::I210, PHY_I210),
+    ] {
+        let owned = Model::new(chip, phy, true);
+        owned.set(MANC, MANC_BLOCK_PHY);
+        initialize(&owned, chip).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            !owned
+                .writes
+                .borrow()
+                .iter()
+                .any(|&(register, value)| register == CTRL && value & CTRL_PHY_RST != 0)
+        );
+        assert_eq!(owned.phy_value(PHY_ADVERTISE), 0);
+        assert_eq!(owned.phy_value(PHY_GIGABIT), 0x1f00);
+        assert_eq!(owned.phy_value(PHY_CONTROL) & PHY_POWERDOWN, 0);
+        assert_eq!(owned.phy_value(PHY_CONTROL) & PHY_RESTART, 0);
+        owned.assert_released();
+    }
 }
 
 #[test]

@@ -54,9 +54,11 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
         })
     }
 
+    /// igb_phy_hw_reset; a reset management firmware blocks is skipped
+    /// (igb_check_reset_block), never refused.
     fn hardware_reset_phy(&mut self) -> Result<(), BlockError> {
-        if self.io.read(MANC) & MANC_BLOCK_PHY != 0 {
-            return Err(BlockError::Unsupported("igb firmware blocks PHY reset"));
+        if self.reset_blocked() {
+            return Ok(());
         }
         self.synchronized(self.phy_mask(), |hardware| {
             let control = hardware.io.read(CTRL);
@@ -89,10 +91,13 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
         last.map(|_| ())
     }
 
+    /// igb_check_reset_block: an SOL/IDE-R session of the management
+    /// firmware owns the PHY and has its link up.
+    fn reset_blocked(&self) -> bool {
+        self.io.read(MANC) & MANC_BLOCK_PHY != 0
+    }
+
     pub(super) fn configure_phy(&mut self) -> Result<(), BlockError> {
-        if self.io.read(MANC) & MANC_BLOCK_PHY != 0 {
-            return Err(BlockError::Unsupported("igb firmware blocks PHY reset"));
-        }
         if !self.chip.old_reset() && self.io.read(MDICNFG) & (1 << 31) != 0 {
             return Err(BlockError::Unsupported(
                 "igb external MDIO PHY is not implemented",
@@ -118,6 +123,11 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
         self.io
             .write(CTRL, (control | CTRL_SLU) & !(CTRL_FRCSPD | CTRL_FRCDPX));
         let control = self.read_phy(PHY_CONTROL)?;
+        if self.reset_blocked() {
+            // igb_power_up_phy_copper still runs; igb_setup_link leaves the
+            // firmware's link as it is.
+            return self.write_phy(PHY_CONTROL, control & !PHY_POWERDOWN);
+        }
         self.write_phy(
             PHY_CONTROL,
             control & !(PHY_POWERDOWN | PHY_ISOLATE | PHY_LOOPBACK),

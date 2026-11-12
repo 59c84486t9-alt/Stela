@@ -61,9 +61,6 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
                 "igb SGMII/SerDes media requires a separate PHY path",
             ));
         }
-        if self.io.read(MANC) & MANC_BLOCK_PHY != 0 {
-            return Err(BlockError::Unsupported("igb firmware blocks PHY reset"));
-        }
         self.io
             .write(CTRL_EXT, self.io.read(CTRL_EXT) & !CTRL_EXT_I2C);
         self.check_nvm()?;
