@@ -131,6 +131,9 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
         }) {
             return Err(BlockError::Timeout);
         }
+        // igb_reset: wake-up control cleared after the MAC reset, so a wake
+        // configuration a previous OS armed (APME, PME_EN) does not stay.
+        self.io.write(WUC, 0);
         Ok(())
     }
 

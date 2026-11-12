@@ -473,6 +473,21 @@ fn unknown_phy_and_media_do_not_start_a_link() {
 }
 
 #[test]
+fn a_wake_configuration_left_armed_is_cleared_by_the_reset() {
+    for (chip, phy, flash) in [
+        (Chip::I82576, PHY_IGP3, true),
+        (Chip::I350, PHY_I350, true),
+        (Chip::I211, PHY_I210, false),
+    ] {
+        let io = Model::new(chip, phy, flash);
+        io.lock_after.set(1);
+        io.set(WUC, 0x3); // APME and PME_EN, as Windows leaves them for WoL.
+        initialize(&io, chip).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(io.get(WUC), 0);
+    }
+}
+
+#[test]
 fn a_management_owned_phy_is_powered_up_but_neither_reset_nor_renegotiated() {
     // igb_check_reset_block: an SOL/IDE-R session owns the PHY and its link.
     // Linux skips igb_phy_hw_reset and igb_setup_link, and starts the MAC.
