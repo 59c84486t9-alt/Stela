@@ -13,15 +13,25 @@ struct ReadDestination<'a> {
 }
 
 impl Controller {
-    /// Before the CPU takes back memory a completion released: an owned
-    /// controller's completion counts only while its registers answer
-    /// without a fatal status, which a removed hierarchy or a failed engine
-    /// would not.
+    /// Before the CPU takes back memory an admin command's data completion
+    /// released: an owned controller's completion counts only while its
+    /// registers answer without a fatal status, which a removed hierarchy or
+    /// a failed engine would not.
     pub(super) fn trust_completion(&self) -> Result<(), BlockError> {
         match self.owned {
             Some(_) => self.check_fatal(),
             None => Ok(()),
         }
+    }
+
+    /// The error for an I/O completion that names no command it may, or
+    /// whose entry changed under its read: the controller's own, when its
+    /// status says it is removed or fatally failed, otherwise a corrupt
+    /// queue.
+    fn invalid_completion(&self) -> BlockError {
+        parts::timed(parts::Part::Status, || self.check_fatal())
+            .err()
+            .unwrap_or(BlockError::Device { status: 0xffff })
     }
 
     /// Page `index` of those tag `tag` holds.
@@ -436,28 +446,30 @@ impl Controller {
                 break;
             }
             let (head, phase, consumed) = (self.io.head, self.io.phase, self.io.consumed);
+            // A valid completion is trusted as Linux's nvme_handle_cqe trusts
+            // it, with no register read: the controller's status is read
+            // where Linux reads it, at a command's timeout, a reset, an admin
+            // command's data, and a completion that looks invalid.
             match self.posted(true) {
                 Ok(None) => break,
                 Ok(Some((id, _, status, sq_head))) => {
-                    if !reaped
-                        && let Err(error) =
-                            parts::timed(parts::Part::Status, || self.trust_completion())
-                    {
-                        (self.io.head, self.io.phase, self.io.consumed) = (head, phase, consumed);
-                        self.poison(error);
-                        self.fail_all();
-                        return;
-                    }
                     if !self.complete(id, status, sq_head, &mut destination) {
                         // A completion for no running command, or for one the
                         // controller had not fetched: the queue is corrupt.
                         // It stays unretired.
                         (self.io.head, self.io.phase, self.io.consumed) = (head, phase, consumed);
-                        self.poison(BlockError::Device { status: 0xffff });
+                        let error = self.invalid_completion();
+                        self.poison(error);
                         self.fail_all();
                         return;
                     }
                     reaped = true;
+                }
+                Err(BlockError::Device { status: 0xffff }) => {
+                    let error = self.invalid_completion();
+                    self.poison(error);
+                    self.fail_all();
+                    return;
                 }
                 Err(error) => {
                     self.poison(error);

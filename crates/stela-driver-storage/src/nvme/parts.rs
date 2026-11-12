@@ -20,7 +20,7 @@ pub enum Part {
     /// A look at the I/O completion queue: its completions' ends, read data
     /// copies included, retries and deadlines.
     Advance,
-    /// The controller status read before completions are trusted.
+    /// A controller status read after a completion that looked invalid.
     Status,
     /// An I/O completion doorbell write.
     Ring,

@@ -1210,9 +1210,96 @@ fn a_command_counts_its_start_and_finish_parts() {
         parts::Part::Start,
         parts::Part::Doorbell,
         parts::Part::Advance,
-        parts::Part::Status,
         parts::Part::Ring,
     ] {
         assert!(calls(part) >= 1, "{part:?}");
     }
+}
+
+/// A valid completion is taken with no status read, as Linux takes it, even
+/// while the controller reports a fatal status; an invalid one reads the
+/// status and fails the controller with it.
+#[test]
+fn completions_are_trusted_without_a_status_read_unless_they_look_invalid() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut controller = disk.controller.borrow_mut();
+        controller.registers.write32(STATUS, FATAL).unwrap();
+        let id = running_id(&controller, read);
+        post(&mut controller, id, 0);
+    }
+    assert!(matches!(disk.finish(read), Some(Ok(Some(_)))));
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut controller = disk.controller.borrow_mut();
+        let id = running_id(&controller, read);
+        post(&mut controller, id.wrapping_add(7), 0);
+    }
+    let error = BlockError::Device { status: FATAL };
+    assert_eq!(disk.finish(read), Some(Err(error.clone())));
+    assert_eq!(disk.controller.borrow().fault, Some(error));
+}
+
+/// An invalid completion from a controller whose status is good poisons it
+/// as a corrupt queue.
+#[test]
+fn an_invalid_completion_from_a_healthy_controller_is_a_corrupt_queue() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut controller = disk.controller.borrow_mut();
+        controller.registers.write32(STATUS, READY).unwrap();
+        let id = running_id(&controller, read);
+        post(&mut controller, id.wrapping_add(7), 0);
+    }
+    let corrupt = BlockError::Device { status: 0xffff };
+    assert_eq!(disk.finish(read), Some(Err(corrupt)));
+}
+
+/// A dead controller posts nothing: its commands' timeout reads its status,
+/// within the command deadline, and resets one that failed fatally and
+/// fails the commands of one that reads all ones.
+#[test]
+fn a_dead_controller_is_found_at_the_command_timeout() {
+    let _clock = crate::test_clock::virtualize();
+    let wait = |disk: &mut Namespace| {
+        let clock = disk.controller.borrow().clock;
+        let started = clock.try_start().unwrap();
+        while clock.try_elapsed_us(started).unwrap() < 1000 {
+            core::hint::spin_loop();
+        }
+    };
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    disk.controller
+        .borrow()
+        .registers
+        .write32(STATUS, FATAL)
+        .unwrap();
+    assert_eq!(disk.finish(read), None);
+    wait(disk);
+    assert_eq!(disk.finish(read), None);
+    {
+        let controller = disk.controller.borrow();
+        assert!(
+            controller.aborts.is_empty(),
+            "no abort to a failed controller"
+        );
+        assert!(controller.recovery.is_some(), "reset at the first deadline");
+    }
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    disk.controller
+        .borrow()
+        .registers
+        .write32(STATUS, REMOVED)
+        .unwrap();
+    assert_eq!(disk.finish(read), None);
+    wait(disk);
+    assert_eq!(disk.finish(read), Some(Err(removed())));
 }

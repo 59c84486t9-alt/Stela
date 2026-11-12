@@ -1540,6 +1540,10 @@ fn owned_absent_coherent_observation_refuses_before_enable_and_releases_unpublis
     assert!(m.released && m.maps.is_empty());
     assert!(!m.events.contains(&"command") && !m.events.contains(&"bme_on"));
 }
+/// Registers that fail after a doorbell are found at the next status read:
+/// a completion that looks invalid reads the status, and the read's failure
+/// poisons the controller with no CPU reacquire. (A valid completion is
+/// taken with no register read, as Linux takes it.)
 #[test]
 fn owned_register_failure_after_doorbell_poison_keeps_no_cpu_reacquire() {
     let f = Fixture::new();
@@ -1547,6 +1551,7 @@ fn owned_register_failure_after_doorbell_poison_keeps_no_cpu_reacquire() {
     let before = f.model.lock().unwrap().sync_cpu;
     let commands = f.model.lock().unwrap().commands;
     f.model.lock().unwrap().fail_after_doorbell = true;
+    f.model.lock().unwrap().mutation = Mutation::Cid;
     assert!(a.namespaces[0].flush().is_err());
     {
         let m = f.model.lock().unwrap();
