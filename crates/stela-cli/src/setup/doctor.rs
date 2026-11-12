@@ -730,6 +730,24 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     .into())
 }
 
+/// The report line for the device skips `by` ends
+/// (`boot_log::clear_device_skips`): empty when the USB's log names none.
+pub(super) fn device_skips(esp: &Path, by: &str, dry_run: bool) -> Result<String> {
+    let log = esp.join(crate::efi::BOOT_LOG);
+    let named = crate::boot_log::clear_device_skips(&log, by, dry_run)?;
+    Ok(match (named.is_empty(), dry_run) {
+        (true, _) => String::new(),
+        (false, true) => format!(
+            "  device skips   {} would be started again\n",
+            named.join(", ")
+        ),
+        (false, false) => format!(
+            "  device skips   {} will be started again at the next boot\n",
+            named.join(", ")
+        ),
+    })
+}
+
 /// `repair`.
 pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let usb = &command.usb;
@@ -745,6 +763,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     }
     let esp = record.esp.clone();
     let mut text = format!("Stela repair on {}:\n", esp.display());
+    text.push_str(&device_skips(&esp, "stela setup repair", command.dry_run)?);
     let Ok(tool) = fs::read(esp.join(LOADER_PATH)) else {
         bail!(
             "{} has no stela.efi: {}",

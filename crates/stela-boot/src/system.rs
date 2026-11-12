@@ -800,6 +800,7 @@ fn load(
         boot_disk[..take].copy_from_slice(&location.as_bytes()[..take]);
         boot_disk_bytes = take;
     }
+    let (device_skips, device_needs) = device_starts(&system);
     crate::status::done("");
     let boot_heap = crate::ALLOCATOR.usage();
     output::arguments(format_args!(
@@ -941,6 +942,8 @@ fn load(
             native_mmio_capture,
             inactive_firmware_units,
             amd_tables,
+            device_skips,
+            device_needs,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and
@@ -955,6 +958,34 @@ fn load(
         }
         .enter()
     }
+}
+
+/// The PCI functions an earlier boot did not finish starting, as the USB's
+/// log gave them, and, when there are any, the controllers of the disks
+/// `system` names, which the engine never skips.
+fn device_starts(system: &System) -> (pc::device_starts::Skips, pc::device_starts::Needed) {
+    let skips = crate::log_file::device_skips();
+    let mut needs = pc::device_starts::Needed::EMPTY;
+    if skips.is_empty() {
+        return (skips, needs);
+    }
+    let serials: Vec<&str> = [
+        &system.storage,
+        &system.preboot,
+        &system.restore_source,
+        &system.nor,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|target| target.serial.as_str())
+    .collect();
+    for address in crate::selection::disk_controllers(&serials) {
+        output::arguments(format_args!(
+            "HOST DEVICE NEEDED pci={address}: a disk this boot needs is on it\n"
+        ));
+        needs.add(address);
+    }
+    (skips, needs)
 }
 
 /// The host's ACPI power hardware, reported while the firmware's tables

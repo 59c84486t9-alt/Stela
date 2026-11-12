@@ -105,6 +105,12 @@ pub struct Handoff {
     pub(crate) inactive_firmware_units: crate::native_dma::InactiveFirmwareUnits,
     /// Exclusive firmware RAM below 4 GiB for AMD-Vi device tables.
     pub(crate) amd_tables: Region,
+    /// The PCI functions an earlier boot did not finish starting, or
+    /// skipped since, as the USB's log gives them (`log_file::device_skips`).
+    pub(crate) device_skips: pc::device_starts::Skips,
+    /// The controllers of the disks this boot cannot continue without,
+    /// which it never skips (`selection::disk_controllers`).
+    pub(crate) device_needs: pc::device_starts::Needed,
 }
 
 /// A read of the firmware's real-time clock: its time as UTC and its

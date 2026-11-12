@@ -481,6 +481,87 @@ pub(crate) fn summary(log: &Log) -> String {
     text
 }
 
+/// End every device skip the USB's boot log at `path` holds (`pc::device_starts`):
+/// the functions an earlier boot did not finish starting, which later boots
+/// skip until `by` (`stela setup repair` or `update stela`) clears them.
+/// The functions it named, for the report; none when the log names none or
+/// cannot be read, which leaves nothing to clear. A dry run changes nothing.
+pub(crate) fn clear_device_skips(path: &Path, by: &str, dry_run: bool) -> Result<Vec<String>> {
+    use stela_runtime::pc::device_starts;
+    let Ok(mut bytes) = std::fs::read(path) else {
+        return Ok(Vec::new());
+    };
+    let Ok(log) = boot_log::read(&bytes) else {
+        return Ok(Vec::new());
+    };
+    let named: Vec<String> = device_starts::read(&log.stream)
+        .iter()
+        .map(|function| {
+            format!(
+                "PCI {} {:04x}:{:04x}",
+                function.address, function.vendor, function.device
+            )
+        })
+        .collect();
+    if named.is_empty() || dry_run {
+        return Ok(named);
+    }
+    let mut region = Region {
+        identity: Identity {
+            transport: Transport::VirtioBlk,
+            location: path.display().to_string(),
+            model: String::from("boot log"),
+            serial: String::new(),
+            blocks: bytes.len() as u64 / 512,
+            block_size: 512,
+            read_only: false,
+            features: Default::default(),
+        },
+        bytes: &mut bytes,
+    };
+    let mut writer = boot_log::Writer::resume(&mut region)
+        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
+    writer.append(format!("{} by {by}\n", device_starts::CLEARED).as_bytes());
+    writer
+        .flush(&mut region)
+        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
+    // In place: the file keeps the clusters `stela.efi` writes on to.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening {} to write", path.display()))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(named)
+}
+
+/// A boot log file's bytes as 512-byte blocks.
+struct Region<'a> {
+    identity: Identity,
+    bytes: &'a mut [u8],
+}
+
+impl BlockDevice for Region<'_> {
+    fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.identity.check(lba, buffer.len())?;
+        let at = (lba * 512) as usize;
+        buffer.copy_from_slice(&self.bytes[at..at + buffer.len()]);
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.identity.check(lba, data.len())?;
+        let at = (lba * 512) as usize;
+        self.bytes[at..at + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}
+
 /// A disk image read through 512- or 4096-byte blocks.
 struct Image {
     file: File,
@@ -651,6 +732,50 @@ pub(crate) mod tests {
             offset,
             in_target: false,
         }
+    }
+
+    /// `stela setup repair` and `update stela` end every skip the USB's log
+    /// holds, in place, and a dry run changes nothing.
+    #[test]
+    fn clearing_device_skips_ends_them_in_place() {
+        use stela_runtime::pc::device_starts;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.bin");
+        // A boot that stopped inside a network adapter's start.
+        std::fs::write(
+            &path,
+            region(&["HOST DEVICE START pci=0000:05:00.0 id=144d:a808\n\
+                 HOST DEVICE START pci=0000:07:00.0 id=10ec:8125\n"]),
+        )
+        .unwrap();
+        let skips = |path: &Path| {
+            let log = boot_log::read(&std::fs::read(path).unwrap()).unwrap();
+            device_starts::read(&log.stream)
+        };
+        assert_eq!(skips(&path).iter().count(), 1);
+        let named = clear_device_skips(&path, "stela setup repair", true).unwrap();
+        assert_eq!(named, ["PCI 0000:07:00.0 10ec:8125"]);
+        assert_eq!(skips(&path).iter().count(), 1);
+        let named = clear_device_skips(&path, "stela setup repair", false).unwrap();
+        assert_eq!(named, ["PCI 0000:07:00.0 10ec:8125"]);
+        assert!(skips(&path).is_empty());
+        let log = boot_log::read(&std::fs::read(&path).unwrap()).unwrap();
+        let text = String::from_utf8(log.stream).unwrap();
+        assert!(
+            text.ends_with("HOST DEVICE SKIPS CLEARED by stela setup repair\n"),
+            "{text}"
+        );
+        // Nothing left to clear, and no log at all, write nothing.
+        assert!(
+            clear_device_skips(&path, "stela setup update stela", false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            clear_device_skips(&dir.path().join("none"), "x", false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

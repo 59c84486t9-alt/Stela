@@ -14,6 +14,7 @@
 pub mod acpi;
 pub mod board_flash;
 pub mod boot_log;
+pub mod device_starts;
 pub mod display;
 pub mod failure_record;
 pub mod fat32;

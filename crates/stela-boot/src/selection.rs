@@ -183,6 +183,33 @@ fn whole_disks() -> Result<Vec<WholeDisk>> {
     Ok(disks)
 }
 
+/// The PCI controllers of the whole disks whose serials are among
+/// `serials`, as the firmware's device paths give them: the functions a boot
+/// on those disks cannot continue without.
+pub(crate) fn disk_controllers(serials: &[&str]) -> Vec<stela_drivers::bus::pci::Address> {
+    let Ok(handles) = boot::find_handles::<BlockIO>() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for handle in handles {
+        let Some(io) = block_io(handle) else {
+            continue;
+        };
+        let media = io.media();
+        if media.is_logical_partition() || !media.is_media_present() {
+            continue;
+        }
+        drop(io);
+        let path = device_path(handle).unwrap_or_default();
+        if disk_serial(handle, &path).is_some_and(|serial| serials.contains(&serial.as_str()))
+            && let Some(controller) = crate::pci_io::disk_controller(handle)
+        {
+            found.push(controller.address);
+        }
+    }
+    found
+}
+
 /// The whole disk behind `io` and its GPT.
 fn table(io: ScopedProtocol<BlockIO>) -> Result<(Partition, gpt::Table)> {
     let media = io.media();

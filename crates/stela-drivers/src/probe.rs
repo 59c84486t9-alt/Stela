@@ -1438,8 +1438,18 @@ pub trait Observer {
     /// Once [`Self::first`]'s start has ended, before any other starts.
     fn first_started(&mut self, _devices: &mut Devices) {}
     /// Once a function is named as starting, right before its driver runs,
-    /// between two drivers' calls.
-    fn starting(&mut self, _function: &crate::bus::pci::Identity) {}
+    /// between two drivers' calls: whether its driver runs.
+    fn starting(&mut self, _function: &crate::bus::pci::Identity) -> Start {
+        Start::Run
+    }
+}
+
+/// Whether a function's driver runs, as [`Observer::starting`] decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    Run,
+    /// Left untouched and recorded as not driven, for this reason.
+    Skip(&'static str),
 }
 
 /// No observer.
@@ -1642,7 +1652,10 @@ pub unsafe fn probe_observed(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
-            observer.starting(&function.identity());
+            if let Start::Skip(why) = observer.starting(&function.identity()) {
+                devices.unsupported.push((address, function.class, why));
+                continue;
+            }
             let start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
             #[cfg(feature = "native-acpi")]
             if smbus::matches(&function) {
@@ -3061,8 +3074,13 @@ mod tests {
             fn first_started(&mut self, _: &mut Devices) {
                 self.events.push(("first started", 0xff));
             }
-            fn starting(&mut self, function: &crate::bus::pci::Identity) {
+            fn starting(&mut self, function: &crate::bus::pci::Identity) -> Start {
                 self.events.push(("starting", function.address.device));
+                if function.address.device == 1 {
+                    Start::Skip("skipped here")
+                } else {
+                    Start::Run
+                }
             }
         }
         let mut ecam = alloc::vec![u32::MAX; (1 << 20) / 4];
@@ -3124,7 +3142,7 @@ mod tests {
                 ..Told::default()
             };
             // SAFETY: as above.
-            let _ = unsafe {
+            let result = unsafe {
                 probe_observed(
                     &handoff,
                     PlatformCaptures::default(),
@@ -3136,6 +3154,20 @@ mod tests {
                 )
             };
             assert_eq!(told.events, expected, "{first:?}");
+            // A skipped function is left untouched and recorded as not
+            // driven, and the claim on it is settled by that record.
+            let devices = result;
+            assert!(
+                devices
+                    .unsupported
+                    .iter()
+                    .any(|(at, _, why)| *at == address(1) && *why == "skipped here"),
+                "{first:?}"
+            );
+            assert!(
+                devices.failures.iter().all(|(at, _)| *at != address(1)),
+                "{first:?}"
+            );
         }
     }
 

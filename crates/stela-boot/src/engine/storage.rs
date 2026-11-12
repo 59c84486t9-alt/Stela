@@ -39,7 +39,7 @@ use stela_drivers::{
     probe::{NativeServices, native::usb4, probe_observed},
 };
 use stela_runtime::pc::{
-    failure_record,
+    device_starts, failure_record,
     gpt::{Guid, PartitionDevice},
     machine_state,
     storage::{self, Named, Target},
@@ -744,8 +744,10 @@ impl BlockDevice for HeldLog {
 
 /// The device start's observer: it starts the controller of the disk Stela
 /// started from first, writes on to the USB's log as soon as that disk is
-/// up, and stores the log before each later device's driver runs, so a
-/// device that never ends its start is named on the stick.
+/// up, and stores a [`device_starts::START`] marker on it before each later
+/// device's driver runs, so a device that never ends its start is named on
+/// the stick, and the next boot skips it unless it cannot continue without
+/// it.
 struct Observer {
     /// The controller of the disk Stela started from (`pci_io::disk_location`).
     first: Option<Address>,
@@ -754,10 +756,24 @@ struct Observer {
     root: u64,
     /// Whether the log is written on to from the device start.
     resumed: bool,
+    /// Whether the log said that this boot's starts are not on the USB.
+    told_unrecorded: bool,
+    skips: device_starts::Skips,
+    needs: device_starts::Needed,
 }
 
+/// Why a skipped function is not driven, in the boot's account.
+const SKIPPED: &str = "skipped: it did not finish starting on an earlier boot. Run stela setup \
+                       repair to try it again";
+
 impl Observer {
-    fn new(boot_disk: Option<&str>, log: Option<Guid>, root: u64) -> Self {
+    fn new(
+        boot_disk: Option<&str>,
+        log: Option<Guid>,
+        root: u64,
+        skips: device_starts::Skips,
+        needs: device_starts::Needed,
+    ) -> Self {
         Self {
             first: boot_disk
                 .and_then(|location| location.split(' ').next())
@@ -765,7 +781,23 @@ impl Observer {
             log,
             root,
             resumed: false,
+            told_unrecorded: false,
+            skips,
+            needs,
         }
+    }
+
+    /// Store the log on the USB, when the start writes on to it.
+    fn store(&self) {
+        if self.resumed {
+            between_drivers(output::store_usb_log);
+        }
+    }
+
+    /// Once every function's start has ended.
+    fn finished(&self) {
+        output::arguments(format_args!("{}\n", device_starts::STARTED));
+        self.store();
     }
 }
 
@@ -798,10 +830,39 @@ impl stela_drivers::probe::Observer for Observer {
         });
         self.resumed = between_drivers(|| crate::log_file::resume_quietly(Box::new(log)));
     }
-    fn starting(&mut self, _function: &stela_drivers::bus::pci::Identity) {
-        if self.resumed {
-            between_drivers(output::store_usb_log);
+    fn starting(
+        &mut self,
+        identity: &stela_drivers::bus::pci::Identity,
+    ) -> stela_drivers::probe::Start {
+        let function = device_starts::Function::from(identity);
+        let is_first = self.first == Some(function.address);
+        if !self.resumed && !is_first && !core::mem::replace(&mut self.told_unrecorded, true) {
+            output::arguments(format_args!(
+                "HOST DEVICE STARTS not stored on the USB before each start: a device whose \
+                 start never ends cannot be named for the next boot\n"
+            ));
         }
+        match device_starts::decide(&self.skips, &self.needs, self.first, &function) {
+            device_starts::Decision::Skip => {
+                let line = device_starts::skipped_line(&function);
+                crate::status::info(&line);
+                output::arguments(format_args!(
+                    "HOST DEVICE {line}\n{}\n",
+                    function.line(device_starts::SKIPPED)
+                ));
+                self.store();
+                return stela_drivers::probe::Start::Skip(SKIPPED);
+            }
+            device_starts::Decision::Retry => {
+                let line = device_starts::retried_line(&function);
+                crate::status::info(&line);
+                output::arguments(format_args!("HOST DEVICE {line}\n"));
+            }
+            device_starts::Decision::Start => {}
+        }
+        output::arguments(format_args!("{}\n", function.line(device_starts::START)));
+        self.store();
+        stela_drivers::probe::Start::Run
     }
 }
 
@@ -1172,6 +1233,11 @@ pub struct Selection<'a> {
     /// where a stop the USB's log cannot keep leaves its record
     /// (`failure_record`).
     pub state: Option<&'a Target>,
+    /// The PCI functions an earlier boot did not finish starting, or
+    /// skipped since (`Handoff::device_skips`).
+    pub device_skips: device_starts::Skips,
+    /// The controllers of the disks this boot cannot continue without.
+    pub device_needs: device_starts::Needed,
 }
 
 /// Open the explicitly selected partitions in the loader's identity root
@@ -1206,6 +1272,8 @@ pub unsafe fn open(
         external,
         boot_disk,
         state,
+        device_skips,
+        device_needs,
     } = *selection;
     if let Some(serial) = usb_disks
         .iter()
@@ -1228,7 +1296,7 @@ pub unsafe fn open(
     };
     let firmware =
         super::firmware_requests::Requests::new(stela_drivers::probe::handoff_provider(handoff));
-    let mut observer = Observer::new(boot_disk, log, root);
+    let mut observer = Observer::new(boot_disk, log, root, device_skips, device_needs);
     STARTING_GS.store(this_gs(), Ordering::Release);
     // SAFETY: the loader mapped these ranges uncached and identity-mapped;
     // the observer drives only the log partition its first device brought,
@@ -1244,6 +1312,7 @@ pub unsafe fn open(
             &mut observer,
         )
     };
+    observer.finished();
     STARTING_GS.store(0, Ordering::Release);
     // A log the start already writes on to is not opened again.
     let early_log = observer.resumed;

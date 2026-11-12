@@ -2746,6 +2746,8 @@ fn start_devices(
             let log_partition = handoff.log_partition.map(Guid);
             let usb4_approved = options.usb4_approved.clone();
             let boot_disk = handoff.boot_disk().map(alloc::string::String::from);
+            let device_skips = handoff.device_skips;
+            let device_needs = handoff.device_needs;
             // `--nor` naming the `--storage` partition keeps the machine
             // state in its tail, where a failed start leaves its record.
             let owned_state = options
@@ -2786,6 +2788,8 @@ fn start_devices(
                             external,
                             boot_disk: boot_disk.as_deref(),
                             state: owned_state.as_ref(),
+                            device_skips,
+                            device_needs,
                         },
                     )
                 }
