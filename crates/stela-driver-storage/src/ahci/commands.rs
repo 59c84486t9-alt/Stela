@@ -517,7 +517,13 @@ impl AhciDisk {
                 .write(RECEIVED_SDB, FIS_REGISTER_HOST_TO_DEVICE);
             fence(Ordering::SeqCst);
         }
-        let interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
+        let mut interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
+        // ahci_handle_port_interrupt: a PhyRdy change LPM explains is
+        // dropped and its SError bit cleared, which clears PRCS.
+        if interrupts & INTERRUPT_PHY_READY_CHANGE != 0 && self.ignore_phy_events() {
+            interrupts &= !INTERRUPT_PHY_READY_CHANGE;
+            port.write32(PORT_SATA_ERROR, SERROR_PHY_READY_CHANGE);
+        }
         let running = port.read32(active);
         fence(Ordering::SeqCst);
         let slots = launched
@@ -540,7 +546,9 @@ impl AhciDisk {
         port.write32(PORT_SATA_ERROR, serror);
         port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
         let timed_out = interrupts == 0;
-        let mut failure = classify(interrupts, serror, port.read32(PORT_TASK_FILE), timed_out);
+        let lpm = self.lpm.policy > LPM_MAX_POWER;
+        let task_file = port.read32(PORT_TASK_FILE);
+        let mut failure = classify(interrupts, serror, task_file, timed_out, lpm);
         // ahci_qc_fill_rtf, before error handling issues anything else: the
         // Set Device Bits FIS for a queued command, else the last D2H FIS.
         let fis = if queued { RECEIVED_SDB } else { RECEIVED_D2H };

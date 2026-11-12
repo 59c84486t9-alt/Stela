@@ -561,7 +561,8 @@ impl AhciDisk {
         if lpm.dipm {
             dipm(self, FEATURE_SATA_DISABLE)?;
         }
-        // sata_link_scr_lpm; the port's PhyRdy interrupt is already masked.
+        // sata_link_scr_lpm. Linux masks the port's PhyRdy interrupt
+        // first; a look drops PRCS by the policy instead.
         let scr_lpm = || {
             let mut control = port.read32(PORT_SATA_CONTROL);
             if policy == LPM_MAX_POWER {
@@ -630,6 +631,7 @@ impl AhciDisk {
             self.lpm.policy = old;
             return Err(error);
         }
+        self.lpm.changed = self.clock.try_start().ok();
         Ok(())
     }
 

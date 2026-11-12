@@ -408,6 +408,9 @@ const LPM_MAX_POWER: u8 = 1;
 const LPM_MED_POWER_WITH_DIPM: u8 = 3;
 /// `ahci_set_lpm`'s wait for the interface to leave a low-power state.
 const LPM_WAKE_US: u64 = 10_000;
+/// `ATA_TMOUT_SPURIOUS_PHY`: how long after an LPM policy change a PhyRdy
+/// change may be the change's own.
+const SPURIOUS_PHY_US: u64 = 10_000_000;
 /// The highest sense key REQUEST SENSE DATA EXT may report.
 const SENSE_COMPLETED: u8 = 0x0f;
 
@@ -686,6 +689,9 @@ struct Lpm {
     dipm: bool,
     /// `ATA_QUIRK_NOLPM`: the device's LPM is broken; max_power is forced.
     broken: bool,
+    /// `link->last_lpm_change` with `ATA_LFLAG_CHANGED`: the clock when a
+    /// policy was last applied.
+    changed: Option<u64>,
 }
 
 impl Lpm {
@@ -1090,8 +1096,10 @@ fn translate_error(status: u8, error: u8) -> Sense {
 }
 
 /// Linux `ahci_error_intr`, `ata_eh_analyze_serror` and `ata_eh_analyze_tf`
-/// for a single non-NCQ command on a port without a multiplier.
-fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Failure {
+/// for a single non-NCQ command on a port without a multiplier. With `lpm`
+/// (`link->lpm_policy > ATA_LPM_MAX_POWER`) SError's PhyRdy and exchange
+/// bits are no hotplug: the link's own power transitions set them.
+fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool, lpm: bool) -> Failure {
     let mut mask = 0;
     let mut reset = false;
     let mut hotplug = false;
@@ -1110,8 +1118,13 @@ fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Fa
         mask |= ERR_ATA_BUS;
         reset = true;
     }
+    let hotplug_serror = if lpm {
+        0
+    } else {
+        SERROR_PHY_READY_CHANGE | SERROR_DEVICE_EXCHANGED
+    };
     if interrupts & (INTERRUPT_CONNECT_CHANGE | INTERRUPT_PHY_READY_CHANGE) != 0
-        || serror & (SERROR_PHY_READY_CHANGE | SERROR_DEVICE_EXCHANGED) != 0
+        || serror & hotplug_serror != 0
     {
         hotplug = true;
     }
@@ -1519,6 +1532,19 @@ fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
 }
 
 impl AhciDisk {
+    /// Linux `sata_lpm_ignore_phy_events`: a PhyRdy change means nothing
+    /// while LPM is on, nor in the first [`SPURIOUS_PHY_US`] after a policy
+    /// change. This driver polls PxIS, which latches PRCS whatever PxIE
+    /// masks, so a look drops it here as Linux's interrupt handler does.
+    fn ignore_phy_events(&self) -> bool {
+        self.lpm.policy > LPM_MAX_POWER
+            || self.lpm.changed.is_some_and(|at| {
+                self.clock
+                    .try_elapsed_us(at)
+                    .is_ok_and(|elapsed| elapsed < SPURIOUS_PHY_US)
+            })
+    }
+
     fn ready(&self) -> Result<(), BlockError> {
         self.minimum.ready()?;
         self.fault.clone().map_or(Ok(()), Err)

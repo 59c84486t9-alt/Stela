@@ -413,7 +413,13 @@ impl AhciDisk {
             named: Some(tag),
             result: [status, error],
             sense,
-            ..classify(failure.interrupts, failure.serror, task_file, false)
+            ..classify(
+                failure.interrupts,
+                failure.serror,
+                task_file,
+                false,
+                self.lpm.policy > LPM_MAX_POWER,
+            )
         };
         Ok(true)
     }

@@ -68,6 +68,12 @@ enum Fault {
     Gone,
     /// The command completes.
     Complete,
+    /// The command completes, and PhyRdy changed meanwhile, as a link power
+    /// transition sets it: PRCS with SError N and W.
+    PhyEvent,
+    /// PhyRdy changes during the command, which never completes; the link
+    /// stays up.
+    Flap,
 }
 
 /// A port and link that answer engine, COMRESET and command register
@@ -84,6 +90,8 @@ struct Link {
 }
 
 const READY: u32 = 0x50;
+/// SError DIAG.W, which a link waking from Partial or Slumber sets.
+const SERROR_COMM_WAKE: u32 = 1 << 18;
 
 impl Link {
     fn new(faults: &[Fault]) -> Self {
@@ -124,7 +132,15 @@ impl CommandPort for Link {
         self.writes.borrow_mut().push((offset, value));
         let mut registers = self.registers.borrow_mut();
         match offset {
-            PORT_INTERRUPTS | PORT_SATA_ERROR => registers[offset / 4] &= !value,
+            PORT_INTERRUPTS | PORT_SATA_ERROR => {
+                registers[offset / 4] &= !value;
+                // PxIS.PRCS reflects SError's N bit: only clearing N
+                // clears it.
+                registers[PORT_INTERRUPTS / 4] &= !INTERRUPT_PHY_READY_CHANGE;
+                if registers[PORT_SATA_ERROR / 4] & SERROR_PHY_READY_CHANGE != 0 {
+                    registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
+                }
+            }
             PORT_SATA_ACTIVE => registers[offset / 4] |= value,
             PORT_COMMAND => {
                 let mut command = value & !(COMMAND_LIST_RUNNING | COMMAND_FIS_RUNNING);
@@ -172,6 +188,13 @@ impl CommandPort for Link {
                         registers[PORT_TASK_FILE / 4] = READY;
                         registers[PORT_SATA_ACTIVE / 4] &= !value;
                     }
+                    Some(Fault::PhyEvent) => {
+                        registers[PORT_TASK_FILE / 4] = READY;
+                        registers[PORT_SATA_ACTIVE / 4] &= !value;
+                        registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
+                        registers[PORT_SATA_ERROR / 4] |=
+                            SERROR_PHY_READY_CHANGE | SERROR_COMM_WAKE;
+                    }
                     Some(fault) => {
                         registers[PORT_ISSUE / 4] |= value;
                         match fault {
@@ -184,7 +207,12 @@ impl CommandPort for Link {
                                 registers[PORT_INTERRUPTS / 4] |= INTERRUPT_INTERFACE_FATAL;
                                 registers[PORT_SATA_ERROR / 4] |= SERROR_DATA;
                             }
-                            Fault::Complete => unreachable!(),
+                            Fault::Complete | Fault::PhyEvent => unreachable!(),
+                            Fault::Flap => {
+                                registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
+                                registers[PORT_SATA_ERROR / 4] |=
+                                    SERROR_PHY_READY_CHANGE | SERROR_COMM_WAKE;
+                            }
                             Fault::Gone => {
                                 self.present.set(false);
                                 registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
@@ -361,6 +389,7 @@ mod lifecycle;
 mod links;
 mod minimum_timing;
 mod modes;
+mod phy_events;
 mod power;
 mod queue;
 mod recovery;
