@@ -174,12 +174,16 @@ impl<L: Link, C: Clock> Stack<L, C> {
     /// and a router advertisement; DNS also accepts RFC8106 RDNSS lifetimes.
     /// Stateful DHCPv6 is not implemented.
     pub fn automatic(&mut self) -> Result<Automatic, NetError> {
-        let start = self.now()?;
-        while !self.phy.link.carrier() {
-            if self.now()?.wrapping_sub(start) >= CARRIER_WAIT_US {
-                return Err(NetError::NoCarrier);
-            }
-        }
+        self.automatic_waiting(|_| {})
+    }
+
+    /// [`Self::automatic`], telling `waiting` each whole second it has
+    /// waited for the link's carrier so far.
+    pub fn automatic_waiting(
+        &mut self,
+        mut waiting: impl FnMut(u64),
+    ) -> Result<Automatic, NetError> {
+        self.await_carrier(&mut waiting)?;
         let deadline = self.now()?.saturating_add(DHCP_WAIT_US);
         loop {
             self.poll()?;
@@ -375,6 +379,69 @@ pub(super) mod tests {
         stack.probe_ipv6().unwrap();
         assert_eq!(stack.phy.approved_ipv6, [stack.phy.local_ipv6]);
         assert_eq!(stack.phy.link.transmissions, 1);
+    }
+    /// A link whose carrier comes up at `up_us` on a clock that advances
+    /// 10 ms per reading, and that may take `wait_us` to bring it up.
+    struct LateCarrier {
+        now: alloc::rc::Rc<core::cell::Cell<u64>>,
+        up_us: u64,
+        wait_us: u64,
+    }
+    impl Link for LateCarrier {
+        fn mac(&self) -> stela_drivers::net::Mac {
+            stela_drivers::net::Mac([2, 0, 0, 0, 0, 2])
+        }
+        fn carrier(&mut self) -> bool {
+            self.now.get() >= self.up_us
+        }
+        fn carrier_wait_us(&self) -> u64 {
+            self.wait_us
+        }
+        fn transmit(&mut self, _: &[u8]) -> Result<(), LinkError> {
+            Ok(())
+        }
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+            Ok(None)
+        }
+    }
+    struct SharedStep(alloc::rc::Rc<core::cell::Cell<u64>>);
+    impl Clock for SharedStep {
+        fn now_us(&self) -> Result<u64, ClockError> {
+            let now = self.0.get() + 10_000;
+            self.0.set(now);
+            Ok(now)
+        }
+    }
+    fn late_carrier(up_us: u64, wait_us: u64) -> (Result<(), NetError>, Vec<u64>, u64) {
+        let now = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        let link = LateCarrier {
+            now: now.clone(),
+            up_us,
+            wait_us,
+        };
+        let mut stack = Stack::new(link, SharedStep(now.clone()), 7).unwrap();
+        let start = now.get();
+        let mut seconds = Vec::new();
+        let result = stack.await_carrier(&mut |second| seconds.push(second));
+        (result, seconds, now.get() - start)
+    }
+    #[test]
+    fn a_wired_link_gets_ten_seconds_for_carrier_and_is_taken_when_it_comes() {
+        // A 10GBASE-T link up after 7 s is used at once, each second told.
+        let (result, seconds, elapsed) =
+            late_carrier(7_000_000, stela_drivers::net::WIRED_CARRIER_WAIT_US);
+        assert_eq!(result, Ok(()));
+        assert_eq!(seconds, [1, 2, 3, 4, 5, 6]);
+        assert!(elapsed < 7_000_000, "{elapsed}");
+        // No cable: no carrier after the link's whole wait, never sooner.
+        let (result, seconds, elapsed) = late_carrier(u64::MAX, 10_000_000);
+        assert_eq!(result, Err(NetError::NoCarrier));
+        assert_eq!(seconds.last(), Some(&9));
+        assert!((10_000_000..10_100_000).contains(&elapsed), "{elapsed}");
+        // A link that says it needs longer (Wi-Fi) is waited for longer.
+        let (result, _, elapsed) = late_carrier(30_000_000, 45_000_000);
+        assert_eq!(result, Ok(()));
+        assert!((29_000_000..30_000_000).contains(&elapsed), "{elapsed}");
     }
     #[test]
     fn addresses_and_servers_set_by_hand_replace_dhcp_and_advertised_dns() {

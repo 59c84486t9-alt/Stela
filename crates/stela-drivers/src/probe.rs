@@ -345,6 +345,26 @@ impl Link for Adapter {
             Self::RealtekWifi(device) => device.carrier(),
         }
     }
+    fn carrier_wait_us(&self) -> u64 {
+        match self {
+            Self::Virtio(device) => device.carrier_wait_us(),
+            Self::Igc(device) => device.carrier_wait_us(),
+            Self::E1000e(device) => device.carrier_wait_us(),
+            Self::Pch(device) => device.carrier_wait_us(),
+            Self::Igb(device) => device.carrier_wait_us(),
+            Self::Alx(device) => device.carrier_wait_us(),
+            Self::Atl1c(device) => device.carrier_wait_us(),
+            Self::Realtek(device) => device.carrier_wait_us(),
+            Self::Usb(device) => device.carrier_wait_us(),
+            Self::UsbVendor(device) => device.carrier_wait_us(),
+            Self::Tg3(device) => device.carrier_wait_us(),
+            Self::Aqtion(device) => device.carrier_wait_us(),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.carrier_wait_us(),
+            Self::MediatekWifi(device) => device.carrier_wait_us(),
+            Self::RealtekWifi(device) => device.carrier_wait_us(),
+        }
+    }
     fn signals(&self) -> bool {
         match self {
             Self::Virtio(device) => device.signals(),

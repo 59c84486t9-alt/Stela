@@ -48,6 +48,9 @@ impl<L: Link> Link for Located<L> {
     fn carrier(&mut self) -> bool {
         self.link.carrier()
     }
+    fn carrier_wait_us(&self) -> u64 {
+        self.link.carrier_wait_us()
+    }
     fn signals(&self) -> bool {
         self.link.signals()
     }

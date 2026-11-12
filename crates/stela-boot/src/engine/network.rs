@@ -123,6 +123,9 @@ impl Link for RootLink {
     fn signals(&self) -> bool {
         self.device.signals()
     }
+    fn carrier_wait_us(&self) -> u64 {
+        self.device.carrier_wait_us()
+    }
     fn due_us(&self) -> Option<u64> {
         self.device.due_us()
     }
@@ -204,7 +207,12 @@ impl HostNetwork {
                     .set_dns(&options.dns)
                     .map_err(|error| refuse!("host network --dns: {error}", %error))?;
             }
-            match stack.automatic() {
+            let waiting = |seconds: u64| {
+                crate::status::progress(&format!(
+                    "adapter {location}: waiting for the link, {seconds} s"
+                ));
+            };
+            match stack.automatic_waiting(waiting) {
                 Ok(config) => {
                     output::arguments(format_args!("NETWORK driver={driver}\n"));
                     output::arguments(format_args!(

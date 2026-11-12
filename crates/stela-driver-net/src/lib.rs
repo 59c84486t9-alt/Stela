@@ -85,6 +85,11 @@ pub enum LinkError {
     NoCarrier,
 }
 
+/// How long a wired link may take from its start to carrier: copper
+/// autonegotiation after a PHY reset or power-up, about 3 s at 1000BASE-T
+/// and up to 5-7 s at 2.5G/5G/10GBASE-T, with margin.
+pub const WIRED_CARRIER_WAIT_US: u64 = 10_000_000;
+
 /// A raw Ethernet II link: whole frames without the FCS.
 pub trait Link {
     /// The adapter's station address, which the stack sends from.
@@ -92,6 +97,12 @@ pub trait Link {
     /// Whether the adapter reports carrier; `true` when it cannot tell.
     fn carrier(&mut self) -> bool {
         true
+    }
+    /// How long after its start the link may take to report carrier before
+    /// a missing one means no cable or no network. Links that need longer
+    /// than a wired PHY (Wi-Fi scan, authentication and key exchange) say so.
+    fn carrier_wait_us(&self) -> u64 {
+        WIRED_CARRIER_WAIT_US
     }
     /// Queues one frame (14-byte header and payload, at most 1514 bytes).
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError>;

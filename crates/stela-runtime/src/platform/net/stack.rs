@@ -31,9 +31,6 @@ pub struct Config {
     pub dns: Vec<Ipv4>,
 }
 
-/// Autonegotiation after an adapter reset: about 3 s for 2.5GBASE-T,
-/// doubled.
-const CARRIER_WAIT_US: u64 = 6_000_000;
 /// smoltcp's DHCP client retries within this.
 const DHCP_WAIT_US: u64 = 30_000_000;
 /// smoltcp's resolver retries each server within this.
@@ -463,15 +460,31 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(())
     }
 
+    /// Waits for carrier as long as the link may take to bring it up
+    /// ([`Link::carrier_wait_us`]), returning as soon as it is up.
+    /// `waiting` hears each whole second waited so far.
+    fn await_carrier(&mut self, waiting: &mut dyn FnMut(u64)) -> Result<(), NetError> {
+        let start = self.now()?;
+        let limit = self.phy.link.carrier_wait_us();
+        let mut reported = 0;
+        while !self.phy.link.carrier() {
+            let elapsed = self.now()?.saturating_sub(start);
+            if elapsed >= limit {
+                return Err(NetError::NoCarrier);
+            }
+            let seconds = elapsed / 1_000_000;
+            if seconds > reported {
+                reported = seconds;
+                waiting(seconds);
+            }
+        }
+        Ok(())
+    }
+
     /// Waits for carrier and, without a configuration by hand, a DHCP
     /// lease.
     pub fn dhcp(&mut self) -> Result<&Config, NetError> {
-        let start = self.now()?;
-        while !self.phy.link.carrier() {
-            if self.now()? >= start + CARRIER_WAIT_US {
-                return Err(NetError::NoCarrier);
-            }
-        }
+        self.await_carrier(&mut |_| {})?;
         let deadline = self.now()? + DHCP_WAIT_US;
         while self.config.is_none() {
             if self.dhcp.is_none() {
