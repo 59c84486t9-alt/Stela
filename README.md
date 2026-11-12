@@ -75,7 +75,8 @@ sudo ./stela setup boot-log --output log.txt
 ## Build
 
 You need [Rust](https://rustup.rs), git, Python 3.10 or newer, and LLVM 21,
-22 or 23 with Clang, LLD and libclang.
+22 or 23 with Clang, LLD and libclang. On macOS, Xcode's Apple clang 21 or
+newer also works.
 
 ```sh
 git clone https://github.com/tylertms/Stela

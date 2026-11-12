@@ -6,10 +6,11 @@
 //! `CLANG` names the compiler. Otherwise the newest supported Clang among
 //! the versioned installs (`/usr/lib/llvm-NN`, `/usr/lib/llvmNN`,
 //! `/usr/lib64/llvmNN`, Homebrew's `llvm@NN`) and `clang`/`clang-NN` on PATH
-//! is chosen. The linker, archiver and symbol lister come from the same
-//! install when it has them, else from the active Rust toolchain's
-//! `llvm-tools`, else from PATH; each must be at least the compiler's
-//! version. The nested Cargo builds get the choice through `CLANG`, so every
+//! is chosen. Xcode's Apple clang counts by its own release number, and
+//! LLVM's Clang goes first of the same number. The linker, archiver and
+//! symbol lister come from the same install when it has them, else from the
+//! active Rust toolchain's `llvm-tools`, else from PATH; each must be at
+//! least the compiler's version. The nested Cargo builds get the choice through `CLANG`, so every
 //! build script compiles with the same Clang.
 use anyhow::{Result, bail};
 use std::{
@@ -62,12 +63,9 @@ impl fmt::Display for Version {
 }
 
 /// The release a tool's `--version` reports on its first line that names
-/// one: `clang version 21.1.8`, `LLD 21.1.8`, `LLVM version 21.1.8`. Apple's
-/// Clang numbers its releases apart from LLVM's, so it reports none.
+/// one: `clang version 21.1.8`, `LLD 21.1.8`, `LLVM version 21.1.8`, and
+/// Apple's `Apple clang version 21.0.0`, which numbers its own releases.
 pub fn version(report: &str) -> Option<Version> {
-    if report.contains("Apple") {
-        return None;
-    }
     let number = report.lines().find_map(|line| {
         let words: Vec<&str> = line.split_whitespace().collect();
         words
@@ -100,14 +98,20 @@ pub trait Host {
     /// The active Rust toolchain's `llvm-tools` directory and its LLVM
     /// release.
     fn rust_tools(&self) -> Option<(PathBuf, Version)>;
+    /// What `clang -print-resource-dir` prints: its built-in headers'
+    /// directory, under the library directory of its own install.
+    fn resource_dir(&self, clang: &Path) -> Option<PathBuf>;
 }
 
 /// A compiler found, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub clang: PathBuf,
-    /// `None` for a Clang that reports no LLVM release.
+    /// `None` for a Clang that reports no release.
     pub version: Option<Version>,
+    /// Apple's Clang, whose release numbers are Xcode's: Apple clang 21 is
+    /// what libc++ of the pinned LLVM accepts as its oldest, as LLVM's 21.
+    pub apple: bool,
 }
 
 /// The tools of one LLVM.
@@ -221,6 +225,7 @@ pub fn candidates(host: &dyn Host) -> Vec<Found> {
                 found.push(Found {
                     clang,
                     version: None,
+                    apple: false,
                 });
             }
             continue;
@@ -230,8 +235,12 @@ pub fn candidates(host: &dyn Host) -> Vec<Found> {
             continue;
         }
         seen.push(canonical);
-        let version = host.version_report(&clang).as_deref().and_then(version);
-        found.push(Found { clang, version });
+        let report = host.version_report(&clang).unwrap_or_default();
+        found.push(Found {
+            clang,
+            version: version(&report),
+            apple: report.contains("Apple"),
+        });
     }
     found
 }
@@ -251,13 +260,15 @@ fn range() -> String {
     format!("{} to {}", SUPPORTED.start(), SUPPORTED.end())
 }
 
-/// The newest supported Clang of `found`, the first of equals.
+/// The newest supported Clang of `found`: LLVM's before Apple's of the same
+/// release, else the first of equals.
 fn newest(found: &[Found]) -> Option<&Found> {
+    let rank = |f: &Found| (f.version, !f.apple);
     found
         .iter()
         .filter(|f| f.version.is_some_and(|v| SUPPORTED.contains(&v.major)))
         .fold(None, |best: Option<&Found>, f| match best {
-            Some(best) if best.version.cmp(&f.version) != Ordering::Less => Some(best),
+            Some(best) if rank(best).cmp(&rank(f)) != Ordering::Less => Some(best),
             _ => Some(f),
         })
 }
@@ -336,7 +347,12 @@ pub fn select(host: &dyn Host) -> Result<Toolset, Problems> {
         }
     }
 
-    let libclang = libclang(host, &real_directory, version);
+    // The install's library directory, which the built-in headers are in:
+    // the one way to it from Xcode's `/usr/bin/clang`, a launcher.
+    let library = host
+        .resource_dir(&clang)
+        .and_then(|resource| Some(resource.parent()?.parent()?.to_path_buf()));
+    let libclang = libclang(host, &real_directory, library.as_deref(), version);
     let libclang = match libclang {
         Ok(path) => Some(path),
         Err(problem) => {
@@ -366,12 +382,12 @@ fn no_compiler(found: &[Found], explicit: bool) -> String {
     let listed: Vec<String> = found
         .iter()
         .map(|f| match f.version {
+            Some(version) if f.apple => {
+                format!("Apple clang {version} ({})", f.clang.display())
+            }
             Some(version) => format!("Clang {version} ({})", f.clang.display()),
-            None if explicit => format!(
-                "{} (missing, or reports no LLVM release)",
-                f.clang.display()
-            ),
-            None => format!("{} (Apple's or an unknown Clang)", f.clang.display()),
+            None if explicit => format!("{} (missing, or reports no release)", f.clang.display()),
+            None => format!("{} (an unknown Clang)", f.clang.display()),
         })
         .collect();
     let found = if listed.is_empty() {
@@ -421,7 +437,12 @@ fn is_libclang(name: &str) -> bool {
 /// The libclang of Clang `version`: `LIBCLANG_PATH`'s when it is set (a file
 /// or a directory), else its install's, else a distribution directory's
 /// with the same major.
-fn libclang(host: &dyn Host, clang_directory: &Path, version: Version) -> Result<PathBuf, String> {
+fn libclang(
+    host: &dyn Host,
+    clang_directory: &Path,
+    library: Option<&Path>,
+    version: Version,
+) -> Result<PathBuf, String> {
     let matches = |path: &Path, in_install: bool| -> bool {
         let name = host
             .canonical(path)
@@ -463,12 +484,16 @@ fn libclang(host: &dyn Host, clang_directory: &Path, version: Version) -> Result
         });
     }
     let prefix = clang_directory.parent().unwrap_or(Path::new(""));
-    [
-        prefix.join("lib"),
-        prefix.join("lib64"),
-        clang_directory.to_path_buf(),
-    ]
-    .iter()
+    library
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain([
+            prefix.join("lib"),
+            prefix.join("lib64"),
+            clang_directory.to_path_buf(),
+        ])
+        .collect::<Vec<_>>()
+        .iter()
     .find_map(|directory| search(directory, true))
     .or_else(|| {
         LIBRARY_DIRECTORIES
@@ -521,6 +546,15 @@ impl Host for System {
             .status
             .success()
             .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn resource_dir(&self, clang: &Path) -> Option<PathBuf> {
+        let output = Command::new(clang)
+            .arg("-print-resource-dir")
+            .output()
+            .ok()?;
+        let text = String::from_utf8(output.stdout).ok()?;
+        (output.status.success() && !text.trim().is_empty()).then(|| PathBuf::from(text.trim()))
     }
 
     fn rust_tools(&self) -> Option<(PathBuf, Version)> {

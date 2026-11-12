@@ -10,6 +10,7 @@ struct Fake {
     vars: BTreeMap<&'static str, String>,
     path: Vec<PathBuf>,
     rust: Option<(PathBuf, Version)>,
+    resources: BTreeMap<PathBuf, PathBuf>,
 }
 
 impl Fake {
@@ -90,6 +91,9 @@ impl Host for Fake {
     fn rust_tools(&self) -> Option<(PathBuf, Version)> {
         self.rust.clone()
     }
+    fn resource_dir(&self, clang: &Path) -> Option<PathBuf> {
+        self.resources.get(clang).cloned()
+    }
 }
 
 fn path(text: &str) -> PathBuf {
@@ -116,7 +120,10 @@ fn versions_from_tool_reports() {
         v("llvm-nm, compatible with GNU nm\nUbuntu LLVM version 21.1.8\n").as_deref(),
         Some("21.1.8")
     );
-    assert_eq!(v("Apple clang version 17.0.0 (clang-1700.0.13.5)"), None);
+    assert_eq!(
+        v("Apple clang version 21.0.0 (clang-2100.3.34.2)").as_deref(),
+        Some("21.0.0")
+    );
     assert_eq!(v("clang version 22.0.0git").as_deref(), Some("22.0.0"));
     assert_eq!(v(""), None);
 }
@@ -209,7 +216,10 @@ fn too_old_and_apple_compilers_are_named() {
         "Apple clang version 17.0.0 (clang-1700.0.13.5)",
     );
     let problems = select(&host).unwrap_err().to_string();
-    assert!(problems.contains("/usr/bin/clang (Apple's"), "{problems}");
+    assert!(
+        problems.contains("Apple clang 17.0.0 (/usr/bin/clang)"),
+        "{problems}"
+    );
     let host = Fake::new(&["/usr/bin"]).llvm("/usr/bin", 18);
     let problems = select(&host).unwrap_err().to_string();
     assert!(problems.contains("found Clang 18.1.8"), "{problems}");
@@ -335,9 +345,9 @@ fn identity_names_every_tool() {
     }
 }
 
-/// macOS: Xcode's Clang is Apple's, numbered apart from LLVM, so Homebrew's
-/// LLVM is chosen, with its libclang; Homebrew keeps LLD apart, so the
-/// linker comes from the Rust toolchain.
+/// macOS: an Apple clang older than 21 is passed over for Homebrew's LLVM,
+/// with its libclang; Homebrew keeps LLD apart, so the linker comes from
+/// the Rust toolchain.
 #[test]
 fn macos_passes_over_xcode_for_homebrew() {
     let mut host = Fake::new(&["/usr/bin", "/opt/homebrew/bin"])
@@ -378,5 +388,42 @@ fn macos_passes_over_xcode_for_homebrew() {
     assert_eq!(
         toolset.libclang,
         path("/opt/homebrew/opt/llvm/lib/libclang.dylib")
+    );
+}
+
+/// macOS with the Command Line Tools alone: Apple clang 21, whose
+/// `/usr/bin/clang` is a launcher, so its libclang is found through its
+/// built-in headers' directory; the linker, archiver and symbol lister are
+/// the Rust toolchain's.
+#[test]
+fn macos_command_line_tools_alone() {
+    let tools = "/Library/Developer/CommandLineTools/usr";
+    let report = "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin";
+    let mut host = Fake::new(&["/usr/bin"])
+        .tool("/usr/bin/clang", report)
+        .tool("/usr/bin/clang++", report)
+        .file(&format!("{tools}/lib/libclang.dylib"))
+        .file("/rust/bin/gcc-ld/ld.lld")
+        .file("/rust/bin/llvm-ar")
+        .file("/rust/bin/llvm-nm");
+    host.resources.insert(
+        path("/usr/bin/clang"),
+        path(&format!("{tools}/lib/clang/21")),
+    );
+    host.rust = Some((
+        path("/rust/bin"),
+        Version {
+            major: 23,
+            minor: 1,
+            patch: 1,
+        },
+    ));
+    let toolset = select(&host).unwrap();
+    assert_eq!(toolset.clang, path("/usr/bin/clang"));
+    assert_eq!(toolset.linker, path("/rust/bin/gcc-ld/ld.lld"));
+    assert_eq!(toolset.archiver, path("/rust/bin/llvm-ar"));
+    assert_eq!(
+        toolset.libclang,
+        path(&format!("{tools}/lib/libclang.dylib"))
     );
 }
