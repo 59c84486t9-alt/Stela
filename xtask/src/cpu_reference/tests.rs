@@ -12,7 +12,10 @@ fn every_case_is_recorded() {
 
 /// The regression check: every case through Stela gives the outcome
 /// recorded on the Mac, except the known differences, which still differ.
+/// Stela runs the cases in exact guest mappings, which only an x86-64 Linux
+/// or macOS host has.
 #[test]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 fn stela_matches_the_recorded_mac() {
     let table = recorded().unwrap();
     let cases = corpus::all();
