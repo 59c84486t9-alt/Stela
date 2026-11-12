@@ -415,3 +415,57 @@ fn real_poststore_failure_keeps_prefix_count_and_generic_veto() {
     core::mem::forget(parked);
     core::mem::forget(retention);
 }
+
+/// The owner's hard-wired seal over a Bus Master bit that reads clear
+/// makes no write and seals it as clear: no later write may set it.
+#[test]
+fn a_hardwired_seal_of_a_clear_bus_master_seals_it_as_clear() {
+    use crate::bus::pci::requester::containment::MasterSeal;
+    let address = test_support::ADDRESS;
+    let span = PhysicalSpan::new(test_support::physical(address), 4096).unwrap();
+    let (source, authority, _counters) = test_support::unmapped(
+        address,
+        test_support::window(address),
+        span,
+        CacheAttribute::Uncached,
+    );
+    let prepared = UnpublishedConfig::prepare(source.into_prepublication());
+    let mapping = authority
+        .map(
+            prepared.configuration_resource().clone(),
+            0,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+        .unwrap();
+    let mut config = prepared
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("attach"));
+    config.seal_hardwired_bus_master(0x0402).unwrap();
+    assert_eq!(config.try_read16(4), Ok(0));
+    assert_eq!(
+        config.try_write16(4, 0x0006),
+        Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed))
+    );
+    // SAFETY: this isolated model has one source and no other map users.
+    let prepared = unsafe { config.park() }.unwrap_or_else(|_| panic!("park"));
+    let mapping = authority
+        .map(
+            prepared.configuration_resource().clone(),
+            0,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+        .unwrap();
+    let config = prepared
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("reattach"));
+    // SAFETY: the same fixture owns the original resource and completed all
+    // old accesses. The source's own checked model transition runs here.
+    let config = unsafe { config.promote(test_support::FixtureCustody::finish_promotion) }
+        .unwrap_or_else(|_| panic!("promotion"));
+    // SAFETY: all synchronous isolated access ended.
+    unsafe { test_support::retire_owned(config) }.unwrap();
+}

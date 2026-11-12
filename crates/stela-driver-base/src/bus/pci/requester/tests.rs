@@ -17,6 +17,10 @@ struct Config {
     last_read: Cell<u16>,
     /// COMMAND bits that ignore writes, as hardwired bits do.
     command_fixed: u16,
+    /// Bus Master is sealed: a COMMAND write that sets it is refused.
+    master_sealed: bool,
+    /// Each COMMAND value written, in order.
+    command_writes: alloc::vec::Vec<u16>,
 }
 impl ConfigSpace for Config {
     fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
@@ -27,7 +31,16 @@ impl ConfigSpace for Config {
     }
     fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let index = usize::from(offset / 4);
+        if self.master_sealed
+            && index == usize::from(regs::COMMAND / 4)
+            && value & u32::from(regs::COMMAND_MASTER) != 0
+        {
+            return Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::BusMasterSealed,
+            ));
+        }
         let fixed = if index == usize::from(regs::COMMAND / 4) {
+            self.command_writes.push(value as u16);
             u32::from(self.command_fixed)
         } else {
             0
@@ -56,6 +69,29 @@ impl ConfigSpace for Config {
         self.write32(offset & !3, word)
     }
 }
+/// The configuration owner's seal, as `UnpublishedConfig` keeps it.
+impl containment::MasterSeal for Config {
+    fn seal_bus_master(&mut self) -> Result<(), crate::bus::pci::ConfigError> {
+        if self.read16(regs::COMMAND)? & regs::COMMAND_MASTER != 0 {
+            return Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::BusMasterSealed,
+            ));
+        }
+        self.master_sealed = true;
+        Ok(())
+    }
+    fn seal_hardwired_bus_master(
+        &mut self,
+        disabled: u16,
+    ) -> Result<(), crate::bus::pci::ConfigError> {
+        if containment::hardwired_master(self, disabled)? {
+            self.master_sealed = true;
+            Ok(())
+        } else {
+            containment::MasterSeal::seal_bus_master(self)
+        }
+    }
+}
 fn configure<C: ConfigSpace>(config: &mut C) {
     config.write32(0, 0x2c05_10de).unwrap();
     config.write32(8, 0x0300_0000).unwrap();
@@ -70,6 +106,8 @@ fn endpoint() -> Function<Config> {
         words: [0; 1024],
         last_read: Cell::new(0),
         command_fixed: 0,
+        master_sealed: false,
+        command_writes: alloc::vec::Vec::new(),
     };
     configure(&mut config);
     Function::new(ADDRESS, config).unwrap()
@@ -770,38 +808,88 @@ fn containment_accepts_a_hardwired_clear_command_without_an_interrupt_pin() {
     assert_eq!(plan.check_disabled(|offset| config.read16(offset)), Ok(()));
 }
 
-#[test]
-fn containment_leaves_a_host_bridges_hardwired_command_as_found() {
-    use crate::bus::pci::ConfigEffect;
-
-    // An Intel host bridge: class 0600, no INTx pin, Bus Master and Memory
-    // Space read-only set.
+/// A function as the host bridge census reads it: class 0600, no INTx pin,
+/// `command` as firmware left it, and `fixed` COMMAND bits hard-wired.
+fn host_bridge(command: u16, fixed: u16) -> Function<Config> {
     let mut function = endpoint();
     let config = function.config();
     config.write32(8, 0x0600_0000).unwrap();
     config.write8(regs::INTERRUPT_PIN, 0).unwrap();
-    config.write16(regs::COMMAND, 0x0006).unwrap();
-    config.command_fixed = u16::MAX;
+    config.write16(regs::COMMAND, command).unwrap();
+    config.command_fixed = fixed;
+    function
+}
+
+/// The containment acknowledge path: census, stop, then seal.
+fn contain(config: &mut Config, root_bus: bool) -> Result<(), crate::bus::pci::ConfigError> {
+    let plan = containment_plan_on(config, root_bus).unwrap();
+    plan.apply(config)?;
+    plan.seal(config)
+}
+
+/// A Q35-like host bridge on the root bus whose Bus Master bit firmware
+/// left set and software can clear: it is cleared and sealed as every
+/// other function is.
+#[test]
+fn containment_clears_and_seals_a_writable_host_bridge_bus_master() {
+    let mut function = host_bridge(0x0107, 0);
+    let config = function.config();
+    assert_eq!(contain(config, true), Ok(()));
+    assert_eq!(config.read16(regs::COMMAND), Ok(0x0503));
+    assert!(config.master_sealed);
+    assert!(config.write16(regs::COMMAND, 0x0507).is_err());
+}
+
+/// An Intel host bridge on the root bus: COMMAND reads 0x0006 with Bus
+/// Master and Memory Space hard-wired set. The clear does not hold, the
+/// seal proves the bit hard-wired and accepts it, and no write may set
+/// it; any other control that changes is still refused.
+#[test]
+fn containment_seals_a_root_bus_host_bridge_whose_bus_master_is_hardwired() {
+    let mut function = host_bridge(0x0006, u16::MAX);
+    let config = function.config();
+    config.command_writes.clear();
     let plan = containment_plan(config).unwrap();
-    assert!(!plan.permits(4, 2, 0x0402));
-    assert_eq!(plan.apply(config), Ok(ConfigEffect::None));
+    plan.apply(config).unwrap();
+    assert_eq!(plan.seal(config), Ok(()));
     assert_eq!(config.read16(regs::COMMAND), Ok(0x0006));
-    assert_eq!(plan.check_disabled(|offset| config.read16(offset)), Ok(()));
-    // A COMMAND that changes after the census is still refused.
+    assert!(config.master_sealed);
+    // The stop and the proof write only the stopped value, the one write
+    // the containment owner permits.
+    assert_eq!(config.command_writes, [0x0402, 0x0402]);
+    assert!(plan.permits(regs::COMMAND, 2, 0x0402));
+    assert!(config.write16(regs::COMMAND, 0x0006).is_err());
+    // A hard-wired Memory Space bit that later reads clear is refused.
     config.command_fixed = 0;
-    config.write16(regs::COMMAND, 0x0002).unwrap();
+    config.master_sealed = false;
+    config.write16(regs::COMMAND, 0x0004).unwrap();
     assert!(plan.check_disabled(|offset| config.read16(offset)).is_err());
-    // A host bridge behind a downstream port is contained like any other
-    // function: its hardwired Bus Master is refused.
-    config.write16(regs::COMMAND, 0x0006).unwrap();
-    config.command_fixed = u16::MAX;
-    let behind = containment_plan_on(config, false).unwrap();
-    assert!(behind.apply(config).is_err());
-    // Any other function that keeps Bus Master set stays refused.
+}
+
+/// A class-0600 function behind a downstream port, and any other function,
+/// whose Bus Master bit stays set is refused.
+#[test]
+fn containment_refuses_a_hardwired_bus_master_off_the_root_bus() {
+    let mut function = host_bridge(0x0006, u16::MAX);
+    let config = function.config();
+    assert!(contain(config, false).is_err());
+    assert!(!config.master_sealed);
+    let mut function = host_bridge(0x0006, u16::MAX);
+    let config = function.config();
+    config.command_fixed = 0;
     config.write32(8, 0x0604_0000).unwrap();
-    config.write16(regs::COMMAND, 0x0006).unwrap();
-    config.command_fixed = regs::COMMAND_MASTER;
-    assert!(containment_plan(config).unwrap().apply(config).is_err());
+    config.command_fixed = u16::MAX;
+    assert!(contain(config, true).is_err());
+    assert!(!config.master_sealed);
+    // A root-bus host bridge whose bit read clear at the census may not
+    // read set at the seal.
+    let mut function = host_bridge(0x0002, 0);
+    let config = function.config();
+    let plan = containment_plan(config).unwrap();
+    plan.apply(config).unwrap();
+    config.write16(regs::COMMAND, 0x0406).unwrap();
+    assert!(plan.seal(config).is_err());
+    assert!(!config.master_sealed);
 }
 
 #[test]

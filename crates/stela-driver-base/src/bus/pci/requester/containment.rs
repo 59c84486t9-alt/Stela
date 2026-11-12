@@ -22,6 +22,9 @@ struct Control {
     /// Bits of `disabled` the function may leave clear (see
     /// regs::command_optional_bits); every other bit must read back exactly.
     optional: u16,
+    /// Bits of `original` that `disabled` clears and hardware may hold set:
+    /// only the Bus Master bit of a root-bus host bridge.
+    hardwired: u16,
 }
 
 /// This plan describes PCI-level controls only. It conveys no physical
@@ -44,25 +47,27 @@ impl Plan {
                 offset: regs::COMMAND,
             });
         }
-        // A host bridge on a root bus (the root complex's own function, or
-        // one integrated in it) is not a requester: Intel's hardwire its Bus
-        // Master and Memory Space bits set, and Linux never writes it. Its
-        // COMMAND stays as found and must read back unchanged. A function
+        // INTx Disable is asked of every function and required of those with
+        // an INTx pin; Bus Master is cleared on all of them and must read
+        // back clear, except on a host bridge on a root bus (the root
+        // complex's own function): Intel's hard-wire its Bus Master bit set,
+        // and Linux never writes it. There a set bit that stays set is the
+        // hardware's, and the seal proves it ([`Plan::seal`]). A function
         // of that class behind a downstream port is contained like any other.
         let class = read(regs::CLASS_REVISION, 4)? >> 8;
-        if root_bus && class >> 8 == HOST_BRIDGE {
-            plan.push(regs::COMMAND, command, command, 0)?;
+        let hardwired = if root_bus && class >> 8 == HOST_BRIDGE {
+            command & regs::COMMAND_MASTER
         } else {
-            // INTx Disable is asked of every function and required of those
-            // with an INTx pin; Bus Master must read back clear on all of them.
-            let pin = read(regs::INTERRUPT_PIN, 1)? as u8;
-            plan.push(
-                regs::COMMAND,
-                command,
-                command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-                regs::command_optional_bits(pin),
-            )?;
-        }
+            0
+        };
+        let pin = read(regs::INTERRUPT_PIN, 1)? as u8;
+        plan.push(
+            regs::COMMAND,
+            command,
+            command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+            regs::command_optional_bits(pin),
+        )?;
+        plan.0[0].hardwired = hardwired;
 
         let mut express = false;
         let mut seen = 0u32;
@@ -154,6 +159,7 @@ impl Plan {
             original,
             disabled,
             optional,
+            hardwired: 0,
         });
         Ok(())
     }
@@ -208,6 +214,53 @@ impl Plan {
         }
         Ok(())
     }
+
+    /// Acknowledge a contained function: its controls read back stopped,
+    /// then its Bus Master bit is sealed. A clear bit is sealed as clear.
+    /// A set bit is accepted only where this plan lets hardware hold it
+    /// (a root-bus host bridge whose bit was set) and only once the seal
+    /// proves it hard-wired; anything else is refused.
+    pub fn seal(&self, config: &mut impl MasterSeal) -> Result<(), ConfigError> {
+        self.check_disabled(|offset| config.read16(offset))?;
+        let hardwired = self.0.iter().find(|control| {
+            control.offset == regs::COMMAND && control.hardwired & regs::COMMAND_MASTER != 0
+        });
+        if let Some(command) = hardwired
+            && config.read16(regs::COMMAND)? & regs::COMMAND_MASTER != 0
+        {
+            config.seal_hardwired_bus_master(command.disabled)
+        } else {
+            config.seal_bus_master()
+        }
+    }
+}
+
+/// The Bus Master seal of a configuration owner: once sealed, no write
+/// through the owner may set COMMAND's Bus Master bit.
+pub trait MasterSeal: ConfigSpace {
+    /// Seal a function whose Bus Master bit reads clear; refuse one whose
+    /// bit reads set.
+    fn seal_bus_master(&mut self) -> Result<(), ConfigError>;
+    /// Seal a function whose Bus Master bit hardware holds set, proven
+    /// by writing the plan's stopped COMMAND, `disabled`, again
+    /// ([`hardwired_master`]): it cannot be cleared, and a function that
+    /// is the root complex's own masters no DMA through it, so it is left
+    /// as Linux leaves it. A bit that clears is sealed as clear instead.
+    fn seal_hardwired_bus_master(&mut self, disabled: u16) -> Result<(), ConfigError>;
+}
+
+/// Whether COMMAND's Bus Master bit is hard-wired set: it reads set and
+/// still reads set after COMMAND is written with `disabled`, the plan's
+/// stopped value with that bit clear and the one write containment may
+/// make. A writable bit is left clear by the same write.
+pub fn hardwired_master(config: &mut impl ConfigSpace, disabled: u16) -> Result<bool, ConfigError> {
+    if disabled & regs::COMMAND_MASTER != 0
+        || config.read16(regs::COMMAND)? & regs::COMMAND_MASTER == 0
+    {
+        return Ok(false);
+    }
+    config.write16(regs::COMMAND, disabled)?;
+    Ok(config.read16(regs::COMMAND)? & regs::COMMAND_MASTER != 0)
 }
 
 fn record_capability(
@@ -227,9 +280,14 @@ fn record_capability(
 
 impl Control {
     /// A stopped control reads back its disabled value; an optional bit may
-    /// read back clear instead.
+    /// read back clear instead, and a hardwired bit set as found.
     fn verify_disabled(&self, observed: u16) -> Result<(), ConfigError> {
-        verify(self.offset, self.disabled, self.optional, observed)
+        verify(
+            self.offset,
+            self.disabled,
+            self.optional | self.hardwired,
+            observed,
+        )
     }
 }
 

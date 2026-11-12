@@ -1168,8 +1168,9 @@ impl Source {
             wait_for_pending_transactions(&config, || {
                 crate::apic::rdtsc().wrapping_sub(started) >= limit
             })?;
-            plan.check_disabled(|offset| config.try_read16(offset))?;
-            config.seal_bus_master()?;
+            // Stopped controls read back, and Bus Master is sealed: clear,
+            // or proven hard-wired on a root-bus host bridge.
+            plan.seal(&mut config)?;
             if header.bridge.is_some() {
                 config.seal_bus_routing()?;
             }

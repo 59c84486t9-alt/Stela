@@ -265,6 +265,18 @@ impl UnpublishedConfig {
         self.storage.region_mut().try_write32(offset, value)
     }
 }
+impl super::requester::containment::MasterSeal for UnpublishedConfig {
+    fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
+        self.storage.region_mut().seal_bus_master()
+    }
+    fn seal_hardwired_bus_master(&mut self, disabled: u16) -> Result<(), ConfigError> {
+        if super::requester::containment::hardwired_master(self, disabled)? {
+            self.storage.region_mut().seal_hardwired_bus_master()
+        } else {
+            self.storage.region_mut().seal_bus_master()
+        }
+    }
+}
 impl ConfigSpace for UnpublishedConfig {
     fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
         self.try_read8(offset)

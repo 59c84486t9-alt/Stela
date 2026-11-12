@@ -331,6 +331,17 @@ impl<G: Grant> Region<G> {
         self.grant.state().master_sealed.set(true);
         Ok(())
     }
+    /// Seal a function whose Bus Master bit hardware holds set, as
+    /// `requester::containment::hardwired_master` proved just before: it
+    /// cannot be cleared, and no later write through this owner may set it.
+    /// A bit that reads clear is sealed as clear.
+    pub(in crate::bus::pci) fn seal_hardwired_bus_master(&mut self) -> Result<(), ConfigError> {
+        if self.try_read16(4)? & 4 == 0 {
+            return self.seal_bus_master();
+        }
+        self.grant.state().master_sealed.set(true);
+        Ok(())
+    }
     /// # Safety
     /// The owning driver acknowledged actual stop/reset without restart, and
     /// its current root/configuration binding and required payload completion
