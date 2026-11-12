@@ -1,4 +1,5 @@
-//! How the UEFI memory map's entry types bound native device ranges.
+//! How the UEFI memory map's entry types and attributes bound native device
+//! ranges and the identity map of the firmware's runtime regions.
 //!
 //! EFI_MEMORY_RUNTIME says the OS must keep a region mapped for the runtime
 //! services; it does not take the range from the OS. EDK2-derived firmware
@@ -8,8 +9,19 @@
 
 /// EfiReservedMemoryType.
 pub const RESERVED: u32 = 0;
+/// EfiRuntimeServicesCode.
+pub const RUNTIME_SERVICES_CODE: u32 = 5;
 /// EfiMemoryMappedIO.
 pub const MMIO: u32 = 11;
+/// EfiMemoryMappedIOPortSpace.
+pub const MMIO_PORT_SPACE: u32 = 12;
+/// EfiPalCode.
+pub const PAL_CODE: u32 = 13;
+
+/// EFI_MEMORY_WB: the region supports write-back caching.
+pub const MEMORY_WB: u64 = 1 << 3;
+/// EFI_MEMORY_RUNTIME.
+pub const MEMORY_RUNTIME: u64 = 1 << 63;
 
 /// Whether an entry of `kind` leaves its range to devices: reserved or
 /// MMIO, never memory the firmware or the loader can hand out. The
@@ -64,6 +76,31 @@ pub const fn kind_name(kind: u32) -> &'static str {
     }
 }
 
+/// The identity mapping of one runtime region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeMapping {
+    /// Runtime code: write-back and executable.
+    Code,
+    /// Write-back data, not executable.
+    WriteBack,
+    /// Uncached, not executable.
+    Uncached,
+}
+
+/// Map MMIO uncached and code executable; map other runtime regions
+/// write-back only when the firmware says they support it, as Linux's
+/// efi_map_region does. A reserved runtime region without EFI_MEMORY_WB is
+/// often device registers such as an ECAM window, and a write-back alias of
+/// those would conflict with their uncached native mapping.
+pub const fn runtime_mapping(kind: u32, attributes: u64) -> RuntimeMapping {
+    match kind {
+        MMIO | MMIO_PORT_SPACE => RuntimeMapping::Uncached,
+        RUNTIME_SERVICES_CODE | PAL_CODE => RuntimeMapping::Code,
+        _ if attributes & MEMORY_WB != 0 => RuntimeMapping::WriteBack,
+        _ => RuntimeMapping::Uncached,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +152,35 @@ mod tests {
             ECAM.0,
             ECAM.1
         ));
+    }
+
+    #[test]
+    fn runtime_regions_map_write_back_only_when_the_firmware_allows_it() {
+        let uc = 1;
+        assert_eq!(
+            runtime_mapping(MMIO, MEMORY_WB | uc),
+            RuntimeMapping::Uncached
+        );
+        assert_eq!(
+            runtime_mapping(MMIO_PORT_SPACE, 0),
+            RuntimeMapping::Uncached
+        );
+        assert_eq!(
+            runtime_mapping(RUNTIME_SERVICES_CODE, MEMORY_WB),
+            RuntimeMapping::Code
+        );
+        assert_eq!(runtime_mapping(PAL_CODE, MEMORY_WB), RuntimeMapping::Code);
+        assert_eq!(
+            runtime_mapping(6, MEMORY_WB | uc),
+            RuntimeMapping::WriteBack
+        );
+        assert_eq!(
+            runtime_mapping(RESERVED, MEMORY_RUNTIME | uc),
+            RuntimeMapping::Uncached
+        );
+        assert_eq!(
+            runtime_mapping(RESERVED, MEMORY_RUNTIME | MEMORY_WB),
+            RuntimeMapping::WriteBack
+        );
     }
 }
