@@ -15,7 +15,7 @@
 //! keeps nothing else live but the pinned registers, which the call
 //! preserves. The branch forms (BRA*, BLRA* and RETA*) still end their
 //! block, whose thunk completes them.
-use super::{Finish, Form, Routine, call_service, lookup};
+use super::{Finish, Form, Lookup, Routine, call_service, lookup};
 use crate::x86_64::asm::{Code, Gpr, Patch, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
@@ -49,8 +49,9 @@ pub fn inlines(operation: Operation) -> bool {
 /// What [`emit`] leaves to [`place`] out of line.
 pub(crate) struct Slow {
     pc: GuestAddress,
-    /// The service call of a memo miss, which returns to the completion.
-    service: Option<(Form, Vec<Patch>, usize)>,
+    /// The service call of a memo miss, which returns to the completion,
+    /// and the modifier's register.
+    service: Option<(Form, Vec<Patch>, usize, Gpr)>,
     /// The jumps to the exit at the instruction.
     exits: Vec<Patch>,
 }
@@ -79,7 +80,7 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
     let form = Form::of(operation)
         .filter(|form| form.completion == Finish::Register)
         .expect("a form that completes into its register");
-    let misses = lookup(
+    let Lookup { misses, modifier } = lookup(
         &mut asm,
         form,
         Place::new(Anchor::Pointer, cells.tags as usize),
@@ -89,7 +90,7 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
     asm.mov_store(Size::Qword, result, Gpr::Rax);
     Slow {
         pc,
-        service: Some((form, misses, complete)),
+        service: Some((form, misses, complete, modifier)),
         exits: vec![],
     }
 }
@@ -99,11 +100,12 @@ pub(crate) fn place(code: &mut Code, slow: Slow, cells: Cells) {
     let mut asm = code.asm();
     let mut exits = slow.exits;
     let mut back = vec![];
-    if let Some((form, misses, complete)) = slow.service {
+    if let Some((form, misses, complete, modifier)) = slow.service {
         for miss in misses {
             asm.bind(miss);
         }
-        exits.push(call_service(&mut asm, form, Routine::Cell(cells.routine)));
+        let routine = Routine::Cell(cells.routine);
+        exits.push(call_service(&mut asm, form, routine, modifier));
         back.push((asm.jmp(), complete));
     }
     for exit in exits {

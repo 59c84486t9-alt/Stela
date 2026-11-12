@@ -347,10 +347,12 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
         super::super::chain::direct_exit(pc, ExitKind::PointerAuthentication)
     );
     let next = thunk.next.unwrap();
-    assert_eq!(
-        thunk.code[next..next + DIRECT_EXIT_BYTES],
-        super::super::chain::direct_exit(GuestAddress(0x4004), ExitKind::Fallthrough)
-    );
+    // Padded for its patch point, wherever it lands.
+    assert!(super::super::chain::is_direct_exit(
+        &thunk.code[next..next + DIRECT_EXIT_BYTES],
+        GuestAddress(0x4004),
+        ExitKind::Fallthrough
+    ));
     // The refused service lands on the exit; the three memo misses on
     // the service call, just after the completion, whose JMP back to the
     // register write precedes the exit. No branch tests the tag word.

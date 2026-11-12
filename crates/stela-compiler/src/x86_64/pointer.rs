@@ -30,7 +30,7 @@
 //! RCX, RDX, R8, R9 and flags; a service call every register the SysV ABI
 //! lets a call clobber, which no block keeps live across its exit. The call
 //! aligns the stack to 16 bytes itself.
-use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Mem, Patch, ShiftOp, Size, resolve};
+use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
     aarch64::Register,
@@ -279,32 +279,51 @@ impl Thunk {
     }
 }
 
+/// Where a memo lookup's misses go to the service from: their jumps, and
+/// the register holding the modifier ([`lookup`]).
+struct Lookup {
+    misses: Vec<Patch>,
+    modifier: Gpr,
+}
+
 /// The memo lookup of `form`'s operands, the pointer in RAX and the modifier
-/// in RDX, under the tag words at `tags`: the jumps of its misses, to the
-/// service; a hit leaves the result in RAX. A key that is not open misses
-/// (no entry's tag is a bare kind), and so does a disabled key's first use
-/// of each operand pair. Clobbers RCX, R8, R9 and flags.
-fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Vec<Patch> {
+/// in its host register if it has one (SP in pinned code), else in RDX,
+/// under the tag words at `tags`; a hit leaves the result in RAX. A key that
+/// is not open misses (no entry's tag is a bare kind), and so does a
+/// disabled key's first use of each operand pair. Clobbers RCX, RDX, R8, R9
+/// and flags.
+fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
     use Gpr::{R8, R9, Rax, Rcx, Rdx};
     use Size::{Dword, Qword};
     let pointer = asm.guest(Register::X(form.pointer)).expect("X0..X30");
     asm.mov_load(Qword, Rax, pointer);
-    match form.modifier {
-        Modifier::Register(register) => {
-            let modifier = asm.guest(Register::X(register)).expect("X0..X30");
-            asm.mov_load(Qword, Rdx, modifier);
+    let held = match form.modifier {
+        Modifier::Register(register) => Some(asm.guest(Register::X(register)).expect("X0..X30")),
+        Modifier::StackPointer => Some(asm.guest(Register::Sp).expect("SP has storage")),
+        Modifier::Zero => None,
+    };
+    let modifier = match held {
+        // A pinned register, which the service call reads before it
+        // changes any but RSP and R11, which hold no guest register.
+        Some(Rm::Reg(host)) => host,
+        Some(storage) => {
+            asm.mov_load(Qword, Rdx, storage);
+            Rdx
         }
-        Modifier::StackPointer => {
-            let stack = asm.guest(Register::Sp).expect("SP has storage");
-            asm.mov_load(Qword, Rdx, stack);
+        None => {
+            asm.alu(Alu::Xor, Dword, Rdx, Rdx);
+            Rdx
         }
-        Modifier::Zero => asm.alu(Alu::Xor, Dword, Rdx, Rdx),
-    }
+    };
+    debug_assert!(!matches!(
+        modifier,
+        Gpr::Rsp | Gpr::R11 | Rax | Rcx | R8 | R9
+    ));
     // The anchor, then the key's tag word through it: one load, no LEA.
     asm.place(R8, Place::new(tags.anchor, 0));
     let word = i32::try_from(tags.offset + usize::from(form.key) * 8).expect("a tag word offset");
     asm.mov_load(Qword, R8, Mem::base(R8, word));
-    asm.lea(Qword, Rcx, Mem::indexed(Rax, Rdx, 1, 0));
+    asm.lea(Qword, Rcx, Mem::indexed(Rax, modifier, 1, 0));
     asm.mov_imm64(R9, MIX);
     asm.imul(Qword, Rcx, R9);
     asm.shift_imm(ShiftOp::Shr, Qword, Rcx, SLOT_SHIFT);
@@ -316,13 +335,13 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Vec<Patch> {
     let mut misses = Vec::new();
     asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rcx, 0));
     misses.push(asm.jcc(Cond::Ne));
-    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base(Rcx, MODIFIER));
+    asm.alu_load(Alu::Cmp, Qword, modifier, Mem::base(Rcx, MODIFIER));
     misses.push(asm.jcc(Cond::Ne));
     asm.alu_imm8(Alu::Or, Qword, R8, form.kind as i8);
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rcx, TAG));
     misses.push(asm.jcc(Cond::Ne));
     asm.mov_load(Qword, Rax, Mem::base(Rcx, VALUE));
-    misses
+    Lookup { misses, modifier }
 }
 
 /// How native code reaches the service routine.
@@ -335,10 +354,10 @@ enum Routine {
 }
 
 /// The service call on a lookup's miss, the pointer in RAX and the modifier
-/// in RDX: `service(state, request, pointer, modifier)` on a 16-byte aligned
-/// stack, which leaves a completed result in RAX. The jump taken when the
-/// service does not complete it.
-fn call_service(asm: &mut Asm, form: Form, routine: Routine) -> Patch {
+/// in `modifier`: `service(state, request, pointer, modifier)` on a 16-byte
+/// aligned stack, which leaves a completed result in RAX. The jump taken
+/// when the service does not complete it.
+fn call_service(asm: &mut Asm, form: Form, routine: Routine, modifier: Gpr) -> Patch {
     use Gpr::{R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
     use Size::Qword;
     asm.mov(Qword, R11, Rsp);
@@ -348,7 +367,7 @@ fn call_service(asm: &mut Asm, form: Form, routine: Routine) -> Patch {
     // The one pinned register a call may change, and the alignment.
     asm.push(Rsi);
     asm.push(Rsi);
-    asm.mov(Qword, Rcx, Rdx);
+    asm.mov(Qword, Rcx, modifier);
     asm.mov(Qword, Rdx, Rax);
     asm.mov_imm32(Rsi, form.request());
     asm.place(Rdi, Place::new(Anchor::Pointer, 0));
@@ -381,7 +400,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     use Size::Qword;
     let mut code = Code::pinned();
     let mut asm = code.asm();
-    let misses = lookup(&mut asm, form, tags);
+    let Lookup { misses, modifier } = lookup(&mut asm, form, tags);
     let complete = asm.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
@@ -415,7 +434,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     for miss in misses {
         asm.bind(miss);
     }
-    let failed = call_service(&mut asm, form, Routine::Address(service));
+    let failed = call_service(&mut asm, form, Routine::Address(service), modifier);
     let back = asm.jmp();
     asm.bind(failed);
     super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
