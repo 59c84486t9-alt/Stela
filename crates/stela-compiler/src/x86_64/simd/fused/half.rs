@@ -161,6 +161,24 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         emit_native(code, operand, pc);
         return;
     }
+    if super::wide_half::supported(operand, target) {
+        let other = super::wide_half::emit(code, operand);
+        let done = jump(code);
+        let other_start = code.len();
+        for patch in other {
+            resolve(code, patch, other_start);
+        }
+        emit_exact_lanes(code, operand, pc, target);
+        let end = code.len();
+        resolve(code, done, end);
+        return;
+    }
+    emit_exact_lanes(code, operand, pc, target);
+}
+
+/// Each lane exact in Double and rounded once in integers; non-normal
+/// inputs and results take the helper.
+fn emit_exact_lanes(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let mut rollback = Vec::new();
     let widening = if operand.shape == Shape::Scalar {
         // Measured whole scalar recipes favor integer field construction on

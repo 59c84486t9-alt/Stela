@@ -28,6 +28,7 @@ mod half;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod tests;
+mod wide_half;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;

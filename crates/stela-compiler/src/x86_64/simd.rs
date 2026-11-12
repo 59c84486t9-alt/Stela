@@ -41,6 +41,12 @@ mod fast_float_tests;
 mod floating;
 mod fused;
 pub(in crate::x86_64) mod half;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod half_fused_tests;
 mod half_integer;
 #[cfg(all(
     test,
