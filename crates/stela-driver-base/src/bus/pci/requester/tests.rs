@@ -763,6 +763,34 @@ fn containment_accepts_a_hardwired_clear_command_without_an_interrupt_pin() {
 }
 
 #[test]
+fn containment_leaves_a_host_bridges_hardwired_command_as_found() {
+    use crate::bus::pci::ConfigEffect;
+
+    // An Intel host bridge: class 0600, no INTx pin, Bus Master and Memory
+    // Space read-only set.
+    let mut function = endpoint();
+    let config = function.config();
+    config.write32(8, 0x0600_0000).unwrap();
+    config.write8(regs::INTERRUPT_PIN, 0).unwrap();
+    config.write16(regs::COMMAND, 0x0006).unwrap();
+    config.command_fixed = u16::MAX;
+    let plan = containment_plan(config).unwrap();
+    assert!(!plan.permits(4, 2, 0x0402));
+    assert_eq!(plan.apply(config), Ok(ConfigEffect::None));
+    assert_eq!(config.read16(regs::COMMAND), Ok(0x0006));
+    assert_eq!(plan.check_disabled(|offset| config.read16(offset)), Ok(()));
+    // A COMMAND that changes after the census is still refused.
+    config.command_fixed = 0;
+    config.write16(regs::COMMAND, 0x0002).unwrap();
+    assert!(plan.check_disabled(|offset| config.read16(offset)).is_err());
+    // Any other function that keeps Bus Master set stays refused.
+    config.write32(8, 0x0604_0000).unwrap();
+    config.write16(regs::COMMAND, 0x0006).unwrap();
+    config.command_fixed = regs::COMMAND_MASTER;
+    assert!(containment_plan(config).unwrap().apply(config).is_err());
+}
+
+#[test]
 fn containment_sets_intx_disable_where_writable_even_without_a_pin() {
     let mut function = endpoint();
     let config = function.config();

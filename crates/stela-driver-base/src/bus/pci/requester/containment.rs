@@ -11,6 +11,9 @@ use crate::bus::{
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+/// The class and subclass of a host bridge.
+const HOST_BRIDGE: u32 = 0x0600;
+
 #[derive(Clone, Copy)]
 struct Control {
     offset: u16,
@@ -36,15 +39,24 @@ impl Plan {
                 offset: regs::COMMAND,
             });
         }
-        // INTx Disable is asked of every function and required of those
-        // with an INTx pin; Bus Master must read back clear on all of them.
-        let pin = read(regs::INTERRUPT_PIN, 1)? as u8;
-        plan.push(
-            regs::COMMAND,
-            command,
-            command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-            regs::command_optional_bits(pin),
-        )?;
+        // A host bridge's header is the root complex's own, not a requester's:
+        // Intel's hardwire its Bus Master and Memory Space bits set, and
+        // Linux never writes it. Its COMMAND stays as found and must read
+        // back unchanged.
+        let class = read(regs::CLASS_REVISION, 4)? >> 8;
+        if class >> 8 == HOST_BRIDGE {
+            plan.push(regs::COMMAND, command, command, 0)?;
+        } else {
+            // INTx Disable is asked of every function and required of those
+            // with an INTx pin; Bus Master must read back clear on all of them.
+            let pin = read(regs::INTERRUPT_PIN, 1)? as u8;
+            plan.push(
+                regs::COMMAND,
+                command,
+                command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+                regs::command_optional_bits(pin),
+            )?;
+        }
 
         let mut express = false;
         let mut seen = 0u32;
