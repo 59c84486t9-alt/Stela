@@ -1011,13 +1011,14 @@ pub fn write() {
     ) {
         Ok(()) => output::arguments(format_args!(
             "TRANSLATIONS written records={} bytes={} changed={written} proven={} unprovable={} \
-             unproven={} evicted={} ms={}\n",
+             unproven={} evicted={} expired={} ms={}\n",
             planned.layout.records(),
             planned.layout.bytes(),
             planned.proven,
             planned.unprovable,
             planned.unproven,
             planned.evicted,
+            planned.expired,
             output::millis_since(started)
         )),
         Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error:?}\n")),

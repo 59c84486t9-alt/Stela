@@ -35,8 +35,15 @@ const MIXED_SCHEMA: u32 = 2;
 /// Magic, schema, record count and translator id.
 pub const HEADER_BYTES: usize = MAGIC.len() + 4 + 4 + DIGEST_BYTES;
 const DIGEST_BYTES: usize = 32;
-/// Page key, offset and length.
+/// Page key, offset and length. The length field's top byte holds the
+/// record's age ([`MAX_UNUSED_BOOTS`]), the rest its length.
 const INDEX_ENTRY_BYTES: usize = DIGEST_BYTES + 8 + 8;
+const AGE_SHIFT: u32 = 56;
+pub const LENGTH_MASK: u64 = (1 << AGE_SHIFT) - 1;
+/// A record no boot looked up for more boots in a row than this leaves the
+/// next pack: the pack keeps what boots use, and what they stopped using
+/// costs no read time for long. Every boot reads the whole pack.
+pub const MAX_UNUSED_BOOTS: u8 = 3;
 const CHECKSUM_BYTES: usize = DIGEST_BYTES;
 /// The most records a pack holds.
 pub const MAX_RECORDS: usize = 1 << 22;
@@ -191,16 +198,26 @@ impl<'a> Pack<'a> {
 
     /// The record bytes of page key `key`, unchecked.
     pub fn get(&self, key: &Digest) -> Option<&'a [u8]> {
+        let (_, offset, bytes) = entry(self.bytes, self.position(key)?);
+        Some(&self.bytes[offset as usize..(offset + bytes) as usize])
+    }
+
+    /// The boots in a row since one last used the record of `key`
+    /// ([`MAX_UNUSED_BOOTS`]).
+    pub fn age(&self, key: &Digest) -> Option<u8> {
+        Some(entry_age(self.bytes, self.position(key)?))
+    }
+
+    /// The index entry of `key`.
+    fn position(&self, key: &Digest) -> Option<usize> {
         let (mut low, mut high) = (0, self.count);
         while low < high {
             let middle = (low + high) / 2;
-            let (found, offset, bytes) = entry(self.bytes, middle);
+            let (found, _, _) = entry(self.bytes, middle);
             match found.cmp(key) {
                 core::cmp::Ordering::Less => low = middle + 1,
                 core::cmp::Ordering::Greater => high = middle,
-                core::cmp::Ordering::Equal => {
-                    return Some(&self.bytes[offset as usize..(offset + bytes) as usize]);
-                }
+                core::cmp::Ordering::Equal => return Some(middle),
             }
         }
         None
@@ -264,18 +281,21 @@ impl PackedRecord<'_> {
 /// length.
 fn entry(bytes: &[u8], index: usize) -> (Digest, u64, u64) {
     let at = HEADER_BYTES + index * INDEX_ENTRY_BYTES;
-    let field = |offset: usize| {
-        u64::from_le_bytes(
-            bytes[at + offset..at + offset + 8]
-                .try_into()
-                .expect("a field"),
-        )
-    };
     (
         Digest(bytes[at..at + DIGEST_BYTES].try_into().expect("a key")),
-        field(DIGEST_BYTES),
-        field(DIGEST_BYTES + 8),
+        index_field(bytes, at + DIGEST_BYTES),
+        index_field(bytes, at + DIGEST_BYTES + 8) & LENGTH_MASK,
     )
+}
+
+/// Index entry `index`'s age: the top byte of its length field.
+fn entry_age(bytes: &[u8], index: usize) -> u8 {
+    let at = HEADER_BYTES + index * INDEX_ENTRY_BYTES + DIGEST_BYTES + 8;
+    (index_field(bytes, at) >> AGE_SHIFT) as u8
+}
+
+fn index_field(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("a field"))
 }
 
 /// A record of a pack being laid out: one of the read pack's, or new.
@@ -307,6 +327,9 @@ pub struct Layout<'a> {
     changed: Option<Vec<core::ops::Range<u64>>>,
 }
 
+/// The ages of the records of a layout that are not 0 ([`Pack::age`]).
+type Ages = BTreeMap<Digest, u8>;
+
 /// Zeros for the room between records.
 static ZEROS: [u8; 4096] = [0; 4096];
 
@@ -323,7 +346,7 @@ impl<'a> Layout<'a> {
         format: PackFormat,
     ) -> Self {
         let start = prefix_length(records.len()) as u64;
-        Self::compact(translator, records, format, start)
+        Self::compact(translator, records, format, start, &Ages::new())
     }
 
     /// Every record laid out anew in key order from `start`.
@@ -332,6 +355,7 @@ impl<'a> Layout<'a> {
         mut records: Vec<(Digest, Piece<'a>)>,
         format: PackFormat,
         start: u64,
+        ages: &Ages,
     ) -> Self {
         records.sort_by_key(|record| record.0);
         let mut offset = start;
@@ -343,16 +367,18 @@ impl<'a> Layout<'a> {
                 (key, at, piece)
             })
             .collect();
-        Self::placed(translator, placed, format, None)
+        Self::placed(translator, placed, format, None, ages)
     }
 
     /// The layout of records at the offsets given, which lie after the
-    /// prefix and do not overlap.
+    /// prefix and do not overlap, each of the age `ages` gives it (none:
+    /// used by the boot that laid it out).
     fn placed(
         translator: &Digest,
         mut records: Vec<(Digest, u64, Piece<'a>)>,
         format: PackFormat,
         changed: Option<Vec<core::ops::Range<u64>>>,
+        ages: &Ages,
     ) -> Self {
         records.sort_by_key(|record| record.0);
         let count = records.len();
@@ -364,7 +390,8 @@ impl<'a> Layout<'a> {
         for (key, offset, piece) in &records {
             prefix.extend(key.0);
             prefix.extend(offset.to_le_bytes());
-            prefix.extend((piece.bytes().len() as u64).to_le_bytes());
+            let age = u64::from(ages.get(key).copied().unwrap_or(0));
+            prefix.extend((piece.bytes().len() as u64 | age << AGE_SHIFT).to_le_bytes());
         }
         let checksum = Sha256::digest(&prefix);
         prefix.extend(checksum);
@@ -482,6 +509,7 @@ fn layout_over<'a>(
     records: Vec<(Digest, Piece<'a>)>,
     format: PackFormat,
     bound: u64,
+    ages: &Ages,
 ) -> Layout<'a> {
     let relayout = |records: Vec<(Digest, Piece<'a>)>| {
         let used: u64 = records
@@ -498,7 +526,7 @@ fn layout_over<'a>(
         } else {
             prefix_length(records.len()) as u64
         };
-        Layout::compact(translator, records, format, start)
+        Layout::compact(translator, records, format, start, ages)
     };
     let Some(pack) = previous else {
         return relayout(records);
@@ -561,13 +589,17 @@ fn layout_over<'a>(
     }
     // The index changes whenever a record comes, goes or moves; a pack the
     // same in every byte is not written at all.
-    let same = placed.len() == pack.records() && changed.is_empty();
+    let same = placed.len() == pack.records()
+        && changed.is_empty()
+        && placed
+            .iter()
+            .all(|(key, _, _)| pack.age(key) == Some(ages.get(key).copied().unwrap_or(0)));
     let mut ranges = Vec::new();
     if !same {
         ranges.push(0..prefix);
         ranges.extend(changed);
     }
-    Layout::placed(translator, placed, format, Some(ranges))
+    Layout::placed(translator, placed, format, Some(ranges), ages)
 }
 
 /// What a boot's store did.
@@ -1075,6 +1107,9 @@ pub struct Planned<'a> {
     /// Records of the read pack left out to stay within the bound, and new
     /// ones that did not fit.
     pub evicted: u64,
+    /// Records of the read pack left out because no boot used them for
+    /// more than [`MAX_UNUSED_BOOTS`] boots in a row.
+    pub expired: u64,
 }
 
 /// What a store keeps beyond its pack, in bytes ([`Store::set_bounds`]).
@@ -1580,6 +1615,7 @@ impl<'a> Store<'a> {
         // Gained entries first, then this boot's records, then the others.
         let mut scratch = core::mem::take(&mut self.decode_scratch);
         let mut candidates: Vec<(Digest, Piece<'a>)> = Vec::new();
+        let (mut ages, mut expired) = (Ages::new(), 0);
         for (key, record) in &mut proven {
             if let Some(stored) = self.pack.and_then(|pack| pack.record(key)) {
                 match stored.decode(&self.translator, key, &mut scratch) {
@@ -1612,10 +1648,23 @@ impl<'a> Store<'a> {
                     candidates.push((*key, Piece::Kept(bytes)));
                 }
             }
-            for (key, bytes) in pack.iter() {
+            // Records this boot did not look up age by one boot; the
+            // youngest are kept first, and those unused too long leave.
+            let mut unused: Vec<(u8, Digest, &'a [u8])> = Vec::new();
+            for (index, (key, bytes)) in pack.iter().enumerate() {
                 if !self.loaded.contains_key(&key) && !proven.contains_key(&key) {
-                    candidates.push((key, Piece::Kept(bytes)));
+                    let age = entry_age(pack.bytes, index).saturating_add(1);
+                    if age > MAX_UNUSED_BOOTS {
+                        expired += 1;
+                    } else {
+                        unused.push((age, key, bytes));
+                    }
                 }
+            }
+            unused.sort_by_key(|&(age, key, _)| (age, key));
+            for (age, key, bytes) in unused {
+                ages.insert(key, age);
+                candidates.push((key, Piece::Kept(bytes)));
             }
         }
         let (mut kept, mut kept_bytes, mut evicted) = (Vec::new(), 0u64, 0);
@@ -1631,11 +1680,12 @@ impl<'a> Store<'a> {
         }
         let format = self.pack.map_or(PackFormat::Raw, |pack| pack.format);
         Planned {
-            layout: layout_over(&self.translator, self.pack, kept, format, bound),
+            layout: layout_over(&self.translator, self.pack, kept, format, bound, &ages),
             proven: count,
             unprovable,
             unproven,
             evicted,
+            expired,
         }
     }
 }
@@ -2333,12 +2383,21 @@ mod tests {
         assert_eq!(buffer[..10], new[new.len() - 10..]);
         assert!(buffer[10..20].iter().all(|&byte| byte == 0));
 
-        // A boot that changes nothing writes nothing.
-        let mut idle = Store::new(translator, Some(&new)).0;
-        assert!(idle.record(&keys[0]).is_some());
-        let same = idle.plan(u64::MAX, || true).layout;
-        assert_eq!(same.changed(), Some(&[][..]));
-        assert_eq!(same.to_vec(), new);
+        // A boot that uses every record and adds none writes only the index
+        // when that makes records young again, and then nothing.
+        let used = |bytes: &[u8]| {
+            let mut idle = Store::new(translator, Some(bytes)).0;
+            for key in read.keys() {
+                assert!(idle.record(key).is_some());
+            }
+            let layout = idle.plan(u64::MAX, || true).layout;
+            (layout.changed().unwrap().to_vec(), layout.to_vec())
+        };
+        let (ranges, young) = used(&new);
+        assert_eq!((ranges.len(), ranges[0].start), (1, 0));
+        let (ranges, same) = used(&young);
+        assert!(ranges.is_empty());
+        assert_eq!(same, young);
     }
 
     #[test]
@@ -2374,10 +2433,9 @@ mod tests {
         assert!(grown.changed().is_some());
         assert_eq!(records_of(&grown.to_vec(), &translator).len(), 3);
         // Under a bound without room for it, the records follow the index.
-        let tight = Store::new(translator, Some(&old))
-            .0
-            .plan(old.len() as u64, || true)
-            .layout;
+        let mut used = Store::new(translator, Some(&old)).0;
+        assert!(used.record(&keys[0]).is_some());
+        let tight = used.plan(old.len() as u64, || true).layout;
         assert_eq!(tight.to_vec(), old);
     }
 
@@ -2407,7 +2465,14 @@ mod tests {
             .iter()
             .map(|(key, bytes)| (key, Piece::Kept(bytes)))
             .collect();
-        let layout = layout_over(&translator, Some(pack), records, pack.format, u64::MAX);
+        let layout = layout_over(
+            &translator,
+            Some(pack),
+            records,
+            pack.format,
+            u64::MAX,
+            &Ages::new(),
+        );
         assert_eq!(layout.changed(), None);
     }
 
@@ -2506,6 +2571,50 @@ mod tests {
             })
             .count();
         assert_eq!(kept, 3);
+    }
+
+    /// A record no boot looks up ages by a boot at each write and leaves
+    /// after [`MAX_UNUSED_BOOTS`]; one looked up is young again. Only the
+    /// index is written for a change of ages.
+    #[test]
+    fn records_unused_for_too_many_boots_leave_the_pack() {
+        let translator = translator_id();
+        let (used, unused) = (Digest::of(b"used page"), Digest::of(b"unused page"));
+        let mut store = Store::new(translator, None).0;
+        store.offer(offer(0x1_0000_4008, used));
+        store.offer(offer(0x1_0000_8008, unused));
+        let mut bytes = store.plan(u64::MAX, || true).layout.to_vec();
+        for boot in 1..=u64::from(MAX_UNUSED_BOOTS) + 1 {
+            let mut next = Store::new(translator, Some(&bytes)).0;
+            assert!(next.record(&used).is_some());
+            let planned = next.plan(u64::MAX, || true);
+            let ranges = planned.layout.changed().unwrap().to_vec();
+            let expected = if boot > u64::from(MAX_UNUSED_BOOTS) {
+                (1, 1)
+            } else {
+                (2, 0)
+            };
+            assert_eq!((planned.layout.records(), planned.expired), expected);
+            if boot <= u64::from(MAX_UNUSED_BOOTS) {
+                // The records stay where they are: the index alone is new.
+                assert_eq!(ranges.len(), 1);
+                assert_eq!(ranges[0].start, 0);
+            }
+            bytes = planned.layout.to_vec();
+            let pack = Pack::parse(&bytes, &translator).unwrap();
+            assert_eq!(pack.age(&used), Some(0));
+            if boot <= u64::from(MAX_UNUSED_BOOTS) {
+                assert_eq!(pack.age(&unused), Some(boot as u8));
+                // The age leaves the record's length whole.
+                assert!(Record::decode(pack.get(&unused).unwrap(), &translator, &unused).is_ok());
+            } else {
+                assert_eq!(pack.age(&unused), None);
+            }
+        }
+        // A boot that uses every record and changes no age writes nothing.
+        let mut next = Store::new(translator, Some(&bytes)).0;
+        assert!(next.record(&used).is_some());
+        assert_eq!(next.plan(u64::MAX, || true).layout.changed(), Some(&[][..]));
     }
 
     #[test]

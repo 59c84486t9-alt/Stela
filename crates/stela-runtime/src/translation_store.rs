@@ -199,16 +199,18 @@ pub fn trim(pack: &mut [u8]) -> usize {
     kept
 }
 
-/// Index entry `index`'s record offset and length.
+/// Index entry `index`'s record offset and length (the length field less
+/// the record's age, `pack::LENGTH_MASK`).
 fn entry(pack: &[u8], index: usize) -> (u64, u64) {
     let at = HEADER_BYTES + index * INDEX_ENTRY_BYTES + 32;
     let field = |at: usize| u64::from_le_bytes(pack[at..at + 8].try_into().expect("a field"));
-    (field(at), field(at + 8))
+    (field(at), field(at + 8) & pack::LENGTH_MASK)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_engine::machine::Translations as _;
     use stela_engine::translations::pack::Piece;
     #[test]
     fn a_pack_is_written_over_its_files_extents_and_never_past_them() {
@@ -302,10 +304,13 @@ mod tests {
                 bytes: 4 * cluster,
             },
         ];
-        // A boot that changed nothing plans the pack it read, unwritten.
-        let planned = Store::new(translator, Some(&bytes))
-            .0
-            .plan(u64::MAX, || true);
+        // A boot that used every record and added none plans the pack it
+        // read, unwritten.
+        let mut store = Store::new(translator, Some(&bytes)).0;
+        for (key, _) in records() {
+            assert!(store.record(&key).is_some());
+        }
+        let planned = store.plan(u64::MAX, || true);
         assert_eq!(planned.layout.changed(), Some(&[][..]));
         write_in_place(&mut disk, &extents, &planned.layout).unwrap();
         assert_eq!(disk.flushes, 0);
@@ -399,9 +404,13 @@ mod tests {
                 None => assert!(at_least_past(record, &bytes, part.length)),
             }
         }
-        // A boot over the part that changed nothing writes nothing: the
-        // file keeps the whole pack for a PC with more RAM.
-        let planned = Store::new(translator, Some(&read)).0.plan(limit, || true);
+        // A boot over the part that used its records and added none writes
+        // nothing: the file keeps the whole pack for a PC with more RAM.
+        let mut store = Store::new(translator, Some(&read)).0;
+        for (key, _) in trimmed.iter() {
+            assert!(store.record(&key).is_some());
+        }
+        let planned = store.plan(limit, || true);
         assert_eq!(planned.layout.changed(), Some(&[][..]));
         assert_eq!(planned.layout.records(), part.records);
         // A budget the index alone passes reads nothing.
