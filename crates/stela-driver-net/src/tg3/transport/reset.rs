@@ -5,18 +5,15 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Unmanaged core reset: no DMA rings or packet-ready state is implied.
 use super::*;
+use crate::block::BlockError;
 use crate::bus::pci::regs;
-use crate::bus::pci::{Capabilities, capability::Transport};
+use crate::bus::pci::{
+    Capabilities, ConfigError, ConfigFailure, ConfigSpace, capability::Transport,
+};
+use core::cell::{Cell, RefCell};
 
 const PCI_STATUS_CAP_LIST: u32 = 1 << 20;
 const PCI_EXPRESS: u8 = 0x10;
-const PCI_POWER_MANAGEMENT: u8 = 1;
-/// PMCSR's PowerState field and No_Soft_Reset bit.
-const PM_STATE: u32 = 3;
-const PM_NO_SOFT_RESET: u32 = 1 << 3;
-/// PCI PM 1.2's D3hot and D2 recovery times, as `pci_power_up` waits them.
-const D3HOT_EXIT_US: u64 = 10_000;
-const D2_EXIT_US: u64 = 200;
 const GRC_MISC_CFG: u32 = 0x6804;
 const GRC_MODE: u32 = 0x6800;
 const GRC_FASTBOOT_PC: u32 = 0x6894;
@@ -76,63 +73,30 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     }
     /// `pci_power_up`, as `pci_enable_device` runs it before `tg3_init_one`
     /// touches MMIO: a function a previous OS or firmware left in D1-D3hot
-    /// (Windows fast startup does) is brought to D0, with PME generation
-    /// off and a pending PME_Status left as it is, and the BARs a D3hot
-    /// soft reset cleared are written back. MMIO in D3hot reads all ones.
+    /// (Windows fast startup does) is brought to D0 by the shared PCI
+    /// power-up over this register owner's configuration transport. MMIO in
+    /// D3hot reads all ones.
     pub(super) fn power_up(&mut self) -> Result<(), Error> {
-        let command_status = Self::checked(self.regs().config_read32(regs::COMMAND)?)?;
-        if command_status & PCI_STATUS_CAP_LIST == 0 {
-            return Ok(());
-        }
-        let registers = self.regs();
-        let read = |offset: u16, bytes: u8| -> Result<u32, Error> {
-            let word = Self::checked(registers.config_read32(offset & !3)?)?;
-            let value = word >> ((offset & 3) * 8);
-            Ok(match bytes {
-                1 => value & 0xff,
-                2 => value & 0xffff,
-                _ => value,
-            })
+        let Self {
+            registers, delay, ..
+        } = self;
+        let mut config = Config {
+            registers: RefCell::new(registers.as_mut().expect("retained hardware registers")),
+            first: Cell::new(None),
         };
-        let power = Capabilities::new(Transport(read))
-            .find_map(|entry| match entry {
-                Ok(entry) if entry.id == PCI_POWER_MANAGEMENT => Some(Ok(entry.offset)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
+        let result = crate::bus::pci::power_up_config(&mut config, |microseconds| {
+            delay.wait_us(microseconds).map_err(BlockError::from)
+        });
+        let kept = config.first.take();
+        result.map_err(|error| {
+            kept.unwrap_or(match error {
+                BlockError::Config(error) => Error::Config(error),
+                BlockError::PciPower(error) => Error::Timing(error),
+                BlockError::PciCapability(error) => Error::PciCapability(error),
+                BlockError::Unsupported("PCI function does not answer") => Error::Removed,
+                _ => Error::ConfigDidNotLatch,
             })
-            .transpose()?;
-        let Some(power) = power else {
-            return Ok(());
-        };
-        let control = power + 4;
-        let csr = Self::checked(self.regs().config_read32(control)?)?;
-        let state = csr & PM_STATE;
-        if state == 0 {
-            return Ok(());
-        }
-        let mut bars = [0; 6];
-        for (index, bar) in bars.iter_mut().enumerate() {
-            *bar = Self::checked(
-                self.regs()
-                    .config_read32(regs::BASE_ADDRESS_0 + 4 * index as u16)?,
-            )?;
-        }
-        self.regs().config_write16(control, 0)?;
-        self.wait(match state {
-            3 => D3HOT_EXIT_US,
-            2 => D2_EXIT_US,
-            _ => 0,
-        })?;
-        if Self::checked(self.regs().config_read32(control)?)? & PM_STATE != 0 {
-            return Err(Error::ConfigDidNotLatch);
-        }
-        if state == 3 && csr & PM_NO_SOFT_RESET == 0 {
-            for (index, bar) in bars.into_iter().enumerate() {
-                self.regs()
-                    .config_write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar)?;
-            }
-        }
-        Ok(())
+        })
     }
     pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
         // The managed APE/ASF handshake is not inferred from an
@@ -295,5 +259,53 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.stopped = false;
         }
         self.record(result)
+    }
+}
+
+/// The function's configuration space over its register owner, for the
+/// shared PCI power-up. A register failure that is not a configuration
+/// error is kept and returned in place of the transport error.
+struct Config<'a, R: Registers> {
+    registers: RefCell<&'a mut R>,
+    first: Cell<Option<Error>>,
+}
+impl<R: Registers> Config<'_, R> {
+    fn kept(&self, error: Error, offset: u16, width: usize) -> ConfigError {
+        match error {
+            Error::Config(error) => error,
+            error => {
+                if self.first.get().is_none() {
+                    self.first.set(Some(error));
+                }
+                ConfigError::before_effect(ConfigFailure::Access { offset, width })
+            }
+        }
+    }
+}
+impl<R: Registers> ConfigSpace for Config<'_, R> {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        let read = self.registers.borrow_mut().config_read32(offset);
+        read.map_err(|error| self.kept(error, offset, 4))
+    }
+    fn write8(&mut self, offset: u16, _: u8) -> Result<(), ConfigError> {
+        // The register owner has no byte store; the power-up uses none.
+        Err(ConfigError::before_effect(ConfigFailure::Access {
+            offset,
+            width: 1,
+        }))
+    }
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        let written = self.registers.get_mut().config_write16(offset, value);
+        written.map_err(|error| self.kept(error, offset, 2))
+    }
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        let written = self.registers.get_mut().config_write32(offset, value);
+        written.map_err(|error| self.kept(error, offset, 4))
     }
 }

@@ -194,6 +194,61 @@ pub trait ConfigSpace {
     }
 }
 
+/// Linux `pci_power_up` over any configuration transport: a function left
+/// in D1-D3hot is brought to D0 with the whole PMCSR written as zero (PME
+/// generation off; a pending PME_Status, write-one-to-clear, stays pending),
+/// the state's exit delay waited, and the BARs a D3hot soft reset cleared
+/// written back. A function without a power management capability is
+/// always in D0. [`Function::power_up`] and drivers that own their
+/// configuration transport share this.
+pub fn power_up_config<C: ConfigSpace>(
+    config: &mut C,
+    mut delay: impl FnMut(u64) -> Result<(), BlockError>,
+) -> Result<(), BlockError> {
+    let Some(offset) = capability::capabilities(&*config)
+        .find_map(|entry| match entry {
+            Ok(entry) if entry.id == CAPABILITY_POWER => Some(Ok(entry.offset)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    let mut config = transaction::Transaction::new(config);
+    let control = offset + PM_CONTROL;
+    let value = config.read16(control)?;
+    if value == u16::MAX {
+        return Err(BlockError::Unsupported("PCI function does not answer"));
+    }
+    let state = value & PM_STATE;
+    if state == 0 {
+        return Ok(());
+    }
+    let mut bars = [0; BARS];
+    for (index, bar) in bars.iter_mut().enumerate() {
+        *bar = config.read32(regs::BASE_ADDRESS_0 + 4 * index as u16)?;
+    }
+    config.write16(control, 0)?;
+    delay(match state {
+        D3HOT => D3HOT_DELAY_US,
+        D2 => D2_DELAY_US,
+        _ => 0,
+    })?;
+    if config.read16(control)? & PM_STATE != 0 {
+        return Err(BlockError::Unsupported("PCI function did not enter D0"));
+    }
+    if state == D3HOT
+        && value & PM_NO_SOFT_RESET == 0
+        && config.read8(regs::HEADER_TYPE)? & 0x7f == 0
+    {
+        for (index, bar) in bars.into_iter().enumerate() {
+            config.write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar)?;
+        }
+    }
+    Ok(())
+}
+
 /// A function's 4 KiB of ECAM configuration space.
 /// A context-bound config transport. Owned and kept-owned arms delegate
 /// every effect to the original mapping owner; no copied pointer bypass exists.
@@ -577,47 +632,9 @@ impl<C: ConfigSpace> Function<C> {
     }
     fn power_up_with(
         &mut self,
-        mut delay: impl FnMut(u64) -> Result<(), BlockError>,
+        delay: impl FnMut(u64) -> Result<(), BlockError>,
     ) -> Result<(), BlockError> {
-        let Some((offset, _)) = self
-            .capabilities()?
-            .into_iter()
-            .find(|(_, id)| *id == CAPABILITY_POWER)
-        else {
-            return Ok(());
-        };
-        let mut config = transaction::Transaction::new(&mut self.config);
-        let control = u16::from(offset) + PM_CONTROL;
-        let value = config.read16(control)?;
-        if value == u16::MAX {
-            return Err(BlockError::Unsupported("PCI function does not answer"));
-        }
-        let state = value & PM_STATE;
-        if state == 0 {
-            return Ok(());
-        }
-        let mut bars = [0; BARS];
-        for (index, bar) in bars.iter_mut().enumerate() {
-            *bar = config.read32(regs::BASE_ADDRESS_0 + 4 * index as u16)?;
-        }
-        config.write16(control, 0)?;
-        delay(match state {
-            D3HOT => D3HOT_DELAY_US,
-            D2 => D2_DELAY_US,
-            _ => 0,
-        })?;
-        if config.read16(control)? & PM_STATE != 0 {
-            return Err(BlockError::Unsupported("PCI function did not enter D0"));
-        }
-        if state == D3HOT
-            && value & PM_NO_SOFT_RESET == 0
-            && config.read8(regs::HEADER_TYPE)? & 0x7f == 0
-        {
-            for (index, bar) in bars.into_iter().enumerate() {
-                config.write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar)?;
-            }
-        }
-        Ok(())
+        power_up_config(&mut self.config, delay)
     }
     /// Reset this function alone, as Linux's `pcie_flr` inside
     /// `pci_dev_save_and_disable` and `pci_dev_restore`: requests stopped,
