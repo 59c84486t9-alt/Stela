@@ -320,7 +320,20 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
         Ok(good.clone())
     );
     type Mutation = (&'static str, fn(&mut Entry));
-    let mutations: [Mutation; 15] = [
+    // As in compiled blocks, a prologue may precede the first instruction
+    // and an instruction fused into the next shares its native offset.
+    let accepted: [Mutation; 2] = [
+        ("prologue", |entry| entry.source_map[0].1 = 1),
+        ("fused instruction", |entry| {
+            entry.source_map[1].1 = entry.source_map[0].1
+        }),
+    ];
+    for (name, mutate) in accepted {
+        let mut fine = entry.clone();
+        mutate(&mut fine);
+        assert!(fine.consistent(), "{name}");
+    }
+    let mutations: [Mutation; 13] = [
         ("missing word", |entry| {
             entry.source_map.remove(1);
         }),
@@ -328,9 +341,6 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
             entry.source_map[1].0 = entry.source_map[0].0
         }),
         ("guest gap", |entry| entry.source_map[1].0 += 4),
-        ("equal native", |entry| {
-            entry.source_map[1].1 = entry.source_map[0].1
-        }),
         ("descending native", |entry| {
             entry.source_map[3].1 = entry.source_map[2].1 - 1
         }),
@@ -340,7 +350,6 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
         ("out-of-range native", |entry| {
             entry.source_map[3].1 = u32::try_from(entry.code.len() + 1).unwrap()
         }),
-        ("wrong native entry", |entry| entry.source_map[0].1 = 1),
         ("unaligned source base", |entry| {
             entry.offset += 1;
             for (guest, _) in &mut entry.source_map {

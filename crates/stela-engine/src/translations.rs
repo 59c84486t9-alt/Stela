@@ -1,7 +1,9 @@
 //! The persistent translation store's format: page records of
 //! block translations keyed by the SHA-256 of their guest fetch page, with
-//! guest addresses in the native code stored relative to the page, and the
-//! proof that a block's code depends on its address only through them.
+//! guest addresses in the native code stored relative to the page. The
+//! compiler records each such field as it emits it ([`Entry::stored`]); a
+//! check compiles a block again at other pages and requires the fields
+//! that move to be those ([`prove`]).
 //!
 //! The format is the same in every container: the directory store
 //! and the pack `stela.efi` keeps
@@ -23,7 +25,7 @@ use stela_crypto::digest::Digest as _;
 
 /// The bytes of the fetch page a record covers: no block leaves it.
 pub const PAGE_BYTES: usize = 4096;
-pub const SCHEMA: u32 = 3;
+pub const SCHEMA: u32 = 4;
 const RECORD_MAGIC: [u8; 8] = *b"STLTPAGE";
 const HEADER_BYTES: usize = 88;
 const TRAILER_BYTES: usize = 32;
@@ -191,6 +193,7 @@ impl Entry {
                         (GuestAddress(page + u64::from(guest)), native as usize)
                     })
                     .collect(),
+                relocations: Some(self.relocations.clone()),
             },
             source_bytes: usize::from(self.source_bytes),
             direct_exits,
@@ -294,8 +297,26 @@ impl Entry {
         }
     }
 
+    /// Whether the source map has a row for each instruction, in order,
+    /// whose native offsets lie in the `code` bytes and never go back. As in
+    /// the compiled block, a prologue may precede the first instruction's
+    /// code, and an instruction fused into the next has the next's offset.
+    fn source_map_fits(&self, code: usize) -> bool {
+        self.source_map.len() == usize::from(self.source_bytes / 4)
+            && self
+                .source_map
+                .iter()
+                .zip((self.offset..).step_by(4))
+                .all(|(&(guest, native), expected)| guest == expected && (native as usize) < code)
+            && self
+                .source_map
+                .windows(2)
+                .all(|pair| pair[0].1 <= pair[1].1)
+    }
+
     /// Check what decoding cannot: offsets inside the code and the page,
-    /// ascending source map and relocations, and fields that do not overlap.
+    /// the source map ([`Self::source_map_fits`]), and relocation fields in
+    /// order that do not overlap.
     fn consistent(&self) -> bool {
         let code = self.code.len();
         let in_code = |offset: u32, bytes: usize| (offset as usize).saturating_add(bytes) <= code;
@@ -317,16 +338,7 @@ impl Entry {
                 .relocations
                 .iter()
                 .all(|&offset| in_code(offset, FIELD_BYTES))
-            && crate::artifact::validate_source_map_geometry(
-                u64::from(self.offset),
-                usize::from(self.source_bytes),
-                code,
-                0,
-                self.source_map
-                    .iter()
-                    .map(|&(guest, native)| (u64::from(guest), native as usize)),
-            )
-            .is_ok()
+            && self.source_map_fits(code)
             && self.exits.iter().all(|exit| {
                 in_code(exit.offset, 0) && ExitKind::try_from(u64::from(exit.kind)).is_ok()
             })
@@ -766,11 +778,12 @@ pub fn probe_displacements(page: u64) -> [u64; 2] {
     })
 }
 
-/// The stored form of `block`, compiled at `pc` in the page at `page`, given
-/// the same source compiled at the two [`probe_displacements`] of the page:
-/// `None` unless the three differ only in 8-byte fields, each by exactly
-/// its probe's displacement, and in their exit targets and source maps by
-/// the same.
+/// The stored form of `block`, compiled at `pc` in the page at `page`, as
+/// the same source compiled at the two [`probe_displacements`] of the page
+/// shows it: `None` unless the three differ only in 8-byte fields, each by
+/// exactly its probe's displacement, and in their exit targets and source
+/// maps by the same. The check of the relocations the compiler records
+/// ([`Entry::stored`]).
 pub fn prove(
     block: &CompiledBlock,
     input: &[u8],
@@ -863,58 +876,94 @@ pub fn prove(
         relocations.push(start as u32);
         at = start + FIELD_BYTES;
     }
-    let mut stored = code.clone();
-    for &start in &relocations {
-        let start = start as usize;
-        let value = field(code, start).wrapping_sub(page);
-        stored[start..start + FIELD_BYTES].copy_from_slice(&value.to_le_bytes());
+    Entry::with_relocations(block, input, page, pc, context, relocations)
+}
+
+impl Entry {
+    /// The stored form of `block`, compiled at `pc` in the page at `page`
+    /// from `input`: its code with each relocation field the compiler
+    /// recorded made relative to the page. `None` when the compiler found
+    /// a value no relocation reproduces, or the block does not fit an entry.
+    pub fn stored(
+        block: &CompiledBlock,
+        input: &[u8],
+        page: u64,
+        pc: u64,
+        context: Digest,
+    ) -> Option<Self> {
+        let relocations = block.native.relocations.clone()?;
+        Self::with_relocations(block, input, page, pc, context, relocations)
     }
-    let page_offset = |guest: u64| {
-        u16::try_from(guest.wrapping_sub(page))
-            .ok()
-            .filter(|&offset| usize::from(offset) < PAGE_BYTES)
-    };
-    let entry = Entry {
-        context,
-        offset: page_offset(pc)?,
-        source_bytes: u16::try_from(block.source_bytes).ok()?,
-        input: input.to_vec(),
-        code: stored,
-        relocations,
-        source_map: block
-            .native
-            .source_map
+
+    fn with_relocations(
+        block: &CompiledBlock,
+        input: &[u8],
+        page: u64,
+        pc: u64,
+        context: Digest,
+        relocations: Vec<u32>,
+    ) -> Option<Self> {
+        let code = &block.native.x86_64_code;
+        if relocations
             .iter()
-            .map(|&(guest, native)| Some((page_offset(guest.0)?, u32::try_from(native).ok()?)))
-            .collect::<Option<_>>()?,
-        exits: block
-            .direct_exits
-            .iter()
-            .map(|exit| {
-                Some(Exit {
-                    offset: u32::try_from(exit.offset).ok()?,
-                    target: exit.target.0.wrapping_sub(page),
-                    kind: exit.kind as u8,
-                    skipped: exit.skipped,
+            .any(|&start| start as usize + FIELD_BYTES > code.len())
+        {
+            return None;
+        }
+        let mut stored = code.clone();
+        for &start in &relocations {
+            let start = start as usize;
+            let field = &mut stored[start..start + FIELD_BYTES];
+            let value = u64::from_le_bytes((&*field).try_into().expect("8 bytes"));
+            field.copy_from_slice(&value.wrapping_sub(page).to_le_bytes());
+        }
+        let page_offset = |guest: u64| {
+            u16::try_from(guest.wrapping_sub(page))
+                .ok()
+                .filter(|&offset| usize::from(offset) < PAGE_BYTES)
+        };
+        let entry = Entry {
+            context,
+            offset: page_offset(pc)?,
+            source_bytes: u16::try_from(block.source_bytes).ok()?,
+            input: input.to_vec(),
+            code: stored,
+            relocations,
+            source_map: block
+                .native
+                .source_map
+                .iter()
+                .map(|&(guest, native)| Some((page_offset(guest.0)?, u32::try_from(native).ok()?)))
+                .collect::<Option<_>>()?,
+            exits: block
+                .direct_exits
+                .iter()
+                .map(|exit| {
+                    Some(Exit {
+                        offset: u32::try_from(exit.offset).ok()?,
+                        target: exit.target.0.wrapping_sub(page),
+                        kind: exit.kind as u8,
+                        skipped: exit.skipped,
+                    })
                 })
-            })
-            .collect::<Option<_>>()?,
-        recovery: block
-            .fault_recovery
-            .iter()
-            .map(|row| {
-                let mut row = UnqualifiedFaultRecovery::from(row);
-                row.retirement = row
-                    .retirement
-                    .relocated(GuestAddress(
-                        row.retirement.instruction_pc().0.checked_sub(page)?,
-                    ))
-                    .ok()?;
-                Some(row)
-            })
-            .collect::<Option<_>>()?,
-    };
-    entry.consistent().then_some(entry)
+                .collect::<Option<_>>()?,
+            recovery: block
+                .fault_recovery
+                .iter()
+                .map(|row| {
+                    let mut row = UnqualifiedFaultRecovery::from(row);
+                    row.retirement = row
+                        .retirement
+                        .relocated(GuestAddress(
+                            row.retirement.instruction_pc().0.checked_sub(page)?,
+                        ))
+                        .ok()?;
+                    Some(row)
+                })
+                .collect::<Option<_>>()?,
+        };
+        entry.consistent().then_some(entry)
+    }
 }
 
 #[cfg(test)]

@@ -5,8 +5,9 @@
 //! gives this translator the preallocated spare file when it has no pack
 //! yet, reads as much of the pack as this PC's RAM budget holds and notes
 //! the volume's GPT partition. The engine reads blocks from the pack
-//! ([`install`]) and, when the guest restarts or powers off, proves the
-//! blocks it compiled anew and rewrites the pack in place over the file's
+//! ([`install`]) and keeps the stored form of each block it compiles anew;
+//! when the guest restarts or powers off, the pack is rewritten in place
+//! with them over the file's
 //! clusters, within the same budget ([`write`]), found by Stela's own FAT32
 //! reader on the partition the storage drivers opened. The pack is a cache:
 //! every failure leaves the boot running without a store, or without
@@ -15,8 +16,7 @@
 //! When every PE runs on its own host core (the default), their machines
 //! share the store ([`Shared`]), split by page key into parts behind locks
 //! of their own, and it keeps the blocks any of them compiled for the others
-//! to install ([`share`]). A PE that compiles at EL0 proves a few waiting
-//! blocks now and then, so that a stop has fewer left to prove.
+//! to install ([`share`]).
 use super::bundle::Bytes;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
 use alloc::{boxed::Box, format, string::String, vec};
@@ -489,9 +489,6 @@ struct Costs {
     lookups: AtomicU64,
     lookup_ticks: AtomicU64,
     decode_ticks: AtomicU64,
-    /// Proof batches run during the boot, and their TSC ticks.
-    batches: AtomicU64,
-    batch_ticks: AtomicU64,
 }
 
 static COSTS: Costs = Costs {
@@ -501,35 +498,17 @@ static COSTS: Costs = Costs {
     lookups: AtomicU64::new(0),
     lookup_ticks: AtomicU64::new(0),
     decode_ticks: AtomicU64::new(0),
-    batches: AtomicU64::new(0),
-    batch_ticks: AtomicU64::new(0),
 };
 
-/// Proof during the boot: one PE at a time proves a batch of this many
-/// blocks, at EL0, and the next batch waits until the time since this one
-/// began is [`PROOF_SPACING`] times its own. The prover then takes at most
-/// a fraction of one core, and no PE holds a kernel lock while it proves.
-const PROOF_BATCH_BLOCKS: usize = 32;
-const PROOF_SPACING: u64 = 4;
-/// Counter ticks after a look that found nothing to prove before the next:
-/// about a millisecond at the clocks Stela runs on.
-const IDLE_LOOK_TICKS: u64 = 1 << 22;
-static PROVING: AtomicBool = AtomicBool::new(false);
-static NEXT_PROOF: AtomicU64 = AtomicU64::new(0);
-static PROOF_PART: AtomicUsize = AtomicUsize::new(0);
-/// The most a stop spends proving what the boot left: the rest is not kept.
-const STOP_PROOF_MILLIS: u64 = 3000;
-
 /// What the store keeps beyond its pack, for an engine heap of `heap` bytes:
-/// blocks waiting for proof, entries proven during the boot, decoded
-/// records, and the fetch pages the machines keep (a page and its bookkeeping
+/// entries added during the boot, decoded records, and the fetch pages the
+/// machines keep (a page and its bookkeeping
 /// take about 4.5 KiB).
 fn bounds(heap: usize) -> (pack::Bounds, usize) {
     const MIB: usize = 1 << 20;
     let defaults = pack::Bounds::default();
     let bounds = pack::Bounds {
-        pending: (heap / 64).clamp(defaults.pending, 256 * MIB),
-        proven: (heap / 32).clamp(defaults.proven, 512 * MIB),
+        added: (heap / 32).clamp(defaults.added, 512 * MIB),
         decoded: (heap / 64).clamp(defaults.decoded, 128 * MIB),
     };
     (bounds, (heap / 64 / (4608)).max(4096))
@@ -564,60 +543,23 @@ impl Shared {
         drop(retired);
     }
 
+    /// Keep the offer's stored form, made before the lock is taken, and
+    /// share its block.
     fn publish_writable(offer: Offer) {
         let bound = AVAILABLE.shared_bound.load(Ordering::Acquire) / PARTS;
-        let mut staged = StagedOffer::for_writable(&offer, bound);
-        let retired = part(&offer.key()).with(|store| {
-            let store = store.as_mut()?;
-            store.keep_pending(&offer);
-            store.accept_shared(staged.as_mut()?)
+        let entry = offer.entry();
+        let lock = part(&offer.key());
+        lock.with(|store| {
+            if let Some(store) = store {
+                store.keep(&offer, entry);
+            }
         });
+        let Some(mut staged) = StagedOffer::new(offer, bound) else {
+            return;
+        };
+        let retired = lock.with(|store| store.as_mut()?.accept_shared(&mut staged));
         drop(retired);
-        if offer.quiet() {
-            prove_some();
-        }
     }
-}
-
-/// Prove one batch of the blocks waiting for proof outside the store's
-/// locks, when no other PE does and the last batch is long enough past.
-fn prove_some() {
-    let now = output::now();
-    if now < NEXT_PROOF.load(Ordering::Relaxed) || PROVING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    // A stop clears the capability before it waits for `PROVING`.
-    let mut proved = false;
-    if available(WRITE_PACK) && !crate::ALLOCATOR.low() {
-        for _ in 0..PARTS {
-            let lock = &STORES[PROOF_PART.fetch_add(1, Ordering::Relaxed) % PARTS];
-            let Some(batch) = lock.with(|store| store.as_mut()?.take_batch(PROOF_BATCH_BLOCKS))
-            else {
-                continue;
-            };
-            let proven = batch.prove();
-            lock.with(|store| {
-                if let Some(store) = store {
-                    store.fold(proven);
-                }
-            });
-            proved = true;
-            break;
-        }
-    }
-    let spent = output::now().wrapping_sub(now);
-    // Only batches proven count: a look that found every part empty or
-    // full is not one, and the next look waits a while, so that EL0
-    // compiles do not each look through every part.
-    let wait = if proved {
-        COSTS.batches.fetch_add(1, Ordering::Relaxed);
-        COSTS.batch_ticks.fetch_add(spent, Ordering::Relaxed);
-        spent.saturating_mul(PROOF_SPACING)
-    } else {
-        IDLE_LOOK_TICKS
-    };
-    NEXT_PROOF.store(now.wrapping_add(wait), Ordering::Relaxed);
-    PROVING.store(false, Ordering::SeqCst);
 }
 
 impl Translations for Shared {
@@ -878,7 +820,7 @@ fn millis(ticks: u64) -> u64 {
 }
 
 /// Report what the store did and cost this boot: lookups and their causes,
-/// shared misses by reason, proof during the boot and lock waits.
+/// shared misses by reason, stored forms kept and checked, and lock waits.
 fn report(counters: &pack::Counters) {
     let costs = &COSTS;
     let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
@@ -910,20 +852,21 @@ fn report(counters: &pack::Counters) {
         contended += load(&lock.contended);
         spun += load(&lock.spun);
     }
+    let checks = stela_engine::machine::entry_checks();
     output::arguments(format_args!(
-        "TRANSLATIONS early proven={} unprovable={} unkept={} batches={} batch_ms={} \
+        "TRANSLATIONS added={} unstorable={} unkept={} checked={} differed={} \
          locks acquired={acquired} contended={contended} spin_ms={}\n",
-        counters.proven,
-        counters.unprovable,
+        counters.added,
+        counters.unstorable,
         counters.unkept,
-        load(&costs.batches),
-        millis(load(&costs.batch_ticks)),
+        checks.checked,
+        checks.differed,
         millis(spun),
     ));
 }
 
-/// At a quiescent point (the guest restarts or powers off): prove the
-/// blocks compiled anew and rewrite the pack in place.
+/// At a quiescent point (the guest restarts or powers off): rewrite the
+/// pack in place with the entries the boot added.
 pub fn write() {
     let Some(boot) = BOOT.with(|boot| {
         AVAILABLE.capabilities.store(0, Ordering::SeqCst);
@@ -932,10 +875,6 @@ pub fn write() {
     }) else {
         return;
     };
-    // A batch being proven is folded back before the parts are taken.
-    while PROVING.load(Ordering::SeqCst) {
-        core::hint::spin_loop();
-    }
     let mut parts = STORES.iter().filter_map(|lock| lock.with(Option::take));
     let Some(mut store) = parts.next() else {
         return;
@@ -955,20 +894,11 @@ pub fn write() {
         return;
     };
     output::arguments(format_args!(
-        "TRANSLATIONS proving {} blocks (loaded={} absent={} invalid={} dropped={})\n",
-        store.pending(),
-        counters.loaded,
-        counters.absent,
-        counters.invalid,
-        counters.dropped
+        "TRANSLATIONS planning {} added entries (loaded={} absent={} invalid={})\n",
+        counters.added, counters.loaded, counters.absent, counters.invalid,
     ));
-    // Proof recompiles the original and both relocation probes; stop while
-    // the heap still has room for the layout and the write, and before the
-    // stop waits long.
     let started = output::now();
-    let planned = store.plan(bound, || {
-        !crate::ALLOCATOR.low() && output::millis_since(started) < STOP_PROOF_MILLIS
-    });
+    let planned = store.plan(bound);
     let heap = crate::ALLOCATOR.usage();
     let written: u64 = match planned.layout.changed() {
         None => planned.layout.bytes(),
@@ -1010,13 +940,11 @@ pub fn write() {
         &planned.layout,
     ) {
         Ok(()) => output::arguments(format_args!(
-            "TRANSLATIONS written records={} bytes={} changed={written} proven={} unprovable={} \
-             unproven={} evicted={} expired={} ms={}\n",
+            "TRANSLATIONS written records={} bytes={} changed={written} added={} evicted={} \
+             expired={} ms={}\n",
             planned.layout.records(),
             planned.layout.bytes(),
-            planned.proven,
-            planned.unprovable,
-            planned.unproven,
+            counters.added,
             planned.evicted,
             planned.expired,
             output::millis_since(started)

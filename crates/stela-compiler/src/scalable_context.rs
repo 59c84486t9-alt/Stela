@@ -404,9 +404,11 @@ impl Leaf {
                     })?;
             code.patch(displacement, relative.to_le_bytes());
         }
+        let (x86_64_code, relocations) = code.into_parts();
         Ok(NativeBlock {
-            x86_64_code: code.into_bytes(),
+            x86_64_code,
             source_map,
+            relocations: Some(relocations),
         })
     }
 }

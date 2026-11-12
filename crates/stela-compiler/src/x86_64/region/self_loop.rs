@@ -381,8 +381,12 @@ pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) ->
     encoding::patch_relative(&mut code, body_jump, body);
     encoding::decrement_stored_budget(&mut code);
     let prefix = code.len();
-    let mut bytes = code.into_bytes();
+    let (mut bytes, mut relocations) = code.into_parts();
     bytes.extend(native.x86_64_code);
+    native.relocations = native.relocations.map(|fields| {
+        relocations.extend(fields.into_iter().map(|at| at + prefix as u32));
+        relocations
+    });
     for (_, offset) in &mut native.source_map {
         *offset += prefix;
     }
@@ -688,9 +692,11 @@ impl LegacyPlan {
         if let Some((_, offset)) = emitter.output.source_map.first_mut() {
             *offset = 0;
         }
+        let (x86_64_code, relocations) = emitter.output.code.into_parts();
         Ok(NativeBlock {
-            x86_64_code: emitter.output.code.into_bytes(),
+            x86_64_code,
             source_map: emitter.output.source_map,
+            relocations: Some(relocations),
         })
     }
 }
@@ -830,9 +836,11 @@ fn allocated_loop(
         // Hot pressure is the primary loop cost. Equal pressure uses the smallest
         // complete body, then the smaller native callee-save footprint.
         let cost = (hot_frame, emitter.output.code.len(), callee_slots);
+        let (x86_64_code, relocations) = emitter.output.code.into_parts();
         let native = NativeBlock {
-            x86_64_code: emitter.output.code.into_bytes(),
+            x86_64_code,
             source_map: emitter.output.source_map,
+            relocations: Some(relocations),
         };
         if best.as_ref().is_none_or(|(old, _)| cost < *old) {
             best = Some((cost, native));

@@ -119,7 +119,7 @@ fn address_pair_shares_one_literal_and_preserves_distinct_source_rows() {
             0,
             Operation::PcRelative(crate::aarch64::pc_relative::Operand {
                 destination: x0,
-                address: u64::MAX,
+                address: crate::GuestAddress(u64::MAX),
             }),
         ),
         instruction(1, add(x0, x0)),

@@ -274,7 +274,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     literal::Transfer::Integer { .. } => 8,
                     literal::Transfer::Simd { bytes, .. } => u64::from(bytes),
                 };
-                one(operand.address, bytes, true)
+                one(operand.address.0, bytes, true)
             }
             Operation::Simd(simd::Operand::Memory {
                 load,

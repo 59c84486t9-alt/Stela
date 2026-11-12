@@ -359,7 +359,7 @@ pub fn thread_switch_thunk(pc: GuestAddress, rt: u8, cell: Place, places: &Threa
     asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, frame)), Rax);
     load_x(&mut asm, 30);
     asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, link)), Rax);
-    asm.mov_imm64(Rax, pc.0);
+    asm.guest_imm64(Rax, pc);
     asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, pc)), Rax);
     load_x(&mut asm, rt);
     asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, next)), Rax);

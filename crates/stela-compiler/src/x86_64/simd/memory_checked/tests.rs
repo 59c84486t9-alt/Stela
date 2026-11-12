@@ -63,7 +63,7 @@ fn literal_adapter_preserves_absolute_source_address_and_rejects_invalid_shapes(
                     assert!(!checked.transfer.writeback());
                     assert!(
                         matches!(checked.transfer.address, Address::Literal { address }
-                        if address == (i128::from(pc) + i128::from(immediate) * 4) as u64)
+                        if address.0 == (i128::from(pc) + i128::from(immediate) * 4) as u64)
                     );
                     assert_eq!(checked.requirements().required_flags, flags::ASIMD);
                     assert_eq!(
@@ -78,7 +78,7 @@ fn literal_adapter_preserves_absolute_source_address_and_rejects_invalid_shapes(
         assert!(
             CheckedOperand::from_operation(
                 &Operation::Literal(literal::Operand {
-                    address: GUEST_BASE,
+                    address: crate::GuestAddress(GUEST_BASE),
                     transfer: literal::Transfer::Simd { destination, bytes },
                 }),
                 CheckedMemoryProfile::SpAlignmentDisabled,
@@ -579,7 +579,7 @@ fn literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
             for residue in [0, 4, 8, 12] {
                 let address = GUEST_BASE + 32 + residue;
                 let operation = Operation::Literal(literal::Operand {
-                    address,
+                    address: crate::GuestAddress(address),
                     transfer: literal::Transfer::Simd { destination, bytes },
                 });
                 let checked = CheckedOperand::from_operation(

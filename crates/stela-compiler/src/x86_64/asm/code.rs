@@ -8,6 +8,10 @@ pub(crate) struct Code {
     pub(super) bytes: Vec<u8>,
     pub(super) instructions: usize,
     pub(super) sites: Vec<EmissionSite>,
+    /// The offsets of the 8-byte fields that hold guest addresses
+    /// ([`super::Asm::guest_imm64`]), ascending: what a stored block adds its
+    /// page's displacement to when it is installed at another address.
+    pub(super) relocations: Vec<u32>,
     /// Whether guest registers live in host registers ([`super::super::pinned`]).
     pub(super) pinned: bool,
     locals: Option<super::super::pinned::LocalRegisters>,
@@ -100,6 +104,7 @@ impl Code {
             bytes: Vec::with_capacity(INITIAL_BYTES),
             instructions: 0,
             sites: Vec::new(),
+            relocations: Vec::new(),
             pinned: false,
             locals: None,
             dirty: Default::default(),
@@ -216,6 +221,7 @@ impl Code {
             instructions: 0,
             shared: Some(&mut self.instructions),
             sites: Some(&mut self.sites),
+            relocations: Some(&mut self.relocations),
             pinned: self.pinned,
             locals: self.locals,
             dirty: self.dirty,
@@ -262,6 +268,10 @@ impl Code {
     pub(crate) fn sites(&self) -> &[EmissionSite] {
         &self.sites
     }
+    /// The bytes and their guest-address fields.
+    pub(crate) fn into_parts(self) -> (Vec<u8>, Vec<u32>) {
+        (self.bytes, self.relocations)
+    }
     /// The instructions emitted through [`Self::asm`].
     pub(crate) const fn instructions(&self) -> usize {
         self.instructions
@@ -273,6 +283,8 @@ impl Code {
     pub(crate) fn append(&mut self, other: Code) {
         debug_assert!(other.locals.is_none());
         let base = self.bytes.len();
+        self.relocations
+            .extend(other.relocations.iter().map(|at| base as u32 + at));
         self.sites
             .extend(other.sites.into_iter().map(|site| EmissionSite {
                 start: base + site.start,
@@ -313,8 +325,19 @@ impl Code {
         assert!(
             span.end.bytes <= source.bytes.len() && span.end.instructions <= source.instructions
         );
+        let base = self.bytes.len();
         self.bytes
             .extend_from_slice(&source.bytes[span.start.bytes..span.end.bytes]);
+        for &at in &source.relocations {
+            let at = at as usize;
+            if at + 8 > span.start.bytes && at < span.end.bytes {
+                assert!(
+                    at >= span.start.bytes && at + 8 <= span.end.bytes,
+                    "span preserves complete guest-address fields"
+                );
+                self.relocations.push((base + at - span.start.bytes) as u32);
+            }
+        }
         for site in &source.sites {
             if site.start < span.end.bytes && site.end > span.start.bytes {
                 assert!(
@@ -336,6 +359,12 @@ impl Code {
         let end = offset
             .checked_add(N)
             .expect("patch field offset does not overflow");
+        assert!(
+            self.relocations
+                .iter()
+                .all(|&at| at as usize + 8 <= offset || at as usize >= end),
+            "a patch leaves guest-address fields whole"
+        );
         self.bytes
             .get_mut(offset..end)
             .expect("patch field lies in emitted code")
@@ -363,6 +392,17 @@ impl Code {
                 ..site
             })
             .collect();
+        assert!(
+            self.relocations
+                .iter()
+                .all(|&field| field as usize + 8 <= at.bytes || field as usize >= at.bytes),
+            "split preserves complete guest-address fields"
+        );
+        let relocations = self
+            .relocations
+            .extract_if(.., |field| *field as usize >= at.bytes)
+            .map(|field| field - at.bytes as u32)
+            .collect();
         let failures = self
             .failures
             .extract_if(.., |(jump, _, _)| jump.at >= at.bytes)
@@ -378,6 +418,7 @@ impl Code {
             bytes: self.bytes.split_off(at.bytes),
             instructions: self.instructions - at.instructions,
             sites,
+            relocations,
             pinned: self.pinned,
             locals: None,
             dirty: Default::default(),
@@ -402,6 +443,8 @@ impl Code {
             "truncate preserves complete faulting instructions"
         );
         self.sites.retain(|site| site.end <= at.bytes);
+        self.relocations
+            .retain(|&field| field as usize + 8 <= at.bytes);
         self.failures.retain(|(jump, _, _)| jump.at < at.bytes);
         self.bytes.truncate(at.bytes);
         self.instructions = at.instructions;
@@ -438,6 +481,14 @@ impl Code {
             }
             jump.at -= removed;
         }
+        self.relocations
+            .retain(|&field| field as usize + 8 <= range.start || field as usize >= range.end);
+        for field in self.relocations.iter_mut().rev() {
+            if (*field as usize) < range.end {
+                break;
+            }
+            *field -= removed as u32;
+        }
         self.bytes.drain(range);
         self.instructions = self
             .instructions
@@ -449,6 +500,7 @@ impl Code {
         self.bytes.clear();
         self.instructions = 0;
         self.sites.clear();
+        self.relocations.clear();
         self.instruction = 0;
         self.failures.clear();
     }

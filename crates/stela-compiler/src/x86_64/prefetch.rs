@@ -68,7 +68,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
             }
         }
         Address::Literal(address) => {
-            code.asm().mov_imm64(Gpr::Rax, address);
+            code.asm().guest_imm64(Gpr::Rax, address);
             immediate(code, locality, 0);
         }
     }

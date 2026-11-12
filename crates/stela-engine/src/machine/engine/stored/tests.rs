@@ -179,7 +179,7 @@ fn cached_blocks_do_not_cross_presented_instruction_features() {
         ));
         let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
         let mut record = Record::new(translations::translator_id(), offer.key);
-        record.insert(proven(&offer));
+        record.insert(offer.entry().unwrap());
         for shared in [false, true] {
             for same_profile in [false, true] {
                 let mut store = MemoryStore::default();
@@ -239,11 +239,6 @@ fn a_block_another_thread_prepared_at_the_same_pc_is_installed_as_it_is() {
     assert_eq!(second.statistics.compiled, 1);
 }
 
-/// What the directory store's workers do with an offer.
-fn proven(offer: &Offer) -> translations::Entry {
-    offer.prove().unwrap()
-}
-
 #[test]
 fn a_stored_block_of_the_same_page_bytes_is_installed_without_compiling() {
     // adr x0, #8; add x0, x0, #1; svc #0
@@ -260,7 +255,7 @@ fn a_stored_block_of_the_same_page_bytes_is_installed_without_compiling() {
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
     assert_eq!((offer.page, offer.pc), (BASE, BASE + 4));
     let mut record = Record::new(translations::translator_id(), offer.key);
-    record.insert(proven(&offer));
+    record.insert(offer.entry().unwrap());
     let mut store = MemoryStore::default();
     store.records.insert(offer.key, Arc::new(record));
     let mut second = machine(&words);
@@ -322,7 +317,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
     assert_eq!(offer.input().len(), block_bytes);
     let mut record = Record::new(translations::translator_id(), offer.key);
-    record.insert(proven(&offer));
+    record.insert(offer.entry().unwrap());
     let mut store = MemoryStore::default();
     store.records.insert(offer.key, Arc::new(record));
     let mut second = machine(&words);
@@ -458,7 +453,7 @@ fn a_stored_install_relocates_into_the_machines_own_buffers() {
     let offers = core::mem::take(&mut first.host.store.as_mut().unwrap().offers);
     let mut record = Record::new(translations::translator_id(), offers[0].key);
     for offer in &offers {
-        record.insert(proven(offer));
+        record.insert(offer.entry().unwrap());
     }
     let mut store = MemoryStore::default();
     store.records.insert(offers[0].key, Arc::new(record));
@@ -518,7 +513,7 @@ fn installs_count_where_their_block_came_from_at_their_level() {
 
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
     let mut record = Record::new(translations::translator_id(), offer.key);
-    record.insert(proven(&offer));
+    record.insert(offer.entry().unwrap());
     let mut store = MemoryStore::default();
     store.records.insert(offer.key, Arc::new(record));
     store
@@ -561,7 +556,7 @@ fn installs_count_where_their_block_came_from_at_their_level() {
 }
 
 /// The same page content at four addresses: compiled at the first,
-/// compiled and proven at the second, rebased at the third, where it is
+/// compiled and kept at the second, rebased at the third, where it is
 /// what a compile there installs. A rewritten page is compiled again.
 #[test]
 fn a_block_compiled_at_two_addresses_is_rebased_at_a_third() {
@@ -577,16 +572,16 @@ fn a_block_compiled_at_two_addresses_is_rebased_at_a_third() {
     let mut reusing = machine(&words);
     reusing.host.store = Some(MemoryStore::default());
     assert!(reusing.fetch_block(page(0), false).is_ok());
-    assert_eq!(reusing.code.rebases.counts().proven, 0);
+    assert_eq!(reusing.code.rebases.counts().kept, 0);
     assert!(reusing.fetch_block(page(1), false).is_ok());
     assert_eq!(reusing.statistics.compiled, 2);
-    assert_eq!(reusing.code.rebases.counts().proven, 1);
+    assert_eq!(reusing.code.rebases.counts().kept, 1);
     let Ok(Fetched::Block(rebased)) = reusing.fetch_block(page(2), false) else {
         panic!("rebased block")
     };
     assert_eq!(reusing.statistics.compiled, 2);
     let counts = reusing.code.rebases.counts();
-    assert_eq!((counts.hits, counts.proven, counts.unprovable), (1, 1, 0));
+    assert_eq!((counts.hits, counts.kept, counts.unstorable), (1, 1, 0));
     assert_eq!(
         reusing.statistics.store_sources[1][super::super::StoreSource::Rebased as usize],
         1
@@ -625,7 +620,7 @@ fn a_block_compiled_at_two_addresses_is_rebased_at_a_third() {
         panic!("compiled block")
     };
     assert_eq!(installed(&reusing, changed), installed(&fresh, compiled));
-    // The fourth page still holds the proven content.
+    // The fourth page still holds the kept content.
     assert!(reusing.fetch_block(page(3), false).is_ok());
     assert_eq!(
         (
@@ -633,5 +628,277 @@ fn a_block_compiled_at_two_addresses_is_rebased_at_a_third() {
             reusing.code.rebases.counts().hits
         ),
         (3, 2)
+    );
+}
+
+/// What fetching every block of a code image costs, as the engine
+/// prepares them: `STELA_COMPILE_BENCH` names a file of A64 code
+/// (`STELA_COMPILE_OFFSET`, `STELA_COMPILE_BYTES` choose a part), swept
+/// block after block from its start. Prints per-block costs of the
+/// compile, the store's proof and its record encoding and decoding.
+/// A preparation as a boot's kernel PEs compile with: system mode with its
+/// range checks, exclusives, pointer cells and self loops.
+fn system_preparation(target: stela_compiler::TargetCpu) -> Preparation {
+    use stela_compiler::x86_64::{MemoryChecks, NativeSystem, RangeCheck};
+    let chip = crate::machine::test_chip();
+    let checks = MemoryChecks::system(true, false, true, false)
+        .with_range(RangeCheck::four_level(4).one_sided(true));
+    let system = NativeSystem {
+        exclusive: true,
+        pointer: Some(super::super::pointer::CELLS),
+        self_loops: true,
+        ..NativeSystem::NONE
+    };
+    Preparation::new(
+        chip,
+        Arc::new(chip.admit_table(0).expect("admit")),
+        target,
+        true,
+        checks,
+        None,
+        system,
+    )
+}
+
+/// One instruction word of a kind whose code may name its own address or
+/// fold a value derived from it: PC-relative addresses, additions and wide
+/// moves over them, literal loads and prefetches, branches and links, and
+/// ordinary memory and register work between them. Registers come from a
+/// few, so that the words depend on each other.
+fn address_word(random: &mut impl FnMut() -> u32) -> u32 {
+    let register = |value: u32| value % 4;
+    let (r, n, value) = (register(random()), register(random()), random());
+    match random() % 16 {
+        0 => 0x1000_0000 | ((value & 3) << 29) | (((value >> 2) & 0x7ffff) << 5) | r,
+        1 => 0x9000_0000 | ((value & 3) << 29) | (((value >> 2) & 0x7ffff) << 5) | r,
+        2 | 3 => 0x9100_0000 | ((value & 0xfff) << 10) | (n << 5) | r,
+        4 => 0x1100_0000 | ((value & 0xfff) << 10) | (n << 5) | r,
+        5 => 0xd100_0000 | ((value & 0xfff) << 10) | (n << 5) | r,
+        6 => 0xd280_0000 | ((value & 3) << 21) | (((value >> 2) & 0xffff) << 5) | r,
+        7 => 0xf280_0000 | ((value & 3) << 21) | (((value >> 2) & 0xffff) << 5) | r,
+        8 => 0x7280_0000 | ((value & 1) << 21) | (((value >> 2) & 0xffff) << 5) | r,
+        9 => {
+            [0x5800_0000, 0x1800_0000, 0x9800_0000, 0x9c00_0000][value as usize % 4]
+                | (((value >> 2) & 0x3ff) << 5)
+                | r
+        }
+        10 => 0xd800_0000 | (((value >> 2) & 0x3ff) << 5),
+        11 => 0xf940_0000 | ((value & 0x3f) << 10) | (n << 5) | r,
+        12 => 0xf900_0000 | ((value & 0x3f) << 10) | (n << 5) | r,
+        13 => 0x8b00_0000 | ((value & 3) << 16) | (n << 5) | r,
+        14 => 0xd503_201f,
+        _ => 0xaa00_03e0 | (n << 16) | r,
+    }
+}
+
+/// A word that ends a block: conditional, compare and test branches near
+/// and far, direct and linked branches, a register call, a return or a
+/// trap.
+fn ending_word(random: &mut impl FnMut() -> u32) -> u32 {
+    let (r, value) = (random() % 4, random());
+    match random() % 8 {
+        0 => 0x5400_0000 | (((value >> 4) & 0x7ffff) << 5) | (value % 14),
+        1 => 0xb400_0000 | (((value >> 4) & 0x7ffff) << 5) | r,
+        2 => 0x3600_0000 | ((value & 0x1f) << 19) | (((value >> 5) & 0x3fff) << 5) | r,
+        3 => 0x1400_0000 | (value >> 6),
+        4 => 0x9400_0000 | (value >> 6),
+        5 => 0xd63f_0000 | (r << 5),
+        6 => 0xd65f_03c0,
+        _ => 0xd400_0001,
+    }
+}
+
+/// Every block's stored form, made from the relocations its compiler
+/// recorded, is what compiling it again at other pages proves: the fields
+/// that move are those, each by its page's displacement, and nothing else
+/// moves. Blocks of every kind above, in a process's preparation and a
+/// kernel's, at several places in their page.
+#[test]
+fn recorded_relocations_are_the_fields_that_move_with_the_page() {
+    use super::super::Prepared;
+    let mut state = 0x9e37_79b9u32;
+    let mut random = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let preparations = [
+        crate::machine::test_preparation(),
+        system_preparation(stela_compiler::TargetCpu::Baseline),
+    ];
+    let page = 0x1_8000_4000u64;
+    let (mut stored, mut checked) = (0, 0);
+    for block in 0..4000 {
+        let mut words: Vec<u32> = (0..1 + random() % 8)
+            .map(|_| address_word(&mut random))
+            .collect();
+        words.push(ending_word(&mut random));
+        let mut source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let preparation = &preparations[block % 2];
+        preparation.admit(&mut source);
+        let pc = page + u64::from(random() % 64) * 4;
+        let Ok(Prepared::Block {
+            compiled, input, ..
+        }) = preparation.prepare(&source, pc, source.len())
+        else {
+            continue;
+        };
+        let input = &source[..input];
+        let context = preparation.context(page);
+        let entry = translations::Entry::stored(&compiled, input, page, pc, context);
+        let probes = translations::probe_displacements(page)
+            .map(|displacement| preparation.compile_input(input, pc.wrapping_add(displacement)));
+        let [Ok(first), Ok(second)] = &probes else {
+            panic!("{words:08x?} compiles at every page");
+        };
+        let proven = translations::prove(&compiled, input, page, pc, context, [first, second]);
+        assert_eq!(
+            entry.as_ref().map(|entry| &entry.relocations),
+            proven.as_ref().map(|entry| &entry.relocations),
+            "{words:08x?} at {pc:#x}"
+        );
+        assert_eq!(entry, proven, "{words:08x?} at {pc:#x}");
+        checked += 1;
+        stored += usize::from(entry.is_some());
+    }
+    // Every block has a stored form.
+    assert!(checked > 3500 && stored == checked, "{stored} of {checked}");
+}
+
+#[test]
+#[ignore = "manual: opt-in"]
+fn compile_bench() {
+    use super::super::{Prepared, window};
+    let path = std::env::var("STELA_COMPILE_BENCH").expect("STELA_COMPILE_BENCH");
+    let number = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
+    let offset = number("STELA_COMPILE_OFFSET", 0);
+    let bytes = number("STELA_COMPILE_BYTES", 4 << 20);
+    let image = std::fs::read(path).expect("the code image");
+    let image = &image[offset.min(image.len())..(offset + bytes).min(image.len())];
+    let preparation = system_preparation(stela_compiler::TargetCpu::detect());
+    let base = 0x1_8000_0000u64;
+    let (mut blocks, mut instructions, mut code, mut refused) = (0u64, 0u64, 0u64, 0u64);
+    let mut kept = Vec::new();
+    let started = std::time::Instant::now();
+    let mut at = 0usize;
+    while at + 4 <= image.len() {
+        let pc = base + at as u64;
+        let page_end = (at as u64 | (FETCH_PAGE - 1)) + 1;
+        let end = (page_end as usize).min(image.len()).min(at + window(pc));
+        let mut source = image[at..end].to_vec();
+        preparation.admit(&mut source);
+        match preparation.prepare(&source, pc, source.len()) {
+            Ok(Prepared::Block {
+                compiled, input, ..
+            }) => {
+                blocks += 1;
+                instructions += compiled.source_bytes as u64 / 4;
+                code += compiled.native.x86_64_code.len() as u64;
+                at += compiled.source_bytes.max(4);
+                if kept.len() < 20_000 {
+                    kept.push((pc, source[..input].to_vec(), compiled));
+                }
+            }
+            _ => {
+                refused += 1;
+                at += 4;
+            }
+        }
+    }
+    let compile = started.elapsed();
+    // Each kept block's stored form as the compiler made it, then the
+    // block compiled again at both probe pages: the fields that moved
+    // must be the relocations it recorded.
+    let started = std::time::Instant::now();
+    let mut entries = Vec::new();
+    for (pc, input, compiled) in &kept {
+        let page = pc & !(FETCH_PAGE - 1);
+        let context = preparation.context(page);
+        if let Some(entry) = translations::Entry::stored(compiled, input, page, *pc, context) {
+            entries.push((page, *pc, entry));
+        }
+    }
+    let store = started.elapsed();
+    let (mut differed, mut provable_unstorable) = (0, 0);
+    for (pc, input, compiled) in &kept {
+        let page = pc & !(FETCH_PAGE - 1);
+        let context = preparation.context(page);
+        let probes = translations::probe_displacements(page)
+            .map(|displacement| preparation.compile_input(input, pc.wrapping_add(displacement)));
+        let proven = match &probes {
+            [Ok(first), Ok(second)] => {
+                translations::prove(compiled, input, page, *pc, context, [first, second])
+            }
+            _ => None,
+        };
+        let stored = entries
+            .iter()
+            .find(|(_, at, _)| at == pc)
+            .map(|(_, _, entry)| entry);
+        match (stored, &proven) {
+            (Some(stored), proven) if proven.as_ref() != Some(stored) => {
+                differed += 1;
+                println!("DIFFERED {pc:#x}");
+            }
+            (None, Some(_)) => provable_unstorable += 1,
+            _ => {}
+        }
+    }
+    let entries: Vec<(u64, translations::Entry)> = entries
+        .into_iter()
+        .map(|(page, _, entry)| (page, entry))
+        .collect();
+    let translator = translations::translator_id();
+    let mut records = std::collections::BTreeMap::new();
+    for (page, entry) in &entries {
+        records
+            .entry(*page)
+            .or_insert_with(|| {
+                translations::Record::new(translator, Digest::of(&page.to_le_bytes()))
+            })
+            .insert(entry.clone());
+    }
+    let started = std::time::Instant::now();
+    let encoded: Vec<(Digest, Vec<u8>)> = records
+        .values()
+        .map(|record| (record.key, record.encode()))
+        .collect();
+    let encode = started.elapsed();
+    let started = std::time::Instant::now();
+    for (key, bytes) in &encoded {
+        translations::Record::decode(bytes, &translator, key).expect("a record");
+    }
+    let decode = started.elapsed();
+    let encoded_bytes: usize = encoded.iter().map(|(_, bytes)| bytes.len()).sum();
+    let retained: usize = entries
+        .iter()
+        .map(|(_, entry)| entry.retained_bytes())
+        .sum();
+    let per =
+        |time: std::time::Duration, count: usize| time.as_secs_f64() * 1e6 / count.max(1) as f64;
+    println!(
+        "blocks={blocks} refused={refused} instructions={instructions} \
+         host_bytes_per_instruction={:.1} compile_us_per_block={:.2}",
+        code as f64 / instructions.max(1) as f64,
+        per(compile, blocks as usize),
+    );
+    println!(
+        "stored={} of {} differed={differed} provable_unstorable={provable_unstorable} \
+         store_us_per_block={:.2} records={} encode_us_per_entry={:.2} \
+         decode_us_per_entry={:.2} encoded_bytes_per_entry={} retained_bytes_per_entry={}",
+        entries.len(),
+        kept.len(),
+        per(store, kept.len()),
+        encoded.len(),
+        per(encode, entries.len()),
+        per(decode, entries.len()),
+        encoded_bytes / entries.len().max(1),
+        retained / entries.len().max(1),
     );
 }

@@ -736,7 +736,7 @@ impl Emitter<'_> {
         let guest = slot(write.destination).expect("known constant has a real destination");
         if next_use(self.effects, self.current + 1, guest) != usize::MAX {
             let index = self.allocate(guest);
-            self.emit(|code| encoding::immediate(code, POOL[index], write.value, immediate_width));
+            self.emit(|code| write.value.emit(code, POOL[index], immediate_width));
             self.locations[guest] = Location::Host(POOL[index]);
             self.resident[index] = Some(Resident { guest, dirty: true });
             self.output.stats.commits += 1;
@@ -746,7 +746,7 @@ impl Emitter<'_> {
                 self.emit(encoding::nop);
             }
         } else {
-            self.emit(|code| encoding::immediate(code, RESULT, write.value, immediate_width));
+            self.emit(|code| write.value.emit(code, RESULT, immediate_width));
             if let Some(pc) = continuation {
                 self.output.source_map.push((pc, self.output.code.len()));
             }
@@ -830,7 +830,7 @@ impl Emitter<'_> {
                 self.output.stats.commits += 1;
             }
             Operation::PcRelative(operand) => {
-                self.emit(|code| encoding::immediate(code, RESULT, operand.address, Width::X64));
+                self.emit(|code| encoding::guest_immediate(code, RESULT, operand.address));
                 self.commit(operand.destination, Width::X64);
             }
             Operation::MoveWide {
@@ -1345,7 +1345,9 @@ fn emit_prefix_selected<'a>(
                 Operation::MoveWide { .. } => {
                     emitter.constants.fold_wide_run(rest).map(|(count, write)| {
                         // A numeric literal has no AOT relocation field.
-                        let width = if u32::try_from(write.value).is_ok() {
+                        let width = if let constant::Constant::Plain(value) = write.value
+                            && u32::try_from(value).is_ok()
+                        {
                             Width::W32
                         } else {
                             Width::X64

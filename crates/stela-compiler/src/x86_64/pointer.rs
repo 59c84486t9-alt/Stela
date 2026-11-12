@@ -417,7 +417,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
         }
         Finish::Branch { link } => {
             if link {
-                asm.mov_imm64(Rcx, next_pc.0);
+                asm.guest_imm64(Rcx, next_pc);
                 let storage = asm.guest(Register::X(30)).expect("X30 has storage");
                 asm.mov_store(Qword, storage, Rcx);
             }

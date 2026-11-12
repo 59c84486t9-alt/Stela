@@ -310,7 +310,7 @@ mod tests {
         for (key, _) in records() {
             assert!(store.record(&key).is_some());
         }
-        let planned = store.plan(u64::MAX, || true);
+        let planned = store.plan(u64::MAX);
         assert_eq!(planned.layout.changed(), Some(&[][..]));
         write_in_place(&mut disk, &extents, &planned.layout).unwrap();
         assert_eq!(disk.flushes, 0);
@@ -410,7 +410,7 @@ mod tests {
         for (key, _) in trimmed.iter() {
             assert!(store.record(&key).is_some());
         }
-        let planned = store.plan(limit, || true);
+        let planned = store.plan(limit);
         assert_eq!(planned.layout.changed(), Some(&[][..]));
         assert_eq!(planned.layout.records(), part.records);
         // A budget the index alone passes reads nothing.

@@ -10,7 +10,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
         return;
     }
     // MOVABS leaves guest NZCV untouched.
-    super::immediate(code, operand.address);
+    super::guest_immediate(code, operand.address);
     store(code, operand.destination);
 }
 
@@ -27,7 +27,7 @@ mod tests {
             &mut code,
             &Operand {
                 destination: Register::Zero,
-                address: u64::MAX,
+                address: crate::GuestAddress(u64::MAX),
             },
         );
         assert_eq!(code, [0x90]);
@@ -36,7 +36,7 @@ mod tests {
             &mut code,
             &Operand {
                 destination: Register::X(30),
-                address: 0xfedcba9876543210,
+                address: crate::GuestAddress(0xfedcba9876543210),
             },
         );
         assert_eq!(&code[..2], &[0x48, 0xb8]);

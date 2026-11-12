@@ -32,7 +32,7 @@ const fn scratch(offset: u32) -> Mem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Address {
     Literal {
-        address: u64,
+        address: crate::GuestAddress,
     },
     Immediate {
         displacement: i32,
@@ -320,7 +320,7 @@ pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
             .mov_store(Size::Qword, scratch(DATA_OFFSET), Gpr::Rax);
     }
     match operand.address {
-        Address::Literal { address } => crate::x86_64::immediate(code, address),
+        Address::Literal { address } => crate::x86_64::guest_immediate(code, address),
         Address::Immediate { displacement, mode } => address::immediate_with_checks(
             code,
             operand.base,
@@ -447,7 +447,9 @@ mod tests {
                             assert_eq!(
                                 operand.address,
                                 Address::Literal {
-                                    address: pc.wrapping_add_signed(i64::from(immediate) * 4)
+                                    address: crate::GuestAddress(
+                                        pc.wrapping_add_signed(i64::from(immediate) * 4)
+                                    )
                                 }
                             );
                             assert_eq!(operand.base, Register::Zero);

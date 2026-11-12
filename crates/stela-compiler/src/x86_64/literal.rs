@@ -7,7 +7,7 @@ use crate::aarch64::{
 use crate::x86_64::asm::{Code, Gpr, Mem, Size};
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
-    code.asm().mov_imm64(Gpr::Rax, operand.address);
+    code.asm().guest_imm64(Gpr::Rax, operand.address);
     let bytes = match operand.transfer {
         Transfer::Integer {
             width: Width::X64,
@@ -60,7 +60,7 @@ mod tests {
             emit(
                 &mut code,
                 &Operand {
-                    address: u64::MAX,
+                    address: crate::GuestAddress(u64::MAX),
                     transfer: Transfer::Integer {
                         destination: Register::Zero,
                         width,
@@ -86,7 +86,7 @@ mod tests {
             emit(
                 &mut code,
                 &Operand {
-                    address: 0x1004,
+                    address: crate::GuestAddress(0x1004),
                     transfer: Transfer::Integer {
                         destination: Register::X(0),
                         width,
@@ -113,7 +113,7 @@ mod tests {
             emit(
                 &mut code,
                 &Operand {
-                    address: 0x123456789abc,
+                    address: crate::GuestAddress(0x123456789abc),
                     transfer: Transfer::Simd {
                         destination: 31,
                         bytes,

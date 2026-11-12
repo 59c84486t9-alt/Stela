@@ -106,7 +106,7 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
     assert!(!expected.is_empty());
     let translator = translator_id();
     let mut record = Record::new(translator, key);
-    record.insert(offer.prove().unwrap());
+    record.insert(offer.entry().unwrap());
     let record = Record::decode(&record.encode(), &translator, &key).unwrap();
     let origin = Arc::new(StoredOrigin {
         key,
@@ -157,7 +157,7 @@ fn a_kept_entry_qualifies_at_its_new_page_without_a_record() {
         )
         .unwrap()
     };
-    let entry = Arc::new(at(BASE).prove().unwrap());
+    let entry = Arc::new(at(BASE).entry().unwrap());
     let expected = at(moved).block().fault_recovery.clone();
     assert!(!expected.is_empty());
     let origin = Arc::new(StoredOrigin {

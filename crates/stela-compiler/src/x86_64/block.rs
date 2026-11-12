@@ -71,7 +71,7 @@ pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, word: impl I
     let word = word.into();
     let slot = super::chain::link_slot(asm.linked_block(), target, word.kind);
     super::chain::empty_link(asm, slot);
-    asm.mov_imm64(Gpr::Rax, target.0);
+    asm.guest_imm64(Gpr::Rax, target);
     exit_kind_with(asm, word);
 }
 
@@ -469,7 +469,7 @@ pub(super) fn fold_address_pair(
     };
     (destination == address.destination && source == destination).then_some(pc_relative::Operand {
         destination,
-        address: address.address.wrapping_add(u64::from(immediate)),
+        address: GuestAddress(address.address.0.wrapping_add(u64::from(immediate))),
     })
 }
 
@@ -2300,7 +2300,7 @@ fn emit_terminal(
                 direct_exit(code, trap.instruction_pc, ExitKind::Trap);
             }
             Terminator::DirectCall(target) => {
-                super::immediate(code, fallthrough.0);
+                super::guest_immediate(code, fallthrough);
                 super::store(code, Register::X(30));
                 direct_exit(code, *target, ExitKind::Call);
             }
@@ -2309,7 +2309,7 @@ fn emit_terminal(
                 if *kind == ExitKind::Call {
                     // Capture BLR X30's target before LR is overwritten.
                     code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
-                    super::immediate(code, fallthrough.0);
+                    super::guest_immediate(code, fallthrough);
                     super::store(code, Register::X(30));
                     code.asm().mov(Size::Qword, Gpr::Rax, Gpr::Rcx);
                 }

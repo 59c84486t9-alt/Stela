@@ -219,7 +219,7 @@ fn instruction(a: &mut Asm, operation: &Operation, ndd: bool) {
         Operation::Nop => a.nop(),
         Operation::PcRelative(operand) => {
             if let Some(destination) = value(operand.destination) {
-                a.mov_imm64(destination, operand.address);
+                a.guest_imm64(destination, operand.address);
             }
         }
         Operation::MoveWide {

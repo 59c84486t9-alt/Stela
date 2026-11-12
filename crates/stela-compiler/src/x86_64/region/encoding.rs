@@ -150,6 +150,11 @@ pub fn store_nzcv(code: &mut Code, source: HostGpr) {
     code.asm().mov_store(Size::Dword, nzcv(), source.gpr());
 }
 
+/// `movabs destination,address`, its field a relocation of the block.
+pub fn guest_immediate(code: &mut Code, destination: HostGpr, address: crate::GuestAddress) {
+    code.asm().guest_imm64(destination.gpr(), address);
+}
+
 pub fn immediate(code: &mut Code, destination: HostGpr, value: u64, width: Width) {
     match width {
         Width::X64 => code.asm().mov_imm64(destination.gpr(), value),

@@ -466,7 +466,7 @@ pub fn guarded_enter_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -> 
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, spsr)));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, elr)));
-    asm.mov_imm64(Rax, pc.0.wrapping_add(4));
+    asm.guest_imm64(Rax, GuestAddress(pc.0.wrapping_add(4)));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, esr)));
     asm.mov_imm32(Rax, syndrome);
@@ -733,7 +733,7 @@ pub fn supervisor_call_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, spsr)));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, elr)));
-    asm.mov_imm64(Rax, pc.0.wrapping_add(4));
+    asm.guest_imm64(Rax, GuestAddress(pc.0.wrapping_add(4)));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, esr)));
     asm.mov_imm32(Rax, syndrome);

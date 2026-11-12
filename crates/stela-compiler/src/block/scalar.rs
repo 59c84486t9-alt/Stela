@@ -13,7 +13,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarLoadAddress {
     Literal {
-        address: u64,
+        address: crate::GuestAddress,
     },
     Immediate {
         base: Register,
@@ -148,7 +148,9 @@ mod tests {
         assert_eq!(literal.bytes(), 8);
         assert_eq!(
             literal.address(),
-            ScalarLoadAddress::Literal { address: 0x1008 }
+            ScalarLoadAddress::Literal {
+                address: crate::GuestAddress(0x1008)
+            }
         );
         assert!(ScalarStore::from_instruction(&lift(0x79c0_0c41)).is_none());
     }

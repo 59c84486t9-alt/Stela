@@ -89,7 +89,8 @@ pub(crate) fn request(
     ] {
         asm.mov_rm_imm32(Size::Dword, stack(request_offset + field), value as i32);
     }
-    asm.mov_imm64(Gpr::Rcx, pc);
+    // The guest PC of the access: a field that moves with the block.
+    asm.guest_imm64(Gpr::Rcx, crate::GuestAddress(pc));
     asm.mov_store(
         Size::Qword,
         stack(request_offset + MEMORY_REQUEST_PC_OFFSET),
@@ -148,7 +149,7 @@ pub(crate) fn fault(code: &mut Code, status: MemoryStatus, pc: u64) {
         field(offset_of!(MemoryContextView, fault_address)),
         Gpr::Rax,
     );
-    asm.mov_imm64(Gpr::Rcx, pc);
+    asm.guest_imm64(Gpr::Rcx, crate::GuestAddress(pc));
     asm.mov_store(
         Size::Qword,
         field(offset_of!(MemoryContextView, fault_pc)),

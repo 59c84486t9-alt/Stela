@@ -39,7 +39,7 @@ fn scratch(offset: u8) -> Mem {
 #[derive(Clone, Copy)]
 enum Address {
     Literal {
-        address: u64,
+        address: crate::GuestAddress,
     },
     Immediate {
         displacement: i32,
@@ -178,7 +178,8 @@ impl Transfer {
     fn naturally_aligned(self) -> bool {
         match self.address {
             Address::Literal { address } => {
-                address.is_multiple_of(u64::from(self.quantity_bytes()))
+                // Its page offset alone decides: the same at every page.
+                address.0.is_multiple_of(u64::from(self.quantity_bytes()))
             }
             Address::Immediate { displacement, mode } => {
                 crate::x86_64::memory_store::aligned_immediate(
@@ -333,7 +334,7 @@ fn transfer_requirements(
 
 fn address(code: &mut Code, transfer: Transfer, profile: CheckedMemoryProfile) {
     match transfer.address {
-        Address::Literal { address } => crate::x86_64::immediate(code, address),
+        Address::Literal { address } => crate::x86_64::guest_immediate(code, address),
         Address::Immediate { displacement, mode } => {
             service::address::immediate_with_checks(
                 code,

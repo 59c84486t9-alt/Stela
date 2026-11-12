@@ -106,6 +106,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             native: stela_compiler::NativeBlock {
                 x86_64_code: chain::direct_exit(GuestAddress(pc), ExitKind::System).to_vec(),
                 source_map: alloc::vec![(GuestAddress(pc), 0)],
+                // A device stub is never stored.
+                relocations: None,
             },
             source_bytes: INSTRUCTION as usize,
             direct_exits: Vec::new(),

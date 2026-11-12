@@ -615,9 +615,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let context = stored
             .is_some()
             .then(|| self.stored_context(variant, &preparation, page));
-        // Compiled at another PC of the same page content before: proven
-        // once compiled here ([`super::rebase`]).
-        let mut prove = false;
+        // Compiled at another PC of the same page content before: its
+        // stored form is kept once compiled here ([`super::rebase`]).
+        let mut keep = false;
         if let (Some((key, record)), Some(context)) = (&stored, &context) {
             // The machine's buffers take the entry's relocated code: an
             // install from the store allocates nothing.
@@ -676,7 +676,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             // The same page content, compiled at another address of this
-            // boot: its proven entry, rebased to this page.
+            // boot: its kept entry, rebased to this page.
             match self.code.rebases.look(key, offset as u16, context, pc) {
                 super::rebase::Found::Entry(entry) => {
                     if entry.input.len() > available && !whole {
@@ -711,7 +711,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                     self.relocated = relocated;
                 }
-                super::rebase::Found::Prove => prove = true,
+                super::rebase::Found::Keep => keep = true,
                 super::rebase::Found::Compile => {}
             }
         }
@@ -775,12 +775,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             compiled,
             preparation,
         ));
-        if prove
+        if keep
             && !self.host.memory_low()
             && let (Some((key, _)), Some(context)) = (&stored, &context)
         {
-            let proving = self.host.counter();
-            let entry = Offer::prove_block(
+            let entry = super::stored::stored_entry(
                 &emission.block,
                 &emission.input,
                 page,
@@ -789,10 +788,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 &emission.preparation,
             );
             self.code.rebases.keep(key, offset as u16, context, entry);
-            self.statistics.compile_ticks += self.host.counter().wrapping_sub(proving);
         }
-        // An offer is kept until the store proves it. With memory low the
-        // store holds no more for proof, but the other PEs still take the
+        // A store keeps an offer's stored form. With memory low it keeps no
+        // more, but the other PEs still take the
         // block: this one retains the emission anyway, and each reuse saves
         // a compile and a copy.
         if let (Some((key, _)), Some(context)) = (stored, context)

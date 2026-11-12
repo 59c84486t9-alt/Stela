@@ -34,7 +34,7 @@ pub enum Transfer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Operand {
-    pub address: u64,
+    pub address: GuestAddress,
     pub transfer: Transfer,
 }
 
@@ -69,7 +69,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported
     let immediate = i64::from((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK);
     let signed = (immediate << IMMEDIATE_SIGN_SHIFT) >> IMMEDIATE_SIGN_SHIFT;
     Some(Ok(Operand {
-        address: pc.0.wrapping_add_signed(signed * INSTRUCTION_BYTES),
+        address: GuestAddress(pc.0.wrapping_add_signed(signed * INSTRUCTION_BYTES)),
         transfer,
     }))
 }
@@ -92,7 +92,7 @@ mod tests {
                             .unwrap()
                             .unwrap();
                         assert_eq!(
-                            operand.address,
+                            operand.address.0,
                             (i128::from(pc) + i128::from(immediate) * 4) as u64
                         );
                         let expected = match form {

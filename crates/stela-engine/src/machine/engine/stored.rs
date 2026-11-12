@@ -4,13 +4,94 @@
 //! record has is rebased instead of compiled. A block the store's process
 //! already prepared at the same PC (another thread's, or ahead-of-time
 //! translation's) is installed as it is. A block compiled anew is offered
-//! back, with what the host needs to compile it again at the probe
-//! addresses (`translations::prove`).
+//! back; its stored form is its code with the relocations its compiler
+//! recorded made relative to its page ([`stored_entry`]).
 use super::recovery::StoredOrigin;
 use super::{Devices, FETCH_PAGE, Host, Machine, Preparation, Variant};
-use crate::translations::{Digest, PAGE_BYTES, Record};
+use crate::translations::{Digest, Entry, PAGE_BYTES, Record};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 use stela_compiler::block::CompiledBlock;
+
+/// A profile build checks one stored form in this many ([`stored_entry`]).
+const CHECK_INTERVAL: u64 = 1024;
+
+/// Stored forms made, checked against the block compiled at other pages,
+/// and those the check found to differ ([`EntryChecks`]).
+static ENTRIES: AtomicU64 = AtomicU64::new(0);
+static CHECKED: AtomicU64 = AtomicU64::new(0);
+static DIFFERED: AtomicU64 = AtomicU64::new(0);
+
+/// Stored forms checked against a compile at other pages, and those that
+/// differed and were not stored ([`stored_entry`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EntryChecks {
+    pub checked: u64,
+    pub differed: u64,
+}
+
+/// The stored-form checks of this process so far.
+pub fn entry_checks() -> EntryChecks {
+    EntryChecks {
+        checked: CHECKED.load(Ordering::Relaxed),
+        differed: DIFFERED.load(Ordering::Relaxed),
+    }
+}
+
+/// The stored form of `block`, compiled through `preparation` at `pc` of
+/// the page at `page` from `input` ([`Entry::stored`]). The compiler makes
+/// it as it emits; a check compiles the block again at both probe addresses
+/// of its page and requires the fields that move to be the relocations it
+/// recorded ([`crate::translations::prove`]). Test and debug builds check
+/// every one and panic on a difference; a profile build checks one in
+/// [`CHECK_INTERVAL`], counts any that differ ([`entry_checks`]) and keeps
+/// those out of the store. Other builds trust the compiler.
+pub(super) fn stored_entry(
+    block: &CompiledBlock,
+    input: &[u8],
+    page: u64,
+    pc: u64,
+    context: Digest,
+    preparation: &Preparation,
+) -> Option<Entry> {
+    let entry = Entry::stored(block, input, page, pc, context)?;
+    let due = if cfg!(any(test, debug_assertions)) {
+        true
+    } else if cfg!(feature = "native-profile") {
+        ENTRIES
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(CHECK_INTERVAL)
+    } else {
+        false
+    };
+    if !due {
+        return Some(entry);
+    }
+    CHECKED.fetch_add(1, Ordering::Relaxed);
+    let probes = crate::translations::probe_displacements(page).map(|displacement| {
+        preparation
+            .compile_input(input, pc.wrapping_add(displacement))
+            .ok()
+    });
+    let proven = match &probes {
+        [Some(first), Some(second)] => {
+            crate::translations::prove(block, input, page, pc, context, [first, second])
+        }
+        _ => None,
+    };
+    if proven.as_ref() == Some(&entry) {
+        return Some(entry);
+    }
+    DIFFERED.fetch_add(1, Ordering::Relaxed);
+    debug_assert!(
+        false,
+        "the relocations recorded for the block at {pc:#x} are not the fields that move: \
+         recorded {:?}, moved {:?}",
+        entry.relocations,
+        proven.map(|proven| proven.relocations)
+    );
+    None
+}
 
 /// A block as compiled, with its complete admitted input and the
 /// preparation that compiled it: immutable once made, so the store and every
@@ -27,8 +108,8 @@ impl Emission {
         mut block: CompiledBlock,
         preparation: Arc<Preparation>,
     ) -> Self {
-        // The store keeps an emission until it proves it, sharing its bound
-        // by capacity: none of it is slack.
+        // The shared cache keeps an emission within its bound by capacity:
+        // none of it is slack.
         input.shrink_to_fit();
         block.native.x86_64_code.shrink_to_fit();
         block.native.source_map.shrink_to_fit();
@@ -247,23 +328,9 @@ impl Offer {
         })
     }
 
-    /// Writable stores keep the original offer for proof admission. The
-    /// shared cache does not need the offer's separate successor list.
-    pub(crate) fn shared_for_proof(&self) -> Arc<SharedTranslation> {
-        Arc::new(SharedTranslation {
-            emission: Arc::clone(&self.emission),
-            key: self.key,
-            page: self.page,
-            pc: self.pc,
-            context: self.context,
-        })
-    }
-
-    /// Its block's stored form: the block compiled again at both probe
-    /// addresses of its page, proven to move only by them
-    /// ([`translations::prove`](crate::translations::prove)).
-    pub fn prove(&self) -> Option<crate::translations::Entry> {
-        Self::prove_block(
+    /// Its block's stored form ([`stored_entry`]).
+    pub fn entry(&self) -> Option<Entry> {
+        stored_entry(
             self.block(),
             self.input(),
             self.page,
@@ -271,41 +338,6 @@ impl Offer {
             self.context,
             self.preparation(),
         )
-    }
-
-    /// A pending source window owns no installed emission. Compile it for
-    /// proof without building an owned offer for other PEs.
-    pub(crate) fn prove_input(
-        input: &[u8],
-        page: u64,
-        pc: u64,
-        context: Digest,
-        preparation: &Preparation,
-    ) -> Option<crate::translations::Entry> {
-        if page != pc & !(PAGE_BYTES as u64 - 1) || preparation.context(page) != context {
-            return None;
-        }
-        let block = preparation.compile_input(input, pc).ok()?;
-        Self::prove_block(&block, input, page, pc, context, preparation)
-    }
-
-    pub(super) fn prove_block(
-        block: &CompiledBlock,
-        input: &[u8],
-        page: u64,
-        pc: u64,
-        context: Digest,
-        preparation: &Preparation,
-    ) -> Option<crate::translations::Entry> {
-        let probes = crate::translations::probe_displacements(page).map(|displacement| {
-            preparation
-                .compile_input(input, pc.wrapping_add(displacement))
-                .ok()
-        });
-        let [Some(first), Some(second)] = &probes else {
-            return None;
-        };
-        crate::translations::prove(block, input, page, pc, context, [first, second])
     }
 }
 

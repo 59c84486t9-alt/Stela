@@ -77,9 +77,11 @@ pub(crate) struct Emitted {
 
 impl Emitted {
     pub(crate) fn into_native(self) -> crate::NativeBlock {
+        let (x86_64_code, relocations) = self.x86_64_code.into_parts();
         crate::NativeBlock {
-            x86_64_code: self.x86_64_code.into_bytes(),
+            x86_64_code,
             source_map: self.source_map,
+            relocations: Some(relocations),
         }
     }
 }
@@ -1266,6 +1268,11 @@ pub(super) fn register_store(
 /// `movabs rax,value`.
 fn immediate(code: &mut Code, value: u64) {
     code.asm().mov_imm64(asm::Gpr::Rax, value);
+}
+
+/// `movabs rax,address`, its field a relocation of the block.
+fn guest_immediate(code: &mut Code, address: GuestAddress) {
+    code.asm().guest_imm64(asm::Gpr::Rax, address);
 }
 
 fn nzcv(code: &mut Code, subtract: bool) {

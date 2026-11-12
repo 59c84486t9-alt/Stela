@@ -17,6 +17,7 @@ pub(crate) fn generate(
     let stela_compiler::NativeBlock {
         x86_64_code,
         source_map,
+        ..
     } = compile()?;
     require!(
         !x86_64_code.is_empty() && x86_64_code.len() <= MAX_CACHE_NATIVE_BYTES,
@@ -141,6 +142,7 @@ mod tests {
             generate(identity, None, || Ok(stela_compiler::NativeBlock {
                 x86_64_code: vec![],
                 source_map: vec![],
+                relocations: None,
             }))
             .is_err()
         );

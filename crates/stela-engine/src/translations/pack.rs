@@ -7,18 +7,19 @@
 //! follows from the index, so a file allocated larger than its pack (to be
 //! rewritten in place) holds bytes past it that are never read.
 //!
-//! The store hands the engine the pack's records and keeps the blocks the
-//! engine compiled anew. A store shared by machines that run at once (one
-//! per PE) also keeps those blocks' native code, within a bound, for the
-//! other machines to install instead of compiling them again. At a quiescent point it proves them (each compiled
-//! again at its page's probe addresses) and lays out the next pack within a
-//! bound: the records that gained entries, then the records this boot used,
-//! then the others, as long as they fit.
+//! The store hands the engine the pack's records and keeps the stored form
+//! of each block the engine compiled anew, which its compiler made as it
+//! emitted the block ([`Offer::entry`]). A store shared by machines that
+//! run at once (one per PE) also keeps those blocks' native code, within a
+//! bound, for the other machines to install instead of compiling them
+//! again. At a quiescent point it lays out the next pack within a bound:
+//! the records that gained entries, then the records this boot used, then
+//! the others, as long as they fit.
 mod codec;
 
-use super::{Digest, FormatError, Record};
+use super::{Digest, Entry, FormatError, Record};
 use crate::machine::engine::SharedTranslation;
-use crate::machine::{Offer, Preparation, Translations};
+use crate::machine::{Offer, Translations};
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Weak},
@@ -47,18 +48,11 @@ pub const MAX_UNUSED_BOOTS: u8 = 3;
 const CHECKSUM_BYTES: usize = DIGEST_BYTES;
 /// The most records a pack holds.
 pub const MAX_RECORDS: usize = 1 << 22;
-/// The most memory the blocks waiting for proof take by default; later
-/// blocks are counted as dropped ([`Store::set_bounds`]).
-const MAX_PENDING_BYTES: usize = 16 << 20;
 /// The default bound of the decoded-record cache, least recently used first
 /// out ([`Store::set_bounds`]). One record takes at most an eighth of it.
 const DECODED_BYTES: usize = 8 << 20;
-/// The default bound of the entries proven during the run
-/// ([`Store::prove_batch`]).
-const PROVEN_BYTES: usize = 64 << 20;
-/// What a page waiting for proof costs beyond its buffers: an entry in a
-/// B-tree node about half full.
-const PENDING_PAGE_BYTES: usize = 2 * size_of::<(PendingKey, PendingPage)>();
+/// The default bound of the entries added during the run ([`Store::keep`]).
+const ADDED_BYTES: usize = 64 << 20;
 /// The direct-mapped tables that name why a shared lookup missed: offers
 /// being compiled, offers evicted, and the last offer of each PC and page.
 const MISS_SLOTS: usize = 4096;
@@ -615,13 +609,11 @@ pub struct Counters {
     pub repeated: u64,
     pub cached: u64,
     pub decoded: u64,
-    /// Blocks offered and kept for proof, and those past the memory bound.
-    pub offered: u64,
-    pub dropped: u64,
-    /// Blocks proven during the run ([`Store::prove_batch`]), and proven
-    /// entries left out because the proven bound was full.
-    pub proven: u64,
-    pub unprovable: u64,
+    /// Blocks offered whose stored form was added, those whose compiler
+    /// made none, and those left out because the added bound was full
+    /// ([`Store::keep`]).
+    pub added: u64,
+    pub unstorable: u64,
     pub unkept: u64,
     /// Shared lookups that found a block, and why the others missed: no
     /// offer of it, an offer of its PC and page in another context, its
@@ -643,10 +635,8 @@ impl Counters {
             repeated,
             cached,
             decoded,
-            offered,
-            dropped,
-            proven,
-            unprovable,
+            added,
+            unstorable,
             unkept,
             shared_hits,
             shared_absent,
@@ -660,10 +650,8 @@ impl Counters {
         self.repeated += repeated;
         self.cached += cached;
         self.decoded += decoded;
-        self.offered += offered;
-        self.dropped += dropped;
-        self.proven += proven;
-        self.unprovable += unprovable;
+        self.added += added;
+        self.unstorable += unstorable;
         self.unkept += unkept;
         self.shared_hits += shared_hits;
         self.shared_absent += shared_absent;
@@ -671,65 +659,6 @@ impl Counters {
         self.shared_evicted += shared_evicted;
         self.shared_in_flight += shared_in_flight;
     }
-}
-
-/// A block offered for proof: its place in its page and its input's in the
-/// page's [`PendingPage::inputs`]. The proof compiles the block again.
-#[derive(Debug, Clone, Copy)]
-struct PendingBlock {
-    offset: u16,
-    length: u16,
-    start: u32,
-}
-
-/// A page's blocks of one context waiting for proof, by offset. What the
-/// blocks share is held once, so a block costs little more than its words.
-#[derive(Debug)]
-struct PendingPage {
-    preparation: Arc<Preparation>,
-    blocks: Vec<PendingBlock>,
-    inputs: Vec<u8>,
-}
-
-impl PendingPage {
-    /// What the page is charged against the pending bound.
-    fn charge(&self) -> usize {
-        self.blocks.capacity() * size_of::<PendingBlock>()
-            + self.inputs.capacity()
-            + PENDING_PAGE_BYTES
-    }
-}
-
-/// A pending page's key, guest page and context.
-type PendingKey = (Digest, u64, Digest);
-
-/// Stage bounded growth without changing a retained allocation. Either
-/// buffer may fail, so the owner installs their replacements together.
-fn grow_pending<T: Copy>(
-    current: Option<&Vec<T>>,
-    additional: usize,
-    minimum: usize,
-    limit: usize,
-) -> Result<Option<Vec<T>>, ()> {
-    let held = current.map_or(0, Vec::capacity);
-    let used = current.map_or(0, Vec::len);
-    let required = used.checked_add(additional).ok_or(())?;
-    if required.max(held) > limit {
-        return Err(());
-    }
-    if required <= held {
-        return Ok(None);
-    }
-    let capacity = held.saturating_mul(2).max(minimum).max(required).min(limit);
-    let mut replacement = Vec::new();
-    replacement.try_reserve_exact(capacity).map_err(|_| ())?;
-    if replacement.capacity() > limit {
-        return Err(());
-    }
-    if let Some(current) = current {
-        replacement.extend_from_slice(current);
-    }
-    Ok(Some(replacement))
 }
 
 /// A shared block's PC and the leading words of its page key and context:
@@ -840,13 +769,6 @@ impl StagedOffer {
     pub fn new(offer: Offer, bound: usize) -> Option<Self> {
         let (key, bytes) = Self::charge(&offer, bound)?;
         Some(Self::entry(key, bytes, offer.shared()))
-    }
-
-    /// Stage only the shared emission while leaving its producer's proof
-    /// input available. Admission still checks the live shared bound.
-    pub fn for_writable(offer: &Offer, bound: usize) -> Option<Self> {
-        let (key, bytes) = Self::charge(offer, bound)?;
-        Some(Self::entry(key, bytes, offer.shared_for_proof()))
     }
 
     fn charge(offer: &Offer, bound: usize) -> Option<(SharedKey, usize)> {
@@ -1005,58 +927,6 @@ impl DecodedCache {
     }
 }
 
-/// Pending pages taken from a store to prove outside its lock
-/// ([`Store::take_batch`]).
-pub struct ProofBatch {
-    pages: Vec<(PendingKey, PendingPage)>,
-}
-
-/// What proving a [`ProofBatch`] made: each page key's new entries, and
-/// the blocks proven and refused.
-pub struct ProvenBatch {
-    records: Vec<(Digest, Vec<super::Entry>)>,
-    proven: u64,
-    unprovable: u64,
-}
-
-impl ProofBatch {
-    /// The blocks in the batch.
-    pub fn blocks(&self) -> usize {
-        self.pages.iter().map(|(_, page)| page.blocks.len()).sum()
-    }
-
-    /// Compile each block again at its page's probe addresses and keep the
-    /// entries proven to move only by them. Needs no store.
-    pub fn prove(self) -> ProvenBatch {
-        let (mut proven, mut unprovable) = (0, 0);
-        let mut records: Vec<(Digest, Vec<super::Entry>)> = Vec::new();
-        for ((key, page, context), held) in self.pages {
-            let mut entries = Vec::new();
-            for block in &held.blocks {
-                let start = block.start as usize;
-                let input = &held.inputs[start..start + usize::from(block.length)];
-                let pc = page + u64::from(block.offset);
-                match Offer::prove_input(input, page, pc, context, &held.preparation) {
-                    Some(entry) => {
-                        proven += 1;
-                        entries.push(entry);
-                    }
-                    None => unprovable += 1,
-                }
-            }
-            match records.last_mut() {
-                Some((last, held)) if *last == key => held.extend(entries),
-                _ => records.push((key, entries)),
-            }
-        }
-        ProvenBatch {
-            records,
-            proven,
-            unprovable,
-        }
-    }
-}
-
 /// One boot's store over the pack it read.
 #[derive(Debug)]
 pub struct Store<'a> {
@@ -1068,21 +938,10 @@ pub struct Store<'a> {
     loaded: BTreeMap<Digest, bool>,
     decoded: DecodedCache,
     decode_scratch: DecodeScratch,
-    pending: BTreeMap<PendingKey, PendingPage>,
-    /// The blocks in `pending`.
-    pending_blocks: usize,
-    /// What `pending` holds: a charge for each page's entry and tree node,
-    /// and the capacity of its buffers.
-    pending_bytes: usize,
-    pending_bound: usize,
-    /// Entries proven during the run, by page key, and their retained bytes.
-    proven: BTreeMap<Digest, Record>,
-    proven_bytes: usize,
-    proven_bound: usize,
-    /// A fold left an entry out for the proven bound: a batch proven now
-    /// would be left out too, so none is taken until the bound grows
-    /// ([`Self::take_batch`]). Its pages wait for the stop's proof instead.
-    proven_full: bool,
+    /// Entries added during the run, by page key, and their retained bytes.
+    added: BTreeMap<Digest, Record>,
+    added_bytes: usize,
+    added_bound: usize,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
@@ -1099,11 +958,6 @@ pub struct Store<'a> {
 #[derive(Debug)]
 pub struct Planned<'a> {
     pub layout: Layout<'a>,
-    /// Blocks proven and refused by their proofs, and those left unproven
-    /// when the room to prove them ran out.
-    pub proven: u64,
-    pub unprovable: u64,
-    pub unproven: u64,
     /// Records of the read pack left out to stay within the bound, and new
     /// ones that did not fit.
     pub evicted: u64,
@@ -1115,10 +969,8 @@ pub struct Planned<'a> {
 /// What a store keeps beyond its pack, in bytes ([`Store::set_bounds`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
-    /// Inputs of blocks waiting for proof.
-    pub pending: usize,
-    /// Entries proven during the run.
-    pub proven: usize,
+    /// Entries added during the run.
+    pub added: usize,
     /// Decoded pack records.
     pub decoded: usize,
 }
@@ -1126,8 +978,7 @@ pub struct Bounds {
 impl Default for Bounds {
     fn default() -> Self {
         Self {
-            pending: MAX_PENDING_BYTES,
-            proven: PROVEN_BYTES,
+            added: ADDED_BYTES,
             decoded: DECODED_BYTES,
         }
     }
@@ -1138,8 +989,7 @@ impl Bounds {
     pub fn share(self, parts: usize) -> Self {
         let parts = parts.max(1);
         Self {
-            pending: self.pending / parts,
-            proven: self.proven / parts,
+            added: self.added / parts,
             decoded: self.decoded / parts,
         }
     }
@@ -1168,14 +1018,9 @@ impl<'a> Store<'a> {
             loaded: BTreeMap::new(),
             decoded: DecodedCache::new(bounds.decoded),
             decode_scratch: DecodeScratch::default(),
-            pending: BTreeMap::new(),
-            pending_blocks: 0,
-            pending_bytes: 0,
-            pending_bound: bounds.pending,
-            proven: BTreeMap::new(),
-            proven_bytes: 0,
-            proven_bound: bounds.proven,
-            proven_full: false,
+            added: BTreeMap::new(),
+            added_bytes: 0,
+            added_bound: bounds.added,
             shared: BTreeMap::new(),
             shared_order: VecDeque::new(),
             shared_bytes: 0,
@@ -1188,58 +1033,19 @@ impl<'a> Store<'a> {
     /// Bound what the store keeps beyond its pack. Records the decoded
     /// cache lets go come back, to drop outside a lock.
     pub fn set_bounds(&mut self, bounds: Bounds) -> Vec<Arc<Record>> {
-        self.pending_bound = bounds.pending;
-        if bounds.proven > self.proven_bound {
-            self.proven_full = false;
-        }
-        self.proven_bound = bounds.proven;
+        self.added_bound = bounds.added;
         self.decoded.shrink(bounds.decoded)
     }
 
     /// Take `other`'s run (another part of one store over the same pack):
-    /// what it looked up, its blocks waiting for proof, its proven entries
-    /// and its counts. Its shared blocks are dropped.
+    /// what it looked up, its added entries and its counts. Its shared
+    /// blocks are dropped.
     pub fn absorb(&mut self, other: Self) {
         for (key, valid) in other.loaded {
             self.loaded.entry(key).or_insert(valid);
         }
-        for (group, page) in other.pending {
-            match self.pending.entry(group) {
-                alloc::collections::btree_map::Entry::Vacant(slot) => {
-                    self.pending_blocks += page.blocks.len();
-                    self.pending_bytes += page.charge();
-                    slot.insert(page);
-                }
-                alloc::collections::btree_map::Entry::Occupied(mut slot) => {
-                    // One page's offers reach one part: merge them anyway.
-                    let held = slot.get_mut();
-                    let before = held.charge();
-                    for block in page.blocks {
-                        if let Err(place) = held
-                            .blocks
-                            .binary_search_by_key(&block.offset, |held| held.offset)
-                        {
-                            let start = held.inputs.len();
-                            let from = block.start as usize;
-                            held.inputs.extend_from_slice(
-                                &page.inputs[from..from + usize::from(block.length)],
-                            );
-                            held.blocks.insert(
-                                place,
-                                PendingBlock {
-                                    start: start as u32,
-                                    ..block
-                                },
-                            );
-                            self.pending_blocks += 1;
-                        }
-                    }
-                    self.pending_bytes += held.charge() - before;
-                }
-            }
-        }
-        for (key, record) in other.proven {
-            match self.proven.entry(key) {
+        for (key, record) in other.added {
+            match self.added.entry(key) {
                 alloc::collections::btree_map::Entry::Vacant(slot) => {
                     slot.insert(record);
                 }
@@ -1248,8 +1054,7 @@ impl<'a> Store<'a> {
                 }
             }
         }
-        self.proven_bytes += other.proven_bytes;
-        self.proven_full |= other.proven_full;
+        self.added_bytes += other.added_bytes;
         self.counters.add(&other.counters);
     }
 
@@ -1332,152 +1137,35 @@ impl<'a> Store<'a> {
         }
     }
 
-    /// Admit the original input for durable proof independently of shared
-    /// emission admission. A writable owner may call both under one lock.
-    pub fn keep_pending(&mut self, offer: &Offer) {
+    /// Keep `entry`, the stored form of `offer` ([`Offer::entry`], made
+    /// before the store's lock is taken), for the next pack while the added
+    /// bound has room.
+    pub fn keep(&mut self, offer: &Offer, entry: Option<Entry>) {
+        let key = offer.key();
         self.misses
-            .offered(shared_key(&offer.key(), offer.pc(), &offer.context()));
-        if !self.reserve_pending(offer) {
-            self.counters.dropped += 1;
-        }
-    }
-
-    /// Keep `offer` for proof unless its page holds the block already:
-    /// whether it fit.
-    fn reserve_pending(&mut self, offer: &Offer) -> bool {
-        const BLOCK_BYTES: usize = size_of::<PendingBlock>();
-        let (Ok(offset), Ok(length)) = (
-            u16::try_from(offer.pc() - offer.page()),
-            u16::try_from(offer.input().len()),
-        ) else {
-            return false;
+            .offered(shared_key(&key, offer.pc(), &offer.context()));
+        let Some(entry) = entry else {
+            self.counters.unstorable += 1;
+            return;
         };
-        let group = (offer.key(), offer.page(), offer.context());
         if self
-            .proven
-            .get(&offer.key())
-            .is_some_and(|record| record.find(offset, &offer.context()).is_some())
+            .added
+            .get(&key)
+            .is_some_and(|record| record.find(entry.offset, &entry.context).is_some())
         {
-            // Proven during the run already.
-            return true;
+            return;
         }
-        let known = self.pending.get(&group);
-        let place = known.map_or(Err(0), |page| {
-            page.blocks
-                .binary_search_by_key(&offset, |block| block.offset)
-        });
-        let Err(place) = place else {
-            return true;
-        };
-        let new_page = if known.is_some() {
-            0
-        } else {
-            PENDING_PAGE_BYTES
-        };
-        let held_slots = known.map_or(0, |page| page.blocks.capacity());
-        let held_inputs = known.map_or(0, |page| page.inputs.capacity());
-        let held = held_slots * BLOCK_BYTES + held_inputs;
-        let Some(available) = self
-            .pending_bound
-            .checked_sub(self.pending_bytes)
-            .and_then(|available| available.checked_sub(new_page))
-        else {
-            return false;
-        };
-        let limit = held + available;
-        // A page's inputs stay far below 4 GiB: each offset is unique and
-        // both it and the associated block length fit in 16 bits.
-        let start = known.map_or(0, |page| page.inputs.len());
-        let required_inputs = (start + usize::from(length)).max(held_inputs);
-        let Some(slot_limit) = limit.checked_sub(required_inputs) else {
-            return false;
-        };
-        let Ok(blocks) = grow_pending(
-            known.map(|page| &page.blocks),
-            1,
-            4,
-            slot_limit / BLOCK_BYTES,
-        ) else {
-            return false;
-        };
-        let slots = blocks.as_ref().map_or(held_slots, Vec::capacity);
-        let Ok(inputs) = grow_pending(
-            known.map(|page| &page.inputs),
-            usize::from(length),
-            8,
-            limit - slots * BLOCK_BYTES,
-        ) else {
-            return false;
-        };
-        let page = self.pending.entry(group).or_insert_with(|| PendingPage {
-            preparation: Arc::clone(offer.preparation()),
-            blocks: Vec::new(),
-            inputs: Vec::new(),
-        });
-        if let Some(blocks) = blocks {
-            page.blocks = blocks;
+        let bytes = entry.retained_bytes();
+        if self.added_bytes + bytes > self.added_bound {
+            self.counters.unkept += 1;
+            return;
         }
-        if let Some(inputs) = inputs {
-            page.inputs = inputs;
-        }
-        page.blocks.insert(
-            place,
-            PendingBlock {
-                offset,
-                length,
-                start: start as u32,
-            },
-        );
-        page.inputs.extend_from_slice(offer.input());
-        let grown = page.blocks.capacity() * BLOCK_BYTES + page.inputs.capacity() - held;
-        self.pending_bytes += grown + new_page;
-        self.pending_blocks += 1;
-        self.counters.offered += 1;
-        true
-    }
-
-    /// Pending pages holding at least `blocks` blocks (all, when fewer
-    /// wait), oldest key first, to prove outside the store's lock; `None`
-    /// when none wait or the proven bound is full: reached, or short of an
-    /// entry a fold left out. A batch then would be proven only to be
-    /// dropped, and its pages with it.
-    pub fn take_batch(&mut self, blocks: usize) -> Option<ProofBatch> {
-        if self.pending.is_empty() || self.proven_full || self.proven_bytes >= self.proven_bound {
-            return None;
-        }
-        let mut pages = Vec::new();
-        let mut taken = 0;
-        while taken < blocks.max(1)
-            && let Some((group, page)) = self.pending.pop_first()
-        {
-            taken += page.blocks.len();
-            self.pending_blocks -= page.blocks.len();
-            self.pending_bytes -= page.charge();
-            pages.push((group, page));
-        }
-        Some(ProofBatch { pages })
-    }
-
-    /// Keep what a [`ProofBatch`] of this store proved, within the proven
-    /// bound; the rest is counted as unkept.
-    pub fn fold(&mut self, batch: ProvenBatch) {
-        self.counters.proven += batch.proven;
-        self.counters.unprovable += batch.unprovable;
-        for (key, entries) in batch.records {
-            for entry in entries {
-                let bytes = entry.retained_bytes();
-                if self.proven_bytes + bytes > self.proven_bound {
-                    self.counters.unkept += 1;
-                    self.proven_full = true;
-                    continue;
-                }
-                self.proven_bytes += bytes;
-                self.proven
-                    .entry(key)
-                    .or_insert_with(|| Record::new(self.translator, key))
-                    .insert(entry);
-            }
-        }
+        self.added_bytes += bytes;
+        self.counters.added += 1;
+        self.added
+            .entry(key)
+            .or_insert_with(|| Record::new(self.translator, key))
+            .insert(entry);
     }
 
     /// The translator whose records the store keeps.
@@ -1571,52 +1259,18 @@ impl<'a> Store<'a> {
         self.pack.as_ref()
     }
 
-    /// Blocks waiting for proof.
-    pub fn pending(&self) -> usize {
-        self.pending_blocks
-    }
-
-    /// Prove the offered blocks while `room` says there is memory to, and
-    /// lay out the next pack within `bound` bytes: the records that gained
-    /// entries, then those this boot used, then the others, as long as
-    /// they fit. Records kept unchanged stay where they were in the pack
-    /// read ([`Layout::changed`]).
-    pub fn plan(&mut self, bound: u64, room: impl Fn() -> bool) -> Planned<'a> {
-        let mut proven = core::mem::take(&mut self.proven);
-        self.proven_bytes = 0;
-        self.proven_full = false;
-        let (mut count, mut unprovable) = (0, 0);
-        let pending = core::mem::take(&mut self.pending);
-        let mut unproven = self.pending_blocks as u64;
-        'pages: for ((key, page, context), held) in pending {
-            for block in held.blocks {
-                if !room() {
-                    break 'pages;
-                }
-                unproven -= 1;
-                let start = block.start as usize;
-                let input = &held.inputs[start..start + usize::from(block.length)];
-                let pc = page + u64::from(block.offset);
-                let entry = Offer::prove_input(input, page, pc, context, &held.preparation);
-                match entry {
-                    Some(entry) => {
-                        count += 1;
-                        proven
-                            .entry(key)
-                            .or_insert_with(|| Record::new(self.translator, key))
-                            .insert(entry);
-                    }
-                    None => unprovable += 1,
-                }
-            }
-        }
-        self.pending_blocks = 0;
-        self.pending_bytes = 0;
+    /// Lay out the next pack within `bound` bytes: the records that gained
+    /// entries, then those this boot used, then the others, as long as they
+    /// fit. Records kept unchanged stay where they were in the pack read
+    /// ([`Layout::changed`]).
+    pub fn plan(&mut self, bound: u64) -> Planned<'a> {
+        let mut added = core::mem::take(&mut self.added);
+        self.added_bytes = 0;
         // Gained entries first, then this boot's records, then the others.
         let mut scratch = core::mem::take(&mut self.decode_scratch);
         let mut candidates: Vec<(Digest, Piece<'a>)> = Vec::new();
         let (mut ages, mut expired) = (Ages::new(), 0);
-        for (key, record) in &mut proven {
+        for (key, record) in &mut added {
             if let Some(stored) = self.pack.and_then(|pack| pack.record(key)) {
                 match stored.decode(&self.translator, key, &mut scratch) {
                     Ok(previous) => {
@@ -1642,7 +1296,7 @@ impl<'a> Store<'a> {
         if let Some(pack) = self.pack {
             for (key, valid) in &self.loaded {
                 if *valid
-                    && !proven.contains_key(key)
+                    && !added.contains_key(key)
                     && let Some(bytes) = pack.get(key)
                 {
                     candidates.push((*key, Piece::Kept(bytes)));
@@ -1652,7 +1306,7 @@ impl<'a> Store<'a> {
             // youngest are kept first, and those unused too long leave.
             let mut unused: Vec<(u8, Digest, &'a [u8])> = Vec::new();
             for (index, (key, bytes)) in pack.iter().enumerate() {
-                if !self.loaded.contains_key(&key) && !proven.contains_key(&key) {
+                if !self.loaded.contains_key(&key) && !added.contains_key(&key) {
                     let age = entry_age(pack.bytes, index).saturating_add(1);
                     if age > MAX_UNUSED_BOOTS {
                         expired += 1;
@@ -1681,9 +1335,6 @@ impl<'a> Store<'a> {
         let format = self.pack.map_or(PackFormat::Raw, |pack| pack.format);
         Planned {
             layout: layout_over(&self.translator, self.pack, kept, format, bound, &ages),
-            proven: count,
-            unprovable,
-            unproven,
             evicted,
             expired,
         }
@@ -1725,7 +1376,8 @@ impl Translations for Store<'_> {
     }
 
     fn offer(&mut self, offer: Offer) {
-        self.keep_pending(&offer);
+        let entry = offer.entry();
+        self.keep(&offer, entry);
         self.lend(offer);
     }
 
@@ -1835,7 +1487,7 @@ mod tests {
         let translator = translator_id();
         let key = Digest::of(b"page");
         let mut large = Record::new(translator, key);
-        let mut entry = offer(0x1000, key).prove().unwrap();
+        let mut entry = offer(0x1000, key).entry().unwrap();
         entry.code.resize(DECODED_BYTES / 8, 0);
         large.insert(entry);
         let bytes = Layout::new(&translator, vec![(key, Piece::New(large.encode()))]).to_vec();
@@ -1871,7 +1523,7 @@ mod tests {
         let first = Digest::of(b"compressed");
         let second = Digest::of(b"raw");
         let mut compressed_record = Record::new(translator, first);
-        let mut entry = offer(0x1000, first).prove().unwrap();
+        let mut entry = offer(0x1000, first).entry().unwrap();
         entry.code.resize(4096, 0);
         compressed_record.insert(entry);
         let raw = compressed_record.encode();
@@ -1908,7 +1560,7 @@ mod tests {
         assert_eq!(*held, compressed_record);
         assert!(Arc::ptr_eq(&held, &store.record(&first).unwrap()));
         assert_eq!(store.record(&second).unwrap().key, second);
-        let output = store.plan(u64::MAX, || true).layout.to_vec();
+        let output = store.plan(u64::MAX).layout.to_vec();
         let pack = Pack::parse(&output, &translator).unwrap();
         assert_eq!(pack.format, PackFormat::Mixed);
         assert_eq!(pack.get(&first), Some(compressed.as_slice()));
@@ -2015,7 +1667,7 @@ mod tests {
         assert!(Arc::ptr_eq(&retired, &old.upgrade().unwrap()));
         assert!(store.prepared(&key, 0x1008, &context).is_some());
         assert!(store.shared_usage() <= bound);
-        assert_eq!(store.pending(), 0);
+        assert_eq!(store.counters.added, 0);
         drop(retired);
         assert!(old.upgrade().is_none());
 
@@ -2024,97 +1676,6 @@ mod tests {
         assert!(store.accept_shared(&mut staged).is_none());
         assert!(staged.entry.is_some());
         assert!(store.prepared(&key, 0x1000, &context).is_none());
-    }
-
-    #[test]
-    fn pending_budget_caps_capacity_growth_and_keeps_exact_input() {
-        let key = Digest::of(b"page");
-        let base = 0x1_0000_4000;
-        let mut store = Store::new(translator_id(), None).0;
-        for index in 0..4 {
-            store.keep_pending(&offer(base + index * 8, key));
-        }
-        let page = store.pending.values().next().unwrap();
-        assert_eq!((page.blocks.len(), page.inputs.len()), (4, 32));
-        assert_eq!((page.blocks.capacity(), page.inputs.capacity()), (4, 32));
-
-        // The other pages consume the rest of the budget. There is room
-        // for one exact block and its input, but no geometric slack.
-        let extra = size_of::<PendingBlock>() + 8;
-        store.pending_bytes = MAX_PENDING_BYTES - extra;
-        let next = offer(base + 32, key);
-        store.keep_pending(&next);
-        assert_eq!(store.pending_bytes, MAX_PENDING_BYTES);
-        let page = store.pending.values().next().unwrap();
-        assert_eq!((page.blocks.capacity(), page.inputs.capacity()), (5, 40));
-        assert_eq!(&page.inputs[32..], next.input());
-
-        // A duplicate has no charge. A fresh block cannot replace an old
-        // allocation or corrupt the input offsets at the exhausted limit.
-        let previous = page.inputs.clone();
-        store.keep_pending(&next);
-        store.keep_pending(&offer(base + 40, key));
-        assert_eq!(store.pending_bytes, MAX_PENDING_BYTES);
-        assert_eq!((store.pending(), store.counters.dropped), (5, 1));
-        let page = store.pending.values().next().unwrap();
-        assert_eq!(page.inputs, previous);
-        assert_eq!(
-            page.blocks
-                .iter()
-                .map(|block| block.start)
-                .collect::<Vec<_>>(),
-            [0, 8, 16, 24, 32]
-        );
-    }
-
-    #[test]
-    fn writable_staging_preserves_proof_with_and_without_shared_admission() {
-        let translator = translator_id();
-        let key = Digest::of(b"page");
-        let first = offer(0x1_0000_4008, key);
-        let second = offer(0x1_0000_4010, key);
-        let charge = first.retained_bytes() + size_of::<(SharedKey, SharedEntry)>();
-        let mut queue = VecDeque::<SharedKey>::new();
-        queue.try_reserve(1).unwrap();
-        let bound = charge + queue.capacity() * size_of::<SharedKey>();
-        let mut store = Store::new(translator, None).0;
-        store.share(bound);
-
-        let mut staged = StagedOffer::for_writable(&first, bound).unwrap();
-        store.keep_pending(&first);
-        assert!(store.accept_shared(&mut staged).is_none());
-        let owner = Arc::downgrade(&store.prepared(&key, first.pc(), &first.context()).unwrap());
-
-        let mut staged = StagedOffer::for_writable(&second, bound).unwrap();
-        store.keep_pending(&second);
-        let retired = store.accept_shared(&mut staged).unwrap();
-        assert!(Arc::ptr_eq(&retired, &owner.upgrade().unwrap()));
-        assert!(store.prepared(&key, first.pc(), &first.context()).is_none());
-        assert!(store.shared_usage() <= bound);
-        drop(retired);
-        assert!(owner.upgrade().is_none());
-
-        // A live store change may refuse shared publication after staging.
-        let mut staged = StagedOffer::for_writable(&second, bound).unwrap();
-        store.share(0);
-        store.keep_pending(&second);
-        assert!(store.accept_shared(&mut staged).is_none());
-        assert!(staged.entry.is_some());
-        assert!(StagedOffer::for_writable(&first, 0).is_none());
-        assert_eq!(store.pending(), 2);
-        assert_eq!((store.counters.offered, store.counters.dropped), (2, 0));
-
-        // Reuse and eviction are independent of durable proof input.
-        let planned = store.plan(u64::MAX, || true);
-        assert_eq!(
-            (planned.proven, planned.unprovable, planned.unproven),
-            (2, 0, 0)
-        );
-        let bytes = planned.layout.to_vec();
-        let mut next = Store::new(translator, Some(&bytes)).0;
-        let record = next.record(&key).unwrap();
-        assert!(record.find(8, &first.context()).is_some());
-        assert!(record.find(16, &second.context()).is_some());
     }
 
     #[test]
@@ -2180,8 +1741,8 @@ mod tests {
         assert!(store.prepared(&key, 0x1000, &first.context()).is_some());
         assert!(store.prepared(&key, 0x1020, &fifth.context()).is_some());
         assert!(store.shared_usage() <= 4 * bytes + fifo);
-        // Each distinct block waits for proof once, however often offered.
-        assert_eq!(store.pending(), 5);
+        // Each distinct block is added once, however often offered.
+        assert_eq!(store.counters.added, 5);
     }
 
     #[test]
@@ -2238,35 +1799,22 @@ mod tests {
     }
 
     #[test]
-    fn blocks_past_the_room_to_prove_them_stay_unproven() {
-        let translator = translator_id();
-        let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
-        let mut store = Store::new(translator, None).0;
-        store.offer(offer(0x1_0000_4008, first));
-        store.offer(offer(0x1_0000_8010, second));
-        let tried = core::cell::Cell::new(0);
-        let planned = store.plan(u64::MAX, || {
-            tried.set(tried.get() + 1);
-            tried.get() == 1
-        });
-        assert_eq!((planned.proven, planned.unproven), (1, 1));
-        assert_eq!(planned.layout.records(), 1);
-    }
-
-    #[test]
-    fn a_boot_proves_its_blocks_into_the_next_pack_and_the_one_after_reads_them() {
+    fn a_boot_keeps_its_blocks_in_the_next_pack_and_the_one_after_reads_them() {
         let translator = translator_id();
         let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
         let mut store = Store::new(translator, None).0;
         store.offer(offer(0x1_0000_4008, first));
         store.offer(offer(0x1_0000_8010, second));
         assert_eq!(store.record(&first), None);
-        let planned = store.plan(u64::MAX, || true);
+        let planned = store.plan(u64::MAX);
         assert_eq!(
-            (planned.proven, planned.unprovable, planned.evicted),
+            (
+                store.counters.added,
+                store.counters.unstorable,
+                planned.evicted
+            ),
             (2, 0, 0)
         );
-        assert_eq!(store.pending(), 0);
         let bytes = planned.layout.to_vec();
 
         let mut next = Store::new(translator, Some(&bytes)).0;
@@ -2282,7 +1830,7 @@ mod tests {
         assert_eq!(next.counters.loaded, 1);
         // The record this boot used is kept first under a tight bound.
         let one = layout_bytes(1, next.pack().unwrap().get(&first).unwrap().len() as u64);
-        let planned = next.plan(one, || true);
+        let planned = next.plan(one);
         assert_eq!((planned.layout.records(), planned.evicted), (1, 1));
         let kept = planned.layout.to_vec();
         let pack = Pack::parse(&kept, &translator).unwrap();
@@ -2301,10 +1849,10 @@ mod tests {
         let key = Digest::of(b"page");
         let mut store = Store::new(translator, None).0;
         store.offer(offer(0x1_0000_4008, key));
-        let bytes = store.plan(u64::MAX, || true).layout.to_vec();
+        let bytes = store.plan(u64::MAX).layout.to_vec();
         let mut next = Store::new(translator, Some(&bytes)).0;
         next.offer(offer(0x1_0000_4010, key));
-        let merged = next.plan(u64::MAX, || true).layout.to_vec();
+        let merged = next.plan(u64::MAX).layout.to_vec();
         let pack = Pack::parse(&merged, &translator).unwrap();
         let record = Record::decode(pack.get(&key).unwrap(), &translator, &key).unwrap();
         let mut offsets: Vec<u16> = record.entries.iter().map(|entry| entry.offset).collect();
@@ -2329,7 +1877,7 @@ mod tests {
         for (index, key) in keys[..4].iter().enumerate() {
             store.offer(offer(0x1_0000_4008 + 0x1000 * index as u64, *key));
         }
-        let first = store.plan(u64::MAX, || true).layout;
+        let first = store.plan(u64::MAX).layout;
         assert_eq!(first.changed(), None);
         let old = first.to_vec();
         // The next boot uses one record and offers a new block in another
@@ -2338,7 +1886,7 @@ mod tests {
         assert!(next.record(&keys[1]).is_some());
         next.offer(offer(0x1_0000_9010, keys[4]));
         next.offer(offer(0x1_0000_6010, keys[2]));
-        let layout = next.plan(u64::MAX, || true).layout;
+        let layout = next.plan(u64::MAX).layout;
         let new = layout.to_vec();
         assert_eq!(new.len() as u64, layout.bytes());
         let changed = layout.changed().expect("an incremental layout").to_vec();
@@ -2390,7 +1938,7 @@ mod tests {
             for key in read.keys() {
                 assert!(idle.record(key).is_some());
             }
-            let layout = idle.plan(u64::MAX, || true).layout;
+            let layout = idle.plan(u64::MAX).layout;
             (layout.changed().unwrap().to_vec(), layout.to_vec())
         };
         let (ranges, young) = used(&new);
@@ -2415,7 +1963,7 @@ mod tests {
         .to_vec();
         let mut store = Store::new(translator, Some(&old)).0;
         store.offer(offer(0x1_0000_4008, keys[1]));
-        let layout = store.plan(u64::MAX, || true).layout;
+        let layout = store.plan(u64::MAX).layout;
         assert_eq!(layout.changed(), None);
         let roomy = layout.to_vec();
         let pack = Pack::parse(&roomy, &translator).unwrap();
@@ -2429,13 +1977,13 @@ mod tests {
         assert!(first >= prefix_length(2 + MIN_INDEX_SLACK));
         let mut next = Store::new(translator, Some(&roomy)).0;
         next.offer(offer(0x1_0000_5008, keys[2]));
-        let grown = next.plan(u64::MAX, || true).layout;
+        let grown = next.plan(u64::MAX).layout;
         assert!(grown.changed().is_some());
         assert_eq!(records_of(&grown.to_vec(), &translator).len(), 3);
         // Under a bound without room for it, the records follow the index.
         let mut used = Store::new(translator, Some(&old)).0;
         assert!(used.record(&keys[0]).is_some());
-        let tight = used.plan(old.len() as u64, || true).layout;
+        let tight = used.plan(old.len() as u64).layout;
         assert_eq!(tight.to_vec(), old);
     }
 
@@ -2476,103 +2024,6 @@ mod tests {
         assert_eq!(layout.changed(), None);
     }
 
-    #[test]
-    fn blocks_proven_in_batches_during_the_run_reach_the_next_pack() {
-        let translator = translator_id();
-        let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
-        let mut store = Store::new(translator, None).0;
-        store.offer(offer(0x1_0000_4008, first));
-        store.offer(offer(0x1_0000_4010, first));
-        store.offer(offer(0x1_0000_8010, second));
-        let batch = store.take_batch(1).unwrap();
-        assert_eq!(batch.blocks(), 2);
-        assert_eq!(store.pending(), 1);
-        store.fold(batch.prove());
-        assert_eq!(store.counters.proven, 2);
-        // An offer already proven waits no more, and frees nothing twice.
-        store.offer(offer(0x1_0000_4008, first));
-        assert_eq!(store.pending(), 1);
-        let planned = store.plan(u64::MAX, || true);
-        assert_eq!((planned.proven, planned.unproven), (1, 0));
-        let bytes = planned.layout.to_vec();
-        let mut next = Store::new(translator, Some(&bytes)).0;
-        let context = offer(0x1_0000_4008, first).context();
-        let record = next.record(&first).unwrap();
-        assert!(record.find(8, &context).is_some() && record.find(16, &context).is_some());
-        assert!(next.record(&second).unwrap().find(16, &context).is_some());
-
-        // Past the proven bound a batch's entries are counted, not kept.
-        let mut full = Store::new(translator, None).0;
-        drop(full.set_bounds(Bounds {
-            proven: 0,
-            ..Bounds::default()
-        }));
-        full.offer(offer(0x1_0000_4008, first));
-        assert!(full.take_batch(1).is_none());
-        drop(full.set_bounds(Bounds {
-            proven: 1,
-            ..Bounds::default()
-        }));
-        let batch = full.take_batch(1).unwrap();
-        full.fold(batch.prove());
-        assert_eq!((full.counters.proven, full.counters.unkept), (1, 1));
-    }
-
-    /// Once a fold left an entry out for the proven bound, a batch proven
-    /// then would be left out too: none is taken, and the pages wait for
-    /// the stop's proof, which keeps them. Before, every batch was proven
-    /// and dropped with its pages for the rest of the run.
-    #[test]
-    fn a_store_short_of_an_entry_proves_no_batch_until_its_bound_grows() {
-        let translator = translator_id();
-        let keys: Vec<Digest> = (0u8..4).map(|index| Digest::of(&[index])).collect();
-        let mut store = Store::new(translator, None).0;
-        drop(store.set_bounds(Bounds {
-            proven: 1,
-            ..Bounds::default()
-        }));
-        for (index, key) in keys.iter().enumerate() {
-            store.offer(offer(0x1_0000_4008 + 0x4000 * index as u64, *key));
-        }
-        assert_eq!(store.pending(), 4);
-        let batch = store.take_batch(1).unwrap();
-        assert_eq!(batch.blocks(), 1);
-        store.fold(batch.prove());
-        assert_eq!((store.counters.proven, store.counters.unkept), (1, 1));
-        // Room is left under the bound, but not for an entry: no batch.
-        for _ in 0..8 {
-            assert!(store.take_batch(1).is_none());
-        }
-        assert_eq!((store.counters.proven, store.pending()), (1, 3));
-        // A smaller bound changes nothing; a larger one proves again.
-        drop(store.set_bounds(Bounds {
-            proven: 0,
-            ..Bounds::default()
-        }));
-        assert!(store.take_batch(1).is_none());
-        drop(store.set_bounds(Bounds::default()));
-        let batch = store.take_batch(1).unwrap();
-        store.fold(batch.prove());
-        assert_eq!((store.counters.proven, store.counters.unkept), (2, 1));
-        assert_eq!(store.pending(), 2);
-        // The stop proves the two that still wait, and the next pack holds
-        // them with the one proven during the run.
-        let planned = store.plan(u64::MAX, || true);
-        assert_eq!((planned.proven, planned.unproven), (2, 0));
-        let bytes = planned.layout.to_vec();
-        let mut next = Store::new(translator, Some(&bytes)).0;
-        // All but the page the first, unkept batch took.
-        let context = offer(0x1_0000_4008, keys[0]).context();
-        let kept = keys
-            .iter()
-            .filter(|key| {
-                next.record(key)
-                    .is_some_and(|record| record.find(8, &context).is_some())
-            })
-            .count();
-        assert_eq!(kept, 3);
-    }
-
     /// A record no boot looks up ages by a boot at each write and leaves
     /// after [`MAX_UNUSED_BOOTS`]; one looked up is young again. Only the
     /// index is written for a change of ages.
@@ -2583,11 +2034,11 @@ mod tests {
         let mut store = Store::new(translator, None).0;
         store.offer(offer(0x1_0000_4008, used));
         store.offer(offer(0x1_0000_8008, unused));
-        let mut bytes = store.plan(u64::MAX, || true).layout.to_vec();
+        let mut bytes = store.plan(u64::MAX).layout.to_vec();
         for boot in 1..=u64::from(MAX_UNUSED_BOOTS) + 1 {
             let mut next = Store::new(translator, Some(&bytes)).0;
             assert!(next.record(&used).is_some());
-            let planned = next.plan(u64::MAX, || true);
+            let planned = next.plan(u64::MAX);
             let ranges = planned.layout.changed().unwrap().to_vec();
             let expected = if boot > u64::from(MAX_UNUSED_BOOTS) {
                 (1, 1)
@@ -2614,28 +2065,34 @@ mod tests {
         // A boot that uses every record and changes no age writes nothing.
         let mut next = Store::new(translator, Some(&bytes)).0;
         assert!(next.record(&used).is_some());
-        assert_eq!(next.plan(u64::MAX, || true).layout.changed(), Some(&[][..]));
+        assert_eq!(next.plan(u64::MAX).layout.changed(), Some(&[][..]));
     }
-
     #[test]
-    fn a_larger_pending_bound_keeps_offers_a_smaller_one_drops() {
+    fn entries_past_the_added_bound_are_counted_not_kept() {
         let translator = translator_id();
         let key = Digest::of(b"page");
         let offers: Vec<Offer> = (0..64)
             .map(|index| offer(0x1_0000_4000 + 8 * index, key))
             .collect();
+        let one = offers[0].entry().unwrap().retained_bytes();
         let mut small = Store::new(translator, None).0;
         drop(small.set_bounds(Bounds {
-            pending: 256,
+            added: 4 * one,
             ..Bounds::default()
         }));
         let mut large = Store::new(translator, None).0;
         for offer in &offers {
-            small.keep_pending(offer);
-            large.keep_pending(offer);
+            small.keep(offer, offer.entry());
+            large.keep(offer, offer.entry());
         }
-        assert!(small.counters.dropped > 0);
-        assert_eq!((large.pending(), large.counters.dropped), (64, 0));
+        assert_eq!((small.counters.added, small.counters.unkept), (4, 60));
+        assert_eq!((large.counters.added, large.counters.unkept), (64, 0));
+        // An offer the compiler gave no stored form is counted apart.
+        large.keep(&offers[0], None);
+        assert_eq!(large.counters.unstorable, 1);
+        let bytes = small.plan(u64::MAX).layout.to_vec();
+        let mut next = Store::new(translator, Some(&bytes)).0;
+        assert_eq!(next.record(&key).unwrap().entries().len(), 4);
     }
 
     #[test]
@@ -2690,11 +2147,10 @@ mod tests {
         for part in parts {
             merged.absorb(part);
         }
-        assert_eq!(merged.pending(), whole.pending());
-        assert_eq!(merged.counters.offered, whole.counters.offered);
+        assert_eq!(merged.counters.added, whole.counters.added);
         assert_eq!(
-            merged.plan(u64::MAX, || true).layout.to_vec(),
-            whole.plan(u64::MAX, || true).layout.to_vec()
+            merged.plan(u64::MAX).layout.to_vec(),
+            whole.plan(u64::MAX).layout.to_vec()
         );
     }
 }

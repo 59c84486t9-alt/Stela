@@ -239,7 +239,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         address: ScalarLoadAddress,
     ) -> (u64, Option<(Register, u64)>) {
         match address {
-            ScalarLoadAddress::Literal { address } => (address, None),
+            ScalarLoadAddress::Literal { address } => (address.0, None),
             ScalarLoadAddress::Immediate {
                 base,
                 displacement,

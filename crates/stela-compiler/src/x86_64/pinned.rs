@@ -311,7 +311,7 @@ pub(super) fn compare_held_immediate(code: &mut Code, width: Width, immediate: u
 pub(super) fn emit_pc_relative(code: &mut Code, operand: pc_relative::Operand) {
     // Fixed in size at every address, for a stored block's rebase.
     let work = working(code, operand.destination);
-    code.asm().mov_imm64(work, operand.address);
+    code.asm().guest_imm64(work, operand.address);
     finish(code, work, operand.destination, false, false);
 }
 

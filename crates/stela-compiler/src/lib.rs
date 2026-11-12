@@ -76,6 +76,13 @@ pub trait Lifter {
 pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,
     pub source_map: Vec<(GuestAddress, usize)>,
+    /// The offsets of the 8-byte fields of the code that hold guest
+    /// addresses, ascending, as the emitter recorded them: the code depends
+    /// on its block's address through these alone, so it moves to another
+    /// page by adding the page's displacement to each. `None` for code the
+    /// emitter assembled without recording them, which is not moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocations: Option<Vec<u32>>,
 }
 
 /// What [`compile`] translates for: the guest services and memory checks of a

@@ -5,7 +5,7 @@ use crate::GuestAddress;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Operand {
     pub destination: Register,
-    pub address: u64,
+    pub address: GuestAddress,
 }
 
 pub fn decode(pc: GuestAddress, word: u32) -> Option<Operand> {
@@ -25,7 +25,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Operand> {
     };
     Some(Operand {
         destination: register(word & 31, false),
-        address,
+        address: GuestAddress(address),
     })
 }
 
@@ -56,7 +56,7 @@ mod tests {
                         };
                         let operand =
                             decode(GuestAddress(pc), word(page, immediate, destination)).unwrap();
-                        assert_eq!(operand.address, expected);
+                        assert_eq!(operand.address.0, expected);
                         assert_eq!(operand.destination, register(destination, false));
                     }
                 }
@@ -78,7 +78,7 @@ mod tests {
                 instruction.operation,
                 Operation::PcRelative(Operand {
                     destination: Register::Zero,
-                    address: if page { 0x5000 } else { 0x4005 },
+                    address: GuestAddress(if page { 0x5000 } else { 0x4005 }),
                 })
             );
         }

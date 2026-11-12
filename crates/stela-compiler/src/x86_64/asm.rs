@@ -32,6 +32,9 @@ pub(crate) struct Asm<'a> {
     instructions: usize,
     shared: Option<&'a mut usize>,
     sites: Option<&'a mut Vec<EmissionSite>>,
+    /// The [`Code`]'s guest-address fields ([`Self::guest_imm64`]); none for
+    /// code built outside a block (thunks and tails the engine places).
+    relocations: Option<&'a mut Vec<u32>>,
     pinned: bool,
     locals: Option<super::pinned::LocalRegisters>,
     /// The locals a fault recovers from their hosts ([`super::pinned::Span`]).
@@ -68,6 +71,7 @@ impl<'a> Asm<'a> {
             instructions: 0,
             shared: None,
             sites: None,
+            relocations: None,
             pinned: false,
             locals: None,
             dirty: Default::default(),
@@ -346,6 +350,18 @@ impl<'a> Asm<'a> {
     pub(crate) fn mov_imm64(&mut self, destination: Gpr, value: u64) {
         self.opcode_reg(Size::Qword, 0xb8, destination);
         self.data(&value.to_le_bytes());
+    }
+    /// `movabs destination, address`: a guest address, whose field the
+    /// code records among its relocations so that the block, stored, moves
+    /// with its page. Every guest address a block's code holds is emitted
+    /// here; [`Self::mov_imm64`] takes no [`crate::GuestAddress`].
+    pub(crate) fn guest_imm64(&mut self, destination: Gpr, address: crate::GuestAddress) {
+        self.opcode_reg(Size::Qword, 0xb8, destination);
+        let at = self.code.len();
+        self.data(&address.0.to_le_bytes());
+        if let Some(relocations) = self.relocations.as_deref_mut() {
+            relocations.push(u32::try_from(at).expect("code under 4 GiB"));
+        }
     }
     /// `mov rm, imm32` (C7 /0), sign-extended for a quadword.
     pub(crate) fn mov_rm_imm32(&mut self, size: Size, rm: impl Into<Rm>, value: i32) {

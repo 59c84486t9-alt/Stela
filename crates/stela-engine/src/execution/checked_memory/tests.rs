@@ -473,7 +473,10 @@ fn checked_low128_literal_entry_requires_context_and_preserves_full_fault_state(
                     assert_eq!(pc.0, expected.x[30]);
                 }
                 assert_eq!(registers, expected);
-                assert_eq!(literal::decode(PC, word).unwrap().unwrap().address, address);
+                assert_eq!(
+                    literal::decode(PC, word).unwrap().unwrap().address.0,
+                    address
+                );
             }
         }
     }

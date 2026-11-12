@@ -50,7 +50,7 @@ pub enum Address {
         extend: IndexExtend,
         shift: u8,
     },
-    Literal(u64),
+    Literal(GuestAddress),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +100,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported
             (word >> LITERAL_IMMEDIATE_SHIFT) & LITERAL_IMMEDIATE_MASK,
             LITERAL_IMMEDIATE_BITS,
         ) * INSTRUCTION_BYTES;
-        Address::Literal(pc.0.wrapping_add_signed(displacement))
+        Address::Literal(GuestAddress(pc.0.wrapping_add_signed(displacement)))
     } else {
         return None;
     };
@@ -224,7 +224,9 @@ mod tests {
                     assert_eq!(operand.hint.encoding(), hint as u8);
                     assert_eq!(
                         operand.address,
-                        Address::Literal((i128::from(pc) + i128::from(immediate) * 4) as u64)
+                        Address::Literal(GuestAddress(
+                            (i128::from(pc) + i128::from(immediate) * 4) as u64
+                        ))
                     );
                 }
             }

@@ -1779,7 +1779,7 @@ fn board_code(
     let churn = format!(
         " churn=new/ring/ivau/slot/other:{}/{}/{}/{}/{} same_bytes={} \
          ages=turn/four/older:{}/{}/{} aliases=pc/variant:{}/{} ghosts_overwritten={} \
-         rebased=hits/proven/unprovable/kib:{}/{}/{}/{}",
+         rebased=hits/kept/unstorable/kib:{}/{}/{}/{}",
         churn.new,
         churn.again[0],
         churn.again[1],
@@ -1793,10 +1793,10 @@ fn board_code(
         churn.variants,
         churn.overwritten,
         now.rebases.hits.saturating_sub(was.rebases.hits),
-        now.rebases.proven.saturating_sub(was.rebases.proven),
+        now.rebases.kept.saturating_sub(was.rebases.kept),
         now.rebases
-            .unprovable
-            .saturating_sub(was.rebases.unprovable),
+            .unstorable
+            .saturating_sub(was.rebases.unstorable),
         now.rebases.bytes / 1024,
     );
     // The parts young and tenured code hold, installs sent to the tenured
