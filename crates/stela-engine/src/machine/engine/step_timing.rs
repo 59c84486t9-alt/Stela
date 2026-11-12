@@ -202,6 +202,76 @@ pub fn system_key_name(key: u32) -> alloc::string::String {
     alloc::format!("{kind}:{key:#010x}")
 }
 
+/// What a System exit key does, for the per-class totals of `PES SYSTEM`,
+/// which leave no key out: device sites; Apple's compression instructions;
+/// barriers; TLB and cache maintenance and address translation (TLBI, IC,
+/// DC, AT: SYS with CRn 7 or 8); waits (WFE, WFI); the generic timer's
+/// registers (CRn 14); implementation-defined registers (CRn 15: Apple's
+/// counters, IPIs and controls); the translation controls (SCTLR, CPACR,
+/// TTBRn, TCR, MAIR, CONTEXTIDR: CRn 1, 2, 10, 13); exception entries and
+/// returns and guarded-level transitions; and everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemClass {
+    Device,
+    Compression,
+    Barrier,
+    Maintenance,
+    Wait,
+    Timer,
+    ImplementationDefined,
+    TranslationControl,
+    Transition,
+    Other,
+}
+
+impl SystemClass {
+    pub const COUNT: usize = Self::Other as usize + 1;
+    pub const NAMES: [&'static str; Self::COUNT] = [
+        "device",
+        "compression",
+        "barrier",
+        "maintenance",
+        "wait",
+        "timer",
+        "impdef",
+        "translation",
+        "transition",
+        "other",
+    ];
+
+    /// The class of System exit key `key`.
+    pub fn of(key: u32) -> Self {
+        use stela_compiler::aarch64::system::registers;
+        if key == DEVICE_SITE_KEY {
+            return Self::Device;
+        }
+        let word = if key >> 24 == 0xd5 { key | 0x1f } else { key };
+        if let Some(access) = registers::decode(word) {
+            let encoding = access.encoding();
+            return match (encoding.op0(), encoding.crn()) {
+                (3, 15) => Self::ImplementationDefined,
+                (3, 14) => Self::Timer,
+                (3, 1 | 2 | 10 | 13) => Self::TranslationControl,
+                _ => Self::Other,
+            };
+        }
+        if let Some(access) = registers::decode_sys(word) {
+            return match access.encoding().crn() {
+                7 | 8 => Self::Maintenance,
+                _ => Self::Other,
+            };
+        }
+        let name = system_key_name(key);
+        match name.split(['.', ':']).next().unwrap_or_default() {
+            "Compression" => Self::Compression,
+            "Synchronization" => Self::Barrier,
+            "Wait" => Self::Wait,
+            "Exception" | "Guarded" => Self::Transition,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// One [`SystemExits`] key's exits, the ticks handling them, and how many
 /// of them closed every mirror cell (`Machine::derived_changed`), after
 /// which each MRS and MSR site exits again once.
@@ -1322,6 +1392,31 @@ mod tests {
     use super::*;
 
     const FAULT_SLOT: usize = FAULT_SLOTS + 1;
+
+    /// Each System exit key falls in the class of what it does.
+    #[test]
+    fn system_keys_fall_in_the_class_of_what_they_do() {
+        let cases = [
+            (DEVICE_SITE_KEY, SystemClass::Device),
+            (0x0020_0c20, SystemClass::Compression),
+            (0xd503_3b80, SystemClass::Barrier),
+            (0xd508_83a0, SystemClass::Maintenance),
+            (0xd508_7500, SystemClass::Maintenance),
+            (0xd503_2040, SystemClass::Wait),
+            (0xd51b_e300, SystemClass::Timer),
+            (0xd53a_f000, SystemClass::ImplementationDefined),
+            (0xd51d_f000, SystemClass::ImplementationDefined),
+            (0xd518_2000, SystemClass::TranslationControl),
+            (0xd518_1000, SystemClass::TranslationControl),
+            (0xd69f_03e0, SystemClass::Transition),
+            (0xd400_1001, SystemClass::Transition),
+            (0xd503_47e0, SystemClass::Other),
+        ];
+        for (key, class) in cases {
+            let name = system_key_name(key);
+            assert_eq!(SystemClass::of(key), class, "{key:#010x} {name}");
+        }
+    }
 
     #[test]
     fn hot_blocks_rank_by_samples_per_level_and_merge() {

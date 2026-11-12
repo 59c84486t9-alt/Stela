@@ -89,7 +89,10 @@ pub(super) fn profile_report(
 /// `PES SYSTEM count/ns/closes`: every PE's System exits since the last
 /// beat by key (`step_timing::system_key_name`), the eight most frequent,
 /// then the sixteen costliest, each with its total handling time and the exits
-/// that closed every mirror cell; `other` holds keys past the table's.
+/// that closed every mirror cell; `other` holds keys past the table's. Then
+/// every key's exits by class (`step_timing::SystemClass`), the keys past
+/// the table's as `other`; pointer and floating-point keys have lines of
+/// their own.
 fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     const SHOWN: usize = 8;
     const SHOWN_BY_TIME: usize = 16;
@@ -124,6 +127,25 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     }
     if exits.other.count != 0 {
         line.push_str(&item("other", &exits.other));
+    }
+    // Every key's exits by class, so that nothing hides past the shown
+    // ones; the keys past the table's count as `other`.
+    let mut classes = [step_timing::SystemExit::default(); step_timing::SystemClass::COUNT];
+    let unkeyed = core::iter::once((step_timing::SystemClass::Other, &exits.other));
+    let keyed = keys
+        .iter()
+        .map(|exit| (step_timing::SystemClass::of(exit.key), exit));
+    for (class, exit) in keyed.chain(unkeyed) {
+        let total = &mut classes[class as usize];
+        total.count += exit.count;
+        total.ticks += exit.ticks;
+        total.closes += exit.closes;
+    }
+    line.push_str(" by_class");
+    for (name, total) in step_timing::SystemClass::NAMES.iter().zip(&classes) {
+        if total.count != 0 {
+            line.push_str(&item(name, total));
+        }
     }
     output::arguments(format_args!("{line}\n"));
     // `PES POINTER count/ns/closes`: the pointer authentication exits by
