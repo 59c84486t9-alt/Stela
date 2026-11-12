@@ -213,6 +213,32 @@ fn the_ring_wraps_and_the_reader_keeps_order() {
 }
 
 #[test]
+fn reading_back_from_the_head_gives_the_newest_stream_and_stops_when_enough() {
+    for block in [512, 4096] {
+        let ring = 4 * u64::from(block);
+        let mut disk = Recorder::new(HEADER_BYTES + ring, block);
+        // A blank region holds no stream.
+        assert!(read_newest(&mut disk, 100, |_| false).unwrap().is_empty());
+        let mut writer = Writer::open(&mut disk).unwrap();
+        for line in 0..(3 * ring / 10) {
+            writer.append(format!("line {line:04}\n").as_bytes());
+        }
+        writer.flush(&mut disk).unwrap();
+        // Wrapped, with its head inside a block.
+        let whole = disk.log().unwrap().stream;
+        assert!(disk.log().unwrap().overwritten() > 0);
+        for chunk in [1, 100, u64::from(block), 3 * u64::from(block) + 7, 1 << 20] {
+            assert_eq!(read_newest(&mut disk, chunk, |_| false).unwrap(), whole);
+            // Stopping early gives a suffix that answers.
+            let newest = read_newest(&mut disk, chunk, |read| read.len() >= 300).unwrap();
+            assert!(newest.len() >= 300, "{chunk}");
+            assert!(whole.ends_with(&newest), "{chunk}");
+            assert!(newest.len() < 300 + chunk.max(u64::from(block)) as usize);
+        }
+    }
+}
+
+#[test]
 fn the_reader_orders_a_wrapped_region() {
     let ring = 16u64;
     let mut region = vec![0u8; (HEADER_BYTES + ring) as usize];

@@ -806,5 +806,56 @@ pub fn read(region: &[u8]) -> Result<Log, HeaderError> {
     })
 }
 
+/// The newest bytes of the stream the log on `device` holds, oldest first,
+/// read back from the head `chunk` bytes at a time until `enough` says the
+/// bytes read answer the question, or the whole stream is read: a boot
+/// that needs only its last boots' lines reads a few blocks, not the
+/// region. A blank or invalid header is a log with no stream.
+pub fn read_newest(
+    device: &mut dyn BlockDevice,
+    chunk: u64,
+    enough: impl Fn(&[u8]) -> bool,
+) -> Result<Vec<u8>, BlockError> {
+    let identity = device.identity();
+    let block = u64::from(identity.block_size);
+    let bytes = identity.blocks.saturating_mul(block);
+    if block == 0 || !HEADER_BYTES.is_multiple_of(block) || bytes <= HEADER_BYTES {
+        return Ok(Vec::new());
+    }
+    let ring_bytes = bytes - HEADER_BYTES;
+    let mut header = vec![0; HEADER_BYTES as usize];
+    device.read(0, &mut header)?;
+    let Ok(Header { head, .. }) = Header::decode(&header, ring_bytes) else {
+        return Ok(Vec::new());
+    };
+    let oldest = head.saturating_sub(ring_bytes);
+    let mut newest = Vec::new();
+    let mut from = head;
+    while from > oldest {
+        let to = from;
+        from = to.saturating_sub(chunk.max(block)).max(oldest);
+        // Whole blocks around [from, to), each within the ring.
+        let mut read = Vec::with_capacity((to - from) as usize);
+        let mut at = from - from % block;
+        while at < to {
+            let in_ring = at % ring_bytes;
+            let run = (to.next_multiple_of(block) - at).min(ring_bytes - in_ring);
+            let mut buffer = vec![0; run as usize];
+            device.read((HEADER_BYTES + in_ring) / block, &mut buffer)?;
+            read.extend_from_slice(&buffer);
+            at += run;
+        }
+        let skip = (from % block) as usize;
+        read.truncate(skip + (to - from) as usize);
+        read.drain(..skip);
+        read.extend_from_slice(&newest);
+        newest = read;
+        if enough(&newest) {
+            break;
+        }
+    }
+    Ok(newest)
+}
+
 #[cfg(test)]
 mod tests;
