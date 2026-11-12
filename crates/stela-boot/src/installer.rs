@@ -497,19 +497,60 @@ impl Picker {
                 disk.write(write.lba, &write.bytes)?;
             }
         }
+        disk.blank(first, blocks)?;
+        Ok(target)
+    }
+}
+
+impl Disk {
+    /// Zero the first MiB and the machine state's tail of the partition of
+    /// `blocks` from `first`, so the restore and the NOR start blank, and
+    /// make it durable.
+    fn blank(&mut self, first: u64, blocks: u64) -> Result<()> {
+        let block = self.geometry.block_bytes;
         let bytes = blocks * block;
         let split =
             machine_state::split(bytes).map_err(|_| refuse!("the partition is too small"))?;
-        disk.zero(first, MIB)?;
-        disk.zero(
+        self.zero(first, MIB)?;
+        self.zero(
             first + split.namespace_bytes / block,
             bytes - split.namespace_bytes,
         )?;
-        disk.io
+        self.io
             .flush_blocks()
-            .map_err(|_| refuse!("the disk did not finish writing"))?;
-        Ok(target)
+            .map_err(|_| refuse!("the disk did not finish writing"))
     }
+}
+
+/// Install macOS again on the Stela partition chosen before (`SERIAL:GUID`),
+/// as choosing it again in the picker does: its table unchanged, its first
+/// MiB and machine state blank.
+pub fn again(chosen: &str) -> Result<()> {
+    let target: Target = chosen.parse()?;
+    let mut disks = disks();
+    let disk = disks
+        .iter_mut()
+        .find(|disk| disk.serial.as_deref() == Some(target.serial.as_str()))
+        .ok_or(refuse!("the disk chosen before is not there"))?;
+    let partition = disk
+        .table
+        .as_ref()
+        .and_then(|table| {
+            table.partitions.iter().find(|partition| {
+                partition.unique_guid == target.partition
+                    && partition.role() == Some(Role::AppleRegion)
+            })
+        })
+        .map(|partition| (partition.first_lba, partition.blocks()))
+        .ok_or(refuse!("the partition chosen before is not there"))?;
+    if let Some(refusal) = disk.refusal {
+        return Err(refuse!("{refusal}", refusal));
+    }
+    output::arguments(format_args!(
+        "INSTALLER again on the partition chosen before first_lba={} blocks={}\n",
+        partition.0, partition.1
+    ));
+    disk.blank(partition.0, partition.1)
 }
 
 /// Open `handle`'s block I/O, without taking it from its driver.

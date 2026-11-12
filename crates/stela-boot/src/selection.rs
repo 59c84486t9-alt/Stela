@@ -262,6 +262,14 @@ fn find(target: &Target) -> Result<Partition> {
     })
 }
 
+/// Whether the partition Install macOS chose before (`SERIAL:GUID`) is on
+/// this PC: exactly one disk with its serial, and exactly one partition
+/// with its GUID that is no EFI system partition.
+pub fn chosen_present(disk: &str) -> bool {
+    disk.parse::<Target>()
+        .is_ok_and(|target| matches!(search(&target), Ok(Ok(_))))
+}
+
 /// Why the partition `target` names is no longer there to boot, when it is
 /// not (`chosen_disk::Stale::of`).
 fn stale(target: &Target) -> Result<Option<Stale>> {
