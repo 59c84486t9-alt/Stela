@@ -3,8 +3,9 @@
 // Copyright (c) 2026 Stela contributors
 //! Initial SPT I219 LM/V (156f/1570), with the integrated flash window,
 //! unmanaged force-ULP exit and descriptor-flush status. Later I219 generations
-//! are not selected by their common I217 PHY ID. Initial PHY identity must be
-//! accessible; firmware/SMM, ME ownership and other users remain excluded.
+//! are not selected by their common I217 PHY ID. The PHY is first read after
+//! the forced ULP exit's LANPHYPC toggle, which brings it back from ULP or
+//! SMBus mode; firmware/SMM, ME ownership and other users remain excluded.
 use super::{
     Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, i219, lpt,
     nvm,
@@ -55,8 +56,8 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
     /// requirements apply, with vendor8086/class020000/device156f/1570.
     /// Config/MMIO/integrated MAC+e000 flash/PHY share one kept
     /// Function/reset epoch. LTR words remain immutable, while config e4 is a
-    /// real live read at every required reset/stop point. The initial PHY is
-    /// accessible and identifies as I217 before the forced interconnect cycle.
+    /// real live read at every required reset/stop point. The PHY identifies
+    /// as I217 once the forced interconnect cycle has brought it up.
     /// A foreign ring requiring flush is refused without touching foreign RAM.
     /// No native config/MMIO/DMA provider or probe admission is supplied here.
     pub unsafe fn new_spt(device: u16, io: R, delay: D) -> Result<Self, Error> {
@@ -153,11 +154,16 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     pub(super) fn initialize_i219(&mut self) -> Result<(), Error> {
         self.qualify()?;
         self.inherited_ring_check()?;
-        self.identity = self.phy.identify()?;
         self.validate_nvm()?;
         self.station = self.nvm.station()?;
         self.gate(true)?;
+        // As `e1000_init_phy_workarounds_pchlan`, force ULP off before the
+        // first PHY read: a PHY the last OS left in ULP, as it does with no
+        // cable at shutdown, or behind SMBus answers no MDIO cycle until the
+        // LANPHYPC toggle. The PHY's identity is checked right after, before
+        // any reset or PHY configuration.
         self.spt_ulp_exit()?;
+        self.identity = self.phy.identify()?;
         // The donor releases SWFLAG before this hardware PHY reset. No PHY
         // transaction wrapper may span it, or the later full-chip reset.
         self.phy_reset()?;

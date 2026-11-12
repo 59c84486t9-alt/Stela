@@ -298,11 +298,28 @@ fn retries_never_swallow_access_removal_or_uncertain_owner_cleanup() {
 #[test]
 fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
     for device in [0x550a, 0x57b3] {
+        // The forced ULP exit runs its MDIO cycles without retries before
+        // the first PHY ID read, which the retried failures then meet.
+        let identity_read = {
+            let (state, _, io, timer) = spt::tests::fixture_spt();
+            let c = start_any(device, io, timer).unwrap();
+            let m = state.borrow();
+            let cycles = m
+                .operations
+                .iter()
+                .filter(|o| o[0] == 1 && o[1] == 0x20)
+                .take_while(|o| (o[2] >> 16) & 31 != 2 || (o[2] >> 21) & 31 != 2)
+                .count();
+            drop(m);
+            drop(c);
+            cycles
+        };
         for kind in 0..3 {
             let (state, released, io, timer) = spt::tests::fixture_spt();
             {
                 let mut m = state.borrow_mut();
                 m.mdic_failures = 2;
+                m.mdic_fail_after = identity_read;
                 m.mdic_kind = kind;
             }
             let c = start_any(device, io, timer).unwrap();
@@ -331,7 +348,7 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
                         .iter()
                         .filter(|o| o[0] == 1 && o[1] == 0x20)
                         .count(),
-                    3
+                    identity_read + 3
                 );
             }
             drop(c);

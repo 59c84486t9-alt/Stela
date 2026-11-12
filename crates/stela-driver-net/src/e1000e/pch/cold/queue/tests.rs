@@ -1594,3 +1594,18 @@ fn lost_minimum_is_typed_through_link_and_cannot_resume_device_effects() {
     // NVM's unused clone may drop; PHY keeps the actual shared provider alive.
     assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 1);
 }
+#[test]
+fn an_i219_left_in_ulp_without_a_cable_starts_with_its_link_down() {
+    let mut memory = Memory::new();
+    let (state, _, io, timer) = super::super::spt::tests::fixture_spt();
+    state.borrow_mut().phy_asleep = true;
+    // SAFETY: one synchronous modeled Function/config/PHY/flash.
+    let controller = unsafe { Controller::new_i219(0x15b8, io, timer) }.unwrap();
+    let mut net = open(controller, &mut memory);
+    assert!(!net.carrier());
+    assert!(matches!(
+        net.transmit(&[0; 60]),
+        Err(LinkError::Adapter(ref why)) if why.contains("link is down")
+    ));
+    assert!(!net.controller.is_poisoned());
+}

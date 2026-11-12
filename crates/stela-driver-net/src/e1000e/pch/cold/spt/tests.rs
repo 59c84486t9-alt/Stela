@@ -363,3 +363,35 @@ fn spt_firmware_reset_phy_nvm_and_readiness_failures_never_enable_packet_dma() {
             && o[2] & 2 != 0));
     }
 }
+#[test]
+fn a_phy_left_in_ulp_answers_after_the_lanphypc_toggle() {
+    // 15b8 is the I219-V of the SPT table; 156f the initial SPT cohort.
+    for device in [0x15b8, 0x156f] {
+        let (state, released, io, timer) = fixture_spt();
+        state.borrow_mut().phy_asleep = true;
+        // SAFETY: one synchronous modeled Function/config/PHY/flash.
+        let controller = unsafe { Controller::new_i219(device, io, timer) }.unwrap();
+        assert_eq!(controller.identity().id, 0x0154_00a0);
+        {
+            let m = state.borrow();
+            let toggle = m
+                .operations
+                .iter()
+                .position(|o| {
+                    o[0] == 1 && o[1] == super::super::CTRL && o[2] & LANPHYPC_OVERRIDE != 0
+                })
+                .unwrap();
+            let first_phy = m
+                .operations
+                .iter()
+                .position(|o| o[0] == 1 && o[1] == super::super::super::MDIC)
+                .unwrap();
+            assert!(toggle < first_phy, "a PHY cycle came before LANPHYPC");
+            assert_eq!(m.phy[&(1, 779, 16)] & ULP_CLEAR, 0);
+            assert_eq!(m.mac[&CTRL_EXT] & FORCE_SMBUS, 0);
+        }
+        assert!(!controller.is_poisoned());
+        drop(controller);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+}

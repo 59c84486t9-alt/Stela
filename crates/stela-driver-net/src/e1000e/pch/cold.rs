@@ -200,8 +200,10 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     /// real reservation/mappings. Native DMA, IRQs, firmware/SMM and all other
     /// users are already excluded/drained. This is a new cold reset epoch;
     /// `delay` and its clones provide real minimum elapsed hardware delays.
-    /// The initial PHY must be accessible; SMBus/LANPHYPC recovery is not yet
-    /// admitted. This does not authorize LPT/SPT by PHY-ID similarity.
+    /// The 82579's initial PHY must be accessible; its SMBus/LANPHYPC
+    /// recovery is not admitted (the I219 cohorts toggle LANPHYPC before
+    /// their first PHY read). This does not authorize LPT/SPT by PHY-ID
+    /// similarity.
     pub unsafe fn new(device: u16, io: R, delay: D) -> Result<Self, Error> {
         if !matches!(device, 0x1502 | 0x1503) {
             return Err(Error::UnsupportedDevice(device));

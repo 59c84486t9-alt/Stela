@@ -19,6 +19,9 @@ pub(super) struct Model {
     pub(super) smb_hidden: bool,
     pub(super) smb_stuck: bool,
     pub(super) ulp_stuck: bool,
+    /// A PHY in ULP or behind SMBus: no MDIO cycle completes until the
+    /// LANPHYPC toggle brings it back.
+    pub(super) phy_asleep: bool,
     pub(super) flush_after_tx: bool,
     pub(super) flush_after_rx: bool,
     pub(super) phy: BTreeMap<(u8, u16, u16), u16>,
@@ -37,6 +40,8 @@ pub(super) struct Model {
     pub(super) quiet_until: u64,
     pub(super) master_busy: usize,
     pub(super) mdic_failures: usize,
+    /// The MDIC attempt the `mdic_failures` window starts at.
+    pub(super) mdic_fail_after: usize,
     pub(super) mdic_attempts: usize,
     pub(super) mdic_kind: u8,
     pub(super) init_missing: bool,
@@ -79,6 +84,7 @@ impl Model {
             smb_hidden: false,
             smb_stuck: false,
             ulp_stuck: false,
+            phy_asleep: false,
             flush_after_tx: false,
             flush_after_rx: false,
             phy: BTreeMap::from([((2, 0, 2), 0x154), ((2, 0, 3), 0x93)]),
@@ -97,6 +103,7 @@ impl Model {
             quiet_until: 0,
             master_busy: 0,
             mdic_failures: 0,
+            mdic_fail_after: 0,
             mdic_attempts: 0,
             mdic_kind: 0,
             init_missing: false,
@@ -211,6 +218,7 @@ unsafe impl Registers for Io {
             m.did_reset();
         } else if m.spt && at == CTRL && previous & (1 << 16) != 0 && value & (1 << 16) == 0 {
             m.power_pending = true;
+            m.phy_asleep = false;
             if m.smb_hidden_after_power {
                 m.smb_hidden = true;
                 let value = m.phy.get(&(1, 769, 23)).copied().unwrap_or(0) | 1;
@@ -231,6 +239,8 @@ unsafe impl Registers for Io {
                 m.kmrn.insert(index, value as u16);
                 m.mac.insert(at, value);
             }
+        } else if at == super::super::MDIC && m.phy_asleep {
+            m.mac.insert(at, value & !super::super::MDIC_READY);
         } else if at == super::super::MDIC {
             let index = ((value >> 16) & 31) as u16;
             let address = ((value >> 21) & 31) as u8;
@@ -249,7 +259,8 @@ unsafe impl Registers for Io {
                     smb && m.smb_hidden && m.mac.get(&0x18).copied().unwrap_or(0) & (1 << 11) == 0;
                 m.phy_load(address, index)
             };
-            let failed = m.mdic_attempts < m.mdic_failures;
+            let failed =
+                (m.mdic_fail_after..m.mdic_fail_after + m.mdic_failures).contains(&m.mdic_attempts);
             m.mdic_attempts += 1;
             let response = (value & !0xffff)
                 | u32::from(data)
