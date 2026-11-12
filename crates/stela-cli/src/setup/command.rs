@@ -320,6 +320,10 @@ struct Create {
     /// partition and a FAT32 volume. Without it, setup asks.
     #[arg(long, default_value = "", value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from))]
     usb: PathBuf,
+    /// The installer to make: offline by default when the USB is 32 GB or
+    /// more, else online.
+    #[arg(long, value_enum, value_name = "KIND")]
+    installer: Option<super::InstallImage>,
     #[command(flatten)]
     image: Image,
     #[command(flatten)]
@@ -410,6 +414,7 @@ impl Create {
         let mut request = Request {
             action: Action::Create,
             usb: self.usb,
+            install_image: self.installer,
             efi: self.efi,
             model: self.model,
             dry_run: self.dry_run,

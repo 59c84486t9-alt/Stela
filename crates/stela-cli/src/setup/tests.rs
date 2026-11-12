@@ -565,7 +565,7 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     assert!(plan.contains("gs.apple.com"), "{plan}");
     // macOS is on the USB, and the plan still says the install needs the
     // network, for the signing server alone.
-    let local = stela_runtime::restore::tss::network_reason(false);
+    let local = create::OFFLINE_SIGNING_NOTE;
     assert!(plan.contains(local), "{plan}");
     assert!(plan.contains("restore        "), "{plan}");
     assert!(!plan.contains("recoveryOS     "), "{plan}");
@@ -1164,8 +1164,17 @@ fn preparation_preflights_signing_and_capacity() {
         .find(|d| d.identifier == "disk5")
         .unwrap()
         .bytes = 1;
+    // Offline is refused on it first; Online meets the capacity check.
     let mut opted = command(&f, Path::new("disk5"));
     opted.confirmed = true;
+    let error = setup(&environment(&f.host), opted).unwrap_err();
+    assert!(
+        error.to_string().starts_with("Offline needs a USB"),
+        "{error:#}"
+    );
+    let mut opted = command(&f, Path::new("disk5"));
+    opted.confirmed = true;
+    opted.install_image = None;
     let error = setup(&environment(&f.host), opted).unwrap_err();
     assert!(
         error.to_string().contains("needs a USB of at least"),
@@ -1321,16 +1330,19 @@ fn the_last_word_on_the_network_follows_the_installer() {
     };
     let network = run(InstallImage::Network);
     assert!(
-        network.starts_with("The install downloads macOS"),
+        network.starts_with("Online: the install downloads macOS"),
         "{network}"
     );
     // These fake bundles hold no signing answers.
     let full = run(InstallImage::Full);
-    assert!(full.starts_with("macOS is on the USB."), "{full}");
+    assert!(
+        full.starts_with("Offline: the install needs internet only"),
+        "{full}"
+    );
     let offline = format!("  note           {}\n", create::OFFLINE_NOTE);
     let offline = create::network_next_step(&offline);
     assert!(
-        offline.starts_with("The install needs no network"),
+        offline.starts_with("Offline: the install needs no internet."),
         "{offline}"
     );
 }
@@ -1344,8 +1356,8 @@ fn install_reads_full_or_streamed_image() {
     let mut network = installed_command(&f);
     network.install_image = Some(InstallImage::Network);
     let report = setup(&environment(&f.host), network).unwrap();
-    assert!(report.contains("file list only"), "{report}");
-    let remote = stela_runtime::restore::tss::network_reason(true);
+    assert!(report.contains("installer      Online: "), "{report}");
+    let remote = create::ONLINE_NOTE;
     assert!(report.contains(remote), "{report}");
     let written = record(&f);
     assert_eq!(written.install_image, Some(InstallImage::Network));
@@ -1364,13 +1376,11 @@ fn install_reads_full_or_streamed_image() {
     // Status names where a streamed image comes from, not an empty partition.
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains("(macOS ") && status.contains(", downloads during installation): intact"),
+        status.contains("(macOS ")
+            && status.contains(", Online, downloads during installation): intact"),
         "{status}"
     );
-    assert!(
-        status.contains(stela_runtime::restore::tss::network_reason(true)),
-        "{status}"
-    );
+    assert!(status.contains(create::ONLINE_NOTE), "{status}");
     // Repair makes it full: the IPSW in pieces on the USB.
     let switch = |image| {
         rerun(&f, |c| {
@@ -1413,13 +1423,16 @@ fn full_install_requires_system_image() {
     full.install_image = Some(InstallImage::Full);
     full.dry_run = true;
     let error = format!("{:#}", setup(&environment(&f.host), full).unwrap_err());
-    assert!(error.contains("only the recovery members"), "{error}");
+    assert!(
+        error.contains("Offline needs an IPSW file with all of macOS"),
+        "{error}"
+    );
     // A new setup without an image choice on this 128 GB USB, with
     // `--target` too, puts a whole image on it, and streams the install
     // from a recovery archive.
     for (ipsw, line) in [
-        (recovery, "file list only"),
-        (f.ipsw.clone(), "install medium "),
+        (recovery, "installer      Online: "),
+        (f.ipsw.clone(), "installer      Offline: "),
     ] {
         let mut default = installed_command(&f);
         default.ipsw = Some(ipsw);
@@ -1447,7 +1460,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     let mut dry = installed_command(&f);
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
-    assert!(plan.contains("install medium "), "{plan}");
+    assert!(plan.contains("installer      Offline: "), "{plan}");
     assert!(plan.contains(STELA_GUID), "{plan}");
     assert!(plan.contains("restore        "), "{plan}");
     assert_eq!(snapshot(&stela_volume(&f)), stela_before);
@@ -3206,7 +3219,7 @@ fn an_interrupted_full_setup_resumes_as_a_full_install_and_keeps_its_pieces() {
     assert!(report.contains("Done."), "{report}");
     // The last piece is short, so it is not counted as on the USB.
     let found = format!(
-        "continuing the full installer: {} pieces already on the USB",
+        "continuing the Offline installer: {} parts of macOS already on the USB",
         pieces.len() - 1
     );
     assert!(report.contains(&found), "{report}");
@@ -3331,10 +3344,10 @@ fn an_interrupted_network_setup_resumes_as_a_network_install() {
     for path in [efi::LOADER, efi::OPTIONS, CHOICES_PATH] {
         fs::remove_file(f.esp.join(path)).unwrap();
     }
-    assert_eq!(stopped.resume_summary(), "continuing the network installer");
+    assert_eq!(stopped.resume_summary(), "continuing the Online installer");
     let report = resume_setup(&f);
     assert!(
-        report.contains("continuing the network installer"),
+        report.contains("continuing the Online installer"),
         "{report}"
     );
     let resumed = record(&f);
@@ -3481,7 +3494,7 @@ fn installed_os_update_preserves_user_data() {
     };
     let before = snapshot(&f.esp);
     let plan = update_to(&newer, true).unwrap();
-    assert!(plan.contains("install medium"), "{plan}");
+    assert!(plan.contains("installer      Offline: "), "{plan}");
     assert!(plan.contains("remove"), "{plan}");
     assert_eq!(snapshot(&f.esp), before);
     update_to(&newer, false).unwrap();
@@ -4959,7 +4972,7 @@ fn the_wizard_resumes_an_interrupted_setup_on_the_chosen_usb() {
     assert!(
         found
             .resume_summary()
-            .starts_with("continuing the full installer: "),
+            .starts_with("continuing the Offline installer: "),
         "{}",
         found.resume_summary()
     );
@@ -5073,19 +5086,13 @@ fn a_full_installer_with_every_signing_answer_says_the_install_needs_no_network(
     assert!(plan.contains(create::OFFLINE_NOTE), "{plan}");
     // What is not known is said too.
     assert!(plan.contains(create::FIRST_START_NOTE), "{plan}");
-    assert!(
-        !plan.contains(stela_runtime::restore::tss::network_reason(false)),
-        "{plan}"
-    );
+    assert!(!plan.contains(create::OFFLINE_SIGNING_NOTE), "{plan}");
     // Without the answers the same USB's install needs the network.
     let mut dry = command(&f, &f.esp);
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
     assert!(!plan.contains(create::OFFLINE_NOTE), "{plan}");
-    assert!(
-        plan.contains(stela_runtime::restore::tss::network_reason(false)),
-        "{plan}"
-    );
+    assert!(plan.contains(create::OFFLINE_SIGNING_NOTE), "{plan}");
     // The written USB's status says the same.
     setup(&staged, command(&f, &f.esp)).unwrap();
     let mut status = command(&f, &f.esp);
@@ -5093,28 +5100,125 @@ fn a_full_installer_with_every_signing_answer_says_the_install_needs_no_network(
     status.model = None;
     status.action = Action::Status;
     let report = status.dispatch(&staged).unwrap();
-    assert!(report.contains(create::STATUS_OFFLINE), "{report}");
+    assert!(report.contains(create::OFFLINE_NOTE), "{report}");
 }
 
 #[test]
-fn the_wizard_promises_no_network_only_once_the_answers_are_fetched() {
-    let full = create::expected_network_notes(true);
-    assert_eq!(full[0], create::FULL_BEFORE_NOTE);
-    assert!(!full.iter().any(|note| note == create::OFFLINE_NOTE));
+fn offline_is_made_on_a_usb_of_32_gb_or_more_from_an_image_with_all_of_macos() {
+    for capacity in [0, 31_000_000_000, 64 * GIB] {
+        assert_eq!(offline_unavailable(capacity, true), None, "{capacity}");
+    }
     assert_eq!(
-        create::expected_network_notes(false),
-        [stela_runtime::restore::tss::network_reason(true)]
+        offline_unavailable(16_000_000_000, true).as_deref(),
+        Some("needs a USB of 32 GB or more (this one is 16.0 GB)")
+    );
+    assert!(offline_unavailable(8_000_000_000, true).is_some());
+    let startup_files = offline_unavailable(64 * GIB, false).unwrap();
+    assert!(
+        startup_files.contains("only its startup files"),
+        "{startup_files}"
     );
 }
 
 #[test]
-fn a_new_setup_puts_macos_on_a_usb_of_32_gb_or_more() {
-    assert_eq!(default_install_image(0), InstallImage::Network);
-    assert_eq!(default_install_image(8_000_000_000), InstallImage::Network);
-    assert_eq!(default_install_image(16_000_000_000), InstallImage::Network);
-    // A stick sold as 32 GB.
-    assert_eq!(default_install_image(31_000_000_000), InstallImage::Full);
-    assert_eq!(default_install_image(64 * GIB), InstallImage::Full);
+fn a_new_setup_makes_the_installer_asked_for_or_else_offline_where_it_fits() {
+    let f = fixture(64 * GIB, false);
+    let recovery = f._dir.path().join("Recovery.ipsw");
+    restore::payload::trim(
+        fs::File::open(&f.ipsw).unwrap(),
+        restore::payload::SYNTHETIC_MODEL,
+        &recovery,
+        "Copying boot files",
+    )
+    .unwrap();
+    let choose = |asked, capacity, ipsw: Option<&Path>| {
+        create::choose_installer(asked, capacity, ipsw).map_err(|e| e.to_string())
+    };
+    let (full, network) = (Some(InstallImage::Full), Some(InstallImage::Network));
+    // Both on a large USB; Offline by default.
+    assert_eq!(choose(None, 64 * GIB, None), Ok(InstallImage::Full));
+    assert_eq!(choose(full, 64 * GIB, None), Ok(InstallImage::Full));
+    assert_eq!(choose(network, 64 * GIB, None), Ok(InstallImage::Network));
+    // Online alone on a small USB, and Offline asked for there is refused.
+    assert_eq!(
+        choose(None, 16_000_000_000, None),
+        Ok(InstallImage::Network)
+    );
+    assert_eq!(
+        choose(network, 16_000_000_000, None),
+        Ok(InstallImage::Network)
+    );
+    assert_eq!(
+        choose(full, 16_000_000_000, None),
+        Err(
+            "Offline needs a USB of 32 GB or more (this one is 16.0 GB). Use --installer \
+             online, or a larger USB"
+                .into()
+        )
+    );
+    // A local IPSW with the startup files alone makes Online only.
+    assert_eq!(
+        choose(None, 64 * GIB, Some(&recovery)),
+        Ok(InstallImage::Network)
+    );
+    let refused = choose(full, 64 * GIB, Some(&recovery)).unwrap_err();
+    assert!(
+        refused.starts_with("Offline needs an IPSW file with all of macOS"),
+        "{refused}"
+    );
+    assert_eq!(
+        choose(full, 64 * GIB, Some(&f.ipsw)),
+        Ok(InstallImage::Full)
+    );
+}
+
+#[test]
+fn installer_flag_offline_on_a_small_usb_is_refused_before_anything_changes() {
+    use clap::Parser as _;
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    for disk in f.host.disks.iter_mut().filter(|d| d.identifier == "disk5") {
+        disk.bytes = 16_000_000_000;
+    }
+    let volume = stela_volume(&f);
+    let parse = |kind: &str| {
+        let crate::Command::Setup(parsed) = crate::Cli::try_parse_from([
+            "stela".as_ref(),
+            "setup".as_ref(),
+            "--usb".as_ref(),
+            volume.as_os_str(),
+            "--installer".as_ref(),
+            kind.as_ref(),
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a setup command");
+        };
+        let mut request = parsed.request();
+        assert!(matches!(request.action, Action::Create));
+        (request.ipsw, request.efi) = (Some(f.ipsw.clone()), Some(f.efi.clone()));
+        request.fetch = false;
+        request.model = Some(restore::payload::SYNTHETIC_MODEL.into());
+        request.build = restore::payload::SYNTHETIC_BUILD.into();
+        request.translation_store_bytes = Some(translations::MIN_PACK_BYTES);
+        request
+    };
+    assert_eq!(parse("offline").install_image, Some(InstallImage::Full));
+    assert_eq!(parse("online").install_image, Some(InstallImage::Network));
+    let before = (snapshot(&f.esp), snapshot(&volume));
+    let error = setup(&environment(&f.host), parse("offline"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("Offline needs a USB of 32 GB or more (this one is 16.0 GB)"),
+        "{error}"
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&volume)), before);
+    let mut online = parse("online");
+    online.dry_run = true;
+    let report = setup(&environment(&f.host), online).unwrap();
+    assert!(report.contains("installer      Online: "), "{report}");
 }
 
 #[test]
@@ -5130,21 +5234,33 @@ fn a_usb_named_by_its_mounted_volume_gets_the_installer_its_size_allows() {
         dry.install_image = None;
         dry.dry_run = true;
         let plan = setup(&environment(&f.host), dry).unwrap();
-        assert_eq!(!plan.contains("file list only"), full, "{bytes}: {plan}");
+        assert_eq!(
+            plan.contains("installer      Offline: "),
+            full,
+            "{bytes}: {plan}"
+        );
+        assert_eq!(
+            plan.contains("installer      Online: "),
+            !full,
+            "{bytes}: {plan}"
+        );
     }
 }
 
 #[test]
-fn the_no_network_promise_says_the_install_checks_the_answers_first() {
+fn the_offline_promise_says_the_install_checks_the_answers_first() {
     // Setup cannot run the install's dry run (it needs the install's own
-    // nonce and machine), so no message promises more than the check.
+    // nonce and machine), so the plan and status say the check.
+    assert!(create::OFFLINE_NOTE.contains("only if they do not fit"));
     for message in [
         create::OFFLINE_NOTE,
-        create::STATUS_OFFLINE,
-        create::FULL_BEFORE_NOTE,
+        create::OFFLINE_SIGNING_NOTE,
+        create::ONLINE_NOTE,
     ] {
-        assert!(!message.contains("needs no network"), "{message}");
-        assert!(message.contains("only if they do not fit"), "{message}");
+        assert!(
+            message.starts_with("Offline: ") || message.starts_with("Online: "),
+            "{message}"
+        );
     }
 }
 

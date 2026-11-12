@@ -224,15 +224,15 @@ pub(super) fn describe_install(
     if let Some(medium) = plan.medium.as_ref().filter(|m| m.remote) {
         writeln!(
             text,
-            "  install image  {}: file list only; Install macOS downloads macOS {} from Apple \
-             over the PC's network (Ethernet, or the Wi-Fi network setup names)",
+            "  installer      Online: {} lists macOS {}; Install macOS downloads it from Apple \
+             over the PC's internet (Ethernet, or the Wi-Fi network setup names)",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
         )?;
     } else if let Some(medium) = &plan.medium {
         writeln!(
             text,
-            "  install medium {}: the macOS {} IPSW in pieces on partition {} ({} to write)",
+            "  installer      Offline: {} holds the macOS {} IPSW, on partition {} ({} to write)",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
             medium.guid,
@@ -501,10 +501,18 @@ pub(super) const SIGNING_NOTE: &str = "Apple's signing service (gs.apple.com) re
     tickets, its Cryptex1 ticket and the recoveryOS LocalPolicy: setup asks while it prepares \
     the boot files, and the install asks only for what the USB lacks.";
 
-/// The full installer's promise, and its limit.
-pub(super) const OFFLINE_NOTE: &str = "Full installer: macOS and Apple's signing answers are \
-    on the USB. The install checks the answers before it changes a disk and needs a network only \
-    if they do not fit it.";
+/// An Offline installer with every signing answer on the USB. The install
+/// checks the answers before it changes a disk, and asks Apple only when
+/// they do not fit it.
+pub(super) const OFFLINE_NOTE: &str = "Offline: macOS and Apple's signing answers are on the \
+    USB, so the install needs no internet; it checks the answers first and asks Apple only if \
+    they do not fit.";
+/// An Offline installer whose signing answers are not all on the USB.
+pub(super) const OFFLINE_SIGNING_NOTE: &str = "Offline: macOS is on the USB; the install needs \
+    internet only to ask Apple's signing server.";
+/// An Online installer.
+pub(super) const ONLINE_NOTE: &str = "Online: the install downloads macOS, so the PC needs \
+    internet (Ethernet, or the Wi-Fi network setup names).";
 /// What is not known yet about the installed system without a network.
 pub(super) const FIRST_START_NOTE: &str = "After the install, macOS may ask for a network the \
     first time it starts: whether Setup Assistant's activation finishes without one is not \
@@ -519,60 +527,43 @@ fn staged(directory: &Path) -> bool {
         .is_some_and(|set| set.complete())
 }
 
-/// The full installer's promise before setup has asked Apple: it holds only
-/// once every signing answer is on the USB.
-pub(super) const FULL_BEFORE_NOTE: &str = "Full installer: macOS goes on the USB; once Apple's \
-    signing answers are fetched, the install needs a network only if they do not fit it.";
-
-/// What the wizard says about the network before setup asks Apple; the plan
-/// says the final answer from the written bundles ([`network_notes`]).
-pub(super) fn expected_network_notes(full: bool) -> Vec<String> {
-    match full {
-        true => vec![FULL_BEFORE_NOTE.into(), FIRST_START_NOTE.into()],
-        false => vec![stela_runtime::restore::tss::network_reason(true).into()],
-    }
-}
-
 /// Whether an install needs no network: macOS on the USB and every restore
 /// bundle holding all of its signing answers.
 fn offline(remote: bool, restore_bundles: &[PathBuf]) -> bool {
     !remote && !restore_bundles.is_empty() && restore_bundles.iter().all(|b| staged(b))
 }
 
-/// `status`'s install line: whether the active build's install needs a
-/// network, by the same test as the plan's ([`network_notes`]).
+/// The installer and what its install needs of the internet, as the plan
+/// and `status` say it: [`OFFLINE_NOTE`] with macOS and every signing
+/// answer on the USB, else [`OFFLINE_SIGNING_NOTE`] or [`ONLINE_NOTE`].
 pub(super) fn network_status(remote: bool, restore_bundles: &[PathBuf]) -> &'static str {
-    match offline(remote, restore_bundles) {
-        true => STATUS_OFFLINE,
-        false => stela_runtime::restore::tss::network_reason(remote),
+    match (remote, offline(remote, restore_bundles)) {
+        (true, _) => ONLINE_NOTE,
+        (false, true) => OFFLINE_NOTE,
+        (false, false) => OFFLINE_SIGNING_NOTE,
     }
 }
 
-/// `status`'s install line for a USB that installs without a network.
-pub(super) const STATUS_OFFLINE: &str = "macOS and every signing answer are on the USB; the \
-    install checks the answers before it starts and needs a network only if they do not fit";
-
-/// What the plan says about the network: none needed for the install with
-/// macOS and every signing answer on the USB, else why it is needed.
+/// What the plan says about the installer and the internet
+/// ([`network_status`]), and about macOS's first start without it.
 pub(super) fn network_notes(remote: bool, offline: bool) -> Vec<String> {
-    match offline {
-        true => vec![OFFLINE_NOTE.into(), FIRST_START_NOTE.into()],
-        false => vec![stela_runtime::restore::tss::network_reason(remote).into()],
+    match (remote, offline) {
+        (true, _) => vec![ONLINE_NOTE.into()],
+        (false, true) => vec![OFFLINE_NOTE.into(), FIRST_START_NOTE.into()],
+        (false, false) => vec![OFFLINE_SIGNING_NOTE.into()],
     }
 }
 
-/// The interactive setup's last word on the network, by the network note
-/// of the plan in `report` ([`network_notes`]).
+/// The interactive setup's last word on the internet, one sentence, by
+/// the installer note of the plan in `report` ([`network_notes`]).
 pub(super) fn network_next_step(report: &str) -> &'static str {
-    use stela_runtime::restore::tss::network_reason;
     if report.contains(OFFLINE_NOTE) {
-        "The install needs no network: macOS and Apple's signing answers are on the USB."
-    } else if report.contains(network_reason(false)) {
-        "macOS is on the USB. The install needs a network for Apple's signing server: connect \
-         the PC to Ethernet, or to the Wi-Fi network set up for it."
+        "Offline: the install needs no internet."
+    } else if report.contains(OFFLINE_SIGNING_NOTE) {
+        "Offline: the install needs internet only to ask Apple's signing server."
     } else {
-        "The install downloads macOS and asks Apple's signing server, so it needs a network: \
-         connect the PC to Ethernet, or to the Wi-Fi network set up for it."
+        "Online: the install downloads macOS, so connect the PC to the internet by Ethernet or \
+         Wi-Fi."
     }
 }
 
@@ -968,11 +959,17 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             found.name,
             host::size_text(found.bytes)
         );
+        // The installer it makes, refused before anything else when it
+        // cannot be made on this USB.
+        let installer =
+            choose_installer(command.install_image, found.bytes, command.ipsw.as_deref())?;
+        command.install_image = Some(installer);
         if command.dry_run {
             return Ok(format!(
                 "Setup would erase {disk} ({}) into an EFI partition and a FAT32 volume named \
-                 {USB_VOLUME}, then set it up.\nDry run: nothing was changed.\n",
-                found.name
+                 {USB_VOLUME}, then make the {} installer on it.\nDry run: nothing was changed.\n",
+                found.name,
+                installer.name()
             ));
         }
         host.check_erase_access(&disk)?;
@@ -993,23 +990,32 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             );
             confirm_erase(host, &found)?;
         }
-        // A new setup puts macOS on a USB large enough for it.
-        if command.install_image.is_none() {
-            command.install_image = Some(default_image(found.bytes, command.ipsw.as_deref())?);
-        }
         erase = Some((disk, found.name, found.bytes, identity));
-    } else if command.install_image.is_none() {
-        // An interrupted setup the USB holds keeps its own choice: a full
-        // installer goes on from the pieces already on the USB.
-        // A USB named by one of its mounted volumes is otherwise set up as
-        // the same USB erased by setup would be: macOS goes on it when it
-        // is large enough. A finished setup is refused by `plan`.
+    } else {
+        // An interrupted setup the USB holds keeps its own installer: an
+        // Offline one goes on from the parts already on the USB. A USB
+        // named by one of its mounted volumes is otherwise set up as the
+        // same USB erased by setup would be. A finished setup is refused by
+        // `plan`.
         let esp = super::locate_esp(host, &command.usb)?;
         if let Some(record) = super::record::interrupted(host, &esp, &command.usb) {
-            command.install_image = Some(record.install_kind());
+            let kind = record.install_kind();
+            ensure!(
+                command.install_image.is_none_or(|asked| asked == kind),
+                "{} holds an interrupted {} setup, which goes on as it began. Run it again \
+                 without --installer, or remove it with {} and start over",
+                esp.display(),
+                kind.name(),
+                super::fix(&command.usb, "uninstall")
+            );
+            command.install_image = Some(kind);
         } else if !esp.join(RECORD).exists() {
             let capacity = usb_capacity(host, &command.usb)?;
-            command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
+            command.install_image = Some(choose_installer(
+                command.install_image,
+                capacity,
+                command.ipsw.as_deref(),
+            )?);
         }
     }
     // Every new or resumed setup knows its installer from here on.
@@ -1166,18 +1172,32 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     Ok(report)
 }
 
-/// A new setup's installer for a USB of `capacity` bytes: macOS goes on a
-/// large enough USB (`super::default_install_image`), unless the local IPSW
-/// holds only the recovery members, which prepare the boot files alone.
-fn default_image(capacity: u64, ipsw: Option<&Path>) -> Result<InstallImage> {
-    let image = super::default_install_image(capacity);
-    match ipsw {
-        Some(ipsw)
-            if image == InstallImage::Full && !restore::payload::holds_system_image(ipsw)? =>
-        {
-            Ok(InstallImage::Network)
-        }
-        _ => Ok(image),
+/// A new setup's installer on a USB of `capacity` bytes: the one `asked`
+/// for, or else Offline where it can be made and Online where it cannot
+/// (`super::offline_unavailable`): on a smaller USB, or from a local IPSW
+/// with only the recovery members, which prepare the boot files alone.
+/// Offline asked for where it cannot be made is refused, before anything
+/// is downloaded or changed.
+pub(super) fn choose_installer(
+    asked: Option<InstallImage>,
+    capacity: u64,
+    ipsw: Option<&Path>,
+) -> Result<InstallImage> {
+    let whole = match ipsw {
+        Some(ipsw) => restore::payload::holds_system_image(ipsw)?,
+        None => true,
+    };
+    match (asked, super::offline_unavailable(capacity, whole)) {
+        (Some(InstallImage::Full), Some(reason)) => bail!(
+            "Offline {reason}. Use --installer online, or {}",
+            match whole {
+                true => "a larger USB",
+                false => "an IPSW file with all of macOS",
+            }
+        ),
+        (Some(kind), _) => Ok(kind),
+        (None, Some(_)) => Ok(InstallImage::Network),
+        (None, None) => Ok(InstallImage::Full),
     }
 }
 

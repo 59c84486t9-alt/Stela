@@ -137,11 +137,11 @@ impl Record {
     }
 
     /// What resuming this interrupted setup continues, after the medium the
-    /// stopped setup left on the USB: "continuing the full installer: 3 of
-    /// 6 pieces already on the USB".
+    /// stopped setup left on the USB: "continuing the Offline installer: 3
+    /// of 6 parts of macOS already on the USB".
     pub(super) fn resume_summary(&self) -> String {
         if self.install_kind() == InstallImage::Network {
-            return "continuing the network installer".into();
+            return "continuing the Online installer".into();
         }
         let found = self
             .medium_of(&self.build)
@@ -149,12 +149,13 @@ impl Record {
             .map(|medium| medium::download::pieces_on_usb(&medium.directory()));
         match found {
             Some((present, Some(total))) => format!(
-                "continuing the full installer: {present} of {total} pieces already on the USB"
+                "continuing the Offline installer: {present} of {total} parts of macOS already \
+                 on the USB"
             ),
-            Some((present, None)) if present > 0 => {
-                format!("continuing the full installer: {present} pieces already on the USB")
-            }
-            _ => "continuing the full installer: no pieces on the USB yet".into(),
+            Some((present, None)) if present > 0 => format!(
+                "continuing the Offline installer: {present} parts of macOS already on the USB"
+            ),
+            _ => "continuing the Offline installer: no part of macOS on the USB yet".into(),
         }
     }
 

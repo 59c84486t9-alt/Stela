@@ -210,9 +210,9 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
                 } else if usb.bytes < super::FULL_MIN {
-                    "Network installer · macOS downloads during installation".into()
+                    "Online installer only · Offline needs 32 GB or more".into()
                 } else {
-                    "Full installer · macOS goes on the USB".into()
+                    "Offline or Online installer".into()
                 },
                 enabled: usb.bytes >= NETWORK_MIN,
             })
@@ -231,7 +231,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             .iter()
             .position(|usb| usb.path() == command.usb)
             .unwrap_or(0);
-        let usb = &choices[menu::select("1 / 6  Choose a USB", &rows, initial)?];
+        let usb = &choices[menu::select("1. Choose a USB", &rows, initial)?];
         command.usb = usb.path();
         // A setup this USB holds that stopped part way is finished, not
         // erased and begun again.
@@ -260,13 +260,13 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 return Ok(true);
             }
         }
-        // A USB of 32 GB or more takes the whole macOS image, so the
-        // install needs no network; a smaller one gets the network
-        // installer. A local IPSW named on the command line supplies the
-        // boot files, and macOS too when it holds the whole image.
-        let mut install_image = super::default_install_image(usb.bytes);
+        // A local IPSW named on the command line supplies the boot files,
+        // and macOS too when it holds the whole image.
         let prefilled = first && command.ipsw.is_some();
         first = false;
+        // macOS's size, for the Offline choice, and whether the image holds
+        // all of it.
+        let (image_bytes, whole);
         let (version, models) = if prefilled {
             let path = command.ipsw.clone().unwrap();
             let progress = Phase::spinner("Reading IPSW metadata");
@@ -279,10 +279,9 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.fetch = false;
             command.build = manifest.product_build.clone();
             preferred_build = Some(command.build.clone());
-            if !crate::restore::payload::holds_system_image(command.ipsw.as_deref().unwrap())? {
-                install_image = InstallImage::Network;
-            }
-            command.install_image = Some(install_image);
+            let ipsw = command.ipsw.as_deref().unwrap();
+            whole = crate::restore::payload::holds_system_image(ipsw)?;
+            image_bytes = std::fs::metadata(ipsw).ok().map(|meta| meta.len());
             cliclack::log::info(format!(
                 "macOS {} ({}) · local IPSW{}",
                 manifest.product_version,
@@ -310,7 +309,8 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             preferred_build = Some(command.build.clone());
             command.ipsw = None;
             command.fetch = true;
-            command.install_image = Some(install_image);
+            whole = true;
+            image_bytes = download_size(image);
             (image.version.clone(), image.models.clone())
         };
         ensure!(
@@ -321,38 +321,44 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
-        // What the install needs the network for, and what is not known
-        // about the installed system's first start.
-        let full = install_image == InstallImage::Full;
-        for note in super::create::expected_network_notes(full) {
-            cliclack::log::info(note)?;
-        }
-        choose_wifi(command)?;
-        super::addresses::choose(command)?;
-        cliclack::note(
-            "6 / 6  Review",
+        let (rows, initial) = installer_rows(usb.bytes, whole, image_bytes, command.install_image);
+        let install_image = INSTALLERS[menu::select("4. Installer", &rows, initial)?];
+        command.install_image = Some(install_image);
+        // Only the Online installer's install needs the internet, and so a
+        // way to it.
+        let online = install_image == InstallImage::Network;
+        let network = if online {
+            choose_wifi(command)?;
+            super::addresses::choose(command)?;
             format!(
-                "USB        {}\nInstaller  {}\nmacOS      {version} ({})\nMac        {}\n{}{}{}",
+                "{}{}",
+                match &command.wifi {
+                    Some(ssid) => format!("Wi-Fi      {ssid}\n"),
+                    None => "Wi-Fi      None (Ethernet)\n".into(),
+                },
+                super::addresses::review(command)
+            )
+        } else {
+            (command.wifi, command.wifi_passphrase) = (None, None);
+            (command.ipv4, command.ipv4_gateway, command.dns) = (None, None, None);
+            String::new()
+        };
+        cliclack::note(
+            if online { "7. Review" } else { "5. Review" },
+            format!(
+                "USB        {}\nInstaller  {}\nmacOS      {version} ({})\nMac        {}\n{network}{}",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
                 ),
-                match full {
-                    true => {
-                        "Full · macOS goes on the USB; the install needs a network only if \
-                         Apple's signing answers do not fit it"
-                    }
-                    false => "Network · macOS downloads during installation",
+                match online {
+                    false => "Offline · the install needs no internet",
+                    true => "Online · the install downloads macOS",
                 },
                 command.build,
                 names
                     .get(command.model())
                     .map_or(command.model(), String::as_str),
-                match &command.wifi {
-                    Some(ssid) => format!("Wi-Fi      {ssid}\n"),
-                    None => "Wi-Fi      None (Ethernet)\n".into(),
-                },
-                super::addresses::review(command),
                 // Only a scripted --profile turns it on.
                 if command.profile {
                     "Profiling  On\n"
@@ -394,7 +400,68 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
     }
 }
 
-/// A network installer's Wi-Fi: a network this computer sees or knows, one
+/// The installer step's choices, by their menu values.
+const INSTALLERS: [InstallImage; 2] = [InstallImage::Full, InstallImage::Network];
+
+/// The installer step on a USB of `usb_bytes`, for an image of
+/// `image_bytes` that holds all of macOS (`whole`) or only its startup
+/// files: Offline, shown unavailable with its reason where it cannot be
+/// made, and Online; and the one preselected, `chosen` before or else
+/// Offline where it can be made.
+fn installer_rows(
+    usb_bytes: u64,
+    whole: bool,
+    image_bytes: Option<u64>,
+    chosen: Option<InstallImage>,
+) -> (Vec<menu::Item>, usize) {
+    let unavailable = super::offline_unavailable(usb_bytes, whole);
+    let offline = match &unavailable {
+        Some(reason) => {
+            let mut hint = reason.clone();
+            hint[..1].make_ascii_uppercase();
+            hint
+        }
+        None => format!(
+            "macOS is copied to the USB now{}. The install needs no internet.",
+            image_bytes.map_or_else(String::new, |bytes| format!(
+                " (about {:.0} GB)",
+                bytes as f64 / 1e9
+            ))
+        ),
+    };
+    let rows = vec![
+        menu::Item {
+            value: 0,
+            label: InstallImage::Full.name().into(),
+            hint: offline,
+            enabled: unavailable.is_none(),
+        },
+        menu::Item {
+            value: 1,
+            label: InstallImage::Network.name().into(),
+            hint: "Small and quick to make. The install downloads macOS, so the PC needs \
+                   internet."
+                .into(),
+            enabled: true,
+        },
+    ];
+    let initial = match (chosen, unavailable) {
+        (Some(InstallImage::Network), _) | (_, Some(_)) => 1,
+        _ => 0,
+    };
+    (rows, initial)
+}
+
+/// The size of the catalog's macOS image, from Apple's server; nothing
+/// when the server does not say.
+fn download_size(image: &restore::Image) -> Option<u64> {
+    let progress = Phase::spinner("Checking the size of macOS");
+    let size = restore::open_image(image).ok().map(|remote| remote.size());
+    progress.finish();
+    size
+}
+
+/// An Online installer's Wi-Fi: a network this computer sees or knows, one
 /// typed in, or none.
 fn choose_wifi(command: &mut Request) -> Result<()> {
     let progress = Phase::spinner("Looking for Wi-Fi networks");
@@ -402,7 +469,7 @@ fn choose_wifi(command: &mut Request) -> Result<()> {
     progress.finish();
     const ETHERNET: usize = usize::MAX;
     const TYPED: usize = usize::MAX - 1;
-    let mut select = cliclack::select("4 / 6  Wi-Fi during installation").item(
+    let mut select = cliclack::select("5. Wi-Fi during installation").item(
         ETHERNET,
         "No Wi-Fi",
         "Connect the PC to Ethernet during installation",
@@ -458,6 +525,72 @@ mod tests {
         );
         assert!(local_image(&dir.path().join("missing.ipsw")).is_err());
         Ok(())
+    }
+
+    fn shown(rows: &[menu::Item]) -> Vec<(String, String, bool)> {
+        rows.iter()
+            .map(|row| (row.label.clone(), row.hint.clone(), row.enabled))
+            .collect()
+    }
+
+    const ONLINE: &str =
+        "Small and quick to make. The install downloads macOS, so the PC needs internet.";
+
+    #[test]
+    fn a_large_usb_offers_both_installers_with_offline_first() {
+        let (rows, initial) = installer_rows(64_000_000_000, true, Some(17_800_000_000), None);
+        assert_eq!(
+            shown(&rows),
+            [
+                (
+                    "Offline".into(),
+                    "macOS is copied to the USB now (about 18 GB). The install needs no internet."
+                        .into(),
+                    true
+                ),
+                ("Online".into(), ONLINE.into(), true),
+            ]
+        );
+        assert_eq!(INSTALLERS[initial], InstallImage::Full);
+        // Edit choices comes back to Online once it was chosen.
+        let (_, initial) = installer_rows(64_000_000_000, true, None, Some(InstallImage::Network));
+        assert_eq!(INSTALLERS[initial], InstallImage::Network);
+        let (rows, _) = installer_rows(64_000_000_000, true, None, None);
+        assert_eq!(
+            rows[0].hint,
+            "macOS is copied to the USB now. The install needs no internet."
+        );
+    }
+
+    #[test]
+    fn a_small_usb_shows_offline_unavailable_with_its_reason() {
+        let (rows, initial) = installer_rows(16_000_000_000, true, Some(17_800_000_000), None);
+        assert_eq!(
+            shown(&rows),
+            [
+                (
+                    "Offline".into(),
+                    "Needs a USB of 32 GB or more (this one is 16.0 GB)".into(),
+                    false
+                ),
+                ("Online".into(), ONLINE.into(), true),
+            ]
+        );
+        assert_eq!(INSTALLERS[initial], InstallImage::Network);
+        // An earlier Offline choice cannot be preselected there.
+        let (_, initial) = installer_rows(16_000_000_000, true, None, Some(InstallImage::Full));
+        assert_eq!(INSTALLERS[initial], InstallImage::Network);
+    }
+
+    #[test]
+    fn a_local_ipsw_without_all_of_macos_shows_offline_unavailable() {
+        let (rows, initial) = installer_rows(64_000_000_000, false, Some(1_000_000_000), None);
+        assert!(!rows[0].enabled);
+        assert_eq!(
+            rows[0].hint,
+            "Needs an IPSW file with all of macOS; this one has only its startup files"
+        );
+        assert_eq!(INSTALLERS[initial], InstallImage::Network);
     }
 
     #[test]

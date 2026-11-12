@@ -31,7 +31,7 @@ impl Download {
     ) -> Result<Self> {
         ensure!(
             image.sha1.is_some(),
-            "the catalog provides no checksum for this full installer"
+            "the catalog provides no checksum for this macOS image, which an Offline installer needs"
         );
         let source = restore::open_image(&image)?;
         let download = Self {

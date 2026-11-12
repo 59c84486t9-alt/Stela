@@ -2,10 +2,12 @@
 //! a disk of the PC and boot it, and keep it working over the installed
 //! system's life.
 //!
-//! Setup writes the install medium (`setup::medium`): on a USB of 32 GB or
-//! more the whole IPSW on its FAT32 data partition, else the IPSW's
-//! inventory, from which `stela.efi` streams the IPSW from Apple's servers
-//! during the install ([`default_install_image`]). It prepares each machine's restore bundle (`stela
+//! Setup writes the install medium (`setup::medium`) of the installer the
+//! user chooses ([`InstallImage`]): Offline, the whole IPSW on the USB's
+//! FAT32 data partition, which needs a USB of 32 GB or more; or Online,
+//! the IPSW's inventory, from which `stela.efi` streams the IPSW from
+//! Apple's servers during the install. Offline is the default where it
+//! fits ([`offline_unavailable`]). It prepares each machine's restore bundle (`stela
 //! boot prepare --restore`) and adds an Install macOS startup choice
 //! (`stela.efi --install`), which restores macOS and its paired recoveryOS
 //! and System Recovery onto the Mac's internal SSD, as a Mac's erase
@@ -63,11 +65,11 @@ mod fdr;
 mod firmware;
 mod format;
 pub(crate) mod host;
-#[cfg(unix)]
-mod ownership;
 mod installed;
 mod machines;
 mod medium;
+#[cfg(unix)]
+mod ownership;
 mod prepare;
 mod record;
 mod sources;
@@ -287,34 +289,57 @@ fn restore_choice_name(kind: Kind) -> &'static str {
     }
 }
 
-/// Where an install reads the macOS restore image: on the USB when it is
-/// large enough ([`default_install_image`]), else streamed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The installer a setup makes, which the user sees as Offline or Online
+/// ([`Self::name`], `--installer`): where the install reads the macOS
+/// restore image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum InstallImage {
-    /// The whole IPSW on the USB: with the signing answers setup fetched,
-    /// the install needs no network. Records written before the name
-    /// changed say `offline`.
+    // The whole IPSW on the USB; with the signing answers setup fetched,
+    // the install needs no network. Records name it `full`, and those
+    // written before that name `offline`. The doc line is `--help`'s.
+    /// macOS is copied to the USB (32 GB or more); the install needs no internet
     #[serde(alias = "offline")]
+    #[value(name = "offline")]
     Full,
-    /// The IPSW on Apple's servers, streamed during the install. Records
-    /// written before the name changed say `online`.
+    // The IPSW on Apple's servers, streamed during the install. Records
+    // name it `network`, and those written before that `online`.
+    /// The install downloads macOS, so the PC needs internet
     #[serde(alias = "online")]
+    #[value(name = "online")]
     Network,
 }
 
-/// The smallest USB, as the PC reports it, that a full installer is made
-/// on: a stick sold as 32 GB holds about 28.6 GiB.
+impl InstallImage {
+    /// The installer's name wherever the user sees it.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Full => "Offline",
+            Self::Network => "Online",
+        }
+    }
+}
+
+/// The smallest USB, as the PC reports it, that an Offline installer is
+/// made on: a stick sold as 32 GB holds about 28.6 GiB.
 pub(super) const FULL_MIN: u64 = 28 * 1024 * 1024 * 1024;
 
-/// A new setup's installer for a USB of `capacity` bytes (0 when unknown):
-/// the whole macOS image on a USB of 32 GB or more, so the install needs no
-/// network, and the network installer on a smaller one.
-pub(super) fn default_install_image(capacity: u64) -> InstallImage {
-    match capacity >= FULL_MIN {
-        true => InstallImage::Full,
-        false => InstallImage::Network,
+/// Why an Offline installer cannot be made on a USB of `capacity` bytes (0
+/// when unknown) from an image that holds all of macOS (`whole`) or only
+/// its startup files, as the wizard and the refusal of `--installer
+/// offline` say it after "Offline"; nothing when it can.
+pub(super) fn offline_unavailable(capacity: u64, whole: bool) -> Option<String> {
+    if !whole {
+        return Some(
+            "needs an IPSW file with all of macOS; this one has only its startup files".into(),
+        );
     }
+    (capacity != 0 && capacity < FULL_MIN).then(|| {
+        format!(
+            "needs a USB of 32 GB or more (this one is {})",
+            host::size_text(capacity)
+        )
+    })
 }
 
 fn image_is_remote(ipsw: &Path, choice: InstallImage) -> Result<bool> {

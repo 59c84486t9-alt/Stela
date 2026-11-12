@@ -86,7 +86,7 @@ pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
                 }
             })
             .collect();
-        initial = super::menu::select("2 / 6  Choose a macOS version", &majors, initial)?;
+        initial = super::menu::select("2. Choose a macOS version", &majors, initial)?;
         let (major, entries) = &groups[initial];
         let rows: Vec<_> = entries
             .iter()
@@ -223,7 +223,7 @@ pub(super) fn model(
                 }
             })
             .collect();
-        initial = super::menu::select("3 / 6  Choose a Mac", &families, initial)?;
+        initial = super::menu::select("3. Choose a Mac", &families, initial)?;
         let (family, models) = &groups[initial];
         let rows: Vec<_> = models
             .iter()

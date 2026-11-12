@@ -390,8 +390,8 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
                 medium.build,
                 // A streamed image is on Apple's servers, not a partition.
                 match medium.remote {
-                    true => "downloads during installation".into(),
-                    false => format!("partition {}", medium.partition_guid),
+                    true => "Online, downloads during installation".into(),
+                    false => format!("Offline, on partition {}", medium.partition_guid),
                 },
                 if problems.is_empty() {
                     "intact"
