@@ -200,7 +200,8 @@ impl Mail {
     /// and so does a whole invalidation of either kind; past
     /// [`MAIL_SCOPES`] code pages one whole invalidation replaces them. A
     /// TLB scope next to one of the last kept merges with it
-    /// ([`tlbi::Scope::merged`]); past [`MAIL_TLB_SCOPES`], it merges into
+    /// ([`tlbi::Scope::merged`]) where that keeps the ASID either named;
+    /// past [`MAIL_TLB_SCOPES`], it merges into
     /// the one of the last [`MAIL_NEAR`] that makes the narrowest range,
     /// and one that merges with none of them makes a whole invalidation.
     /// Every kept scope removes at least what the TLBIs it stands for
@@ -247,7 +248,16 @@ impl Mail {
                         _ => None,
                     })
                     .take(MAIL_NEAR)
-                    .filter_map(|(at, held)| Some((at, held.merged(scope, gap)?)))
+                    .filter_map(|(at, held)| Some((at, held, held.merged(scope, gap)?)))
+                    // Until the mailbox is full a merge keeps an ASID either
+                    // scope named: one of every ASID would drop those VAs in
+                    // every process's lookup contexts, which share the
+                    // shared cache's addresses.
+                    .filter(|(_, held, merged)| {
+                        full || merged.named_asid().is_some()
+                            || held.named_asid().is_none() && scope.named_asid().is_none()
+                    })
+                    .map(|(at, _, merged)| (at, merged))
                     .min_by_key(|(_, merged)| merged.span().map(|(first, last)| last - first));
                 if let Some((at, merged)) = nearest {
                     self.maintenance[at] = Maintenance::Tlb(merged);

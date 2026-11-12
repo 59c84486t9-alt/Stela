@@ -794,6 +794,49 @@ fn a_run_of_tlbis_by_page_merges_into_one_range() {
     assert_eq!(upper.named_asid(), Some(7));
 }
 
+/// Pages of two processes at the same VAs (the shared cache's) stay two
+/// ranges, one per ASID, rather than one of every ASID that would drop
+/// those VAs in every process's lookup contexts; a page of every ASID
+/// merges with neither. A full mailbox may merge them all the same.
+#[test]
+fn mail_merges_tlbis_of_different_asids_only_when_full() {
+    use crate::machine::system::TlbiKind::{VA, VAA};
+    let (first, _) = hub(2);
+    for page in 0..8u64 {
+        for asid in [7u64, 8] {
+            first.broadcast(0, &[tlbi(VA, asid << 48 | (0x18_0000 + page))]);
+        }
+    }
+    first.broadcast(0, &[tlbi(VAA, 0x18_0004)]);
+    let mail = first.take(1).unwrap();
+    let scopes: Vec<_> = mail
+        .maintenance
+        .iter()
+        .map(|posted| match posted {
+            Maintenance::Tlb(scope) => (scope.named_asid(), scope.span()),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let range = Some((0x1_8000_0000, 0x1_8000_0000 + 7 * 0x1000));
+    assert_eq!(
+        scopes,
+        [
+            (Some(7), range),
+            (Some(8), range),
+            (None, Some((0x1_8000_4000, 0x1_8000_4000)))
+        ]
+    );
+    assert_eq!(mail.merged, 2 * 7);
+    // Past the kept scopes, any of the last ones takes the next.
+    let (hub, _) = hub(2);
+    for page in 0..super::MAIL_TLB_SCOPES as u64 {
+        hub.broadcast(0, &[tlbi(VAA, 0x10_0000 + 32 * page)]);
+    }
+    hub.broadcast(0, &[tlbi(VA, 7 << 48 | 0x10_0001)]);
+    let mail = hub.take(1).unwrap();
+    assert_eq!(mail.maintenance.len(), super::MAIL_TLB_SCOPES);
+}
+
 /// Whatever TLBIs a PE's mail keeps or merges, every entry one of them
 /// removes, the kept scopes remove: by [`tlbi::Scope::covers`], and by
 /// what the PE's ITLB and shadow apply ([`tlbi::Scope::everywhere`],
