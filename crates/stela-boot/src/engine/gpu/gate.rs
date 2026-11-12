@@ -33,7 +33,7 @@ use stela_drivers::gpu::metal::{
         open::{Gpu, OpenError, open, reopen},
     },
     service::{Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
-    timing::Totals,
+    timing::{ExitWatch, Totals},
     vulkan::physical::PciBusInfo,
 };
 use stela_linux::{
@@ -199,11 +199,9 @@ const LOOK_MICROS: u64 = 1000;
 /// (`GPU LONG EXIT`): 100 ms.
 const LONG_EXIT_MILLIS: u64 = 100;
 
-/// The longest single exit since the last report, in ticks, and its
-/// operation; the frontend calls answered `Pending` at the wait bound.
-static LONGEST_EXIT: AtomicU64 = AtomicU64::new(0);
-static LONGEST_EXIT_OPERATION: AtomicU32 = AtomicU32::new(0);
-static GAVE_UP: AtomicU64 = AtomicU64::new(0);
+/// The exits since the last report, checked against the target
+/// (`GPU EXIT … check=ok|over`).
+static EXITS: ExitWatch = ExitWatch::new();
 
 /// A turn held this long or longer is reported once for each operation and
 /// phase: no turn should come near it.
@@ -600,19 +598,14 @@ fn served(served: Served) {
         .fetch_add(u64::from(served.deferrals), Ordering::Relaxed);
 }
 
-/// Keeps the longest single exit, and says once a boot when one reached
-/// [`LONG_EXIT_MILLIS`]: `GPU LONG EXIT operation=… status=… waited_us=…
-/// held_us=…`.
+/// Counts each exit against the target, and says once a boot when one
+/// reached [`LONG_EXIT_MILLIS`]: `GPU LONG EXIT operation=… status=…
+/// waited_us=… held_us=…`.
 fn note_exit(served: &Served) {
     static REPORTED: AtomicBool = AtomicBool::new(false);
-    if served.gave_up {
-        GAVE_UP.fetch_add(1, Ordering::Relaxed);
-    }
     let exit = served.waited.wrapping_add(served.held);
-    if LONGEST_EXIT.fetch_max(exit, Ordering::Relaxed) < exit {
-        LONGEST_EXIT_OPERATION.store(served.operation, Ordering::Relaxed);
-    }
     let tsc_hz = installed().map_or(0, |gpu| gpu.tsc_hz);
+    EXITS.note(exit, served.operation, served.gave_up, tsc_hz);
     if tsc_hz == 0
         || exit < tsc_hz / 1000 * LONG_EXIT_MILLIS
         || REPORTED.swap(true, Ordering::Relaxed)
@@ -833,14 +826,9 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         }
     }
     report_lock(tsc_hz);
-    let longest = LONGEST_EXIT.swap(0, Ordering::Relaxed);
-    let gave_up = GAVE_UP.swap(0, Ordering::Relaxed);
-    if longest != 0 || gave_up != 0 {
-        output::arguments(format_args!(
-            "GPU EXIT longest_us={}@{:#x} gave_up={gave_up}\n",
-            micros(longest),
-            LONGEST_EXIT_OPERATION.load(Ordering::Relaxed),
-        ));
+    // Every beat with exits says whether each stayed under the target.
+    if let Some(exits) = EXITS.take() {
+        output::arguments(format_args!("{}\n", exits.line(tsc_hz)));
     }
     let mut taken: Vec<_> = CALLS
         .iter()

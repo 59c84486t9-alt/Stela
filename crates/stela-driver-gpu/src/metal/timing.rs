@@ -600,5 +600,103 @@ impl Taken {
     }
 }
 
+/// The time every gate exit should stay under: a processor in an exit takes
+/// no guest interrupt, so a longer one is a dropped frame on the screen it
+/// serves, and XNU panics at half a second.
+pub const EXIT_TARGET_MICROS: u64 = 5_000;
+
+/// The gate's exits since the last report, from any processor: the longest,
+/// how many passed [`EXIT_TARGET_MICROS`], and the calls answered `Pending`
+/// at the wait bound.
+pub struct ExitWatch {
+    exits: AtomicU64,
+    over: AtomicU64,
+    longest: AtomicU64,
+    operation: AtomicU64,
+    gave_up: AtomicU64,
+}
+
+impl ExitWatch {
+    pub const fn new() -> Self {
+        Self {
+            exits: AtomicU64::new(0),
+            over: AtomicU64::new(0),
+            longest: AtomicU64::new(0),
+            operation: AtomicU64::new(0),
+            gave_up: AtomicU64::new(0),
+        }
+    }
+
+    /// Counts one exit of `ticks` that served `operation`.
+    pub fn note(&self, ticks: u64, operation: u32, gave_up: bool, tsc_hz: u64) {
+        self.exits.fetch_add(1, Ordering::Relaxed);
+        if gave_up {
+            self.gave_up.fetch_add(1, Ordering::Relaxed);
+        }
+        if micros(ticks, tsc_hz) >= u128::from(EXIT_TARGET_MICROS) {
+            self.over.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.longest.fetch_max(ticks, Ordering::Relaxed) < ticks {
+            self.operation
+                .store(u64::from(operation), Ordering::Relaxed);
+        }
+    }
+
+    /// What was counted since the last call, which starts the next count;
+    /// `None` without exits.
+    pub fn take(&self) -> Option<Exits> {
+        let exits = self.exits.swap(0, Ordering::Relaxed);
+        let taken = Exits {
+            exits,
+            over: self.over.swap(0, Ordering::Relaxed),
+            longest: self.longest.swap(0, Ordering::Relaxed),
+            operation: self.operation.load(Ordering::Relaxed) as u32,
+            gave_up: self.gave_up.swap(0, Ordering::Relaxed),
+        };
+        (exits != 0).then_some(taken)
+    }
+}
+
+impl Default for ExitWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The exits of one report period ([`ExitWatch::take`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Exits {
+    pub exits: u64,
+    pub over: u64,
+    pub longest: u64,
+    pub operation: u32,
+    pub gave_up: u64,
+}
+
+impl Exits {
+    /// Whether every exit stayed under [`EXIT_TARGET_MICROS`].
+    pub fn within_target(&self) -> bool {
+        self.over == 0
+    }
+
+    /// `GPU EXIT longest_us=…@op over=…/exits target_us=… check=ok|over
+    /// gave_up=…`: `check=over` marks a period with an exit past the target.
+    pub fn line(&self, tsc_hz: u64) -> impl fmt::Display + '_ {
+        Line(move |formatter: &mut fmt::Formatter<'_>| {
+            write!(
+                formatter,
+                "GPU EXIT longest_us={}@{:#x} over={}/{} target_us={EXIT_TARGET_MICROS} check={} \
+                 gave_up={}",
+                micros(self.longest, tsc_hz),
+                self.operation,
+                self.over,
+                self.exits,
+                if self.within_target() { "ok" } else { "over" },
+                self.gave_up,
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;

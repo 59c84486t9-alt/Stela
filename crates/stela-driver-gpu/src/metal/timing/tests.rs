@@ -150,3 +150,29 @@ fn a_name_is_cut_at_a_character() {
     let name = Name::new(&long);
     assert_eq!(name.as_str(), "é".repeat(20));
 }
+
+#[test]
+fn the_exit_line_checks_every_exit_against_the_target() {
+    // A clock of a million ticks a second: a tick is a microsecond.
+    const HZ: u64 = 1_000_000;
+    let watch = ExitWatch::new();
+    assert_eq!(watch.take(), None, "no exits, no line");
+    watch.note(EXIT_TARGET_MICROS - 1, 0x203, false, HZ);
+    watch.note(300, 0x40b, true, HZ);
+    let exits = watch.take().unwrap();
+    assert!(exits.within_target());
+    assert_eq!(
+        exits.line(HZ).to_string(),
+        "GPU EXIT longest_us=4999@0x203 over=0/2 target_us=5000 check=ok gave_up=1"
+    );
+    // The next period starts empty; one exit at the target marks it.
+    watch.note(EXIT_TARGET_MICROS, 0x103, false, HZ);
+    watch.note(138_606, 0x40b, false, HZ);
+    watch.note(10, 0x3, false, HZ);
+    let exits = watch.take().unwrap();
+    assert!(!exits.within_target());
+    assert_eq!(
+        exits.line(HZ).to_string(),
+        "GPU EXIT longest_us=138606@0x40b over=2/3 target_us=5000 check=over gave_up=0"
+    );
+}
