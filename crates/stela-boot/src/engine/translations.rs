@@ -424,7 +424,11 @@ fn read_journal(
         .sum();
     let head = PLACEMENT_BYTES + SLOT_BYTES as usize + 8 * entries.len();
     let spare = if arena {
-        usize::try_from(limit).unwrap_or(usize::MAX).saturating_sub(blobs) / PAGE * PAGE
+        usize::try_from(limit)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(blobs)
+            / PAGE
+            * PAGE
     } else {
         0
     };
@@ -887,7 +891,11 @@ pub fn install(region: &'static mut [u8]) -> Option<Guid> {
         .0
         .iter()
         .try_fold(lengths, |at, length| {
-            at.checked_add(usize::try_from(u64::from_le_bytes(*length)).ok()?.next_multiple_of(8))
+            at.checked_add(
+                usize::try_from(u64::from_le_bytes(*length))
+                    .ok()?
+                    .next_multiple_of(8),
+            )
         })?
         .min(region.len());
     let (contents, arena) = region.split_at_mut(blobs);
