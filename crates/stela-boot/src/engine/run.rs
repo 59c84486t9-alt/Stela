@@ -517,7 +517,7 @@ pub(super) fn run<H: Host>(
                 super::display::Turn::Alone
             };
             // One stop for all of it.
-            machine.exclude_host_time(|_| {
+            machine.exclude_host_time(|devices| {
                 if pump {
                     super::gpu::pump();
                 }
@@ -525,8 +525,11 @@ pub(super) fn run<H: Host>(
                 super::display::flush(turn);
                 service.parts.lap(ServiceParts::DISPLAY, host::rdtsc());
                 // A staged guest disk nobody else stepped lately: one step
-                // with guest code to run, more while idle.
-                super::storage::serve_staged(idle);
+                // with guest code to run, more while idle. What it completed
+                // the home machine's next transfer takes.
+                if super::storage::serve_staged(idle) {
+                    devices.call_home();
+                }
                 service.parts.lap(ServiceParts::DISK, host::rdtsc());
             });
             if service::shutdown_pending() {

@@ -75,6 +75,12 @@ pub trait Kick: Send + Sync {
     fn released(&self) -> bool {
         false
     }
+    /// Whether a device call left host work for [`Self::released`], without
+    /// doing it: a PE in a guest exit then hands it to a sleeping PE
+    /// ([`Hub::hand_off_service`]), which does it at its host service.
+    fn release_due(&self) -> bool {
+        false
+    }
 }
 
 /// A PE that may use any context's translations ([`Inbox::translating`]).
@@ -256,6 +262,11 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
+    /// While it sleeps, it waits for an interrupt (or is powered down), so a
+    /// wake for the host's service is one it takes ([`Hub::request_service`]):
+    /// one waiting in WFE may hold a ticket another PE hands it, and leaves
+    /// the service to others.
+    serves: AtomicBool,
     /// The host needs its core ([`Hub::call_host`]).
     host_call: AtomicBool,
     /// Its machine left its run loop, for the host's service or a stop, or
@@ -514,6 +525,7 @@ impl Hub {
                     pending: AtomicBool::new(false),
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
+                    serves: AtomicBool::new(false),
                     host_call: AtomicBool::new(false),
                     translating: AtomicU32::new(ANY_CONTEXT),
                     lower_globals: Arc::new(GlobalSpan::new()),
@@ -686,9 +698,11 @@ impl Hub {
     }
 
     /// Halt PE `pe`'s core with `halt` unless mail or a line change it has
-    /// not seen since `epoch` is already there.
-    fn sleep(&self, pe: usize, epoch: u64, halt: impl FnOnce()) {
+    /// not seen since `epoch` is already there; `serves` when it waits for an
+    /// interrupt, so takes the host's service a wake brings ([`Inbox::serves`]).
+    fn sleep(&self, pe: usize, epoch: u64, serves: bool, halt: impl FnOnce()) {
         let inbox = &self.inboxes[pe];
+        inbox.serves.store(serves, Ordering::SeqCst);
         inbox.sleeping.store(true, Ordering::SeqCst);
         if !self.woken(pe, epoch) {
             halt();
@@ -696,20 +710,45 @@ impl Hub {
         // Ordered before its look at its mail, against a broadcast's look
         // at `sleeping` ([`Self::applied`]).
         inbox.sleeping.store(false, Ordering::SeqCst);
+        inbox.serves.store(false, Ordering::SeqCst);
+    }
+
+    /// A PE other than `caller` that sleeps waiting for an interrupt, which
+    /// takes the host's service once woken ([`Inbox::serves`]).
+    fn sleeping_server(&self, caller: usize) -> Option<usize> {
+        (0..self.pes()).find(|&pe| {
+            let inbox = &self.inboxes[pe];
+            pe != caller
+                && inbox.sleeping.load(Ordering::SeqCst)
+                && inbox.serves.load(Ordering::SeqCst)
+        })
+    }
+
+    /// Hand the host's service to a PE that sleeps waiting for an interrupt,
+    /// so that `caller` need not do the host work its device call left: its
+    /// idle core does it while `caller`'s guest runs on. Whether one was
+    /// woken for it; with none, the caller does the work itself. The woken
+    /// PE takes the service at its next wait pass ([`Self::take_service`]);
+    /// should it find guest work first, the next PE to wait takes it.
+    pub(super) fn hand_off_service(&self, caller: usize) -> bool {
+        let Some(pe) = self.sleeping_server(caller) else {
+            return false;
+        };
+        self.service.store(true, Ordering::SeqCst);
+        self.kick.kick(pe);
+        true
     }
 
     /// A device left bytes for the host to feed or drain: the host's service
-    /// is due. The first PE that sleeps wakes to serve it, which its idle
-    /// core can without holding up any guest code; with none asleep, the
-    /// next PE to wait takes it. Ordered against [`Self::sleep`]'s store of
+    /// is due. The first PE that sleeps waiting for an interrupt wakes to
+    /// serve it ([`Inbox::serves`]), which its idle core can without holding
+    /// up any guest code; with none asleep, the next PE to wait takes it. Ordered against [`Self::sleep`]'s store of
     /// `sleeping` as [`Self::wake`] is.
     fn request_service(&self) {
         if self.service.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Some(pe) =
-            (0..self.pes()).find(|&pe| self.inboxes[pe].sleeping.load(Ordering::SeqCst))
-        {
+        if let Some(pe) = self.sleeping_server(usize::MAX) {
             self.kick.kick(pe);
         }
     }
@@ -717,11 +756,7 @@ impl Hub {
     /// Whether the host's service is due with no PE asleep to wake for it:
     /// every PE runs, and only one that waits would take it.
     pub fn service_unclaimed(&self) -> bool {
-        self.service.load(Ordering::SeqCst)
-            && !self
-                .inboxes
-                .iter()
-                .any(|inbox| inbox.sleeping.load(Ordering::SeqCst))
+        self.service.load(Ordering::SeqCst) && self.sleeping_server(usize::MAX).is_none()
     }
 
     /// The host has work only PE `pe`'s core can do: its run ends at the next
@@ -756,7 +791,7 @@ impl Hub {
                 return address;
             }
             let epoch = self.lines_epoch(pe);
-            self.sleep(pe, epoch, &mut halt);
+            self.sleep(pe, epoch, false, &mut halt);
         }
     }
 
@@ -1673,9 +1708,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// mail or a device line change reaches this PE.
     pub(super) fn sleep(&mut self) {
         match self.parallel.clone() {
-            Some(hub) => hub.sleep(self.current, self.lines_epoch, || {
-                self.host.wait_for_interrupt()
-            }),
+            Some(hub) => {
+                let serves = self.waits_for_interrupt();
+                hub.sleep(self.current, self.lines_epoch, serves, || {
+                    self.host.wait_for_interrupt()
+                })
+            }
             None => self.host.wait_for_interrupt(),
         }
     }

@@ -671,6 +671,12 @@ static STEPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// taking its completions.
 static RELEASED_STEPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
+/// Whether a device call left a staged disk a step ([`released`]), without
+/// taking it: a PE in a guest exit hands it to a sleeping PE's service.
+pub(super) fn release_due() -> bool {
+    STEP_DUE.load(Ordering::Relaxed)
+}
+
 /// After a device call released the devices' lock, outside it: the step its
 /// staged disk commands left, on the processor whose guest made them, as
 /// the disk's own I/O ran there before staging; whether it collected a
@@ -758,8 +764,10 @@ pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
 /// processor stepped for [`FALLBACK_MILLIS`] or one whose completion signal
 /// came since the last step. What a step took reaches the guest at the next
 /// release of the devices' lock, whose published deadline then calls the
-/// home machine at once. Nothing here waits for a disk.
-pub(super) fn serve_staged(whole: bool) {
+/// home machine at once. Nothing here waits for a disk. Whether a step
+/// collected a completion, which the caller tells the home machine of
+/// (`SharedDevices::call_home`): no release may follow soon on an idle board.
+pub(super) fn serve_staged(whole: bool) -> bool {
     if !staged_disk::step_due(
         whole,
         super::host::fresh_counter(),
@@ -768,16 +776,20 @@ pub(super) fn serve_staged(whole: bool) {
         super::host::doorbells(),
         SEEN_DOORBELLS.load(Ordering::Relaxed),
     ) {
-        return;
+        return false;
     }
+    let mut finished = false;
     for worker in staged_workers() {
         while worker.work() {
-            let progressed = step(worker).is_some_and(|step| step.progressed());
+            let step = step(worker);
+            finished |= step.as_ref().is_some_and(|step| step.finished != 0);
+            let progressed = step.is_some_and(|step| step.progressed());
             if !whole || !progressed || super::host::interrupted() {
                 break;
             }
         }
     }
+    finished
 }
 
 fn staged_workers() -> impl Iterator<Item = &'static DiskWorker> {
