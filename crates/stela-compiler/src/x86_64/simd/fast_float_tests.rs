@@ -316,9 +316,10 @@ fn quick_float_guards_match_the_reference() {
                                         actual, initial,
                                         "{op:?} {format:?} {lanes} {target:?}"
                                     );
-                                    // FZ and FIZ flush subnormal inputs inline.
+                                    // FZ and FIZ flush subnormal inputs inline;
+                                    // elementwise min/max completes NaN lanes too.
                                     let must_inline = (matches!(op, Op::MinMax(..))
-                                        && ordered
+                                        && (ordered || matches!(op, Op::MinMax(_, false)))
                                         && !target.data_independent_timing()
                                         && target.supports(TargetCpu::Sse41)
                                         || matches!(op, Op::Sqrt))

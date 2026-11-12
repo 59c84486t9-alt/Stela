@@ -6,6 +6,10 @@ use super::numerical::{
     exponent_range, flush_subnormal_lanes, infinity_scalar, jump, prepare_vector_input_range,
     read_numerical_vector, resolve, test_control, vector_ordered_range, zero_scalar,
 };
+use super::numerical::{
+    NanRegisters, commit_invalid_lanes, environment, quiet_lanes, restore_environment,
+    select_input_nans,
+};
 use super::{Host, commit, packed, packed_imm, read_vector};
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size, vector_extensions};
 use crate::x86_64::asm::{FloatLanes, FloatOp};
@@ -215,13 +219,15 @@ fn quick_guard_supported(target: TargetCpu) -> bool {
 /// only a NaN in either operand needs the full Arm rules. One unordered
 /// compare (UCOMIS for a scalar, CMPUNORD and PTEST over both whole
 /// registers for a vector, whose 8-byte form has its high qword clear)
-/// sends it to the helper. Returns the branch past the full classification
-/// that follows, which handles AH set (AH=1 reports IDC for a subnormal).
+/// sends it to `nan` ([`nan_selection`]), or without it to the helper.
+/// Returns the branch past the full classification that follows, which
+/// handles AH set (AH=1 reports IDC for a subnormal).
 fn quick_guard(
     code: &mut Code,
     shape: Shape,
     format: Format,
     helper: &mut Vec<usize>,
+    nan: Option<&mut Vec<usize>>,
     target: TargetCpu,
 ) -> usize {
     use crate::aarch64::floating::{FPCR_FIZ, FPCR_FZ};
@@ -236,7 +242,11 @@ fn quick_guard(
         } else {
             asm.ucomiss(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
         }
-        helper.push(branch(code, Condition::Parity));
+        let unordered = branch(code, Condition::Parity);
+        match nan {
+            Some(nan) => nan.push(unordered),
+            None => helper.push(unordered),
+        }
     } else {
         let lanes = if double {
             FloatLanes::PackedDouble
@@ -247,7 +257,11 @@ fn quick_guard(
         code.asm()
             .float_compare(lanes, SELECTION_SCRATCH, Rm::Xmm(RIGHT_VECTOR), UNORDERED);
         super::three::test_zero(code, SELECTION_SCRATCH, target);
-        helper.push(branch(code, Condition::NotZero));
+        let unordered = branch(code, Condition::NotZero);
+        match nan {
+            Some(nan) => nan.push(unordered),
+            None => helper.push(unordered),
+        }
     }
     // After the NaN check, which leaves for the helper with the state
     // untouched: FZ or FIZ flush a subnormal input to its signed zero, FZ
@@ -265,6 +279,117 @@ fn quick_guard(
     let end = code.len();
     resolve(code, flushing, end);
     unflushed
+}
+
+/// [`nan_selection`]'s registers, apart from the selection's.
+const NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 4,
+    inputs: 5,
+    invalid: 6,
+    mask: SIGN_VECTOR,
+    temporary: ORIGINAL_LEFT_VECTOR,
+};
+
+/// S/D elementwise min/max with FPCR.AH clear and a NaN in some lane, for
+/// every input, in the private environment: FZ or FIZ flush subnormal
+/// inputs (FZ raising IDC); FMAXNM and FMINNM first replace a quiet NaN
+/// beside a number by that number; then a lane with a NaN takes Arm's
+/// propagated NaN ([`select_input_nans`]: quieted, or the default NaN
+/// under DN, IOC for a signalling one) and the others the selection.
+fn nan_selection(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    use crate::aarch64::floating::{FPCR_FIZ, FPCR_FZ};
+    const UNORDERED: u8 = 3;
+    let Operand::Binary {
+        operation,
+        format,
+        shape,
+        destination,
+        ..
+    } = *operand
+    else {
+        unreachable!("binary min/max operand")
+    };
+    let NanRegisters {
+        selected,
+        inputs: nan,
+        invalid,
+        mask,
+        temporary,
+    } = NAN_REGISTERS;
+    let lanes = if format == Format::Double {
+        FloatLanes::PackedDouble
+    } else {
+        FloatLanes::PackedSingle
+    };
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let plain = branch(code, Condition::Zero);
+    for source in [RESULT_VECTOR, RIGHT_VECTOR] {
+        flush_subnormal_lanes(code, format, shape, source, FLUSH_SCRATCH);
+    }
+    let plain_start = code.len();
+    resolve(code, plain, plain_start);
+    environment(code);
+    if matches!(
+        operation,
+        MinMaxOperation::MaximumNumber | MinMaxOperation::MinimumNumber
+    ) {
+        // `mask`: Vn's quiet NaN lanes beside a non-NaN Vm; `temporary`:
+        // Vm's beside a non-NaN Vn. They are disjoint.
+        let unordered = |code: &mut Code, destination: u8, source: u8| {
+            packed(code, Host::MoveAligned, destination, source);
+            code.asm()
+                .float_compare(lanes, destination, Rm::Xmm(destination), UNORDERED);
+        };
+        unordered(code, mask, RESULT_VECTOR);
+        quiet_lanes(code, format, selected, RESULT_VECTOR);
+        packed(code, Host::And, mask, selected);
+        unordered(code, nan, RIGHT_VECTOR);
+        packed(code, Host::AndNot, nan, mask);
+        packed(code, Host::MoveAligned, mask, nan);
+        unordered(code, temporary, RIGHT_VECTOR);
+        quiet_lanes(code, format, selected, RIGHT_VECTOR);
+        packed(code, Host::And, temporary, selected);
+        unordered(code, nan, RESULT_VECTOR);
+        packed(code, Host::AndNot, nan, temporary);
+        packed(code, Host::MoveAligned, temporary, nan);
+        // Vm takes Vn where Vm's quiet NaN is replaced, then Vn takes Vm.
+        packed(code, Host::MoveAligned, selected, temporary);
+        packed(code, Host::And, selected, RESULT_VECTOR);
+        packed(code, Host::AndNot, temporary, RIGHT_VECTOR);
+        packed(code, Host::Or, temporary, selected);
+        packed(code, Host::MoveAligned, RIGHT_VECTOR, temporary);
+        packed(code, Host::MoveAligned, selected, mask);
+        packed(code, Host::And, selected, RIGHT_VECTOR);
+        packed(code, Host::AndNot, mask, RESULT_VECTOR);
+        packed(code, Host::Or, mask, selected);
+        packed(code, Host::MoveAligned, RESULT_VECTOR, mask);
+    }
+    select_input_nans(
+        code,
+        format,
+        shape,
+        &[RESULT_VECTOR, RIGHT_VECTOR],
+        NAN_REGISTERS,
+    );
+    selection(
+        code,
+        operation,
+        format,
+        shape,
+        RESULT_VECTOR,
+        RIGHT_VECTOR,
+        target,
+    );
+    packed(code, Host::MoveAligned, temporary, nan);
+    packed(code, Host::And, temporary, selected);
+    packed(code, Host::AndNot, nan, RESULT_VECTOR);
+    packed(code, Host::Or, nan, temporary);
+    packed(code, Host::MoveAligned, RESULT_VECTOR, nan);
+    restore_environment(code);
+    commit_invalid_lanes(code, format, shape, invalid);
+    commit_flush_status(code);
+    finish_binary(code, format, shape, destination);
 }
 
 /// Whether [`half_quick_guard`] runs on `target`; the DIT profile keeps its
@@ -501,10 +626,13 @@ fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCp
     exception_guard(code, &mut helper);
     read_numerical_vector(code, shape, left, RESULT_VECTOR);
     read_numerical_vector(code, shape, right, RIGHT_VECTOR);
+    let mut nan = Vec::new();
     let unflushed = if format == Format::Half {
         half_quick_guard_supported(target).then(|| half_quick_guard(code, shape, &mut helper))
     } else {
-        quick_guard_supported(target).then(|| quick_guard(code, shape, format, &mut helper, target))
+        let nan = (mode != BinaryMode::Pairwise).then_some(&mut nan);
+        quick_guard_supported(target)
+            .then(|| quick_guard(code, shape, format, &mut helper, nan, target))
     };
     if shape != Shape::Scalar {
         prepare_vector_input_range(code, format);
@@ -540,6 +668,16 @@ fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCp
         half_order(code, RESULT_VECTOR);
     }
     finish_binary(code, format, shape, destination);
+    if !nan.is_empty() {
+        let done = jump(code);
+        let nan_start = code.len();
+        for patch in nan {
+            resolve(code, patch, nan_start);
+        }
+        nan_selection(code, operand, target);
+        let end = code.len();
+        resolve(code, done, end);
+    }
 }
 
 fn pairwise_scalar(
