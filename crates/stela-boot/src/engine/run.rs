@@ -472,6 +472,7 @@ fn device_exits_report<H: Host>(
                 sum.settle += exit.settle;
                 sum.transfer += exit.transfer;
                 sum.copies += exit.copies;
+                sum.released += exit.released;
                 sum.longest = sum.longest.max(exit.longest);
             }
             None => registers.push((label, *exit)),
@@ -483,7 +484,7 @@ fn device_exits_report<H: Host>(
     // the lock and the deferred copies after its release; the longest exit
     // ends each entry.
     let mut line = String::from(
-        "PES DEVICE REGISTERS count/ns/lock_ns[/access_ns/settle_ns/transfer_ns/copies_ns]/longest_ns",
+        "PES DEVICE REGISTERS count/ns/lock_ns[/access_ns/settle_ns/transfer_ns/copies_ns/released_ns]/longest_ns",
     );
     for (label, exit) in registers.iter().take(REGISTERS) {
         line.push_str(&format!(
@@ -494,11 +495,12 @@ fn device_exits_report<H: Host>(
         ));
         if label.ends_with(":w") {
             line.push_str(&format!(
-                "/{}/{}/{}/{}",
+                "/{}/{}/{}/{}/{}",
                 nanos(exit.access),
                 nanos(exit.settle),
                 nanos(exit.transfer),
-                nanos(exit.copies)
+                nanos(exit.copies),
+                lock_nanos(exit.released)
             ));
         }
         line.push_str(&format!("/{}", nanos(exit.longest)));
@@ -519,13 +521,14 @@ fn device_exits_report<H: Host>(
         let each = |ticks: u64| nanos(ticks) / u128::from(writes.count);
         let parts = writes.access + writes.settle + writes.call;
         output::arguments(format_args!(
-            "PES DEVICE WRITES count={} ns_each exit={} access={} settle={} transfer={} copies={} call={} rest={}\n",
+            "PES DEVICE WRITES count={} ns_each exit={} access={} settle={} transfer={} copies={} released={} call={} rest={}\n",
             writes.count,
             each(writes.exit),
             each(writes.access),
             each(writes.settle),
             each(writes.transfer),
             each(writes.copies),
+            lock_nanos(writes.released) / u128::from(writes.count),
             each(writes.call),
             each(writes.exit.saturating_sub(parts)),
         ));
@@ -1892,9 +1895,25 @@ impl Heartbeat {
                         / u128::from(host::COUNTER_HZ),
                 ));
             }
+            // By call since the last beat: the releases that did the host's
+            // work (a staged disk's step) on the calling core and its
+            // microseconds there, and those that handed it to a sleeping PE.
+            let mut releases = String::from("DEVICE RELEASES stepped/us/handed");
+            for (index, call) in Call::ALL.iter().enumerate() {
+                let (now, then) = (&times[index], &self.lock_times[index]);
+                releases.push_str(&format!(
+                    " {}={}/{}/{}",
+                    call.name(),
+                    now.stepped.wrapping_sub(then.stepped),
+                    u128::from(now.step.wrapping_sub(then.step)) * 1_000_000
+                        / u128::from(host::COUNTER_HZ),
+                    now.handed.wrapping_sub(then.handed),
+                ));
+            }
             self.lock_times = times;
             output::arguments(format_args!("{locks}\n"));
             output::arguments(format_args!("{wakes}\n"));
+            output::arguments(format_args!("{releases}\n"));
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
             output::arguments(format_args!("{fetches}\n"));

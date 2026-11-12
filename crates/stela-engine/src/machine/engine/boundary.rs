@@ -615,6 +615,7 @@ pub trait Devices {
             written_at,
             settled_at,
             unlocked_at: settled_at,
+            released: 0,
             settled,
         })
     }
@@ -866,6 +867,10 @@ pub struct WriteSettled {
     /// changed and released its lock, before the DMA copies the settlement
     /// deferred ([`Self::settled_at`] for a board of one).
     pub unlocked_at: u64,
+    /// The board counter's ticks ([`super::parallel::Kick::ticks`], as a
+    /// lock wait's) the host work the release left took on this core
+    /// ([`super::parallel::Kick::released`]), within the settle.
+    pub released: u64,
     /// The write's settlement, when it succeeded.
     pub settled: Option<Settled>,
 }

@@ -91,6 +91,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.time_part(1, outcome.written_at, ended);
                     self.time_part(3, outcome.written_at, outcome.settled_at);
                     self.time_part(4, outcome.unlocked_at, ended);
+                    if let Some(parts) = &mut self.timed_write {
+                        parts[5] += outcome.released;
+                    }
                 }
                 let settlement = outcome
                     .settled

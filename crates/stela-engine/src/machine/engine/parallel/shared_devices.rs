@@ -20,6 +20,15 @@ pub(super) struct Board<D> {
     /// ([`wake_after`]): a sleeping PE's host core takes an interrupt.
     pub(super) woken: [AtomicU64; Call::ALL.len()],
     pub(super) wake_ticks: [AtomicU64; Call::ALL.len()],
+    /// By [`Call`], the host work releases left ([`Kick::released`]): the
+    /// releases that did it on the calling core, the ticks it took there,
+    /// and the releases that handed it to a sleeping PE instead.
+    pub(super) stepped: [AtomicU64; Call::ALL.len()],
+    pub(super) step_ticks: [AtomicU64; Call::ALL.len()],
+    pub(super) handed: [AtomicU64; Call::ALL.len()],
+    /// By PE, the ticks of host work its releases did on its core, which a
+    /// device write's settle reports apart ([`super::super::WriteSettled`]).
+    pub(super) released: Box<[AtomicU64]>,
     /// The latest count any machine passed, which every later call sees at
     /// least: the PEs' counters agree only to within their reads.
     pub(super) now: AtomicU64,
@@ -399,12 +408,22 @@ impl<D: Devices> Drop for Held<'_, D> {
         // host service, and goes on with its guest; with none asleep it does
         // the work itself, as before.
         let hub = &self.board.hub;
-        if hub.serves_released(self.pe)
-            && hub.kick.release_due()
-            && !hub.hand_off_service(self.pe)
-            && hub.kick.released()
-        {
-            self.board.call_home();
+        if hub.serves_released(self.pe) && hub.kick.release_due() {
+            if hub.hand_off_service(self.pe) {
+                self.board.handed[call].fetch_add(1, Ordering::Relaxed);
+            } else {
+                let start = hub.ticks();
+                let completed = hub.kick.released();
+                let spent = hub.ticks().wrapping_sub(start);
+                self.board.stepped[call].fetch_add(1, Ordering::Relaxed);
+                self.board.step_ticks[call].fetch_add(spent, Ordering::Relaxed);
+                if let Some(released) = self.board.released.get(self.pe) {
+                    released.fetch_add(spent, Ordering::Relaxed);
+                }
+                if completed {
+                    self.board.call_home();
+                }
+            }
         }
     }
 }
@@ -426,6 +445,11 @@ pub struct LockTimes {
     /// Calls that changed another PE's lines, and the ticks waking those PEs.
     pub woken: u64,
     pub wake: u64,
+    /// Releases that did the host's work on the calling core, the ticks it
+    /// took, and releases that handed it to a sleeping PE.
+    pub stepped: u64,
+    pub step: u64,
+    pub handed: u64,
 }
 
 /// The board's devices, shared by every PE's machine.
@@ -552,6 +576,10 @@ impl<D: Devices> SharedDevices<D> {
             longest: Default::default(),
             woken: Default::default(),
             wake_ticks: Default::default(),
+            stepped: Default::default(),
+            step_ticks: Default::default(),
+            handed: Default::default(),
+            released: (0..pes).map(|_| AtomicU64::new(0)).collect(),
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
             dma: AtomicU64::new(u64::MAX),
@@ -674,6 +702,9 @@ impl<D: Devices> SharedDevices<D> {
             held: self.board.held[call].load(Ordering::Relaxed),
             woken: self.board.woken[call].load(Ordering::Relaxed),
             wake: self.board.wake_ticks[call].load(Ordering::Relaxed),
+            stepped: self.board.stepped[call].load(Ordering::Relaxed),
+            step: self.board.step_ticks[call].load(Ordering::Relaxed),
+            handed: self.board.handed[call].load(Ordering::Relaxed),
             longest: self.board.longest[call].swap(0, Ordering::Relaxed),
         })
     }
@@ -958,6 +989,8 @@ impl<D: Devices> Devices for SharedDevices<D> {
         now: u64,
         mut processors: super::super::ProcessorWrite<'_>,
     ) -> Option<super::super::WriteSettled> {
+        let released = self.board.released.get(cpu);
+        let before = released.map_or(0, |released| released.load(Ordering::Relaxed));
         let (outcome, copies) = self.changing(Call::Access, cpu, now, |devices, now| {
             if devices.requires_canonical_write(cpu, physical, bytes) {
                 return (None, Vec::new());
@@ -974,6 +1007,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
         });
         let mut outcome = outcome?;
         outcome.unlocked_at = processors.native_host().profile_ticks();
+        outcome.released = released.map_or(0, |released| {
+            released.load(Ordering::Relaxed).wrapping_sub(before)
+        });
         if !copies.is_empty()
             && let Some(settled) = &mut outcome.settled
         {

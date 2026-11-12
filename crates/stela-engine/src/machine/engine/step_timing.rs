@@ -1086,6 +1086,7 @@ pub struct DeviceRegisterExit {
     pub settle: u64,
     pub transfer: u64,
     pub copies: u64,
+    pub released: u64,
     pub longest: u64,
 }
 
@@ -1098,15 +1099,17 @@ impl DeviceRegisterExit {
         self.settle += other.settle;
         self.transfer += other.transfer;
         self.copies += other.copies;
+        self.released += other.released;
         self.longest = self.longest.max(other.longest);
     }
 }
 
 /// The parts a device write's exit is timed in: its access, its settle,
-/// its gate call, and of the settle the transfer under the devices' lock
-/// and the deferred DMA copies after the lock's release
-/// ([`DeviceWrites::add`]).
-pub const WRITE_PARTS: usize = 5;
+/// its gate call, and of the settle the transfer under the devices' lock,
+/// the deferred DMA copies after the lock's release and the host work the
+/// release did on the writing core, in the board counter's ticks as a lock
+/// wait is ([`DeviceWrites::add`]).
+pub const WRITE_PARTS: usize = 6;
 
 /// The bit of [`DeviceRegisterExit::register`] that says writes: physical
 /// addresses never reach it.
@@ -1132,6 +1135,7 @@ pub struct DeviceWrites {
     pub call: u64,
     pub transfer: u64,
     pub copies: u64,
+    pub released: u64,
 }
 
 impl DeviceWrites {
@@ -1143,6 +1147,7 @@ impl DeviceWrites {
         self.call += parts[2];
         self.transfer += parts[3];
         self.copies += parts[4];
+        self.released += parts[5];
     }
 
     fn merge(&mut self, other: &Self) {
@@ -1153,6 +1158,7 @@ impl DeviceWrites {
         self.call += other.call;
         self.transfer += other.transfer;
         self.copies += other.copies;
+        self.released += other.released;
     }
 }
 

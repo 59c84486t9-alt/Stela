@@ -3317,6 +3317,12 @@ fn released_host_work_goes_to_a_pe_that_sleeps_waiting_for_an_interrupt() {
     assert_eq!(work.done.load(Ordering::SeqCst), 1, "the caller did it");
     assert!(work.kicked.lock().unwrap().is_empty());
     assert!(!hub.service.load(Ordering::SeqCst));
+    let releases = |home: &SharedDevices<Pending>| {
+        let times = home.lock_times()[Call::Access as usize];
+        (times.stepped, times.handed)
+    };
+    assert_eq!(releases(&home), (1, 0), "counted as done on the caller");
+    assert_eq!(home.board.released[1].load(Ordering::SeqCst), 0, "no ticks");
     // PE 2 now sleeps waiting for an interrupt: it is woken for the work.
     hub.inboxes[2].serves.store(true, Ordering::SeqCst);
     work.due.store(true, Ordering::SeqCst);
@@ -3325,6 +3331,7 @@ fn released_host_work_goes_to_a_pe_that_sleeps_waiting_for_an_interrupt() {
     assert!(work.due.load(Ordering::SeqCst), "left for the service");
     assert_eq!(*work.kicked.lock().unwrap(), [2]);
     assert!(hub.take_service());
+    assert_eq!(releases(&home), (1, 1), "counted as handed off");
 }
 
 /// A core whose halt waits on a doorbell never polls before it halts; any
