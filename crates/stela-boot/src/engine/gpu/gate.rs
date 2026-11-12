@@ -23,8 +23,10 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{BundleReport, GateService, MemoryRange, window};
+pub(in crate::engine) use stela_drivers::gpu::metal::deferred::Taker;
 use stela_drivers::gpu::metal::{
     compiler::{self, AirCompiler},
+    deferred::busy_pause_millis,
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
     native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, Refusals, pipeline_store, vk},
@@ -164,22 +166,8 @@ impl core::fmt::Display for Unheld {
     }
 }
 
-/// How long a deferred compilation waits for a processor other than the boot
-/// one before the boot one takes it: with every other busy or none (one PE),
-/// the boot PE's Linux work waits for the job instead.
-const BOOT_JOB_MILLIS: u64 = 100;
-
-/// How long a deferred compilation waits for a processor whose guest waits
-/// before a busy processor takes it between two slices of user code: with
-/// every guest CPU busy, as in a benchmark, no call waits forever, and no
-/// guest call or kernel code waits for a compile.
-const BUSY_JOB_MILLIS: u64 = 100;
-
-/// The least time between two jobs busy processors take, so that a queue of
-/// jobs costs busy guests one compile at a time, not one on every processor.
-const BUSY_SPACING_MILLIS: u64 = 25;
-
-/// The time stamp before which no busy processor takes a job.
+/// The time stamp before which no busy processor takes a job
+/// ([`busy_pause_millis`]).
 static NEXT_BUSY_JOB: AtomicU64 = AtomicU64::new(0);
 
 /// How long a frontend call waits for the turn before it is answered
@@ -207,21 +195,6 @@ static EXITS: ExitWatch = ExitWatch::new();
 /// phase: no turn should come near it.
 const LONG_TURN_MILLIS: u64 = 50;
 
-/// Which processor offers to run a deferred compilation ([`run_job`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::engine) enum Taker {
-    /// A processor other than the boot one whose guest waits for an
-    /// interrupt: it takes any job.
-    Waiting,
-    /// The boot processor while its guest waits: it takes a job no other
-    /// took within [`BOOT_JOB_MILLIS`].
-    Boot,
-    /// A processor other than the boot one between two slices of guest user
-    /// code: it takes a job no other took within [`BUSY_JOB_MILLIS`], at most
-    /// one every [`BUSY_SPACING_MILLIS`] among all busy processors.
-    Busy,
-}
-
 /// Runs one deferred compilation, between two slices of a processor's guest
 /// and never inside a guest's call: a job runs whole, as the compilers have
 /// no point to stop at, so a processor with no guest work to do takes it
@@ -238,12 +211,10 @@ pub(in crate::engine) fn run_job(taker: Taker) -> bool {
     };
     let millis = gpu.tsc_hz / 1000;
     let now = host::rdtsc();
-    let older = match taker {
-        Taker::Waiting => 0,
-        Taker::Boot => millis * BOOT_JOB_MILLIS,
-        Taker::Busy if now < NEXT_BUSY_JOB.load(Ordering::Relaxed) => return false,
-        Taker::Busy => millis * BUSY_JOB_MILLIS,
-    };
+    if taker == Taker::Busy && now < NEXT_BUSY_JOB.load(Ordering::Relaxed) {
+        return false;
+    }
+    let older = millis * taker.after_millis();
     let ran = shared().iter().any(|service| {
         if !service.jobs_waiting() {
             return false;
@@ -260,10 +231,11 @@ pub(in crate::engine) fn run_job(taker: Taker) -> bool {
         measured_job(run)
     });
     if taker == Taker::Busy {
-        // Busy processors look again only after the spacing, whether one ran
-        // or none was due.
+        // After a job, busy processors leave the next to a waiting one for
+        // the spacing; with none due, they look again soon, so that the
+        // spacing never adds to a job's wait.
         NEXT_BUSY_JOB.store(
-            host::rdtsc().wrapping_add(millis * BUSY_SPACING_MILLIS),
+            host::rdtsc().wrapping_add(millis * busy_pause_millis(ran)),
             Ordering::Relaxed,
         );
     }
