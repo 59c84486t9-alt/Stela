@@ -81,6 +81,16 @@ pub trait Kick: Send + Sync {
     fn release_due(&self) -> bool {
         false
     }
+    /// Runs on the processor that just released the devices' lock: whether
+    /// a host interrupt it takes now brought host work no one has been told
+    /// of (a host disk's completion signal, which a core running guest code
+    /// holds pending until it opens an interrupt window). The release then
+    /// hands that work to a PE that sleeps waiting for an interrupt
+    /// ([`Hub::hand_off_service`]); with none asleep it waits for the
+    /// host's own service between slices. True once for each signal.
+    fn signal_due(&self) -> bool {
+        false
+    }
 }
 
 /// The halt-poll after a wait that took `blocked` counts, from `poll`, at

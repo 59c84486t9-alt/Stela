@@ -1114,6 +1114,33 @@ pub(super) fn signalled() -> bool {
     )
 }
 
+/// The doorbell count of the last completion signal a release handed on
+/// ([`signal_due`]).
+static HANDED_SIGNALS: staged_disk::SignalHandOff = staged_disk::SignalHandOff::new();
+
+/// After a device call released the devices' lock: while a staged disk has
+/// commands on its host disk, take the interrupts this core held pending
+/// while its guest ran, a host disk's completion signal among them, and
+/// whether one came that a sleeping PE should take ([`signalled`]), once per
+/// signal. Its guest goes on; the PE's host service steps the disk.
+pub(super) fn signal_due() -> bool {
+    if !staged_workers().any(DiskWorker::work)
+        || super::host::in_interrupt()
+        || host_drivers_held_here()
+    {
+        return false;
+    }
+    // SAFETY: outside any handler and the host drivers, holding no lock a
+    // handler takes; the handlers only record what came. The NOP takes
+    // STI's shadow, so pending interrupts run before the CLI.
+    unsafe { asm!("sti", "nop", "cli", options(nomem, nostack)) };
+    HANDED_SIGNALS.take(
+        super::host::doorbells(),
+        SEEN_DOORBELLS.load(Ordering::Relaxed),
+        host_drivers_taken(),
+    )
+}
+
 fn staged_workers() -> impl Iterator<Item = &'static DiskWorker> {
     // SAFETY: `stage` stores only leaked workers, which live for the boot.
     STAGED

@@ -189,8 +189,10 @@ fn compression_report(compression: &[step_timing::Compression; 2], tsc_hz: u64) 
             each(operation.write),
         ));
     }
-    output::arguments(format_args!("{line}
-"));
+    output::arguments(format_args!(
+        "{line}
+"
+    ));
 }
 
 /// The exits of `exits` past the first `shown`, summed, if any.
@@ -1897,17 +1899,19 @@ impl Heartbeat {
             }
             // By call since the last beat: the releases that did the host's
             // work (a staged disk's step) on the calling core and its
-            // microseconds there, and those that handed it to a sleeping PE.
-            let mut releases = String::from("DEVICE RELEASES stepped/us/handed");
+            // microseconds there, those that handed it to a sleeping PE, and
+            // those that handed it a host disk's completion signal.
+            let mut releases = String::from("DEVICE RELEASES stepped/us/handed/signals");
             for (index, call) in Call::ALL.iter().enumerate() {
                 let (now, then) = (&times[index], &self.lock_times[index]);
                 releases.push_str(&format!(
-                    " {}={}/{}/{}",
+                    " {}={}/{}/{}/{}",
                     call.name(),
                     now.stepped.wrapping_sub(then.stepped),
                     u128::from(now.step.wrapping_sub(then.step)) * 1_000_000
                         / u128::from(host::COUNTER_HZ),
                     now.handed.wrapping_sub(then.handed),
+                    now.signals.wrapping_sub(then.signals),
                 ));
             }
             self.lock_times = times;

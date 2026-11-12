@@ -26,6 +26,9 @@ pub(super) struct Board<D> {
     pub(super) stepped: [AtomicU64; Call::ALL.len()],
     pub(super) step_ticks: [AtomicU64; Call::ALL.len()],
     pub(super) handed: [AtomicU64; Call::ALL.len()],
+    /// By [`Call`], the releases that handed a host interrupt's work
+    /// ([`Kick::signal_due`]) to a sleeping PE.
+    pub(super) signals: [AtomicU64; Call::ALL.len()],
     /// By PE, the ticks of host work its releases did on its core, which a
     /// device write's settle reports apart ([`super::super::WriteSettled`]).
     pub(super) released: Box<[AtomicU64]>,
@@ -408,8 +411,10 @@ impl<D: Devices> Drop for Held<'_, D> {
         // host service, and goes on with its guest; with none asleep it does
         // the work itself, as before.
         let hub = &self.board.hub;
+        let mut handed = false;
         if hub.serves_released(self.pe) && hub.kick.release_due() {
             if hub.hand_off_service(self.pe) {
+                handed = true;
                 self.board.handed[call].fetch_add(1, Ordering::Relaxed);
             } else {
                 let start = hub.ticks();
@@ -424,6 +429,13 @@ impl<D: Devices> Drop for Held<'_, D> {
                     self.board.call_home();
                 }
             }
+        }
+        // A host interrupt this core held pending while its guest ran (a
+        // host disk's completion signal) goes to a PE that sleeps waiting
+        // for an interrupt, which takes it at its host service, rather than
+        // waiting for this core's slice end. Nothing to do here otherwise.
+        if !handed && hub.kick.signal_due() && hub.hand_off_service(self.pe) {
+            self.board.signals[call].fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -450,6 +462,8 @@ pub struct LockTimes {
     pub stepped: u64,
     pub step: u64,
     pub handed: u64,
+    /// Releases that handed a host interrupt's work to a sleeping PE.
+    pub signals: u64,
 }
 
 /// The board's devices, shared by every PE's machine.
@@ -579,6 +593,7 @@ impl<D: Devices> SharedDevices<D> {
             stepped: Default::default(),
             step_ticks: Default::default(),
             handed: Default::default(),
+            signals: Default::default(),
             released: (0..pes).map(|_| AtomicU64::new(0)).collect(),
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
@@ -705,6 +720,7 @@ impl<D: Devices> SharedDevices<D> {
             stepped: self.board.stepped[call].load(Ordering::Relaxed),
             step: self.board.step_ticks[call].load(Ordering::Relaxed),
             handed: self.board.handed[call].load(Ordering::Relaxed),
+            signals: self.board.signals[call].load(Ordering::Relaxed),
             longest: self.board.longest[call].swap(0, Ordering::Relaxed),
         })
     }

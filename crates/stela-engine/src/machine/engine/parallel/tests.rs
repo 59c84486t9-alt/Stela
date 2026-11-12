@@ -3334,6 +3334,72 @@ fn released_host_work_goes_to_a_pe_that_sleeps_waiting_for_an_interrupt() {
     assert_eq!(releases(&home), (1, 1), "counted as handed off");
 }
 
+/// A host interrupt a busy PE took at its release (a host disk's completion
+/// signal) wakes a PE that sleeps waiting for an interrupt, at that release
+/// on the model clock rather than at the busy PE's slice end; with none
+/// asleep the busy PE leaves it to the host's service, and work its own
+/// release handed on already is not handed twice.
+#[test]
+fn a_busy_pes_completion_signal_wakes_a_sleeping_pe_at_its_release() {
+    #[derive(Default)]
+    struct Signals {
+        kicked: Mutex<Vec<(usize, u64)>>,
+        signal: AtomicBool,
+        due: AtomicBool,
+        now: AtomicU64,
+    }
+    struct Signalled(Arc<Signals>);
+    impl Kick for Signalled {
+        fn kick(&self, pe: usize) {
+            let now = self.0.now.load(Ordering::SeqCst);
+            self.0.kicked.lock().unwrap().push((pe, now));
+        }
+        fn ticks(&self) -> u64 {
+            self.0.now.load(Ordering::SeqCst)
+        }
+        fn release_due(&self) -> bool {
+            self.0.due.load(Ordering::SeqCst)
+        }
+        fn signal_due(&self) -> bool {
+            self.0.signal.swap(false, Ordering::SeqCst)
+        }
+    }
+    let signals = Arc::new(Signals::default());
+    let hub = Hub::new(3, Signalled(Arc::clone(&signals)));
+    for pe in 0..3 {
+        hub.set_live(pe, true);
+    }
+    let home = SharedDevices::new(Pending::default(), Arc::clone(&hub));
+    let mut worker = home.worker();
+    let handed = |home: &SharedDevices<Pending>| {
+        let times = home.lock_times()[Call::Access as usize];
+        (times.handed, times.signals)
+    };
+    // PE 1 runs its guest; nobody sleeps: the signal waits for the service.
+    signals.now.store(1_000, Ordering::SeqCst);
+    signals.signal.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 1_000), Ok(0));
+    assert!(signals.kicked.lock().unwrap().is_empty());
+    assert!(!hub.service.load(Ordering::SeqCst));
+    // PE 2 sleeps waiting for an interrupt: the next signal wakes it at the
+    // release that took it, at 2_500, not at PE 1's slice end.
+    hub.inboxes[2].sleeping.store(true, Ordering::SeqCst);
+    hub.inboxes[2].serves.store(true, Ordering::SeqCst);
+    signals.now.store(2_500, Ordering::SeqCst);
+    signals.signal.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 2_500), Ok(0));
+    assert_eq!(*signals.kicked.lock().unwrap(), [(2, 2_500)]);
+    assert!(hub.take_service());
+    assert_eq!(handed(&home), (0, 1));
+    // A release that handed its own work on already wakes nobody twice.
+    hub.inboxes[1].outside.store(true, Ordering::SeqCst);
+    signals.due.store(true, Ordering::SeqCst);
+    signals.signal.store(true, Ordering::SeqCst);
+    assert_eq!(worker.read(1, 0x40, 8, 3_000), Ok(0));
+    assert_eq!(signals.kicked.lock().unwrap().len(), 2);
+    assert_eq!(handed(&home), (1, 1));
+}
+
 /// A core whose halt waits on a doorbell never polls before it halts; any
 /// other polls as Linux's haltpoll governor fits it, at most `most`.
 #[test]

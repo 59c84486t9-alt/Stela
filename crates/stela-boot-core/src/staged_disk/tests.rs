@@ -814,3 +814,15 @@ fn a_waiting_core_steps_for_a_new_doorbell_only_with_disk_work() {
     assert!(signalled(4, 4, true, true, false));
     assert!(!signalled(4, 4, true, true, true));
 }
+
+/// A busy core hands each completion signal on once, only while no step has
+/// seen it and nobody is in the host drivers.
+#[test]
+fn a_busy_core_hands_each_completion_signal_on_once() {
+    let handed = SignalHandOff::new();
+    assert!(!handed.take(4, 4, false), "seen by a step");
+    assert!(!handed.take(5, 4, true), "the drivers' holder looks itself");
+    assert!(handed.take(5, 4, false));
+    assert!(!handed.take(5, 4, false), "handed on already");
+    assert!(handed.take(6, 4, false), "a later signal");
+}

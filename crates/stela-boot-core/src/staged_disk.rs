@@ -478,6 +478,30 @@ pub fn signalled(doorbells: u64, seen: u64, owed: bool, work: bool, taken: bool)
     (doorbells != seen || owed) && work && !taken
 }
 
+/// The completion signals a core that runs guest code handed to a sleeping
+/// core: each doorbell count once.
+#[derive(Debug, Default)]
+pub struct SignalHandOff {
+    /// The doorbell count of the last signal handed on.
+    handed: AtomicU64,
+}
+
+impl SignalHandOff {
+    pub const fn new() -> Self {
+        Self {
+            handed: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether a release hands on the signal behind doorbell count
+    /// `doorbells`: no step has seen it (`seen`, the count at the last
+    /// step), no release handed it on yet, and no core is inside the host
+    /// drivers (`taken`), whose step looks at the disk itself.
+    pub fn take(&self, doorbells: u64, seen: u64, taken: bool) -> bool {
+        doorbells != seen && !taken && self.handed.swap(doorbells, Ordering::AcqRel) != doorbells
+    }
+}
+
 impl BlockDevice for StagedDisk {
     fn identity(&self) -> &Identity {
         &self.identity
