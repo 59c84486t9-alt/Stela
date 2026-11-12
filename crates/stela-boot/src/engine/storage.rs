@@ -1097,6 +1097,23 @@ pub(super) fn serve_staged(whole: bool) -> bool {
     finished
 }
 
+/// Whether a host disk's completion signal came since the last step while
+/// a staged disk has commands on its host disk, and no core is inside the
+/// host drivers, whose step would leave this one nothing: the completion
+/// waits in memory, and a PE that waits for an interrupt leaves its wait to
+/// take it ([`serve_staged`]) instead of sleeping on to its own deadline.
+/// The signal wakes only the core it targets; any core that wakes later
+/// sees the count too.
+pub(super) fn signalled() -> bool {
+    staged_disk::signalled(
+        super::host::doorbells(),
+        SEEN_DOORBELLS.load(Ordering::Relaxed),
+        OWED.owed(),
+        staged_workers().any(DiskWorker::work),
+        host_drivers_taken(),
+    )
+}
+
 fn staged_workers() -> impl Iterator<Item = &'static DiskWorker> {
     // SAFETY: `stage` stores only leaked workers, which live for the boot.
     STAGED

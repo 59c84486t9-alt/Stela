@@ -170,6 +170,9 @@ pub(super) struct FakeHost {
     pub(super) ring: Option<usize>,
     code_partitions: Option<CodePartitions>,
     parts: Vec<core::ops::Range<usize>>,
+    /// The count at which a host interrupt brings host work
+    /// ([`Host::host_work_due`]): it ends a wait it falls in.
+    pub(super) host_work_at: Option<u64>,
 }
 
 impl Host for FakeHost {
@@ -391,6 +394,16 @@ impl Host for FakeHost {
     }
     fn wait_for_interrupt(&mut self) {
         self.now += 1000;
+        if let Some(at) = self.host_work_at {
+            self.now = self.now.min(at.max(self.now - 1000));
+        }
+    }
+    fn host_work_due(&mut self) -> bool {
+        let due = self.host_work_at.is_some_and(|at| self.now >= at);
+        if due {
+            self.host_work_at = None;
+        }
+        due
     }
     fn report(&mut self, event: &Event) {
         self.events.push(*event);
@@ -581,6 +594,7 @@ pub(super) fn board_on<D: Devices>(
         ring: None,
         code_partitions: None,
         parts: Vec::new(),
+        host_work_at: None,
     };
     let profile = CpuProfile {
         name: "test",

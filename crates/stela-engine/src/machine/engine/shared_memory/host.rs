@@ -446,6 +446,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         }
         self.local.poll_interrupt()
     }
+    fn host_work_due(&mut self) -> bool {
+        !self.source_service() && self.local.host_work_due()
+    }
     fn report(&mut self, event: &crate::machine::Event) {
         self.local.report(event);
     }

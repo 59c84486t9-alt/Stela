@@ -402,6 +402,15 @@ pub trait Host {
     fn poll_interrupt(&mut self) -> bool {
         false
     }
+    /// Whether work only the host can do is due, outside the board: a host
+    /// disk's completion that its interrupt announced and nobody has taken
+    /// yet. A PE that waits for an interrupt then returns to the host
+    /// ([`Stop::Waiting`]), as for a device's bytes the host feeds
+    /// ([`Devices::take_host_service`]), rather than sleep on until its own
+    /// next wake with the completion in memory.
+    fn host_work_due(&mut self) -> bool {
+        false
+    }
     /// Progress events for the diagnostic log.
     fn report(&mut self, _event: &Event) {}
     /// The persistent translation store blocks are taken from and offered

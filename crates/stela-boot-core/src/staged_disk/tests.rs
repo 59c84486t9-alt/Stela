@@ -801,3 +801,16 @@ fn a_step_tells_the_host_disk_of_its_commands_once() {
     assert_eq!(stepped(&worker).started, 0);
     assert_eq!(disk.borrow().commits, 1);
 }
+
+/// A waiting core leaves its wait for a doorbell that came since the last
+/// step only while the host disk has work and nobody is in the drivers.
+#[test]
+fn a_waiting_core_steps_for_a_new_doorbell_only_with_disk_work() {
+    assert!(signalled(5, 4, false, true, false));
+    assert!(!signalled(4, 4, false, true, false));
+    assert!(!signalled(5, 4, false, false, false));
+    assert!(!signalled(5, 4, false, true, true));
+    // A step owed to another core's hold, whose ring moved no count.
+    assert!(signalled(4, 4, true, true, false));
+    assert!(!signalled(4, 4, true, true, true));
+}

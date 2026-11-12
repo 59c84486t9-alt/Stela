@@ -1304,6 +1304,22 @@ fn a_wait_only_the_host_can_end_that_reaches_the_limit_or_owes_the_host_returns_
     assert_eq!(machine.processor(), 0);
 }
 
+/// A host interrupt that brings host work (a host disk's completion) ends
+/// a wait for an interrupt then, not at the PE's own deadline: the host
+/// takes the work at once.
+#[test]
+fn host_work_a_host_interrupt_brings_ends_a_wait_when_it_comes() {
+    let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
+    machine.system_instruction(WFI).unwrap();
+    machine.devices.dma = Some(10_000);
+    machine.host.host_work_at = Some(2_500);
+    assert_eq!(machine.schedule(), Err(Stop::Waiting));
+    assert_eq!(machine.host.now, 2_500);
+    // Taken: the next wait lasts until the deadline.
+    machine.schedule().unwrap();
+    assert!(machine.host.now >= 10_000);
+}
+
 #[test]
 fn a_started_pe_leaves_reset_at_its_address_in_el2_with_its_own_identity() {
     let mut machine = pair();

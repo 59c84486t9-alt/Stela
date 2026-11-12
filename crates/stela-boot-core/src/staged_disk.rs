@@ -444,6 +444,11 @@ impl OwedStep {
             .compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Relaxed);
     }
 
+    /// Whether a step is owed: one was given up and none has settled it.
+    pub fn owed(&self) -> bool {
+        self.since.load(Ordering::Acquire) != 0
+    }
+
     /// Whether the core that just released the host drivers rings for the
     /// steps owed: once until the next step settles them.
     pub fn ring_due(&self) -> bool {
@@ -457,6 +462,20 @@ impl OwedStep {
         self.rung.store(false, Ordering::Release);
         (since != 0).then(|| now.saturating_sub(since))
     }
+}
+
+/// Whether a core that waits for an interrupt leaves its wait to step the
+/// staged disks: the doorbell count moved past `seen`, the count at the last
+/// step, or a step given up to another core's hold is still owed (`owed`,
+/// [`OwedStep`], whose ring may store to the waiting core's doorbell line
+/// without moving the count), while a command waits for the host disk or
+/// runs on it (`work`), and no core is inside the host drivers (`taken`).
+/// A count moved with no work is another core's doorbell; and a core inside
+/// the drivers looks at the disk in its own step, so a waiting core would
+/// only find them taken, and leave its wait again at once: that core's
+/// release rings for the steps owed meanwhile.
+pub fn signalled(doorbells: u64, seen: u64, owed: bool, work: bool, taken: bool) -> bool {
+    (doorbells != seen || owed) && work && !taken
 }
 
 impl BlockDevice for StagedDisk {

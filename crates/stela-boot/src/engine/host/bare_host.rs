@@ -769,6 +769,10 @@ impl Host for BareHost<'_> {
         interrupted
     }
 
+    fn host_work_due(&mut self) -> bool {
+        super::super::storage::signalled()
+    }
+
     fn report(&mut self, event: &stela_engine::machine::Event) {
         super::super::report(event);
     }

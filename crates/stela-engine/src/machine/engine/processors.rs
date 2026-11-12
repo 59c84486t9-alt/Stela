@@ -384,9 +384,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.wake();
             }
             // In parallel, only a PE that waits for an interrupt serves the
-            // host: one in WFE may hold a ticket another PE hands it.
+            // host: one in WFE may hold a ticket another PE hands it. A host
+            // interrupt that ended the last halt may have brought host work
+            // (`Host::host_work_due`), which the halt would otherwise sleep
+            // through until its own deadline.
             if (self.parallel.is_none() || self.waits_for_interrupt())
-                && self.devices.take_host_service()
+                && (self.devices.take_host_service() || self.host.host_work_due())
             {
                 if armed {
                     self.host.arm_timer(None);
