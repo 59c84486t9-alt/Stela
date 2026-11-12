@@ -50,7 +50,9 @@ pub const DOWNLOAD_BUFFER: usize = 4 << 20;
 const SEND_BUFFER: usize = 64 * 1024;
 
 /// The link as smoltcp's device. A link refusal is kept, and the operation
-/// polling the interface reports it.
+/// polling the interface reports it. Under [`Link::receive`]'s contract a
+/// receive error means the device is gone, so the operation ends there
+/// rather than polling a dead link to its deadline.
 struct Phy<L> {
     link: L,
     tx_frame: Vec<u8>,

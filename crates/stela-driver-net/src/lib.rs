@@ -130,6 +130,12 @@ pub trait Link {
     /// Queues one frame (14-byte header and payload, at most 1514 bytes).
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError>;
     /// One frame the adapter received, if any, without blocking.
+    ///
+    /// A damaged frame (CRC, length, alignment or framing error, a failed
+    /// bus transfer the adapter recovers from) is dropped and counted, as
+    /// Linux counts `rx_errors`, and never returned as an error: the stack
+    /// treats an `Err` as a device that is gone or wedged beyond its own
+    /// recovery and stops using the link.
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError>;
     /// Receive one frame into caller-owned reusable storage. The buffer is
     /// unchanged if no frame is available or the adapter reports an error.

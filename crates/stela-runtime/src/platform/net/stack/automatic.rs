@@ -443,6 +443,34 @@ pub(super) mod tests {
         assert_eq!(result, Ok(()));
         assert!((29_000_000..30_000_000).contains(&elapsed), "{elapsed}");
     }
+    /// A link with carrier whose device is gone: every receive fails.
+    struct Gone(alloc::rc::Rc<core::cell::Cell<u32>>);
+    impl Link for Gone {
+        fn mac(&self) -> stela_drivers::net::Mac {
+            stela_drivers::net::Mac([2, 0, 0, 0, 0, 3])
+        }
+        fn transmit(&mut self, _: &[u8]) -> Result<(), LinkError> {
+            Ok(())
+        }
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+            self.0.set(self.0.get() + 1);
+            Err(LinkError::Adapter("device removed".into()))
+        }
+    }
+    #[test]
+    fn a_receive_error_means_the_device_is_gone_and_ends_the_setup_at_once() {
+        let receives = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        let now = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        let mut stack = Stack::new(Gone(receives.clone()), SharedStep(now.clone()), 7).unwrap();
+        let result = stack.automatic();
+        assert_eq!(
+            result.map(|_| ()),
+            Err(NetError::Link("device removed".into()))
+        );
+        // One receive, not a dead link polled to the DHCP deadline.
+        assert_eq!(receives.get(), 1);
+        assert!(now.get() < 1_000_000, "{}", now.get());
+    }
     #[test]
     fn addresses_and_servers_set_by_hand_replace_dhcp_and_advertised_dns() {
         let router = Router {
