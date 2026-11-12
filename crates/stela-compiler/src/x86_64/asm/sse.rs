@@ -36,6 +36,9 @@ sse! {
     movlhps => None, [0x0f, 0x16];
     /// `movhps xmm, m64`: memory to the high qword.
     movhps => None, [0x0f, 0x16];
+    /// `movhps m64, xmm` (0F 17): the high qword to memory, named by its
+    /// register first.
+    movhps_store => None, [0x0f, 0x17];
     /// `movhlps xmm, xmm`: the high qword of the source to the low qword.
     movhlps => None, [0x0f, 0x12];
     /// `movq m64, xmm` (66 0F D6), named by its register first.

@@ -113,3 +113,95 @@ fn pinned_pairs_test_the_register_that_holds_the_address() {
         assert!(contains(&code, expected.as_slice()), "{displacement}");
     }
 }
+
+/// Aligned X pairs at SP move each register straight from or to where it
+/// lives (its host register, its frame slot, XZR) through one 16-byte
+/// access, in pinned and frame code alike: the state and memory a plain
+/// model gives, at an offset and with pre- and post-index writeback.
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn aligned_sp_pairs_move_each_register_from_where_it_lives() {
+    use crate::{
+        GuestAddress, GuestState, Options, TargetCpu,
+        block::{BlockProfile, Features},
+    };
+    const BASE: GuestAddress = GuestAddress(0x4000_0000);
+    // Pinned (X0, X1, X8, X16, X19), frame slots and XZR.
+    const REGISTERS: [u32; 8] = [0, 1, 8, 16, 19, 22, 30, 31];
+    let mut memory = alloc::vec![0u8; 1 << 12];
+    let middle = (memory.as_mut_ptr() as u64 + (1 << 11)) & !15;
+    let target = TargetCpu::detect();
+    let mut compared = 0;
+    for (profile, pinned) in [
+        (BlockProfile::new(Features::SYSTEM_MODE), true),
+        (BlockProfile::ORDINARY, false),
+    ] {
+        let options = Options::new(profile, target);
+        // Offset #16, pre-index #-32 and post-index #32.
+        for (form, offset, writeback) in [
+            (0xa900_0000_u32 | 2 << 15, 16_i64, false),
+            (0xa980_0000 | 0x7c << 15, -32, true),
+            (0xa880_0000 | 4 << 15, 32, true),
+        ] {
+            let post = form & 0x0180_0000 == 0x0080_0000;
+            for load in [false, true] {
+                for &first in &REGISTERS {
+                    for &second in &REGISTERS {
+                        if load && first == second {
+                            continue;
+                        }
+                        let word = form | u32::from(load) << 22 | second << 10 | 31 << 5 | first;
+                        let block = crate::compile(&word.to_le_bytes(), BASE, &options)
+                            .unwrap_or_else(|error| panic!("{word:08x}: {error:?}"));
+                        assert_eq!(block.source_bytes, 4, "{word:08x}");
+                        let code = if pinned {
+                            crate::x86_64::pinned::entered(&block.native.x86_64_code)
+                        } else {
+                            block.native.x86_64_code.clone()
+                        };
+                        let mut state = GuestState::default();
+                        for (index, slot) in state.x.iter_mut().enumerate() {
+                            *slot = 0x0101_0101_0101_0101 * (index as u64 + 1);
+                        }
+                        state.sp = middle;
+                        for (index, byte) in memory.iter_mut().enumerate() {
+                            *byte = (index * 7 + 3) as u8;
+                        }
+                        let mut expected = state.clone();
+                        let mut expected_memory = memory.clone();
+                        let at = middle.wrapping_add_signed(if post { 0 } else { offset });
+                        let index = (at - memory.as_ptr() as u64) as usize;
+                        let read = |register: u32| match register {
+                            31 => 0,
+                            _ => expected.x[register as usize],
+                        };
+                        if load {
+                            for (element, register) in [first, second].into_iter().enumerate() {
+                                let bytes = &expected_memory[index + 8 * element..][..8];
+                                let value = u64::from_le_bytes(bytes.try_into().unwrap());
+                                if register != 31 {
+                                    expected.x[register as usize] = value;
+                                }
+                            }
+                        } else {
+                            let values = [read(first), read(second)];
+                            for (element, value) in values.into_iter().enumerate() {
+                                expected_memory[index + 8 * element..][..8]
+                                    .copy_from_slice(&value.to_le_bytes());
+                            }
+                        }
+                        if writeback {
+                            expected.sp = middle.wrapping_add_signed(offset);
+                        }
+                        let next = crate::x86_64::native::run(&code, &mut state);
+                        assert_eq!(next, BASE.0 + 4, "{word:08x}");
+                        assert_eq!(state, expected, "{word:08x} pinned {pinned}");
+                        assert!(memory == expected_memory, "{word:08x} pinned {pinned}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(compared, 2 * 3 * (64 + 56));
+}

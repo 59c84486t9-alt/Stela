@@ -779,6 +779,49 @@ fn quadword_pair_second(code: &mut Code, host: Gpr) {
     asm.movq_from_xmm(host, 0);
 }
 
+/// [`quadword_pair_store`] of `data` straight from where each register
+/// lives, its host register or its frame slot, without staging it in a
+/// GPR. `None` (and nothing emitted) when either is XZR. Clobbers XMM0 and
+/// XMM1.
+fn quadword_pair_store_direct(code: &mut Code, target: Mem, data: [Register; 2]) -> Option<()> {
+    let mut asm = code.asm();
+    let (first, second) = (asm.guest(data[0])?, asm.guest(data[1])?);
+    match first {
+        Rm::Reg(host) => asm.movq_to_xmm(0, host),
+        memory => asm.movq_xmm(0, memory),
+    }
+    match second {
+        Rm::Reg(host) => {
+            asm.movq_to_xmm(1, host);
+            asm.punpcklqdq(0, Rm::Xmm(1));
+        }
+        memory => asm.movhps(0, memory),
+    }
+    asm.guest_access(|asm| asm.movdqa_store(target, 0));
+    Some(())
+}
+
+/// The 16-byte access of an LDP of two quadwords, each element straight to
+/// where its register lives, its host register or its frame slot (none for
+/// XZR). Clobbers XMM0.
+fn quadword_pair_load_direct(code: &mut Code, source: Mem, data: [Register; 2]) {
+    let mut asm = code.asm();
+    asm.guest_access(|asm| asm.movdqa_load(0, source));
+    match asm.guest(data[0]) {
+        Some(Rm::Reg(host)) => asm.movq_from_xmm(host, 0),
+        Some(memory) => asm.movq_store(0, memory),
+        None => {}
+    }
+    match asm.guest(data[1]) {
+        Some(Rm::Reg(host)) => {
+            asm.punpckhqdq(0, Rm::Xmm(0));
+            asm.movq_from_xmm(host, 0);
+        }
+        Some(memory) => asm.movhps_store(0, memory),
+        None => {}
+    }
+}
+
 pub(super) fn pair(
     code: &mut Code,
     checks: MemoryChecks,
@@ -821,7 +864,17 @@ pub(super) fn pair(
     } else {
         FRAME_PAIR_RESULTS[1]
     };
+    // Block code (no recipe) moves an aligned quadword pair straight
+    // between XMM0 and where its registers live.
+    let direct_pair = recipe.is_none() && alignment == PairAlignment::Aligned;
     match transfer {
+        MemoryTransfer::Store
+            if direct_pair
+                && quadword_pair_store_direct(code, Mem::base(at, displacement), data)
+                    .is_some() => {}
+        MemoryTransfer::Load { .. } if direct_pair && !loads_base => {
+            quadword_pair_load_direct(code, Mem::base(at, displacement), data);
+        }
         MemoryTransfer::Store => {
             let first = match code.host(data[0]) {
                 Some(host) => memory_store::Source::Host(host),

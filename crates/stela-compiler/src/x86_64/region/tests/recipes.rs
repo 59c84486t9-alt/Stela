@@ -277,8 +277,10 @@ pub fn ordinary_store_ends(
 }
 
 /// Inspect the exact shared W or X pair store: address, both elements'
-/// data in RCX and R8, then one host store each, first element first. Also
-/// the index of the first element's data segment in the ends.
+/// data in RCX and R8, then one host store each, first element first; or,
+/// for an aligned X pair of two frame registers, both straight into XMM0
+/// and the 16-byte store. Also the index of the first element's data
+/// segment in the ends.
 pub fn ordinary_pair_store_ends(
     code: &[u8],
     bytes: u8,
@@ -300,6 +302,35 @@ pub fn ordinary_pair_store_ends(
     let mut ends = ordinary_address_ends(code, base, displacement)?;
     let data_segment = ends.len();
     let mut end = *ends.last()?;
+    if form == PairForm::Aligned
+        && bytes == DOUBLEWORD_LOAD_BYTES
+        && let [Some(first), Some(second)] = data
+    {
+        // Block code: MOVQ XMM0,[frame]; MOVHPS XMM0,[frame]; MOVDQA [RAX],XMM0.
+        const MOVQ_XMM0_FRAME: [u8; 4] = [0xf3, TWO_BYTE_OPCODE, 0x7e, 0x87];
+        const MOVHPS_XMM0_FRAME: [u8; 3] = [TWO_BYTE_OPCODE, 0x16, 0x87];
+        const MOVDQA_STORE: [u8; 4] = [0x66, TWO_BYTE_OPCODE, 0x7f, 0x00];
+        let slot = |guest: usize| u32::try_from(guest.checked_mul(GPR_BYTES)?).ok();
+        for (opcode, guest) in [
+            (&MOVQ_XMM0_FRAME[..], first),
+            (&MOVHPS_XMM0_FRAME[..], second),
+        ] {
+            let operand = end + opcode.len();
+            if code.get(end..operand)? != opcode
+                || code.get(operand..operand + 4)? != slot(guest)?.to_le_bytes()
+            {
+                return None;
+            }
+            end = operand + 4;
+            ends.push(end);
+        }
+        if code.get(end..end + MOVDQA_STORE.len())? != MOVDQA_STORE {
+            return None;
+        }
+        end += MOVDQA_STORE.len();
+        ends.push(end);
+        return (code.len() == end).then_some((ends, data_segment));
+    }
     for (index, guest) in data.into_iter().enumerate() {
         end = check_store_data(code, end, guest, index == 1)?;
         ends.push(end);
