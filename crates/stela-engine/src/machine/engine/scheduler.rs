@@ -200,6 +200,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !hub.enter_active(self.current) {
             return Ok(());
         }
+        self.set_doing(step_timing::BLOCKER_ENTERING);
         let step = self.act_on(fetched, pc, single, pacm);
         hub.leave_active(self.current);
         step
@@ -311,9 +312,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.state.anchors = self.anchors();
         self.cpu.state.lower_limit = self.lower_limit();
         let entered = self.timing_start();
+        self.set_doing(0);
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
+        self.set_doing(step_timing::BLOCKER_RETURNED);
         if self.mail_returned == 0
             && let Some(hub) = &self.parallel
             && hub.pending(self.current)

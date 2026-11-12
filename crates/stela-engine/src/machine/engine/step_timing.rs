@@ -365,9 +365,15 @@ impl RegimeSyncs {
     }
 }
 
-/// The [`BarrierWaits`] blocker of a PE in native code, or between its
-/// entry to a fetched block and its run.
+/// The [`BarrierWaits`] blocker of a PE in native code.
 pub const BLOCKER_NATIVE: u64 = 1;
+/// The [`BarrierWaits`] blocker of a PE that entered a fetched block and
+/// prepares its native run, or takes the fetch's exception or checked
+/// instruction.
+pub const BLOCKER_ENTERING: u64 = 2;
+/// The [`BarrierWaits`] blocker of a PE whose native run returned, before
+/// it knows the exit.
+pub const BLOCKER_RETURNED: u64 = 3;
 /// Bit 63 of a blocker: a PE completing an exit of the slot in bits 32-62
 /// at the [`system_key`] in bits 0-31 (0 where the exit has no word).
 pub const BLOCKER_EXIT: u64 = 1 << 63;

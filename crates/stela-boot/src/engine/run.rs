@@ -292,7 +292,11 @@ fn barrier_waits_report(waits: &step_timing::BarrierWaits, tsc_hz: u64) {
         .collect();
     blockers.sort_unstable_by_key(|blocker| core::cmp::Reverse(blocker.ticks));
     for blocker in blockers.into_iter().take(SHOWN) {
-        let name = if blocker.key & step_timing::BLOCKER_EXIT == 0 {
+        let name = if blocker.key == step_timing::BLOCKER_ENTERING {
+            String::from("entering")
+        } else if blocker.key == step_timing::BLOCKER_RETURNED {
+            String::from("returned")
+        } else if blocker.key & step_timing::BLOCKER_EXIT == 0 {
             String::from("native")
         } else {
             let slot = ((blocker.key & !step_timing::BLOCKER_EXIT) >> 32) as usize;
