@@ -37,10 +37,8 @@ use std::{
     time::SystemTime,
 };
 use stela_boot_core::memory_budget::DEFAULT_TRANSLATION_PACK_BYTES;
-use stela_engine::translations::{
-    Digest,
-    pack::{self, HEADER_BYTES, PackError},
-};
+use stela_engine::translations::{Digest, pack};
+use stela_formats::journal::{self, DATA_START};
 
 /// The store's directory on its volume.
 pub(super) const DIRECTORY: &str = "stela/store";
@@ -58,7 +56,6 @@ pub(super) const PIPELINES: &str = "pipeline.bin";
 pub(super) const PIPELINE_BYTES: u64 = 64 * MIB;
 /// The translator id bytes a pack's file name holds.
 const NAME_BYTES: usize = 4;
-const ID_BYTES: usize = 32;
 const MIB: u64 = 1024 * 1024;
 /// One pack's bound by default.
 pub(super) const DEFAULT_PACK_BYTES: u64 = DEFAULT_TRANSLATION_PACK_BYTES;
@@ -300,35 +297,34 @@ impl Pack {
     }
 }
 
-/// A pack's header names its file's translator id, and its size is within
-/// the bound.
+/// A pack file is a translation journal (`stela_formats::journal`) whose
+/// newest commit names its file's translator id, or blank, and its size is
+/// within the bound.
 fn check(path: &Path, bytes: u64, bound: u64) -> Result<(), String> {
     if bytes > bound {
         return Err(format!("holds {bytes} bytes, more than the bound {bound}"));
     }
-    let mut header = [0u8; HEADER_BYTES];
+    let mut slots = vec![0u8; DATA_START.min(bytes) as usize];
     use std::io::Read;
     fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .map_err(|_| "is shorter than a pack header".to_string())?;
+        .and_then(|mut file| file.read_exact(&mut slots))
+        .map_err(|_| "cannot be read".to_string())?;
     // A spare its translator took and has not written yet.
-    if header.iter().all(|&byte| byte == 0) {
+    if slots.iter().all(|&byte| byte == 0) {
         return Ok(());
     }
-    let id = Digest(header[HEADER_BYTES - ID_BYTES..].try_into().unwrap());
-    match pack::prefix_bytes(&header, &id) {
-        Ok(_) => {}
-        Err(PackError::Magic) => return Err("is not a STLTPACK pack".into()),
-        Err(PackError::Schema) => {
-            let schema = u32::from_le_bytes(header[8..12].try_into().unwrap());
-            return Err(format!("has unsupported pack schema {schema}"));
-        }
-        Err(PackError::Count) => return Err("has too many pack records".into()),
-        Err(_) => return Err("has an invalid pack header".into()),
+    if bytes < DATA_START {
+        return Err("is shorter than a translation journal's commit slots".into());
     }
+    let Some(commit) = journal::candidates(&slots, pack::JOURNAL_DOMAIN, bytes)
+        .into_iter()
+        .next()
+    else {
+        return Err("holds no translation journal commit".into());
+    };
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if !name.eq_ignore_ascii_case(&pack_name(&id.0)) {
-        let id = id.hex();
+    if !name.eq_ignore_ascii_case(&pack_name(&commit.key)) {
+        let id = Digest(commit.key).hex();
         return Err(format!("names translator {id}, not its file name"));
     }
     Ok(())
@@ -461,16 +457,34 @@ pub(super) fn checked_directory(store: &Store) -> Result<PathBuf> {
 pub(super) mod tests {
     use super::*;
 
-    /// A pack of translator `id` holding `bytes` bytes in all.
+    const ID_BYTES: usize = 32;
+
+    /// The bytes of the smallest pack file [`write_pack`] writes: the
+    /// commit slots and one block.
+    pub(in crate::setup) const SMALL_PACK: usize = (DATA_START + journal::ALIGN) as usize;
+
+    /// A pack file of translator `id` holding `bytes` bytes in all, at
+    /// least [`SMALL_PACK`]: a journal whose commit names an empty segment.
     pub(in crate::setup) fn write_pack(directory: &Path, id: [u8; 32], bytes: usize) -> PathBuf {
-        let mut pack = pack::MAGIC.to_vec();
-        pack.extend_from_slice(&pack::SCHEMA.to_le_bytes());
-        pack.extend_from_slice(&0u32.to_le_bytes());
-        pack.extend_from_slice(&id);
-        pack.resize(bytes.max(HEADER_BYTES), 0);
+        let segment = pack::Layout::new(&Digest(id), Vec::new()).to_vec();
+        let commit = journal::Commit {
+            domain: pack::JOURNAL_DOMAIN,
+            generation: 1,
+            key: id,
+            entries: vec![journal::Entry {
+                kind: pack::SEGMENT_BLOB,
+                offset: DATA_START,
+                length: segment.len() as u64,
+                digest: Digest::of(&segment).0,
+            }],
+        };
+        let mut file = vec![0; bytes.max(SMALL_PACK)];
+        let slot = commit.slot_offset() as usize;
+        file[slot..slot + journal::SLOT_BYTES as usize].copy_from_slice(&commit.encode());
+        file[DATA_START as usize..][..segment.len()].copy_from_slice(&segment);
         fs::create_dir_all(directory).unwrap();
         let path = directory.join(pack_name(&id));
-        fs::write(&path, pack).unwrap();
+        fs::write(&path, file).unwrap();
         path
     }
 
@@ -479,7 +493,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store {
             volume: dir.path().to_path_buf(),
-            pack_bytes: 4096,
+            pack_bytes: 2 * SMALL_PACK as u64,
         };
         store.publish().unwrap();
         assert!(store.config_intact());
@@ -499,11 +513,11 @@ pub(super) mod tests {
         store.publish().unwrap();
         assert_eq!(
             fs::read_to_string(store.directory().join(CONFIG)).unwrap(),
-            "bytes 4096\n"
+            format!("bytes {}\n", 2 * SMALL_PACK)
         );
         let mut paths = Vec::new();
         for n in 0..5u8 {
-            paths.push(write_pack(&store.directory(), [n; 32], 100));
+            paths.push(write_pack(&store.directory(), [n; 32], SMALL_PACK));
             let time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000 + n as u64);
             fs::File::options()
                 .write(true)
@@ -517,7 +531,7 @@ pub(super) mod tests {
         let wrong = store.directory().join(pack_name(&[9u8; 32]));
         fs::copy(&paths[0], &wrong).unwrap();
         fs::write(store.directory().join(pack_name(&[0xab; 32])), b"STLT").unwrap();
-        write_pack(&store.directory(), [7; 32], 5000);
+        write_pack(&store.directory(), [7; 32], 3 * SMALL_PACK);
         let problems: Vec<String> = store
             .packs()
             .into_iter()
@@ -532,36 +546,35 @@ pub(super) mod tests {
         assert_eq!(removed.len(), 7);
         let kept: Vec<PathBuf> = store.packs().into_iter().map(|p| p.path).collect();
         assert_eq!(kept, [paths[4].clone()]);
-        assert_eq!(store.used_bytes(), 100);
+        assert_eq!(store.used_bytes(), SMALL_PACK as u64);
         fs::remove_dir_all(checked_directory(&store).unwrap()).unwrap();
         assert!(!store.directory().exists());
     }
 
     #[test]
-    fn repair_keeps_a_valid_mixed_pack() {
+    fn repair_keeps_a_journal_and_removes_a_pack_of_another_layout() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store {
             volume: dir.path().to_path_buf(),
-            pack_bytes: 4096,
+            pack_bytes: 4 * SMALL_PACK as u64,
         };
-        let translator = Digest([1; ID_BYTES]);
-        let path = write_pack(&store.directory(), translator.0, HEADER_BYTES);
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
-        bytes.extend(Digest::of(&bytes).0);
-        assert!(pack::Pack::parse(&bytes, &translator).is_ok());
-        fs::write(&path, &bytes).unwrap();
-        let unknown = write_pack(&store.directory(), [2; ID_BYTES], HEADER_BYTES);
-        let mut unknown_bytes = fs::read(&unknown).unwrap();
-        unknown_bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
-        fs::write(&unknown, unknown_bytes).unwrap();
-        assert_eq!(
-            store.packs().iter().filter(|p| p.problem.is_some()).count(),
-            1
-        );
+        let path = write_pack(&store.directory(), [1; ID_BYTES], SMALL_PACK);
+        let bytes = fs::read(&path).unwrap();
+        // A pack of the layout before journals, as its first bytes.
+        let old = store.directory().join(pack_name(&[2; ID_BYTES]));
+        let mut old_bytes = pack::MAGIC.to_vec();
+        old_bytes.extend_from_slice(&pack::SCHEMA.to_le_bytes());
+        old_bytes.resize(SMALL_PACK, 0);
+        fs::write(&old, old_bytes).unwrap();
+        let problems: Vec<String> = store
+            .packs()
+            .into_iter()
+            .filter_map(|p| p.problem)
+            .collect();
+        assert_eq!(problems, ["holds no translation journal commit"]);
         store.repair().unwrap();
         assert_eq!(fs::read(path).unwrap(), bytes);
-        assert!(!unknown.exists());
+        assert!(!old.exists());
     }
 
     #[test]
@@ -575,7 +588,7 @@ pub(super) mod tests {
         let config = store.directory().join(CONFIG);
         let previous = b"bytes 2048\n";
         fs::write(&config, previous).unwrap();
-        let pack = write_pack(&store.directory(), [3; 32], 100);
+        let pack = write_pack(&store.directory(), [3; 32], SMALL_PACK);
         let bytes = fs::read(&pack).unwrap();
         let spare = store.directory().join(SPARE);
         fs::create_dir(&spare).unwrap();

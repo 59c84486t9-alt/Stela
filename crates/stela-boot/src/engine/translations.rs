@@ -1,31 +1,39 @@
-//! `stela.efi`'s persistent translation store: the pack `stela setup` makes room for in
-//! `stela/store` on the boot USB's FAT32 data partition.
+//! `stela.efi`'s persistent translation store: the pack file `stela setup`
+//! makes room for in `stela/store` on the boot USB's FAT32 data partition.
+//!
+//! The file is a journal (`stela_formats::journal`) of pack segments and of
+//! used-key lists, one per boot (`translations::pack`): an update writes
+//! only into space the newest commit does not use and then commits, so a
+//! write cut by a power loss, a panic or a forced stop leaves the previous
+//! content whole.
 //!
 //! Before boot services end, [`read`] finds the volume with `store.cfg`,
 //! gives this translator the preallocated spare file when it has no pack
-//! yet, reads as much of the pack as this PC's RAM budget holds and notes
-//! the volume's GPT partition. The engine reads blocks from the pack
-//! ([`install`]) and keeps the stored form of each block it compiles anew;
-//! when the guest restarts or powers off, the pack is rewritten in place
-//! with them over the file's
-//! clusters, within the same budget ([`write`]), found by Stela's own FAT32
-//! reader on the partition the storage drivers opened. The pack is a cache:
-//! every failure leaves the boot running without a store, or without
-//! writing it.
+//! yet, reads the newest commit's segments and lists, as many segments as
+//! this PC's RAM budget holds (the newest first), and notes the volume's GPT
+//! partition. The engine reads blocks from the segments ([`install`]), a
+//! key's record merged from all that hold it, and keeps the stored form of
+//! each block it compiles anew. While the guest runs, [`step`] writes those
+//! entries to the file as new segments and, every few boots, merges the
+//! segments and lists into one, a bounded step at a time on processors whose
+//! guest waits; when the guest restarts or powers off, [`write`] writes what
+//! is left and this boot's used-key list. The pack is a cache: every failure
+//! leaves the boot running without a store, or without writing it.
 //!
 //! When every PE runs on its own host core (the default), their machines
 //! share the store ([`Shared`]), split by page key into parts behind locks
 //! of their own, and it keeps the blocks any of them compiled for the others
 //! to install ([`share`]).
 use super::bundle::Bytes;
+use super::store_file::{Direct, Held, Queued, Staged};
 use crate::{firmware, handoff::Region, output, paging::PAGE};
-use alloc::{boxed::Box, format, string::String, vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
-    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use stela_boot_core::host_memory::PACK_FLOOR;
+use stela_crypto::{Sha256, digest::Digest as _};
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::Offer;
 use stela_engine::machine::Translations;
@@ -34,8 +42,11 @@ use stela_engine::translations;
 use stela_engine::translations::Digest;
 use stela_engine::translations::Record;
 use stela_engine::translations::pack;
-use stela_engine::translations::pack::{DecodedRecord, Pack, StagedOffer, Store};
-#[cfg(feature = "nvk")]
+use stela_engine::translations::pack::{
+    DecodedRecord, Delta, Layout, MAX_SEGMENTS, MAX_USED_KEYS, MAX_USED_LISTS, Merge, Pack,
+    StagedOffer, Store, UsedKeys,
+};
+use stela_formats::journal::{self, Blob, Change, Commit, DATA_START, Execution, SLOT_BYTES, Step};
 use stela_formats::payload::pieces::Extent;
 use stela_runtime::pc::fat32::Fat32;
 use stela_runtime::pc::gpt::Guid;
@@ -51,14 +62,15 @@ use uefi::{
     },
 };
 
-/// The handoff file holding the store's placement and its pack.
+/// The handoff file holding the store's placement and what was read of its
+/// pack file.
 pub const FILE: &str = "translations";
 /// The store's directory on its volume, and `stela setup`'s bound there.
 pub(super) const DIRECTORY: &str = "stela\\store";
 const CONFIG: &str = "store.cfg";
 const BYTES_KEY: &str = "bytes";
 const CONFIG_LIMIT: usize = 256;
-/// A pack's file name: the first bytes of its translator id in hex, an 8.3
+/// A pack file's name: the first bytes of its translator id in hex, an 8.3
 /// name the FAT32 reader finds.
 const NAME_BYTES: usize = 4;
 const PACK_EXTENSION: &str = "pak";
@@ -68,21 +80,40 @@ const PACK_EXTENSION: &str = "pak";
 const SPARE: &str = "spare.bin";
 /// The pack is read in steps of this many bytes, each shown as progress.
 const PROGRESS_STEP: usize = 16 << 20;
-/// The placement record at the start of the handoff file: magic, bound,
-/// partition GUID, flags, pack bytes; the pack follows.
-const PLACEMENT_MAGIC: [u8; 8] = *b"STLTSTOR";
+/// The journal's domain, and the kinds of its blobs: pack segments and
+/// used-key lists.
+const DOMAIN: [u8; 8] = pack::JOURNAL_DOMAIN;
+const SEGMENT: u32 = pack::SEGMENT_BLOB;
+const USED: u32 = pack::USED_BLOB;
+/// The placement record at the start of the handoff file: magic, the bound
+/// the engine writes within, partition GUID, flags, the commit's entry
+/// count and the file's size. The commit's slot ([`SLOT_BYTES`], zeros for
+/// none), the bytes held of each entry and those bytes, each from an 8-byte
+/// boundary, follow.
+const PLACEMENT_MAGIC: [u8; 8] = *b"STLTSTO2";
 const PLACEMENT_BYTES: usize = 64;
 /// The pack file holds the bound's bytes and its volume's partition is
-/// known: the engine may rewrite it.
+/// known: the engine may write it.
 const WRITABLE: u32 = 1;
+/// A segment was left out or cut to the budget: a merge would lose what
+/// was not read, so none runs.
+const PARTIAL: u32 = 2;
 /// The words of the buffer a renamed file's `FileInfo` is built in: its
 /// fixed fields and an 8.3 name.
 const FILE_INFO_WORDS: usize = 64;
 
+/// The pack file's name in the store's directory.
+fn pack_name(translator: &Digest) -> String {
+    format!("{}.{PACK_EXTENSION}", hex(&translator.0[..NAME_BYTES]))
+}
+
 /// The pack file's path, with `separator` between components.
 fn pack_path(translator: &Digest, separator: &str) -> String {
-    let name = format!("{}.{PACK_EXTENSION}", hex(&translator.0[..NAME_BYTES]));
-    format!("{}{separator}{name}", DIRECTORY.replace('\\', separator))
+    format!(
+        "{}{separator}{}",
+        DIRECTORY.replace('\\', separator),
+        pack_name(translator)
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -107,6 +138,12 @@ pub(super) fn read_exact(file: &mut RegularFile, buffer: &mut [u8]) -> Option<()
         done += count;
     }
     Some(())
+}
+
+/// `buffer.len()` bytes from `offset`.
+fn read_at(file: &mut RegularFile, offset: u64, buffer: &mut [u8]) -> Option<()> {
+    file.set_position(offset).ok()?;
+    read_exact(file, buffer)
 }
 
 /// `store.cfg`'s bound.
@@ -150,23 +187,24 @@ pub(crate) fn partition(handle: uefi::Handle) -> Option<[u8; 16]> {
     })
 }
 
-/// What the loader read of the store's pack.
+/// What the loader read of the store's pack segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackRead {
     /// No pack yet, or one the engine would discard.
     None,
-    /// All of the pack's `0` bytes.
+    /// All of the segments' `0` bytes.
     Whole(u64),
-    /// The pack's first `read` of its `held` bytes: the records that end
-    /// within this PC's budget.
+    /// `read` of their `held` bytes: the newest segments, and of the next
+    /// the records that end within this PC's budget.
     Part { read: u64, held: u64 },
-    /// None of it: this PC's budget holds less than its index, or none at
-    /// all. The pack stays on the volume, unwritten, for a PC with more RAM.
+    /// None of it: this PC's budget holds less than the newest segment's
+    /// index, or none at all. The pack stays on the volume, unwritten, for
+    /// a PC with more RAM.
     Skipped,
 }
 
 /// The store the loader found: the handoff file's pages, whether the engine
-/// can rewrite its pack, and what of the pack it read.
+/// can write its pack file, and what of the pack it read.
 pub struct Opened {
     pub region: Region,
     pub writable: bool,
@@ -177,7 +215,7 @@ pub struct Opened {
 /// pages: run before boot services end, with no volume opened exclusively.
 /// `budget` is the most of the pack this PC's RAM holds
 /// (`host_memory::pack_budget`); the pack is read within it and the engine
-/// rewrites it within it, so that it never grows past what the next boot on
+/// merges it within it, so that it does not grow past what the next boot on
 /// this PC can read. `None` when no volume has a store.
 pub fn read(budget: u64) -> Option<Opened> {
     let translator = translations::translator_id();
@@ -204,63 +242,53 @@ pub fn read(budget: u64) -> Option<Opened> {
             .or_else(|| open(&mut root, &path, FileMode::Read).map(|file| (file, false)));
         let partition = partition(handle);
         let reading = output::now();
-        let (region, pack, allocated) = match opened {
+        let (loaded, size, allocated) = match opened {
             Some((mut file, writable)) => {
-                let allocated = writable
-                    && file
-                        .get_boxed_info::<FileInfo>()
-                        .is_ok_and(|info| info.file_size() >= bound);
-                let (region, pack) = read_pack(&mut file, &translator, limit);
-                (region, pack, allocated)
+                let size = file
+                    .get_boxed_info::<FileInfo>()
+                    .map_or(0, |info| info.file_size());
+                let loaded = read_journal(&mut file, &translator, size, limit)?;
+                (loaded, size, writable && size >= bound)
             }
-            None => (None, PackRead::None, false),
+            None => (blank()?, 0, false),
         };
-        let (read, held) = match pack {
+        let (read, held) = match loaded.pack {
             PackRead::None | PackRead::Skipped => (0, 0),
             PackRead::Whole(bytes) => (bytes, bytes),
             PackRead::Part { read, held } => (read, held),
         };
         output::arguments(format_args!(
-            "TRANSLATIONS {path} bound={bound} budget={budget} pack={read} held={held} \
-             skipped={} allocated={allocated} partition={} read_ms={}\n",
-            pack == PackRead::Skipped,
+            "TRANSLATIONS {path} bound={bound} budget={budget} file={size} segments={} of {} \
+             lists={} pack={read} held={held} skipped={} allocated={allocated} partition={} \
+             read_ms={}\n",
+            loaded.segments.0,
+            loaded.segments.1,
+            loaded.lists,
+            loaded.pack == PackRead::Skipped,
             partition.is_some(),
             output::millis_since(reading)
         ));
-        let region = match region {
-            Some(region) => region,
-            None => Region {
-                physical: firmware::pages(1).ok()? as u64,
-                bytes: PLACEMENT_BYTES as u64,
-            },
-        };
         // Below the floor, or with its pack left for a larger PC, the boot
         // keeps its translations in memory.
-        let flags =
-            if allocated && partition.is_some() && limit >= PACK_FLOOR && pack != PackRead::Skipped
-            {
-                WRITABLE
-            } else {
-                0
-            };
-        // SAFETY: the exclusive loader allocation starts with space for
-        // the placement header. Initialize it before taking a mutable slice.
+        let writable = allocated
+            && partition.is_some()
+            && limit >= PACK_FLOOR
+            && loaded.pack != PackRead::Skipped;
+        let flags = if writable { WRITABLE } else { 0 } | if loaded.partial { PARTIAL } else { 0 };
+        // SAFETY: the exclusive loader allocation starts with the placement
+        // header, which `read_journal` and `blank` left zero.
         let placement = unsafe {
-            let start = region.physical as *mut u8;
-            start.write_bytes(0, PLACEMENT_BYTES);
-            core::slice::from_raw_parts_mut(start, PLACEMENT_BYTES)
+            core::slice::from_raw_parts_mut(loaded.region.physical as *mut u8, PLACEMENT_BYTES)
         };
         placement[..8].copy_from_slice(&PLACEMENT_MAGIC);
-        // The engine lays out the next pack within this boot's limit.
         placement[8..16].copy_from_slice(&limit.to_le_bytes());
         placement[16..32].copy_from_slice(&partition.unwrap_or_default());
         placement[32..36].copy_from_slice(&flags.to_le_bytes());
-        let pack_bytes = region.bytes - PLACEMENT_BYTES as u64;
-        placement[40..48].copy_from_slice(&pack_bytes.to_le_bytes());
+        placement[40..48].copy_from_slice(&size.to_le_bytes());
         return Some(Opened {
-            region,
-            writable: flags & WRITABLE != 0,
-            pack,
+            region: loaded.region,
+            writable,
+            pack: loaded.pack,
         });
     }
     None
@@ -275,8 +303,7 @@ fn claim_spare(root: &mut Directory, translator: &Digest) {
     let Ok(info) = file.get_boxed_info::<FileInfo>() else {
         return;
     };
-    let Ok(name) = CString16::try_from(pack_path(translator, "/").rsplit('/').next().unwrap_or(""))
-    else {
+    let Ok(name) = CString16::try_from(pack_name(translator).as_str()) else {
         return;
     };
     let mut storage = vec![0u64; FILE_INFO_WORDS];
@@ -303,88 +330,206 @@ fn claim_spare(root: &mut Directory, translator: &Digest) {
     ));
 }
 
-/// Read a checked pack directly into its final handoff region: all of it,
-/// or, when it passes `limit`, its first bytes holding the records that end
-/// within it, its index trimmed to name only them
-/// (`translation_store::within`).
-fn read_pack(
-    file: &mut RegularFile,
-    translator: &Digest,
-    limit: u64,
-) -> (Option<Region>, PackRead) {
-    let mut header = [0; pack::HEADER_BYTES];
-    if read_exact(file, &mut header).is_none() {
-        return (None, PackRead::None);
-    }
-    let Ok(prefix_len) = pack::prefix_bytes(&header, translator) else {
-        return (None, PackRead::None);
-    };
-    if prefix_len as u64 > limit {
-        return (None, PackRead::Skipped);
-    }
-    let mut prefix = vec![0; prefix_len];
-    prefix[..header.len()].copy_from_slice(&header);
-    if read_exact(file, &mut prefix[header.len()..]).is_none() {
-        return (None, PackRead::None);
-    }
-    let (Ok(held), Ok(within)) = (
-        Pack::length(&prefix, translator),
-        translation_store::within(&prefix, translator, limit),
-    ) else {
-        return (None, PackRead::None);
-    };
-    if within.records == 0 && within.omitted != 0 {
-        return (None, PackRead::Skipped);
-    }
-    let length = within.length as usize;
-    let bytes = PLACEMENT_BYTES + length;
-    let pages = bytes.div_ceil(PAGE);
-    let Ok(physical) = firmware::pages(pages) else {
-        return (None, PackRead::None);
-    };
-    // SAFETY: firmware returned this exclusive allocation and `bytes` fits
-    // in it. Initialize the pack range before borrowing it as a slice.
-    let pack = unsafe {
-        let start = (physical as *mut u8).add(PLACEMENT_BYTES);
-        start.write_bytes(0, length);
-        core::slice::from_raw_parts_mut(start, length)
-    };
-    pack[..prefix_len].copy_from_slice(&prefix);
-    drop(prefix);
-    let total = length >> 20;
-    for (index, part) in pack[prefix_len..].chunks_mut(PROGRESS_STEP).enumerate() {
-        if read_exact(file, part).is_none() {
-            let start = NonNull::new(physical as *mut u8).expect("firmware allocation");
-            // SAFETY: the pack slice is no longer used and these are the
-            // original base and page count of the loader allocation.
-            let _ = unsafe { boot::free_pages(start, pages) };
-            return (None, PackRead::None);
-        }
-        let done = (prefix_len + index * PROGRESS_STEP + part.len()) >> 20;
-        crate::status::progress(&format!("{done} of {total} MB"));
-    }
-    let read = if within.omitted == 0 {
-        PackRead::Whole(length as u64)
-    } else {
-        translation_store::trim(pack);
-        PackRead::Part {
-            read: length as u64,
-            held,
-        }
-    };
-    let region = Region {
-        physical: physical as u64,
-        bytes: bytes as u64,
-    };
-    (Some(region), read)
+/// What [`read_journal`] read: the handoff region (its placement left
+/// zero), the segments read of those committed, the used-key lists read,
+/// and whether a segment was left out or cut.
+struct Loaded {
+    region: Region,
+    pack: PackRead,
+    segments: (usize, usize),
+    lists: usize,
+    partial: bool,
 }
 
-/// Where the boot's store is written: its bound, the pack's path and the
-/// partition. Its parts ([`PARTS`]) hold the store itself.
+/// A handoff region of a placement and a blank commit slot.
+fn blank() -> Option<Loaded> {
+    let bytes = PLACEMENT_BYTES + SLOT_BYTES as usize;
+    let physical = firmware::pages(bytes.div_ceil(PAGE)).ok()?;
+    // SAFETY: firmware returned this exclusive allocation of `bytes` or more.
+    unsafe { (physical as *mut u8).write_bytes(0, bytes) };
+    Some(Loaded {
+        region: Region {
+            physical: physical as u64,
+            bytes: bytes as u64,
+        },
+        pack: PackRead::None,
+        segments: (0, 0),
+        lists: 0,
+        partial: false,
+    })
+}
+
+/// Read the newest commit of the pack file of `size` bytes directly into
+/// the handoff region: every used-key list, checked, and the segments, the
+/// newest first, while they fit `limit`; of the first that does not, its
+/// records that end within what is left, its index trimmed to name only
+/// them (`translation_store::within`). Segments are not checked whole here:
+/// a pack checks its index, and each record its own bytes when first used.
+/// `None` only when no memory is left for the region.
+fn read_journal(
+    file: &mut RegularFile,
+    translator: &Digest,
+    size: u64,
+    limit: u64,
+) -> Option<Loaded> {
+    let mut slots = vec![0; DATA_START as usize];
+    let commit = if size >= DATA_START && read_exact(file, &mut slots).is_some() {
+        journal::candidates(&slots, DOMAIN, size).into_iter().next()
+    } else {
+        None
+    };
+    drop(slots);
+    let entries: &[journal::Entry] = match &commit {
+        Some(commit) if commit.key == translator.0 => &commit.entries,
+        _ => &[],
+    };
+    // What to hold of each entry: every list, and segments within the room
+    // the lists leave, the newest first.
+    let mut held: Vec<u64> = vec![0; entries.len()];
+    let lists: u64 = entries
+        .iter()
+        .filter(|entry| entry.kind == USED)
+        .map(|entry| entry.length)
+        .sum();
+    let mut room = limit.saturating_sub(lists);
+    let mut partial = false;
+    let mut trimmed: Option<(usize, Vec<u8>)> = None;
+    for (index, entry) in entries.iter().enumerate().rev() {
+        match entry.kind {
+            USED => held[index] = entry.length,
+            SEGMENT if partial => {}
+            SEGMENT if entry.length <= room => {
+                held[index] = entry.length;
+                room -= entry.length;
+            }
+            SEGMENT => {
+                partial = true;
+                if let Some((length, prefix)) = segment_within(file, entry, translator, room) {
+                    held[index] = length;
+                    trimmed = Some((index, prefix));
+                }
+            }
+            _ => {}
+        }
+    }
+    let blobs: usize = held
+        .iter()
+        .map(|&length| (length as usize).next_multiple_of(8))
+        .sum();
+    let head = PLACEMENT_BYTES + SLOT_BYTES as usize + 8 * entries.len();
+    let bytes = head + blobs;
+    let pages = bytes.div_ceil(PAGE);
+    let physical = firmware::pages(pages).ok()?;
+    // SAFETY: firmware returned this exclusive allocation of `bytes` or
+    // more. Initialize it before taking a mutable slice.
+    let region = unsafe {
+        let start = physical as *mut u8;
+        start.write_bytes(0, bytes);
+        core::slice::from_raw_parts_mut(start, bytes)
+    };
+    if let Some(commit) = &commit {
+        region[PLACEMENT_BYTES..PLACEMENT_BYTES + SLOT_BYTES as usize]
+            .copy_from_slice(&commit.encode());
+    }
+    region[36..40].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+    let total = blobs >> 20;
+    let mut at = head;
+    let mut done = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        let length = held[index] as usize;
+        if length == 0 {
+            continue;
+        }
+        let blob = &mut region[at..at + length];
+        let mut from = 0;
+        if let Some((_, prefix)) = trimmed.as_ref().filter(|(trim, _)| *trim == index) {
+            blob[..prefix.len()].copy_from_slice(prefix);
+            from = prefix.len();
+        }
+        let mut whole = true;
+        for part in blob[from..].chunks_mut(PROGRESS_STEP) {
+            if read_at(file, entry.offset + from as u64, part).is_none() {
+                whole = false;
+                break;
+            }
+            from += part.len();
+            done += part.len();
+            crate::status::progress(&format!("{} of {total} MB", done >> 20));
+        }
+        whole &= match entry.kind {
+            USED => Sha256::digest(&*blob)[..] == entry.digest,
+            _ => true,
+        };
+        if !whole {
+            partial |= entry.kind == SEGMENT;
+            held[index] = 0;
+        } else if trimmed.as_ref().is_some_and(|(trim, _)| *trim == index) {
+            translation_store::trim(blob);
+        }
+        at += length.next_multiple_of(8);
+    }
+    for (index, &length) in held.iter().enumerate() {
+        let at = head - 8 * (entries.len() - index);
+        region[at..at + 8].copy_from_slice(&length.to_le_bytes());
+    }
+    let segment = |index: usize| entries[index].kind == SEGMENT;
+    let (mut read, mut whole, mut segments, mut committed) = (0, 0, 0, 0);
+    for (index, &length) in held.iter().enumerate().filter(|(index, _)| segment(*index)) {
+        committed += 1;
+        whole += entries[index].length;
+        if length != 0 {
+            segments += 1;
+            read += length;
+        }
+    }
+    let pack = match () {
+        () if committed == 0 => PackRead::None,
+        () if segments == 0 => PackRead::Skipped,
+        () if partial => PackRead::Part { read, held: whole },
+        () => PackRead::Whole(read),
+    };
+    Some(Loaded {
+        region: Region {
+            physical: physical as u64,
+            bytes: bytes as u64,
+        },
+        pack,
+        segments: (segments, committed),
+        lists: held
+            .iter()
+            .enumerate()
+            .filter(|&(index, &length)| !segment(index) && length != 0)
+            .count(),
+        partial,
+    })
+}
+
+/// Of the segment `entry` names, the bytes that hold its records ending
+/// within `room`, and its header and index: `None` when none does or its
+/// index fails the checks `Pack::parse` makes.
+fn segment_within(
+    file: &mut RegularFile,
+    entry: &journal::Entry,
+    translator: &Digest,
+    room: u64,
+) -> Option<(u64, Vec<u8>)> {
+    let mut header = [0; pack::HEADER_BYTES];
+    read_at(file, entry.offset, &mut header)?;
+    let prefix_length = pack::prefix_bytes(&header, translator).ok()?;
+    if prefix_length as u64 > room || prefix_length as u64 > entry.length {
+        return None;
+    }
+    let mut prefix = vec![0; prefix_length];
+    prefix[..header.len()].copy_from_slice(&header);
+    read_exact(file, &mut prefix[header.len()..])?;
+    let within = translation_store::within(&prefix, translator, room).ok()?;
+    (within.records != 0 && within.length <= entry.length).then_some((within.length, prefix))
+}
+
+/// The boot's translator and the store's partition. Its parts ([`PARTS`])
+/// hold the store itself.
 struct Boot {
     translator: Digest,
-    bound: u64,
-    path: String,
     partition: Option<Box<dyn BlockDevice>>,
 }
 
@@ -514,14 +659,14 @@ fn bounds(heap: usize) -> (pack::Bounds, usize) {
     (bounds, (heap / 64 / (4608)).max(4096))
 }
 
-/// Make `parts` the store's, over the pack read if any, sharing up to
+/// Make `parts` the store's, over the segments read, sharing up to
 /// `shared` bytes of blocks across PEs.
-fn install_parts(translator: Digest, pack: Option<Pack<'static>>, shared: usize) {
+fn install_parts(translator: Digest, segments: Vec<Pack<'static>>, shared: usize) {
     let (bounds, kept_pages) = bounds(crate::ALLOCATOR.usage().total);
     AVAILABLE.kept_pages.store(kept_pages, Ordering::Release);
     for lock in &STORES {
         let evicted = lock.with(|store| {
-            let store = store.get_or_insert_with(|| Store::over(translator, pack));
+            let store = store.get_or_insert_with(|| Store::over(translator, segments.clone()));
             store.share(shared / PARTS);
             store.set_bounds(bounds.share(PARTS))
         });
@@ -680,12 +825,10 @@ pub fn share(bound: usize) {
         let translator = boot
             .get_or_insert_with(|| Boot {
                 translator: translations::translator_id(),
-                bound: 0,
-                path: String::new(),
                 partition: None,
             })
             .translator;
-        install_parts(translator, None, bound);
+        install_parts(translator, Vec::new(), bound);
         AVAILABLE.shared_bound.store(bound, Ordering::Release);
         if bound != 0 {
             AVAILABLE
@@ -702,47 +845,85 @@ pub fn share(bound: usize) {
 /// Make the store of the handoff file `contents` the engine's: the GPT
 /// partition to open for writing it, when it can be written.
 pub fn install(contents: &'static [u8]) -> Option<Guid> {
-    if contents.len() < PLACEMENT_BYTES || contents[..8] != PLACEMENT_MAGIC {
+    let head = PLACEMENT_BYTES + SLOT_BYTES as usize;
+    if contents.len() < head || contents[..8] != PLACEMENT_MAGIC {
         return None;
     }
     let field = |at: usize| u64::from_le_bytes(contents[at..at + 8].try_into().expect("a field"));
-    let bound = field(8);
-    let flags = u32::from_le_bytes(contents[32..36].try_into().expect("a word"));
-    let pack_bytes = usize::try_from(field(40)).ok()?;
-    let pack = contents.get(PLACEMENT_BYTES..PLACEMENT_BYTES + pack_bytes)?;
+    let word = |at: usize| u32::from_le_bytes(contents[at..at + 4].try_into().expect("a word"));
+    let (limit, flags, count, size) = (field(8), word(32), word(36) as usize, field(40));
     let translator = translations::translator_id();
-    let parsed = (!pack.is_empty()).then(|| Pack::parse(pack, &translator));
-    let pack = match parsed {
-        Some(Ok(pack)) => {
-            output::arguments(format_args!(
-                "TRANSLATIONS pack records={} bytes={}\n",
-                pack.records(),
-                pack.bytes()
-            ));
-            Some(pack)
+    let slot = &contents[PLACEMENT_BYTES..head];
+    let committed = (0..2).find_map(|index| Commit::decode(slot, index, DOMAIN, size));
+    let mut segments = Vec::new();
+    let mut used = Vec::new();
+    let mut discarded = 0;
+    if let Some(commit) = committed
+        .as_ref()
+        .filter(|commit| commit.key == translator.0 && commit.entries.len() == count)
+    {
+        let mut at = head + 8 * count;
+        for (index, entry) in commit.entries.iter().enumerate() {
+            let length = usize::try_from(field(head + 8 * index)).ok()?;
+            let bytes = contents.get(at..at.checked_add(length)?)?;
+            at += length.next_multiple_of(8);
+            match entry.kind {
+                SEGMENT if length != 0 => match Pack::parse(bytes, &translator) {
+                    Ok(pack) => segments.push(pack),
+                    Err(error) => {
+                        output::arguments(format_args!(
+                            "TRANSLATIONS segment discarded: {error:?}\n"
+                        ));
+                        discarded += 1;
+                    }
+                },
+                USED if length != 0 => match UsedKeys::parse(bytes, &translator) {
+                    Some(list) => used.push(list),
+                    None => discarded += 1,
+                },
+                _ => {}
+            }
         }
-        Some(Err(error)) => {
-            output::arguments(format_args!("TRANSLATIONS pack discarded: {error:?}\n"));
-            None
-        }
-        None => {
-            output::arguments(format_args!("TRANSLATIONS no pack yet\n"));
-            None
-        }
+    }
+    let partial = flags & PARTIAL != 0;
+    output::arguments(format_args!(
+        "TRANSLATIONS pack segments={} records={} bytes={} lists={} discarded={discarded} \
+         partial={partial}\n",
+        segments.len(),
+        segments.iter().map(Pack::records).sum::<usize>(),
+        segments.iter().map(Pack::bytes).sum::<usize>(),
+        used.len(),
+    ));
+    let readable = if segments.is_empty() { 0 } else { READ_PACK };
+    let writer = Writer {
+        translator,
+        limit,
+        file_bytes: size,
+        committed,
+        extents: None,
+        segments: segments.clone(),
+        used,
+        partial,
+        merged: false,
+        added_keys: Vec::new(),
+        task: Task::Idle,
+        queued: Queued::default(),
+        next_delta: 0,
+        delta_interval: super::host::COUNTER_HZ * FIRST_DELTA_SECONDS,
+        failed: false,
+        stats: Stats::default(),
     };
+    WRITER.holding(true, |slot| *slot = Some(writer));
     BOOT.with(|boot| {
         for lock in &STORES {
             let old = lock.with(Option::take);
             drop(old);
         }
-        install_parts(translator, pack, 0);
+        install_parts(translator, segments, 0);
         *boot = Some(Boot {
             translator,
-            bound,
-            path: pack_path(&translator, "/"),
             partition: None,
         });
-        let readable = if pack.is_some() { READ_PACK } else { 0 };
         AVAILABLE.shared_bound.store(0, Ordering::Release);
         AVAILABLE.capabilities.store(readable, Ordering::Release);
     });
@@ -754,8 +935,10 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
 /// its commands then queue, and processors step its I/O in bounded steps.
 static PARTITION_STAGED: AtomicBool = AtomicBool::new(false);
 
-/// Keep `partition`, the store's volume, for [`write`], staged when a slot
-/// is free.
+/// Keep `partition`, the store's volume, for the writes, staged when a
+/// slot is free, and find the pack file's device extents while its drivers
+/// may still be called directly: the writes while the guest runs only
+/// queue.
 pub fn set_partition(partition: Box<dyn BlockDevice>) {
     let partition = match super::storage::try_stage(partition) {
         Ok(staged) => {
@@ -764,20 +947,31 @@ pub fn set_partition(partition: Box<dyn BlockDevice>) {
         }
         Err(unstaged) => unstaged,
     };
-    BOOT.with(|boot| {
-        if let Some(boot) = boot {
-            boot.partition = Some(partition);
-            AVAILABLE
-                .capabilities
-                .fetch_or(WRITE_PACK, Ordering::Release);
+    let translator = BOOT.with(|boot| {
+        let boot = boot.as_mut()?;
+        boot.partition = Some(partition);
+        AVAILABLE
+            .capabilities
+            .fetch_or(WRITE_PACK, Ordering::Release);
+        Some(boot.translator)
+    });
+    let Some(translator) = translator else {
+        return;
+    };
+    let extents = with_store_file(&pack_name(&translator), |_, extents| extents.to_vec());
+    WRITER.with(|writer| match extents {
+        Ok(extents) => writer.extents = Some(extents),
+        Err(error) => {
+            output::arguments(format_args!(
+                "TRANSLATIONS written only at a stop: {error}\n"
+            ));
         }
     });
 }
 
 /// Run `f` on the store's partition with the device extents of `name`, a
-/// file beside the pack, for a writer that rewrites it in place as [`write`]
-/// does the pack. Only while the engine may write the store.
-#[cfg(feature = "nvk")]
+/// file in the store's directory. Only while the engine may write the
+/// store.
 pub fn with_store_file<R>(
     name: &str,
     f: impl FnOnce(&mut dyn BlockDevice, &[Extent]) -> R,
@@ -801,9 +995,9 @@ pub fn with_store_file<R>(
 
 /// Lend the store's partition to `f` while the guest runs, for background
 /// writes: staged, so `f` only queues commands (`BlockDevice::start`) and
-/// takes results (`finish`), never waiting for the disk. The translation
-/// store shares it. `None` when it is absent, lent, or not staged.
-#[cfg(feature = "nvk")]
+/// takes results (`finish`), never waiting for the disk. The pack file and
+/// the pipeline store share it. `None` when it is absent, lent, or not
+/// staged.
 pub fn lend_staged_partition<R>(f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Option<R> {
     if !PARTITION_STAGED.load(Ordering::Acquire) {
         return None;
@@ -854,101 +1048,497 @@ fn report(counters: &pack::Counters) {
     }
     let checks = stela_engine::machine::entry_checks();
     output::arguments(format_args!(
-        "TRANSLATIONS added={} unstorable={} unkept={} checked={} differed={} \
-         locks acquired={acquired} contended={contended} spin_ms={}\n",
+        "TRANSLATIONS added={} unstorable={} unkept={} checked={} differed={} loaded={} \
+         absent={} invalid={} locks acquired={acquired} contended={contended} spin_ms={}\n",
         counters.added,
         counters.unstorable,
         counters.unkept,
         checks.checked,
         checks.differed,
+        counters.loaded,
+        counters.absent,
+        counters.invalid,
         millis(spun),
     ));
 }
 
-/// At a quiescent point (the guest restarts or powers off): rewrite the
-/// pack in place with the entries the boot added.
-pub fn write() {
-    let Some(boot) = BOOT.with(|boot| {
-        AVAILABLE.capabilities.store(0, Ordering::SeqCst);
-        AVAILABLE.shared_bound.store(0, Ordering::Release);
-        boot.take()
-    }) else {
-        return;
-    };
-    let mut parts = STORES.iter().filter_map(|lock| lock.with(Option::take));
-    let Some(mut store) = parts.next() else {
-        return;
-    };
-    for part in parts {
-        store.absorb(part);
+/// Segments or used-key lists at which a boot merges them.
+const MERGE_AT: usize = 4;
+/// The first new segment's delay, which doubles with each, up to the last:
+/// a boot's compiling comes in bursts, mostly early, and the segments a
+/// file holds are few ([`MAX_SEGMENTS`]).
+const FIRST_DELTA_SECONDS: u64 = 60;
+const LAST_DELTA_SECONDS: u64 = 32 * 60;
+/// How long a step may take, in microseconds, and the work it does between
+/// looks at the clock (records encoded, page keys merged, records indexed).
+const STEP_MICROS: u64 = 1000;
+const STEP_WORK: usize = 32;
+/// The bytes a step copies of a new segment, and the most a write step
+/// queues.
+const COPY_BYTES: u64 = 1 << 20;
+const PIECE_BYTES: u64 = 512 << 10;
+
+/// The writer of the pack file while the guest runs and at a stop.
+struct Writer {
+    translator: Digest,
+    /// The bound a merged segment stays within: what this PC can read.
+    limit: u64,
+    file_bytes: u64,
+    committed: Option<Commit>,
+    /// The file's device extents, found while the drivers may be called.
+    extents: Option<Vec<Extent>>,
+    /// The segments read and those this boot wrote, oldest first, and the
+    /// used-key lists read: a merge's input.
+    segments: Vec<Pack<'static>>,
+    used: Vec<UsedKeys>,
+    /// A segment was not read whole: no merge runs.
+    partial: bool,
+    /// This boot's merge ran or was tried: its segment is not in memory, so
+    /// no other follows.
+    merged: bool,
+    /// The keys of the entries this boot took for its segments: with those
+    /// it found, its used keys. More than a list names counts every key.
+    added_keys: Vec<Digest>,
+    task: Task,
+    /// The staged commands of the write in flight.
+    queued: Queued,
+    /// Host counter value before which no new segment starts, and the delay
+    /// after the next.
+    next_delta: u64,
+    delta_interval: u64,
+    /// A write failed: the file is not written again this boot.
+    failed: bool,
+    stats: Stats,
+}
+
+/// What the writer did while the guest ran.
+#[derive(Default)]
+struct Stats {
+    steps: u64,
+    longest: u64,
+    deltas: u64,
+    delta_records: u64,
+    delta_bytes: u64,
+    merges: u64,
+    abandoned: u64,
+}
+
+/// The writer's work in progress.
+enum Task {
+    Idle,
+    /// A new segment of the entries taken, being laid out.
+    Delta(Box<Delta>),
+    /// The new segment, being copied into memory the boot keeps for a
+    /// merge.
+    Copy {
+        layout: Layout<'static>,
+        bytes: Vec<u8>,
+    },
+    Merge(Box<Merge<'static>>),
+    Write {
+        execution: Box<Execution<'static>>,
+        done: Done,
+    },
+}
+
+/// What a finished write leaves.
+enum Done {
+    Segment(Pack<'static>),
+    Merge,
+}
+
+static WRITER: Held<Writer> = Held::new();
+
+/// The keys found valid by every part of the store, with `added`: the
+/// boot's used keys so far, as a list.
+fn used_now(added: &[Digest]) -> Vec<u8> {
+    let translator = translations::translator_id();
+    if added.len() > MAX_USED_KEYS {
+        return UsedKeys::encode_every(&translator);
     }
-    let counters = store.counters;
-    report(&counters);
-    let Boot {
-        bound,
-        path,
-        partition: Some(partition),
-        ..
-    } = boot
-    else {
+    let mut keys: Vec<Digest> = added.to_vec();
+    for lock in &STORES {
+        lock.with(|store| {
+            if let Some(store) = store {
+                keys.extend(store.used_keys().copied());
+            }
+        });
+    }
+    UsedKeys::encode(&translator, keys.iter())
+}
+
+impl Writer {
+    /// The committed blobs of `kind` of this translator.
+    fn count(&self, kind: u32) -> usize {
+        self.committed
+            .as_ref()
+            .filter(|commit| commit.key == self.translator.0)
+            .map_or(0, |commit| {
+                commit
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind == kind)
+                    .count()
+            })
+    }
+
+    /// Note the keys of entries taken for a segment.
+    fn note_added(&mut self, added: &BTreeMap<Digest, Record>) {
+        if self.added_keys.len() <= MAX_USED_KEYS {
+            self.added_keys.extend(added.keys().copied());
+        }
+    }
+
+    /// Start a merge when the file holds enough segments or lists, else a
+    /// segment of the entries added when its time came.
+    fn begin(&mut self, now: u64) {
+        let segments = self.count(SEGMENT);
+        if !self.merged && !self.partial && (segments >= MERGE_AT || self.count(USED) >= MERGE_AT) {
+            self.merged = true;
+            // Beside the file's content, so its commit keeps that content
+            // until the merged segment is whole.
+            let free = journal::largest_free(
+                self.committed.as_ref(),
+                DOMAIN,
+                self.translator.0,
+                self.file_bytes,
+            );
+            let protect = UsedKeys::parse(&used_now(&self.added_keys), &self.translator);
+            let mut merge = Merge::new(
+                self.translator,
+                self.segments.clone(),
+                self.used.clone(),
+                self.limit.min(free),
+            );
+            if let Some(protect) = protect {
+                merge = merge.protect(protect);
+            }
+            self.task = Task::Merge(Box::new(merge));
+            return;
+        }
+        if self.next_delta == 0 {
+            self.next_delta = now + self.delta_interval;
+        }
+        // One segment stays free for the stop's.
+        if now < self.next_delta || segments + 1 >= MAX_SEGMENTS {
+            return;
+        }
+        let added = take_added();
+        if added.is_empty() {
+            self.next_delta = now + super::host::COUNTER_HZ * 10;
+            return;
+        }
+        self.next_delta = now + self.delta_interval;
+        self.delta_interval =
+            (self.delta_interval * 2).min(super::host::COUNTER_HZ * LAST_DELTA_SECONDS);
+        self.note_added(&added);
+        self.stats.delta_records += added.len() as u64;
+        self.task = Task::Delta(Box::new(Delta::new(self.translator, added)));
+    }
+
+    /// Plan writing `change`, which must commit once beside the file's
+    /// content: else it is left out.
+    fn plan(&mut self, change: Change<'static>, what: &str) -> Option<Box<Execution<'static>>> {
+        let plan = journal::plan(
+            self.committed.as_ref(),
+            DOMAIN,
+            self.translator.0,
+            self.file_bytes,
+            change,
+        );
+        let commits = plan
+            .steps
+            .iter()
+            .filter(|step| matches!(step, Step::Commit(_)))
+            .count();
+        if !plan.dropped.is_empty() || commits > 1 {
+            output::arguments(format_args!(
+                "TRANSLATIONS {what} not written: no room beside the content of a file of {} \
+                 bytes\n",
+                self.file_bytes
+            ));
+            self.stats.abandoned += 1;
+            return None;
+        }
+        Some(Box::new(Execution::new(plan)))
+    }
+
+    /// The task that writes `change` ([`Self::plan`]) and then leaves
+    /// `done`.
+    fn write(&mut self, change: Change<'static>, done: Done, what: &str) -> Task {
+        match self.plan(change, what) {
+            Some(execution) => Task::Write { execution, done },
+            None => Task::Idle,
+        }
+    }
+
+    /// A write finished: its commit is the file's newest.
+    fn finish(&mut self, execution: &Execution<'static>, done: Done) {
+        if let Some(last) = execution.last() {
+            self.committed = Some(last);
+        }
+        match done {
+            Done::Segment(pack) => {
+                self.stats.deltas += 1;
+                self.stats.delta_bytes += pack.bytes() as u64;
+                self.segments.push(pack);
+            }
+            Done::Merge => {
+                self.stats.merges += 1;
+                self.segments.clear();
+                self.used.clear();
+            }
+        }
+    }
+
+    /// Carry the work forward until `deadline` (a host counter value), or
+    /// until a write queued its piece.
+    fn work(&mut self, now: u64, deadline: u64) -> Result<(), String> {
+        if matches!(self.task, Task::Idle) {
+            self.begin(now);
+        }
+        loop {
+            self.task = match core::mem::replace(&mut self.task, Task::Idle) {
+                Task::Idle => return Ok(()),
+                Task::Delta(mut delta) => {
+                    if delta.step(STEP_WORK) {
+                        match delta.finish() {
+                            Some(layout) => Task::Copy {
+                                bytes: Vec::with_capacity(layout.bytes() as usize),
+                                layout,
+                            },
+                            None => Task::Idle,
+                        }
+                    } else {
+                        Task::Delta(delta)
+                    }
+                }
+                Task::Copy { layout, mut bytes } => {
+                    let at = bytes.len();
+                    let take = (layout.bytes() - at as u64).min(COPY_BYTES) as usize;
+                    bytes.resize(at + take, 0);
+                    layout.read_at(at as u64, &mut bytes[at..]);
+                    if (bytes.len() as u64) < layout.bytes() {
+                        Task::Copy { layout, bytes }
+                    } else {
+                        drop(layout);
+                        // Kept for the boot: a merge reads it.
+                        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+                        match Pack::parse(bytes, &self.translator) {
+                            Ok(pack) => {
+                                let change = Change {
+                                    replace: Vec::new(),
+                                    blobs: vec![Blob::new(SEGMENT, bytes)],
+                                };
+                                self.write(change, Done::Segment(pack), "segment")
+                            }
+                            Err(error) => return Err(format!("a new segment: {error:?}")),
+                        }
+                    }
+                }
+                Task::Merge(mut merge) => {
+                    if merge.step(STEP_WORK) {
+                        let merged = merge.finish();
+                        output::arguments(format_args!(
+                            "TRANSLATIONS merged records={} bytes={} evicted={} expired={} \
+                             invalid={}\n",
+                            merged.layout.records(),
+                            merged.layout.bytes(),
+                            merged.evicted,
+                            merged.expired,
+                            merged.invalid
+                        ));
+                        let change = Change {
+                            replace: vec![SEGMENT, USED],
+                            blobs: vec![Blob::new(SEGMENT, merged.layout)],
+                        };
+                        self.write(change, Done::Merge, "merge")
+                    } else {
+                        Task::Merge(merge)
+                    }
+                }
+                Task::Write {
+                    mut execution,
+                    done,
+                } => {
+                    let Some(extents) = self.extents.as_deref() else {
+                        return Err(String::from("no extents"));
+                    };
+                    let queued = &mut self.queued;
+                    let advanced = lend_staged_partition(|device| {
+                        let mut target = Staged {
+                            device,
+                            extents,
+                            queued,
+                        };
+                        execution.advance(&mut target, PIECE_BYTES)
+                    });
+                    match advanced {
+                        Some(Ok(true)) => self.finish(&execution, done),
+                        Some(Err(error)) => return Err(error),
+                        None | Some(Ok(false)) => self.task = Task::Write { execution, done },
+                    }
+                    return Ok(());
+                }
+            };
+            if super::host::fresh_counter() >= deadline {
+                return Ok(());
+            }
+        }
+    }
+
+    fn fail(&mut self, error: &str) {
+        output::arguments(format_args!("TRANSLATIONS not written: {error}\n"));
+        self.task = Task::Idle;
+        self.failed = true;
+    }
+}
+
+/// The entries every part of the store added since the last take.
+fn take_added() -> BTreeMap<Digest, Record> {
+    let mut added = BTreeMap::new();
+    for lock in &STORES {
+        let mut part = lock.with(|store| store.as_mut().map(Store::take_added).unwrap_or_default());
+        added.append(&mut part);
+    }
+    added
+}
+
+/// While the guest runs, from a processor whose guest waits and that holds
+/// no device lock: carry the pack file's writer forward for a bounded time
+/// ([`STEP_MICROS`]). Never waits for the disk.
+pub fn step() {
+    if !available(WRITE_PACK) {
+        return;
+    }
+    let started = super::host::fresh_counter();
+    WRITER.try_with(|writer| {
+        if writer.failed || writer.extents.is_none() {
+            return;
+        }
+        let idle = matches!(writer.task, Task::Idle);
+        let deadline = started + super::host::COUNTER_HZ * STEP_MICROS / 1_000_000;
+        if let Err(error) = writer.work(started, deadline) {
+            writer.fail(&error);
+        }
+        if !idle || !matches!(writer.task, Task::Idle) {
+            let took = super::host::fresh_counter().wrapping_sub(started);
+            writer.stats.steps += 1;
+            writer.stats.longest = writer.stats.longest.max(took);
+        }
+    });
+}
+
+/// At a quiescent point (the guest restarts or powers off): finish a new
+/// segment's write in flight, then write a segment of the entries left and
+/// this boot's used-key list. A merge not yet committed is left: its input
+/// stays in the file.
+pub fn write() {
+    AVAILABLE.capabilities.store(0, Ordering::SeqCst);
+    AVAILABLE.shared_bound.store(0, Ordering::Release);
+    let mut parts = STORES.iter().filter_map(|lock| lock.with(Option::take));
+    let store = parts.next().map(|mut store| {
+        for part in parts {
+            store.absorb(part);
+        }
+        store
+    });
+    if let Some(store) = &store {
+        report(&store.counters);
+    }
+    let writer = WRITER.holding(true, Option::take).flatten();
+    if let (Some(mut store), Some(mut writer)) = (store, writer)
+        && BOOT.with(|boot| boot.as_ref().is_some_and(|boot| boot.partition.is_some()))
+        && !writer.failed
+    {
+        write_last(&mut writer, &mut store);
+    }
+    let boot = BOOT.with(Option::take);
+    drop(boot);
+}
+
+/// The stop's writes ([`write`]).
+fn write_last(writer: &mut Writer, store: &mut Store<'static>) {
+    let started = output::now();
+    let name = pack_name(&writer.translator);
+    let run = |execution: &mut Execution<'static>| {
+        with_store_file(&name, |device, extents| {
+            let mut target = Direct { device, extents };
+            while !execution.advance(&mut target, PIECE_BYTES)? {}
+            Ok::<(), String>(())
+        })
+        .and_then(|done| done)
+    };
+    // What the run left: a segment's write is finished, one being made is
+    // written with the rest, a merge is left.
+    let mut pending: Vec<Layout<'static>> = Vec::new();
+    match core::mem::replace(&mut writer.task, Task::Idle) {
+        Task::Write {
+            mut execution,
+            done: done @ Done::Segment(_),
+        } => match run(&mut execution) {
+            Ok(()) => writer.finish(&execution, done),
+            Err(error) => return writer.fail(&error),
+        },
+        Task::Delta(delta) => pending.extend(delta.finish()),
+        Task::Copy { layout, .. } => pending.push(layout),
+        Task::Merge(_) | Task::Write { .. } => {
+            output::arguments(format_args!("TRANSLATIONS merge left for the next boot\n"));
+            writer.stats.abandoned += 1;
+        }
+        Task::Idle => {}
+    }
+    let stats = &writer.stats;
+    output::arguments(format_args!(
+        "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} merges={} \
+         abandoned={}\n",
+        stats.steps,
+        stats.longest * 1_000_000 / super::host::COUNTER_HZ,
+        stats.deltas,
+        stats.delta_records,
+        stats.delta_bytes,
+        stats.merges,
+        stats.abandoned
+    ));
+    let added = store.take_added();
+    writer.note_added(&added);
+    let records = added.len();
+    pending.extend(Delta::new(writer.translator, added).finish());
+    let mut change = Change::default();
+    let room = MAX_SEGMENTS.saturating_sub(writer.count(SEGMENT));
+    let lost: usize = pending.iter().skip(room).map(Layout::records).sum();
+    for layout in pending.into_iter().take(room) {
+        change.blobs.push(Blob::new(SEGMENT, layout));
+    }
+    let lists = writer.count(USED) < MAX_USED_LISTS;
+    if lists {
+        let list = if writer.added_keys.len() > MAX_USED_KEYS {
+            UsedKeys::encode_every(&writer.translator)
+        } else {
+            UsedKeys::encode(
+                &writer.translator,
+                store.used_keys().chain(&writer.added_keys),
+            )
+        };
+        change.blobs.push(Blob::new(USED, list));
+    }
+    let bytes: u64 = change.blobs.iter().map(Blob::length).sum();
+    let Some(mut execution) = writer.plan(change, "stop") else {
         return;
     };
-    output::arguments(format_args!(
-        "TRANSLATIONS planning {} added entries (loaded={} absent={} invalid={})\n",
-        counters.added, counters.loaded, counters.absent, counters.invalid,
-    ));
-    let started = output::now();
-    let planned = store.plan(bound);
-    let heap = crate::ALLOCATOR.usage();
-    let written: u64 = match planned.layout.changed() {
-        None => planned.layout.bytes(),
-        Some(ranges) => ranges.iter().map(|range| range.end - range.start).sum(),
-    };
-    output::arguments(format_args!(
-        "TRANSLATIONS planned records={} bytes={} changed={written} ms={} live={} carved={} \
-         total={}\n",
-        planned.layout.records(),
-        planned.layout.bytes(),
-        output::millis_since(started),
-        heap.live,
-        heap.carved,
-        heap.total
-    ));
-    let started = output::now();
-    let mut volume = match Fat32::open(Bytes::new(partition)) {
-        Ok(volume) => volume,
-        Err(error) => {
-            output::arguments(format_args!("TRANSLATIONS not written: {error}\n"));
-            return;
+    match run(&mut execution) {
+        Ok(()) => {
+            if let Some(last) = execution.last() {
+                writer.committed = Some(last);
+            }
+            output::arguments(format_args!(
+                "TRANSLATIONS written segments={} lists={} records={records} lost={lost} \
+                 bytes={bytes} ms={}\n",
+                writer.count(SEGMENT),
+                writer.count(USED),
+                output::millis_since(started)
+            ));
         }
-    };
-    let file = match volume.file(&path) {
-        Ok(file) => file,
-        Err(error) => {
-            output::arguments(format_args!("TRANSLATIONS not written: {error}\n"));
-            return;
-        }
-    };
-    let mut device = volume.into_inner().into_inner();
-    output::arguments(format_args!(
-        "TRANSLATIONS writing extents={}\n",
-        file.extents.len()
-    ));
-    match stela_runtime::translation_store::write_in_place(
-        &mut *device,
-        &file.extents,
-        &planned.layout,
-    ) {
-        Ok(()) => output::arguments(format_args!(
-            "TRANSLATIONS written records={} bytes={} changed={written} added={} evicted={} \
-             expired={} ms={}\n",
-            planned.layout.records(),
-            planned.layout.bytes(),
-            counters.added,
-            planned.evicted,
-            planned.expired,
-            output::millis_since(started)
-        )),
-        Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error:?}\n")),
+        Err(error) => writer.fail(&error),
     }
 }

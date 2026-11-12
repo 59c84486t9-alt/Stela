@@ -611,6 +611,11 @@ pub(super) fn run<H: Host>(
                 if super::storage::serve_staged(idle) {
                     devices.call_home();
                 }
+                // The translation pack's writes, a bounded step, only while
+                // this PE's guest waits.
+                if idle {
+                    super::translations::step();
+                }
                 service.parts.lap(ServiceParts::DISK, host::rdtsc());
             });
             if service::shutdown_pending() {

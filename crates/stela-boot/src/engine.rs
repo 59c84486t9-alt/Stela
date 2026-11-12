@@ -46,6 +46,7 @@ mod service;
 mod services;
 mod speculation;
 pub(crate) mod storage;
+mod store_file;
 mod topology;
 pub(crate) mod translations;
 mod usb;

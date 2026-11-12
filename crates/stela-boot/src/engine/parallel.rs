@@ -252,6 +252,8 @@ impl Pe {
                         if super::storage::serve_staged(true) {
                             machine.devices.call_home();
                         }
+                        // The translation pack's writes, a bounded step.
+                        super::translations::step();
                         // A GPU compilation a guest call deferred.
                         #[cfg(feature = "nvk")]
                         super::gpu::gate::run_job(super::gpu::gate::Taker::Waiting);

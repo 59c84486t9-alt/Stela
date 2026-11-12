@@ -1924,7 +1924,11 @@ fn same_revision_update_preserves_options() {
     let store = record(&f).translations.unwrap();
     let spare = store.directory().join(translations::SPARE);
     fs::remove_file(&spare).unwrap();
-    let pack = translations::tests::write_pack(&store.directory(), [4; 32], 100);
+    let pack = translations::tests::write_pack(
+        &store.directory(),
+        [4; 32],
+        translations::tests::SMALL_PACK,
+    );
     let pack_bytes = fs::read(&pack).unwrap();
     let options = f.esp.join(efi::OPTIONS);
     let custom = b"--system --watch 0x1000,0x10\n";
@@ -2058,7 +2062,11 @@ fn cache_spare_failure_blocks_activation_until_retry() {
     setup(&environment(&f.host), first).unwrap();
     let store = record(&f).translations.unwrap();
     let spare = store.directory().join(translations::SPARE);
-    let pack = translations::tests::write_pack(&store.directory(), [4; 32], 100);
+    let pack = translations::tests::write_pack(
+        &store.directory(),
+        [4; 32],
+        translations::tests::SMALL_PACK,
+    );
     let pack_bytes = fs::read(&pack).unwrap();
     let active = f.esp.join(efi::LOADER);
     let old_efi = fs::read(&active).unwrap();
@@ -2133,7 +2141,8 @@ fn stela_update_replaces_the_loader_and_keeps_the_newest_pack() {
     assert!(packs.join(translations::CONFIG).is_file());
     let written: Vec<PathBuf> = (0..4u8)
         .map(|n| {
-            let path = translations::tests::write_pack(&packs, [n; 32], 100);
+            let path =
+                translations::tests::write_pack(&packs, [n; 32], translations::tests::SMALL_PACK);
             fs::File::options()
                 .write(true)
                 .open(&path)

@@ -17,18 +17,12 @@
 //! powers off, [`write`] finishes that work and writes what is left. A file
 //! of an older layout reads as empty and is replaced by the first write.
 //! Every failure leaves the boot running: its pipelines compile again.
+use super::store_file::{Direct, Held, Queued, Staged};
 use super::translations;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
 use alloc::{format, string::String, vec, vec::Vec};
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
-};
-use stela_drivers::block::{BlockDevice, Command};
 use stela_drivers::gpu::metal::native::pipeline_store::{self, Key, MAX_BYTES};
-use stela_formats::journal::{
-    self, Blob, Change, Commit, DATA_START, Execution, SLOT_BYTES, Target, device_ranges,
-};
+use stela_formats::journal::{self, Blob, Change, Commit, DATA_START, Execution, SLOT_BYTES};
 use stela_formats::payload::pieces::Extent;
 use uefi::{
     boot,
@@ -176,51 +170,14 @@ struct Running {
     queued: Queued,
 }
 
-/// The commands the write in flight queued, by the file offset it began at.
-#[derive(Default)]
-struct Queued {
-    at: Option<u64>,
-    tags: Vec<u32>,
-}
-
-/// One holder at a time: [`step`] skips while another holds it, [`write`]
-/// waits.
-struct Held {
-    held: AtomicBool,
-    writer: UnsafeCell<Option<Writer>>,
-}
-// SAFETY: `held` admits one holder at a time to `writer`.
-unsafe impl Sync for Held {}
-static WRITER: Held = Held {
-    held: AtomicBool::new(false),
-    writer: UnsafeCell::new(None),
-};
-
-/// Runs `f` on the writer's slot holding it: at once or not at all unless
-/// `wait`.
-fn holding<R>(wait: bool, f: impl FnOnce(&mut Option<Writer>) -> R) -> Option<R> {
-    while WRITER
-        .held
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        if !wait {
-            return None;
-        }
-        core::hint::spin_loop();
-    }
-    // SAFETY: `held` is ours until the store below.
-    let result = f(unsafe { &mut *WRITER.writer.get() });
-    WRITER.held.store(false, Ordering::Release);
-    Some(result)
-}
+static WRITER: Held<Writer> = Held::new();
 
 fn try_writer<R>(f: impl FnOnce(&mut Writer) -> R) -> Option<R> {
-    holding(false, |slot| slot.as_mut().map(f)).flatten()
+    WRITER.try_with(f)
 }
 
 fn writer<R>(f: impl FnOnce(&mut Writer) -> R) -> Option<R> {
-    holding(true, |slot| slot.as_mut().map(f)).flatten()
+    WRITER.with(f)
 }
 
 /// Give the Metal device the stored pipelines of the handoff file
@@ -246,7 +203,7 @@ pub fn install(contents: &'static [u8]) {
         quiet_until: 0,
         failed: false,
     };
-    holding(true, |slot| *slot = Some(writer));
+    WRITER.holding(true, |slot| *slot = Some(writer));
 }
 
 /// Find the file's device extents, once the store's partition is kept and
@@ -418,105 +375,5 @@ pub fn write() {
             "PIPELINES written bytes={bytes} ms={}\n",
             output::millis_since(started)
         ));
-    }
-}
-
-/// The staged partition while the guest runs: each write queues its
-/// commands and is made again until they finished.
-struct Staged<'a> {
-    device: &'a mut dyn BlockDevice,
-    extents: &'a [Extent],
-    queued: &'a mut Queued,
-}
-
-impl Staged<'_> {
-    /// Queue `commands` for the write at `at`, or take their results:
-    /// whether all finished.
-    fn run(
-        &mut self,
-        at: u64,
-        commands: impl FnOnce() -> Result<Vec<Command>, String>,
-    ) -> Result<bool, String> {
-        if self.queued.at != Some(at) {
-            let mut tags = Vec::new();
-            for command in commands()? {
-                tags.push(
-                    self.device
-                        .start(command)
-                        .map_err(|error| format!("{error:?}"))?,
-                );
-            }
-            *self.queued = Queued { at: Some(at), tags };
-            return Ok(false);
-        }
-        while let Some(&tag) = self.queued.tags.last() {
-            match self.device.finish(tag) {
-                None => return Ok(false),
-                Some(result) => {
-                    result.map_err(|error| format!("{error:?}"))?;
-                    self.queued.tags.pop();
-                }
-            }
-        }
-        *self.queued = Queued::default();
-        Ok(true)
-    }
-}
-
-impl Target for Staged<'_> {
-    type Error = String;
-    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<bool, String> {
-        let block = u64::from(self.device.identity().block_size);
-        let extents = self.extents;
-        self.run(offset, || {
-            let ranges =
-                device_ranges(extents, block, offset, bytes.len() as u64).ok_or_else(|| {
-                    format!(
-                        "bytes {offset}+{} are not on the file's blocks",
-                        bytes.len()
-                    )
-                })?;
-            Ok(ranges
-                .into_iter()
-                .map(|(lba, length, from)| Command::Write {
-                    lba,
-                    data: bytes[from..from + length as usize].to_vec(),
-                    fua: false,
-                })
-                .collect())
-        })
-    }
-    fn flush(&mut self) -> Result<bool, String> {
-        self.run(u64::MAX, || Ok(vec![Command::Flush]))
-    }
-}
-
-/// The partition at a stop: each write completes before it returns.
-struct Direct<'a> {
-    device: &'a mut dyn BlockDevice,
-    extents: &'a [Extent],
-}
-
-impl Target for Direct<'_> {
-    type Error = String;
-    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<bool, String> {
-        let block = u64::from(self.device.identity().block_size);
-        let ranges =
-            device_ranges(self.extents, block, offset, bytes.len() as u64).ok_or_else(|| {
-                format!(
-                    "bytes {offset}+{} are not on the file's blocks",
-                    bytes.len()
-                )
-            })?;
-        for (lba, length, from) in ranges {
-            self.device
-                .write(lba, &bytes[from..from + length as usize])
-                .map_err(|error| format!("{error:?}"))?;
-        }
-        Ok(true)
-    }
-    fn flush(&mut self) -> Result<bool, String> {
-        self.device.flush().map_err(|error| format!("{error:?}"))?;
-        Ok(true)
     }
 }
