@@ -287,7 +287,23 @@ pub fn fetch_recovery(image: &Image, model: &str, output: &Path) -> Result<u64> 
         apple_url(&url),
         "image must be hosted on Apple's HTTPS servers"
     );
-    payload::trim(remote::Remote::open(client()?, &image.url)?, model, output)
+    payload::trim(
+        remote::Remote::open(client()?, &image.url)?,
+        model,
+        output,
+        "Downloading boot files",
+    )
+}
+
+/// The bytes [`fetch_recovery`] would copy of `image` for `model`, and the
+/// whole image's, from its ZIP directory read by byte ranges.
+pub fn recovery_size(image: &Image, model: &str) -> Result<(u64, u64)> {
+    let url = Url::parse(&image.url)?;
+    ensure!(
+        apple_url(&url),
+        "image must be hosted on Apple's HTTPS servers"
+    );
+    payload::recovery_bytes(remote::Remote::open(client()?, &image.url)?, model)
 }
 
 /// The restore inventory of `image` for `model` that `stela.efi` streams

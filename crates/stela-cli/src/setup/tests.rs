@@ -374,10 +374,30 @@ fn fake_remote_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::I
     )
 }
 
+/// Tests reach no server, and search and write only a cache of their own.
+static TEST_CACHES: std::sync::LazyLock<[PathBuf; 1]> = std::sync::LazyLock::new(|| {
+    [tempfile::Builder::new()
+        .prefix("stela-test-cache-")
+        .tempdir()
+        .unwrap()
+        .keep()]
+});
+
+fn offline_recovery_size(_: &str, _: &str) -> Result<(u64, u64)> {
+    anyhow::bail!("offline")
+}
+
+fn offline_fetch_recovery(_: &Path, _: &str, _: &str) -> Result<PathBuf> {
+    panic!("tests never download")
+}
+
 fn environment(host: &FakeHost) -> Environment<'_> {
     Environment {
         host,
         download: None,
+        image_caches: &*TEST_CACHES,
+        recovery_size: &offline_recovery_size,
+        fetch_recovery: &offline_fetch_recovery,
         prepare_restore: &fake_prepare_restore,
         prepare_update: &fake_prepare_update,
         inventory: &fake_inventory,
@@ -1332,6 +1352,7 @@ fn full_install_requires_system_image() {
         fs::File::open(&f.ipsw).unwrap(),
         restore::payload::SYNTHETIC_MODEL,
         &recovery,
+        "Copying boot files",
     )
     .unwrap();
     assert!(restore::payload::holds_system_image(&f.ipsw).unwrap());
@@ -2119,18 +2140,13 @@ fn schema_update_rebuilds_bundles() {
     let mut image = b"MZstela-3".to_vec();
     image.extend_from_slice(&mount_interface::marker(newer));
     fs::write(&new, image).unwrap();
-    let update = |ipsw: bool| {
-        let mut command = command(&f, &f.esp);
-        command.ipsw = ipsw.then(|| f.ipsw.clone());
-        command.model = None;
-        command.action = Action::UpdateStela;
-        command.efi = Some(new.clone());
-        command.dispatch(&environment)
-    };
-    let error = update(false).unwrap_err().to_string();
-    assert!(error.contains(&format!("schema {next_schema}")), "{error}");
-    assert!(error.contains("--ipsw"), "{error}");
-    update(true).unwrap();
+    // The USB holds the image, which the update reads without --ipsw.
+    let mut command = command(&f, &f.esp);
+    command.ipsw = None;
+    command.model = None;
+    command.action = Action::UpdateStela;
+    command.efi = Some(new.clone());
+    command.dispatch(&environment).unwrap();
     let record2 = record(&f);
     assert_eq!(record2.bundle_schema, next_schema);
     let migrated = bundle_of(&f, ecid);
@@ -2185,10 +2201,12 @@ fn revision_update_rebuilds_bundles() {
     };
     // A later stela prepares revision 1, with the same stela.efi.
     let new = environment_at(&f.host, &newer, 1);
+    let cache = f._dir.path().join("cache");
     let run = |configure: &dyn Fn(&mut Request)| {
         let mut command = command(&f, &f.esp);
         command.ipsw = None;
         command.model = None;
+        command.download_dir = Some(cache.clone());
         configure(&mut command);
         command.dispatch(&new)
     };
@@ -2197,6 +2215,7 @@ fn revision_update_rebuilds_bundles() {
         status.contains("boot bundles are revision 0, and this stela prepares revision 1"),
         "{status}"
     );
+    assert!(!status.contains("--fetch"), "{status}");
     assert!(status.contains("stela setup update stela"), "{status}");
     // Other changes that prepare bundles wait for the update.
     let repair = run(&|c| {
@@ -2217,20 +2236,39 @@ fn revision_update_rebuilds_bundles() {
             c.dry_run = dry_run;
         })
     };
-    let refusal = update(false, false).unwrap_err().to_string();
-    assert!(
-        refusal.contains(&format!("schema {} revision 1", current().schema)),
-        "{refusal}"
-    );
-    assert!(refusal.contains("update stela --fetch --usb"), "{refusal}");
     let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    // With --ipsw, a dry run prepares from it; without, it names the USB's
+    // own copy of the image, which the update reads; neither downloads
+    // (this environment's downloads panic) nor changes anything.
     let plan = update(true, true).unwrap();
     assert!(!plan.contains("is already installed"), "{plan}");
+    assert!(plan.contains(&f.ipsw.display().to_string()), "{plan}");
+    for directory in directories(1) {
+        assert!(plan.contains(&directory.display().to_string()), "{plan}");
+    }
+    let plan = update(false, true).unwrap();
+    assert!(plan.contains("from this USB's copy of macOS"), "{plan}");
+    assert!(plan.contains("nothing is downloaded"), "{plan}");
     for directory in directories(1) {
         assert!(plan.contains(&directory.display().to_string()), "{plan}");
     }
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
-    update(true, false).unwrap();
+    // A copy that does not read back as written is refused before the USB
+    // changes.
+    let piece = medium::directory(&first.volume, &first.build).join("ipsw.000");
+    let good = fs::read(&piece).unwrap();
+    let mut bad = good.clone();
+    bad[0] ^= 1;
+    fs::write(&piece, &bad).unwrap();
+    let before_bad = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let error = format!("{:#}", update(false, false).unwrap_err());
+    assert!(error.contains("reading "), "{error}");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before_bad);
+    fs::write(&piece, &good).unwrap();
+    // The update itself needs no image and no network: the stick holds
+    // the image. What it read from the USB is not kept.
+    update(false, false).unwrap();
+    assert!(fs::read_dir(&cache).unwrap().next().is_none());
     let updated = record(&f);
     assert_eq!(updated.bundle_revision, 1);
     assert_eq!(updated.stela_version, first.stela_version);
@@ -2259,6 +2297,136 @@ fn revision_update_rebuilds_bundles() {
     })
     .unwrap();
     assert_eq!(record(&f).bundles, updated.bundles);
+}
+
+/// A setup at revision 0 whose install streams the image from Apple's
+/// servers, so the USB holds no copy of it, and the environment of a stela
+/// that prepares revision 1.
+fn network_setup(f: &mut Fixture, older: &[Box<Prepare>; 2]) {
+    add_stela(f);
+    let mut network = command(f, &stela_volume(f));
+    network.install_image = Some(InstallImage::Network);
+    setup(&environment_at(&f.host, older, 0), network).unwrap();
+    assert!(record(f).active_medium().unwrap().remote);
+}
+
+fn update_request(f: &Fixture, cache: &Path) -> Request {
+    let mut command = command(f, &stela_volume(f));
+    command.action = Action::UpdateStela;
+    command.ipsw = None;
+    command.model = None;
+    command.download_dir = Some(cache.to_path_buf());
+    // Another build than the setup's: every maintenance command works on
+    // the setup's own build.
+    command.build = "STELA2".into();
+    command
+}
+
+#[test]
+fn revision_update_without_any_image_fails_before_changing_anything() {
+    let mut f = fixture(64 * GIB, false);
+    let (older, newer) = (preparers(0), preparers(1));
+    network_setup(&mut f, &older);
+    let cache = f._dir.path().join("cache");
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    // No image, no cache, no network: refused with what to do, the USB
+    // as it was.
+    let error = update_request(&f, &cache)
+        .dispatch(&environment_at(&f.host, &newer, 1))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("schema {} revision 1", current().schema)),
+        "{error}"
+    );
+    assert!(error.contains("--ipsw FILE"), "{error}");
+    assert!(error.contains("streams the image"), "{error}");
+    assert!(error.contains(&cache.display().to_string()), "{error}");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+}
+
+#[test]
+fn revision_update_uses_a_downloaded_image_in_any_cache() {
+    let mut f = fixture(64 * GIB, false);
+    let (older, newer) = (preparers(0), preparers(1));
+    network_setup(&mut f, &older);
+    // The boot archive an earlier run downloaded, in a cache other than
+    // --download-dir's, as root's is to a user's run.
+    let other = f._dir.path().join("root-cache");
+    fs::create_dir_all(&other).unwrap();
+    let archive = other.join(format!(
+        "Recovery_{}_{}.ipsw",
+        restore::payload::SYNTHETIC_BUILD,
+        restore::payload::SYNTHETIC_MODEL.replace(',', "_")
+    ));
+    restore::payload::trim(
+        fs::File::open(&f.ipsw).unwrap(),
+        restore::payload::SYNTHETIC_MODEL,
+        &archive,
+        "Copying boot files",
+    )
+    .unwrap();
+    let caches = [other.clone()];
+    let environment = Environment {
+        image_caches: &caches,
+        ..environment_at(&f.host, &newer, 1)
+    };
+    let cache = f._dir.path().join("cache");
+    let mut dry = update_request(&f, &cache);
+    dry.dry_run = true;
+    let plan = dry.dispatch(&environment).unwrap();
+    assert!(plan.contains(&archive.display().to_string()), "{plan}");
+    update_request(&f, &cache).dispatch(&environment).unwrap();
+    assert_eq!(record(&f).bundle_revision, 1);
+    assert!(archive.is_file());
+}
+
+#[test]
+fn revision_update_downloads_only_the_boot_files_saying_their_size() {
+    let mut f = fixture(64 * GIB, false);
+    let (older, newer) = (preparers(0), preparers(1));
+    network_setup(&mut f, &older);
+    let ipsw = f.ipsw.clone();
+    let fetched = std::cell::Cell::new(0);
+    let fetch = |directory: &Path, build: &str, model: &str| -> Result<PathBuf> {
+        fetched.set(fetched.get() + 1);
+        assert_eq!(build, restore::payload::SYNTHETIC_BUILD);
+        fs::create_dir_all(directory)?;
+        let path = directory.join(format!("Recovery_{build}_{}.ipsw", model.replace(',', "_")));
+        restore::payload::trim(fs::File::open(&ipsw)?, model, &path, "Copying boot files")?;
+        Ok(path)
+    };
+    let size = |build: &str, _: &str| -> Result<(u64, u64)> {
+        assert_eq!(build, restore::payload::SYNTHETIC_BUILD);
+        Ok((2_200_000_000, 27_000_000_000))
+    };
+    let environment = Environment {
+        recovery_size: &size,
+        fetch_recovery: &fetch,
+        ..environment_at(&f.host, &newer, 1)
+    };
+    let cache = f._dir.path().join("cache");
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let mut dry = update_request(&f, &cache);
+    dry.dry_run = true;
+    let plan = dry.dispatch(&environment).unwrap();
+    assert!(plan.contains("download 2.2 GB of the macOS"), "{plan}");
+    assert!(plan.contains("27.0 GB"), "{plan}");
+    assert!(plan.contains("--ipsw FILE"), "{plan}");
+    assert_eq!(fetched.get(), 0, "a dry run downloads nothing");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    update_request(&f, &cache).dispatch(&environment).unwrap();
+    assert_eq!(fetched.get(), 1);
+    assert_eq!(record(&f).bundle_revision, 1);
+    // The next update finds that download and fetches nothing.
+    let newest = preparers(2);
+    let environment = Environment {
+        recovery_size: &size,
+        fetch_recovery: &fetch,
+        ..environment_at(&f.host, &newest, 2)
+    };
+    update_request(&f, &cache).dispatch(&environment).unwrap();
+    assert_eq!((fetched.get(), record(&f).bundle_revision), (1, 2));
 }
 
 #[test]

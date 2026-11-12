@@ -68,6 +68,7 @@ mod machines;
 mod medium;
 mod prepare;
 mod record;
+mod sources;
 mod state;
 mod translations;
 mod uninstall;
@@ -487,6 +488,12 @@ type Prepare = dyn for<'a> Fn(prepare::RamdiskOptions<'a>) -> Result<()>;
 
 /// An IPSW's restore inventory for a model.
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
+/// The bytes of a build's boot members for a model on Apple's servers, and
+/// of its whole image (`restore::recovery_size`).
+type RecoverySizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
+/// Download a build's boot members for a model into a directory
+/// (`prepare::fetch_recovery`).
+type FetchRecoveryOf<'a> = dyn Fn(&Path, &str, &str) -> Result<PathBuf> + 'a;
 
 /// Inputs that the command line fixes and tests replace.
 #[derive(Clone, Copy)]
@@ -510,6 +517,11 @@ struct Environment<'a> {
     /// The revision of the bundles this `stela` prepares
     /// (`stela_loader::boot_bundle::REVISION`).
     bundle_revision: u32,
+    /// Where downloaded images may be, this user's cache first
+    /// (`sources::image_caches`).
+    image_caches: &'a [PathBuf],
+    recovery_size: &'a RecoverySizeOf<'a>,
+    fetch_recovery: &'a FetchRecoveryOf<'a>,
     /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
@@ -588,7 +600,7 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
         format!(
             "this setup's boot bundles are revision {theirs}, and this stela prepares revision \
              {ours}: prepare them again with {}",
-            fix(&record.esp, "update stela --fetch")
+            fix(&record.esp, "update stela")
         )
     } else {
         format!(
@@ -690,8 +702,17 @@ impl Request {
             stela_loader::boot_bundle::SCHEMA_VERSION,
             mount_interface::CURRENT.bundle_schema
         );
+        let image_caches = sources::image_caches();
         let environment = Environment {
             host: &host::System,
+            image_caches: &image_caches,
+            recovery_size: &|build, model| {
+                let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
+                restore::recovery_size(&image, model)
+            },
+            fetch_recovery: &|directory, build, model| {
+                prepare::fetch_recovery(directory, build, model)
+            },
             download: None,
             prepare_restore: &prepare_restore,
             prepare_update: &prepare_update,
@@ -794,9 +815,9 @@ impl Request {
                     .then_some(InstallImage::Full)
             });
         }
-        // Repair puts back the active build's files, so `--fetch` downloads
-        // that build.
-        if matches!(action, Action::Repair) {
+        // Every maintenance command works on the active build's files, so
+        // what it downloads is that build; only `update os` names another.
+        if !matches!(action, Action::UpdateOs) {
             self.build = record.build.clone();
         }
         match action {
@@ -810,14 +831,17 @@ impl Request {
                     Some(path) => path.clone(),
                     None => assets::resolve()?,
                 };
-                let ipsw = self.optional_image()?;
+                // The update finds the restore image itself when it needs
+                // one, downloading only its boot files, never the whole
+                // image; `--fetch` adds nothing to that.
                 update::update_stela(
                     environment,
                     record,
                     update::UpdateOptions {
                         usb: &self.usb,
                         image_path: &image,
-                        ipsw: ipsw.as_deref(),
+                        ipsw: self.ipsw.as_deref(),
+                        download_dir: self.download_dir.as_deref(),
                         dry_run: self.dry_run,
                     },
                 )

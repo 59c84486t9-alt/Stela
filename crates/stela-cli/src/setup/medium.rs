@@ -42,6 +42,7 @@ use {
 };
 
 pub(super) mod download;
+pub(super) mod image;
 
 /// Bytes read at a time: a whole number of hash blocks.
 const BUFFER: usize = 64 * HASH_BLOCK_BYTES as usize;

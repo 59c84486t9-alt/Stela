@@ -38,7 +38,7 @@ impl Download {
             etag: source.etag().into(),
             image,
         };
-        restore::payload::trim(source, model, boot)?;
+        restore::payload::trim(source, model, boot, "Downloading boot files")?;
         ensure!(
             restore::payload::identity(boot, model)?.1 == download.image.build,
             "the catalog download contains a different macOS build"

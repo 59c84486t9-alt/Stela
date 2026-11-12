@@ -483,9 +483,11 @@ impl Repair {
 
 #[derive(Subcommand)]
 enum Update {
-    /// Replace `stela.efi` (`--efi`, or the one built into `stela`); `--ipsw`
-    /// or `--fetch` lets it prepare the boot bundles again when it reads a
-    /// new bundle schema or this `stela` prepares a new bundle revision.
+    /// Replace `stela.efi` (`--efi`, or the one built into `stela`). When it
+    /// reads a new bundle schema or this `stela` prepares a new bundle
+    /// revision, the boot bundles are prepared again from `--ipsw`, an image
+    /// already downloaded, the USB's own copy of macOS, or else the image's
+    /// boot files downloaded alone.
     Stela(UpdateStela),
     /// Replace Install macOS's build with a new one (`--fetch` or `--ipsw`):
     /// its install medium and restore bundles replace the old build's.
@@ -525,9 +527,9 @@ struct UpdateStela {
     efi: Option<PathBuf>,
     #[command(flatten)]
     image: Image,
-    /// Download the restore image from Apple, to prepare the boot files
-    /// again when the new stela.efi needs it.
-    #[arg(long, conflicts_with = "ipsw")]
+    /// Accepted for older instructions: the update downloads what it needs
+    /// by itself.
+    #[arg(long, conflicts_with = "ipsw", hide = true)]
     fetch: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
