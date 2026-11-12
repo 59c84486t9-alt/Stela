@@ -371,8 +371,9 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     for medium in &record.media {
         let mut problems = medium.problems();
         // A piece an install found damaged since the medium was last
-        // written or checked whole.
-        if !medium.remote && problems.is_empty() {
+        // written or checked whole: installs read the active build's
+        // medium alone, so the log's piece is one of its own.
+        if medium.build == record.build && !medium.remote && problems.is_empty() {
             for piece in
                 super::medium::reported_damage(&record.esp, record.medium_checked.unwrap_or(0))
             {
