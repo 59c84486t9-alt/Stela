@@ -3,11 +3,13 @@
 //! against the Arm reference, compiled as blocks for every tier this host
 //! has: every inline completion matches the reference in every V register
 //! and FPSR, every exit leaves the state unchanged, and with FZ, FIZ, AH
-//! and the trap enables clear, every binary lane set completes inline, NaN
+//! and the trap enables clear (FZ and FIZ flushing inputs inline), every
+//! binary lane set completes inline, NaN
 //! propagation, invalid operations, subnormal inputs and results, UFC, OFC
 //! and DZC included, but for FMULX's infinity times zero and a minimum
 //! normal quotient; FMA lanes complete likewise but for a quiet NaN
-//! addend with a NaN product and a minimum normal result.
+//! addend with a NaN product and a minimum normal result. Under FZ a
+//! result Arm flushes to zero takes the helper.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -67,10 +69,28 @@ fn controls() -> [u32; 10] {
     ]
 }
 
-/// FPCR whose operations complete inline for every lane without a NaN
-/// input or an invalid operation.
+/// FPCR whose operations complete inline but for the lanes [`exits`]
+/// and the fused test list.
 fn rounded(fpcr: u32) -> bool {
-    fpcr & (FPCR_FZ | FPCR_FIZ | FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0
+    fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0
+}
+
+/// Under FZ, whether Arm flushes the result (UFC) or the host's result
+/// with the inputs flushed is the minimum normal: those lanes take the
+/// helper.
+fn flushed_output(format: Format, fpcr: u32, exceptions: u32, unflushed: u64) -> bool {
+    let magnitude = unflushed & !format.sign_mask();
+    fpcr & FPCR_FZ != 0
+        && (exceptions & floating::UNDERFLOW != 0 || magnitude == 1 << format.fraction_bits())
+}
+
+/// FPCR with FZ's input flushing but no output flushing.
+fn input_flushing(fpcr: u32) -> u32 {
+    if fpcr & FPCR_FZ != 0 {
+        fpcr & !FPCR_FZ | FPCR_FIZ
+    } else {
+        fpcr
+    }
 }
 
 /// Zeros, subnormals, the minimum normal and values whose products and
@@ -177,6 +197,11 @@ fn exits(operation: BinaryOperation, format: Format, fpcr: u32, left: u64, right
         || operation == BinaryOperation::Divide
             && floating::evaluate(format, operation, fpcr, left, right)
                 .is_ok_and(|outcome| magnitude(outcome.bits) == 1 << format.fraction_bits())
+        || floating::evaluate(format, operation, fpcr, left, right).is_ok_and(|outcome| {
+            floating::evaluate(format, operation, input_flushing(fpcr), left, right).is_ok_and(
+                |unflushed| flushed_output(format, fpcr, outcome.exceptions, unflushed.bits),
+            )
+        })
 }
 
 #[test]
@@ -412,6 +437,23 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                                     .is_ok_and(|outcome| {
                                         magnitude(outcome.bits) != 1 << format.fraction_bits()
                                     })
+                                    && !flushed_output(
+                                        format,
+                                        fpcr,
+                                        floating::fused::evaluate(
+                                            format, operation, fpcr, addend, left, right,
+                                        )
+                                        .map_or(0, |outcome| outcome.exceptions),
+                                        floating::fused::evaluate(
+                                            format,
+                                            operation,
+                                            input_flushing(fpcr),
+                                            addend,
+                                            left,
+                                            right,
+                                        )
+                                        .map_or(0, |outcome| outcome.bits),
+                                    )
                             });
                         let mut actual = initial.clone();
                         let exit = run(&code, &mut actual);

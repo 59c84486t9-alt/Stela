@@ -1,16 +1,17 @@
 //! Fused multiply-add: FMA3 when available, otherwise an exact-product SSE2 path.
 use super::super::isa::ShiftOpcode;
+use super::numerical::reject_flushed_underflow;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
     NanRegisters, RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_environment_status,
     clear_scalar, commit_flush_status, commit_inexact, commit_invalid_lanes, commit_rounded_status,
-    emit_fma, emit_opcode, environment, float_lanes, flush_subnormal_lanes, invalid_lane_mask,
-    jump, merge_nans, minimum_normal_lanes, prepare_vector_input_range,
-    prepare_vector_result_range, quiet_lanes, read_inputs, read_numerical_right,
-    read_numerical_vector, reject_exceptional_lanes, reject_other_status, reject_product_status,
-    resolve, restore_environment, restore_environment_with_product, save_product_status,
-    scalar_ordered_range, select_input_nans, sticky_inexact, sticky_result_check, test_control,
-    vector_ordered_range, zero_product_check,
+    emit_fma, emit_opcode, environment, float_lanes, flush_subnormal_lanes, jump, merge_nans,
+    minimum_normal_lanes, prepare_vector_input_range, prepare_vector_result_range, quiet_lanes,
+    read_inputs, read_numerical_right, read_numerical_vector, reject_exceptional_lanes,
+    reject_other_status, reject_product_status, resolve, restore_environment,
+    restore_environment_with_product, save_product_status, scalar_ordered_range, select_input_nans,
+    small_lanes, sticky_inexact, sticky_result_check, test_control, vector_ordered_range,
+    zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::x86_64::asm::{Alu, Code, FloatOp, Gpr, Rm, Size};
@@ -52,6 +53,9 @@ const NAN_REGISTERS: NanRegisters = NanRegisters {
 };
 /// [`minimum_normal_lanes`]' scratch after [`merge_nans`].
 const MINIMUM_SCRATCH: [u8; 2] = [2, 3];
+/// [`small_lanes`]' scratch after [`merge_nans`], leaving its lanes where
+/// [`minimum_normal_lanes`] does.
+const SMALL_SCRATCH: [u8; 3] = [2, 3, 5];
 /// The unordered compare predicate.
 const UNORDERED: u8 = 3;
 
@@ -179,9 +183,16 @@ pub(in crate::x86_64) fn emit(
     // default NaN with IOC ([`merge_nans`]). A quiet NaN addend whose
     // product is invalid (Arm gives the default NaN with IOC) and a minimum
     // normal result take the helper.
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    for source in [LEFT, RIGHT, ADDEND] {
+        flush_subnormal_lanes(code, operand.format, operand.shape, source, FLUSH_SCRATCH);
+    }
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
     let rounded = native_fma.then(|| {
-        test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
-        let strict = branch(code, Condition::NotZero);
         environment(code);
         negate_operands(code, operand);
         select_input_nans(
@@ -221,7 +232,16 @@ pub(in crate::x86_64) fn emit(
         negate_operands(code, operand);
         emit_checked_fma(code, operand, target);
         merge_nans(code, operand.format, operand.shape, LEFT, NAN_REGISTERS);
+        // Under FZ, a result Arm flushes takes the helper too.
+        test_control(code, FPCR_FZ);
+        let unflushing = branch(code, Condition::Zero);
+        small_lanes(code, operand.format, LEFT, SMALL_SCRATCH);
+        let small = jump(code);
+        let minimum = code.len();
+        resolve(code, unflushing, minimum);
         minimum_normal_lanes(code, operand.format, LEFT, MINIMUM_SCRATCH);
+        let classified = code.len();
+        resolve(code, small, classified);
         Host::DwordSignMask.register(
             code,
             Gpr::Rcx as u8,
@@ -229,30 +249,20 @@ pub(in crate::x86_64) fn emit(
             TargetCpu::Baseline,
         );
         code.asm().alu(Alu::Or, Size::Dword, Gpr::Rax, Gpr::Rcx);
-        invalid_lane_mask(code, NAN_REGISTERS.invalid);
         restore_environment(code);
         helper.push(reject_exceptional_lanes(
             code,
             operand.format,
             operand.shape,
         ));
-        commit_invalid_lanes(code, operand.format, operand.shape);
+        helper.push(reject_flushed_underflow(code));
+        commit_flush_status(code);
+        commit_invalid_lanes(code, operand.format, operand.shape, NAN_REGISTERS.invalid);
         commit_rounded_status(code);
-        let done = jump(code);
-        let strict_start = code.len();
-        resolve(code, strict, strict_start);
-        done
+        jump(code)
     });
-    test_control(code, FPCR_AH);
-    let alternative = branch(code, Condition::NotZero);
-    test_control(code, FPCR_FZ | FPCR_FIZ);
-    let unflushed = branch(code, Condition::Zero);
-    for source in [LEFT, RIGHT, ADDEND] {
-        flush_subnormal_lanes(code, operand.format, operand.shape, source, FLUSH_SCRATCH);
-    }
-    let flushed = code.len();
-    resolve(code, alternative, flushed);
-    resolve(code, unflushed, flushed);
+    let strict = code.len();
+    resolve(code, alternative, strict);
     if operand.shape != Shape::Scalar {
         prepare_vector_input_range(code, operand.format);
     }

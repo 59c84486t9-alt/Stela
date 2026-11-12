@@ -1158,19 +1158,57 @@ pub(super) fn minimum_normal_lanes(code: &mut Code, format: Format, source: u8, 
     );
 }
 
-/// Leave the dword sign mask of `lanes` in R11D, for [`commit_invalid_lanes`].
-pub(super) fn invalid_lane_mask(code: &mut Code, lanes: u8) {
-    Host::DwordSignMask.register(code, Gpr::R11 as u8, lanes, crate::TargetCpu::Baseline);
+/// Set `scratch[0]` to all ones in each S/D lane of `source` that is
+/// nonzero and at most the minimum normal in magnitude: under FPCR.FZ Arm
+/// flushes a result tiny before rounding to zero with UFC alone, which
+/// the host's status cannot give per lane. Clobbers the `scratch`
+/// registers.
+pub(super) fn small_lanes(code: &mut Code, format: Format, source: u8, scratch: [u8; 3]) {
+    const LESS_EQUAL: u8 = 2;
+    const NOT_EQUAL: u8 = 4;
+    let [nonzero, minimum, small] = scratch;
+    let lanes = float_lanes(format, Shape::Vector128);
+    let (right, left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
+    packed(code, Host::EqualDword, nonzero, nonzero);
+    packed(code, Host::MoveAligned, minimum, nonzero);
+    right.emit(code, nonzero, SIGN_BITS);
+    packed(code, Host::And, nonzero, source);
+    right.emit(code, minimum, format.bits() as u8 - SIGN_BITS);
+    left.emit(code, minimum, format.fraction_bits() as u8);
+    packed(code, Host::MoveAligned, small, nonzero);
+    code.asm()
+        .float_compare(lanes, small, Rm::Xmm(minimum), LESS_EQUAL);
+    packed(code, Host::Xor, minimum, minimum);
+    code.asm()
+        .float_compare(lanes, nonzero, Rm::Xmm(minimum), NOT_EQUAL);
+    packed(code, Host::And, nonzero, small);
 }
 
-/// Accumulate FPSR.IOC when an active `shape` lane of [`invalid_lane_mask`]
-/// is set.
-pub(super) fn commit_invalid_lanes(code: &mut Code, format: Format, shape: Shape) {
-    code.asm().test_imm(
-        Size::Dword,
-        Gpr::R11,
-        i32::from(active_lane_bits(format, shape)),
-    );
+/// After the environment is restored, under FPCR.FZ: the branch for the
+/// host's underflow status in ECX, a result tiny and inexact that Arm
+/// flushes to zero with UFC alone, which [`small_lanes`] cannot see once
+/// the host rounded it to zero.
+pub(super) fn reject_flushed_underflow(code: &mut Code) -> usize {
+    test_control(code, crate::aarch64::floating::FPCR_FZ);
+    let unflushing = branch(code, Condition::Zero);
+    code.asm()
+        .test_imm(Size::Dword, Rcx, MXCSR_UNDERFLOW as i32);
+    let underflow = branch(code, Condition::NotZero);
+    let end = code.len();
+    resolve(code, unflushing, end);
+    underflow
+}
+
+/// Accumulate FPSR.IOC when an active `shape` lane of the mask `lanes` is
+/// set, after the environment is restored. Clobbers EAX.
+pub(super) fn commit_invalid_lanes(code: &mut Code, format: Format, shape: Shape, lanes: u8) {
+    Host::DwordSignMask.register(code, Rax as u8, lanes, crate::TargetCpu::Baseline);
+    code.asm()
+        .test_imm(Size::Dword, Rax, i32::from(active_lane_bits(format, shape)));
     let clear = branch(code, Condition::Zero);
     code.asm().alu_imm8(
         Alu::Or,

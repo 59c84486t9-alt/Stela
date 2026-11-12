@@ -195,15 +195,34 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     // operations included, but FMULX's infinity times zero (an exact two,
     // for which the host raises invalid) and a minimum normal quotient
     // (the host may find its tininess after rounding).
-    if state.fpcr & (FPCR_FZ | FPCR_FIZ | FPCR_AH) == 0 {
+    // FZ and FIZ flush the inputs first; under FZ a result Arm flushes
+    // (UFC) or the host's minimum normal exits too.
+    if state.fpcr & FPCR_AH == 0 {
+        let flush_inputs = if state.fpcr & FPCR_FZ != 0 {
+            state.fpcr & !FPCR_FZ | FPCR_FIZ
+        } else {
+            state.fpcr
+        };
+        let minimum = 1 << fraction_bits(format);
         return (0..operand.shape.lane_count(format)).all(|lane| {
             let (a, b) = inputs(state, operand, lane);
+            let flushed = |raw: u64| {
+                if state.fpcr & (FPCR_FZ | FPCR_FIZ) != 0 && exponent(raw) == 0 {
+                    raw & sign_mask(format)
+                } else {
+                    raw
+                }
+            };
             let special = |x, y| zero(x) && infinite(y);
             let extended = operand.operation == BinaryOperation::MultiplyExtended;
             let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
-            !(extended && (special(a, b) || special(b, a)))
+            let unflushed = evaluate(format, operand.operation, flush_inputs, a, b).unwrap();
+            let small = unflushed.bits & !sign_mask(format);
+            !(extended && (special(flushed(a), flushed(b)) || special(flushed(b), flushed(a))))
                 && (operand.operation != BinaryOperation::Divide
-                    || outcome.bits & !sign_mask(format) != 1 << fraction_bits(format))
+                    || outcome.bits & !sign_mask(format) != minimum)
+                && !(state.fpcr & FPCR_FZ != 0
+                    && (outcome.exceptions & UNDERFLOW != 0 || small == minimum))
         });
     }
     // FZ or FIZ with AH clear flush subnormal inputs (FZ raising IDC)
@@ -536,9 +555,9 @@ fn full_path_mixed_lanes_preserve_distinct_pairs_and_flush_or_reject_late_inputs
             write_lane(&mut state.v[2], format.bits(), lane, right);
         }
         assert!(check(&mapping, &operand, state.clone(), 0xffff));
-        // FZ flushes a late subnormal input inline, with IDC; a NaN still
-        // takes the helper.
-        for (bad, native) in [(1, true), (exponent_mask(format) | 1, false)] {
+        // FZ flushes a late subnormal input inline, with IDC, and a NaN
+        // propagates inline.
+        for (bad, native) in [(1, true), (exponent_mask(format) | 1, true)] {
             let mut late = state.clone();
             write_lane(&mut late.v[2], format.bits(), lanes - 1, bad);
             assert_eq!(check(&mapping, &operand, late, 0x8040), native);
