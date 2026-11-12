@@ -1,20 +1,21 @@
 //! Vector Half FMLA/FMLS and scalar FMADD, FMSUB, FNMADD, FNMSUB and FMLA
-//! by element for every finite input on AVX2 hosts with F16C, in Single
-//! lanes (a scalar form's status from lane 0 alone): the product of two Half values is exact in Single,
-//! TwoSum gives the sum's exact error, and the sum rounded to odd (24 bits,
-//! at least Half's 11 plus 2) rounds once more to Half exactly as the one
-//! rounding Arm's FPMulAdd makes. Zeros and subnormal inputs need nothing
-//! apart; a NaN or infinite input, FZ16, AH and enabled traps take the
-//! caller's other path.
-use super::super::numerical::{Condition, branch, jump, resolve};
-use super::super::{commit, encode::guest, half as lanes};
-use crate::x86_64::asm::{Alu, Code, Gpr, Map, Pp, Rm, ShiftOp, Size, Vex};
+//! by element on AVX2 hosts with F16C, in Single lanes (a scalar form's
+//! status from lane 0 alone): the product of two Half values is exact in
+//! Single, TwoSum gives the sum's exact error, and the sum rounded to odd
+//! (24 bits, at least Half's 11 plus 2) rounds once more to Half exactly as
+//! the one rounding Arm's FPMulAdd makes. Zeros and subnormal inputs need
+//! nothing apart. Lanes with a NaN or infinite input take Arm's result from
+//! [`special_lanes`] and rerun as zeros; a quiet NaN addend with a NaN
+//! product, FZ16, AH and enabled traps take the caller's other path.
+use super::super::numerical::{Condition, branch, jump, resolve, test_control};
+use super::super::{Host, commit, encode::guest, half as lanes, packed};
+use crate::x86_64::asm::{Alu, Code, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
         floating::{
-            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_ROUNDING_SHIFT, Format, INEXACT,
-            OVERFLOW, UNDERFLOW,
+            FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_ROUNDING_SHIFT, Format,
+            INEXACT, INVALID, OVERFLOW, UNDERFLOW,
         },
         simd::{arithmetic::Shape, fused::Operand},
     },
@@ -216,6 +217,219 @@ fn flag_if_active(code: &mut Code, lanes: &Lanes, xmm: u8, flag: u32) {
     resolve(code, none, next);
 }
 
+/// The Half inputs: Vn in LEFT, Vm (or its broadcast element) in RIGHT and
+/// the addend in ADDEND.
+fn read_inputs(code: &mut Code, operand: &Operand) {
+    super::prepare_right(code, operand);
+    super::read_numerical_vector(code, operand.shape, operand.left, LEFT);
+    super::read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
+}
+
+const PAND: u8 = 0xdb;
+const PANDN: u8 = 0xdf;
+const POR: u8 = 0xeb;
+const PXOR: u8 = 0xef;
+const PCMPEQW: u8 = 0x75;
+const PCMPGTW: u8 = 0x65;
+
+const WORDS: Vex = Vex {
+    map: Map::M0f,
+    pp: Pp::P66,
+    w: false,
+    l: false,
+};
+
+/// `destination = left op right` on the eight words of XMM registers
+/// (VEX.128.66.0F `opcode`; PANDN is `!left & right`).
+fn word(code: &mut Code, opcode: u8, destination: u8, left: u8, right: u8) {
+    code.asm()
+        .vex(WORDS, opcode, destination, left, Rm::Xmm(right));
+}
+
+/// VPSRLW (`extension` 2), VPSRAW (4) or VPSLLW (6) by `count`.
+fn word_shift(code: &mut Code, extension: u8, destination: u8, source: u8, count: u8) {
+    code.asm()
+        .vex(WORDS, 0x71, extension, destination, Rm::Xmm(source));
+    code.asm().data(&[count]);
+}
+
+/// `destination = mask ? right : left` per byte (VPBLENDVB).
+fn word_blend(code: &mut Code, destination: u8, left: u8, right: u8, mask: u8) {
+    code.asm().vex(
+        Vex {
+            map: Map::M0f3a,
+            ..WORDS
+        },
+        0x4c,
+        destination,
+        left,
+        Rm::Xmm(right),
+    );
+    code.asm().data(&[mask << 4]);
+}
+
+/// `destination` = the words of `source` that are NaN, against the
+/// infinity words in `infinity`.
+fn word_nan(code: &mut Code, destination: u8, source: u8, infinity: u8) {
+    word_shift(code, 6, destination, source, 1);
+    word_shift(code, 2, destination, destination, 1);
+    word(code, PCMPGTW, destination, destination, infinity);
+}
+
+/// ZF clear when the word mask `xmm` has an active lane (VPMOVMSKB into
+/// EAX).
+fn test_active_words(code: &mut Code, lanes: &Lanes, xmm: u8) {
+    code.asm().vex(WORDS, 0xd7, 0, 0, Rm::Xmm(xmm));
+    // Two mask bits per word.
+    let bytes = match lanes.active {
+        0xff => 0xffff,
+        0xf => 0xff,
+        _ => 0x3,
+    };
+    code.asm().test_imm(Size::Dword, Gpr::Rax, bytes);
+}
+
+/// R8D's mark that the special lanes' Half results are on the stack.
+const SPECIAL_SAVED: u32 = 1 << 8;
+/// The stack frame holding the special results and a spilled mask.
+const SPECIAL_FRAME_BYTES: i8 = 32;
+const SPILL: i32 = 16;
+const HALF_INFINITY: u32 = 0x7c00_7c00;
+const HALF_QUIET: u32 = 0x0200_0200;
+const HALF_DEFAULT_NAN: u32 = 0x7e00_7e00;
+const SIGN_WORD: u8 = 15;
+const QUIET_TO_SIGN: u8 = 6;
+
+/// Lanes with an infinite or NaN input: Arm's FPMulAdd results go on the
+/// stack (zero in the other lanes) and their IOC into R8D, and their inputs
+/// become zeros whose negated product and sum are +0 with no status, so the
+/// caller reruns the finite recipe and ORs the results in. A NaN input
+/// gives the first signaling NaN of the addend, the (negated) Vn and Vm,
+/// else the first quiet one, quieted (the default NaN under DN), with IOC
+/// for a signaling one; infinities give the infinity, or the default NaN
+/// with IOC for infinity times zero or opposite infinities. A quiet NaN
+/// addend with a NaN product (Arm's default NaN for infinity times zero)
+/// takes `other`. Clobbers XMM0 to XMM7 and EAX.
+fn special_lanes(code: &mut Code, operand: &Operand, lanes: &Lanes, other: &mut Vec<usize>) {
+    let words = &Lanes {
+        wide: false,
+        active: lanes.active,
+    };
+    const INFINITY: u8 = PRODUCT;
+    const ANY_NAN: u8 = SUM;
+    const SIGNALING: u8 = SCRATCH;
+    const MASK: u8 = ERROR;
+    const SELECTED: u8 = RESULT;
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SPECIAL_FRAME_BYTES);
+    read_inputs(code, operand);
+    let negate = |code: &mut Code| {
+        if operand.operation.negate_left() || operand.operation.negate_addend() {
+            ones(code, words, MASK);
+            word_shift(code, 6, MASK, MASK, SIGN_WORD);
+            if operand.operation.negate_left() {
+                word(code, PXOR, LEFT, LEFT, MASK);
+            }
+            if operand.operation.negate_addend() {
+                word(code, PXOR, ADDEND, ADDEND, MASK);
+            }
+        }
+    };
+    negate(code);
+    constant(code, words, INFINITY, HALF_INFINITY);
+    // Quiet NaNs in reverse order of priority, then signaling ones.
+    packed(code, Host::MoveAligned, SELECTED, RIGHT);
+    word_nan(code, ANY_NAN, RIGHT, INFINITY);
+    for input in [LEFT, ADDEND] {
+        word_nan(code, MASK, input, INFINITY);
+        word(code, POR, ANY_NAN, ANY_NAN, MASK);
+        word_blend(code, SELECTED, SELECTED, input, MASK);
+    }
+    Host::StoreUnaligned.emit(
+        code,
+        ANY_NAN,
+        Mem::base(Gpr::Rsp, SPILL),
+        TargetCpu::Baseline,
+    );
+    word(code, PXOR, SIGNALING, SIGNALING, SIGNALING);
+    for input in [RIGHT, LEFT, ADDEND] {
+        word_nan(code, MASK, input, INFINITY);
+        // ANY_NAN = the quiet bit, as a mask.
+        word_shift(code, 6, ANY_NAN, input, QUIET_TO_SIGN);
+        word_shift(code, 4, ANY_NAN, ANY_NAN, SIGN_WORD);
+        word(code, PANDN, MASK, ANY_NAN, MASK);
+        word(code, POR, SIGNALING, SIGNALING, MASK);
+        word_blend(code, SELECTED, SELECTED, input, MASK);
+    }
+    constant(code, words, MASK, HALF_QUIET);
+    word(code, POR, SELECTED, SELECTED, MASK);
+    test_control(code, FPCR_DN);
+    let propagate = branch(code, Condition::Zero);
+    constant(code, words, SELECTED, HALF_DEFAULT_NAN);
+    let after_default = code.len();
+    resolve(code, propagate, after_default);
+    test_active_words(code, lanes, SIGNALING);
+    let quiet = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm8(Alu::Or, Size::Dword, Gpr::R8, INVALID as i8);
+    let after_signaling = code.len();
+    resolve(code, quiet, after_signaling);
+    // A quiet NaN addend with a NaN product takes `other`.
+    widen(code, lanes, ANY_NAN, LEFT);
+    widen(code, lanes, MASK, RIGHT);
+    multiply(code, lanes, ANY_NAN, ANY_NAN, MASK);
+    narrow(code, lanes, ANY_NAN, ANY_NAN, 0);
+    word_nan(code, MASK, ANY_NAN, INFINITY);
+    word_nan(code, SIGNALING, ADDEND, INFINITY);
+    word(code, PAND, MASK, MASK, SIGNALING);
+    word_shift(code, 6, SIGNALING, ADDEND, QUIET_TO_SIGN);
+    word_shift(code, 4, SIGNALING, SIGNALING, SIGN_WORD);
+    word(code, PAND, MASK, MASK, SIGNALING);
+    test_active_words(code, lanes, MASK);
+    let ordinary = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SPECIAL_FRAME_BYTES);
+    code.asm().vzeroupper();
+    other.push(jump(code));
+    let ordinary_start = code.len();
+    resolve(code, ordinary, ordinary_start);
+    // Without a NaN input: the infinity, or a host NaN (invalid).
+    widen(code, lanes, ANY_NAN, LEFT);
+    widen(code, lanes, MASK, RIGHT);
+    multiply(code, lanes, ANY_NAN, ANY_NAN, MASK);
+    widen(code, lanes, MASK, ADDEND);
+    add(code, lanes, ANY_NAN, MASK, ANY_NAN);
+    narrow(code, lanes, ANY_NAN, ANY_NAN, 0);
+    word_nan(code, SIGNALING, ANY_NAN, INFINITY);
+    Host::LoadUnaligned.emit(code, MASK, Mem::base(Gpr::Rsp, SPILL), TargetCpu::Baseline);
+    word(code, PANDN, SIGNALING, MASK, SIGNALING);
+    test_active_words(code, lanes, SIGNALING);
+    let valid = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm8(Alu::Or, Size::Dword, Gpr::R8, INVALID as i8);
+    let after_invalid = code.len();
+    resolve(code, valid, after_invalid);
+    word_blend(code, SELECTED, ANY_NAN, SELECTED, MASK);
+    constant(code, words, ANY_NAN, HALF_DEFAULT_NAN);
+    word_blend(code, SELECTED, SELECTED, ANY_NAN, SIGNALING);
+    // MASK = the special lanes: an input exponent field all ones.
+    word(code, PXOR, MASK, MASK, MASK);
+    for input in [LEFT, RIGHT, ADDEND] {
+        word(code, PAND, SIGNALING, input, INFINITY);
+        word(code, PCMPEQW, SIGNALING, SIGNALING, INFINITY);
+        word(code, POR, MASK, MASK, SIGNALING);
+    }
+    word(code, PAND, SELECTED, SELECTED, MASK);
+    Host::StoreUnaligned.emit(code, SELECTED, Mem::base(Gpr::Rsp, 0), TargetCpu::Baseline);
+    code.asm()
+        .alu_imm32(Alu::Or, Size::Dword, Gpr::R8, SPECIAL_SAVED as i32);
+    // Zeros in the special lanes, negated back to the inputs.
+    for input in [LEFT, RIGHT, ADDEND] {
+        word(code, PANDN, input, MASK, input);
+    }
+    negate(code);
+}
+
 /// Emit the recipe; returns the branches to the caller's other path, which
 /// it enters with the state untouched, the inputs reread and no YMM upper
 /// half in use.
@@ -255,9 +469,11 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
         );
         asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rcx, 3);
     }
-    super::prepare_right(code, operand);
-    super::read_numerical_vector(code, operand.shape, operand.left, LEFT);
-    super::read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
+    // R8D: the special lanes' IOC, and SPECIAL_SAVED once their results
+    // are on the stack.
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R8, Gpr::R8);
+    read_inputs(code, operand);
+    let arithmetic = code.len();
     widen(code, lanes, LEFT, LEFT);
     widen(code, lanes, RIGHT, RIGHT);
     widen(code, lanes, ADDEND, ADDEND);
@@ -285,8 +501,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
     add(code, lanes, LEFT, LEFT, RIGHT);
     compare(code, lanes, LEFT, LEFT, LEFT, UNORDERED);
     let finite = none_active(code, lanes, LEFT);
-    code.asm().vzeroupper();
-    other.push(jump(code));
+    special_lanes(code, operand, lanes, &mut other);
+    let again = jump(code);
+    resolve(code, again, arithmetic);
     let finite_start = code.len();
     resolve(code, finite, finite_start);
     // An exact zero sum is -0 rounding toward minus infinity unless both
@@ -379,6 +596,18 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
     compare(code, lanes, SCRATCH, LEFT, RIGHT, EQUAL);
     or(code, lanes, PRODUCT, PRODUCT, SCRATCH);
     flag_if_active(code, lanes, PRODUCT, OVERFLOW | INEXACT);
+    // The special lanes' results (their computed lanes are +0) and IOC.
+    code.asm()
+        .test_imm(Size::Dword, Gpr::R8, SPECIAL_SAVED as i32);
+    let ordinary = branch(code, Condition::Zero);
+    Host::LoadUnaligned.emit(code, SCRATCH, Mem::base(Gpr::Rsp, 0), TargetCpu::Baseline);
+    word(code, POR, RESULT, RESULT, SCRATCH);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SPECIAL_FRAME_BYTES);
+    asm.alu_imm8(Alu::And, Size::Dword, Gpr::R8, INVALID as i8);
+    asm.alu(Alu::Or, Size::Dword, Gpr::Rcx, Gpr::R8);
+    let after_special = code.len();
+    resolve(code, ordinary, after_special);
     code.asm().vzeroupper();
     code.asm().alu(
         Alu::Or,

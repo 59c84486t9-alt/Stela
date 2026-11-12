@@ -2,9 +2,9 @@
 //! the Arm reference, compiled as blocks for every tier this host has:
 //! every inline completion matches the reference in every V register and
 //! FPSR, every exit leaves the state unchanged, and on AVX2 hosts with
-//! F16C every finite input (zeros and subnormals included) completes
-//! without an exit in every rounding mode unless FZ16, AH or a trap
-//! enable is set.
+//! F16C every input (zeros, subnormals, infinities and NaNs included)
+//! completes without an exit in every rounding mode unless FZ16, AH or a
+//! trap enable is set, but for a quiet NaN addend with a NaN product.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -86,6 +86,18 @@ fn halves() -> Vec<u16> {
     values
 }
 
+/// Whether a lane must complete inline on the packed recipe: every one but
+/// a quiet NaN addend with a NaN product (a NaN factor, or infinity times
+/// zero, which Arm makes the default NaN).
+fn completes(addend: u64, left: u64, right: u64) -> bool {
+    let magnitude = |bits: u64| bits & 0x7fff;
+    let nan = |bits: u64| magnitude(bits) > 0x7c00;
+    let infinite_zero = |a: u64, b: u64| magnitude(a) == 0x7c00 && magnitude(b) == 0;
+    let nan_product =
+        nan(left) || nan(right) || infinite_zero(left, right) || infinite_zero(right, left);
+    !(nan(addend) && addend & 0x200 != 0 && nan_product)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Form {
     subtract: bool,
@@ -151,7 +163,7 @@ fn reference(form: Form, initial: &GuestState) -> Option<GuestState> {
 }
 
 #[test]
-fn finite_half_fused_lanes_complete_inline() {
+fn half_fused_lanes_complete_inline() {
     let all = halves();
     let mut inline = 0usize;
     let mut runs = 0usize;
@@ -180,13 +192,11 @@ fn finite_half_fused_lanes_complete_inline() {
                         }
                         let finite = (0..lanes as usize).all(|index| {
                             let right = element.map_or(index, |element| element as usize);
-                            [
+                            completes(
                                 lane(vectors[0], index),
                                 lane(vectors[1], index),
                                 lane(vectors[2], right),
-                            ]
-                            .iter()
-                            .all(|bits| bits & 0x7c00 != 0x7c00)
+                            )
                         });
                         for fpcr in controls() {
                             let mut initial = GuestState {
@@ -237,12 +247,11 @@ fn finite_half_fused_lanes_complete_inline() {
 }
 
 /// Scalar FMADD, FMSUB, FNMADD and FNMSUB of H, and FMLA and FMLS of H by
-/// element, against the reference: on AVX2 hosts with F16C every finite
-/// lane (zeros and subnormals included) completes inline unless FZ16, AH or
-/// a trap enable is set, the result alone in Vd or, under FPCR.NEP, in the
+/// element, against the reference: on AVX2 hosts with F16C every lane
+/// [`completes`] inline unless FZ16, AH or a trap enable is set, the result alone in Vd or, under FPCR.NEP, in the
 /// addend's other bits; every exit leaves the state unchanged.
 #[test]
-fn finite_scalar_half_fused_forms_complete_inline() {
+fn scalar_half_fused_forms_complete_inline() {
     const A: u32 = 12;
     let registers = M << 16 | N << 5 | D;
     // (word, operation, addend register, right element).
@@ -294,7 +303,7 @@ fn finite_scalar_half_fused_forms_complete_inline() {
                 let pick =
                     |which: usize| u64::from(all[(start * (which + 1) + which * 7) % all.len()]);
                 let (a, n, m) = (pick(0), pick(1), pick(2));
-                let finite = [a, n, m].iter().all(|bits| bits & 0x7c00 != 0x7c00);
+                let finite = completes(a, n, m);
                 for fpcr in controls().into_iter().chain([FPCR_NEP]) {
                     let mut initial = GuestState {
                         fpcr,
@@ -341,4 +350,105 @@ fn finite_scalar_half_fused_forms_complete_inline() {
         }
     }
     assert!(inline > runs / 6, "{inline} of {runs}");
+}
+
+/// FMLA and FMLS of 8H and 4H and FNMADD of H over every triple of
+/// infinities, quiet and signaling NaNs of both signs, zeros and ordinary
+/// values, eight distinct triples per vector: on the packed recipe every
+/// vector without a quiet NaN addend beside a NaN product completes inline
+/// with Arm's propagated NaN (negated for FMLS's Vn and FNMADD's Vn and
+/// Va, quieted, or the default NaN under DN), infinity or invalid default
+/// NaN and IOC; every exit leaves the state unchanged.
+#[test]
+fn special_half_fused_lanes_complete_inline() {
+    const VALUES: [u64; 10] = [
+        0x7c00, 0xfc00, 0x7e01, 0xfe02, 0x7c03, 0xfc05, 0x0000, 0x8000, 0x3c00, 0x0001,
+    ];
+    const A: u32 = 12;
+    let triples: Vec<[u64; 3]> = (0..VALUES.len().pow(3))
+        .map(|index| {
+            [
+                VALUES[index / 100],
+                VALUES[index / 10 % 10],
+                VALUES[index % 10],
+            ]
+        })
+        .collect();
+    let mut inline = 0usize;
+    for target in targets() {
+        let packed = target.supports(TargetCpu::Avx2)
+            && target.supports(TargetCpu::F16c)
+            && !target.data_independent_timing()
+            && !vector_extensions::half_supported(target);
+        // (word, operation, lanes, addend register; lanes 1 is scalar).
+        let forms: [(u32, FusedOperation, usize, u32); 4] = [
+            (
+                0x4e40_0c00 | M << 16 | N << 5 | D,
+                FusedOperation::Add,
+                8,
+                D,
+            ),
+            (
+                0x4ec0_0c00 | M << 16 | N << 5 | D,
+                FusedOperation::Subtract,
+                8,
+                D,
+            ),
+            (
+                0x0ec0_0c00 | M << 16 | N << 5 | D,
+                FusedOperation::Subtract,
+                4,
+                D,
+            ),
+            (
+                0x1fe0_0000 | M << 16 | A << 10 | N << 5 | D,
+                FusedOperation::NegatedAdd,
+                1,
+                A,
+            ),
+        ];
+        for (word, operation, lanes, addend) in forms {
+            let code = compile(word, target);
+            for chunk in triples.chunks(lanes) {
+                for fpcr in [0, FPCR_DN, 2 << FPCR_ROUNDING_SHIFT] {
+                    let mut initial = GuestState {
+                        fpcr,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    for (index, &[a, n, m]) in chunk.iter().enumerate() {
+                        set_lane(&mut initial.v[addend as usize], index, a);
+                        set_lane(&mut initial.v[N as usize], index, n);
+                        set_lane(&mut initial.v[M as usize], index, m);
+                    }
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    let label = alloc::format!("{word:08x} {chunk:x?} {fpcr:#x} {target:?}");
+                    let completing = chunk.iter().all(|&[a, n, m]| completes(a, n, m));
+                    if exit == PC.0 {
+                        assert_eq!(actual, initial, "{label}");
+                        assert!(!(packed && completing), "exited: {label}");
+                        continue;
+                    }
+                    assert_eq!(exit, RETURN, "{label}");
+                    let mut expected = initial.clone();
+                    let mut result = [0u64; 2];
+                    for (index, &[a, n, m]) in chunk.iter().enumerate() {
+                        let outcome =
+                            floating::fused::evaluate(Format::Half, operation, fpcr, a, n, m)
+                                .unwrap();
+                        expected.fpsr |= outcome.exceptions;
+                        set_lane(&mut result, index, outcome.bits);
+                    }
+                    expected.v[D as usize] = result;
+                    assert_eq!(actual, expected, "{label}");
+                    inline += 1;
+                }
+            }
+        }
+    }
+    let host = TargetCpu::detect();
+    if host.supports(TargetCpu::Avx2) && host.supports(TargetCpu::F16c) {
+        assert!(inline > 500, "{inline}");
+    }
 }
