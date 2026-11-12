@@ -169,7 +169,9 @@ fn suffix(clang: &Path) -> String {
 /// versioned installs' and PATH's, each once.
 pub fn candidates(host: &dyn Host) -> Vec<Found> {
     let mut paths = Vec::new();
-    if let Some(clang) = host.var(VARIABLE).filter(|value| !value.is_empty()) {
+    let explicit = host.var(VARIABLE).filter(|value| !value.is_empty());
+    let named = explicit.is_some();
+    if let Some(clang) = explicit {
         let clang = PathBuf::from(clang);
         // A bare name is looked up on PATH.
         let clang = if clang.components().count() == 1 {
@@ -221,7 +223,8 @@ pub fn candidates(host: &dyn Host) -> Vec<Found> {
     let mut seen = Vec::new();
     for clang in paths {
         if !host.is_file(&clang) {
-            if host.var(VARIABLE).is_some() {
+            // Only a compiler `CLANG` names is listed when it is missing.
+            if named {
                 found.push(Found {
                     clang,
                     version: None,

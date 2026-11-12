@@ -260,6 +260,22 @@ fn nix_shell_takes_tools_from_path_and_libclang_from_the_environment() {
     );
 }
 
+/// An empty `CLANG` is unset: an install directory without a `clang` is
+/// not listed as a missing compiler.
+#[test]
+fn an_empty_clang_lists_only_compilers_that_exist() {
+    let host = Fake::new(&["/usr/bin"])
+        .var("CLANG", "")
+        .file("/usr/lib/llvm-21/lib/libLLVM.so.21.1")
+        .llvm("/usr/bin", 18);
+    let problems = select(&host).unwrap_err().to_string();
+    assert!(
+        problems.starts_with("found Clang 18.1.8 (/usr/bin/clang)."),
+        "{problems}"
+    );
+    assert!(!problems.contains("llvm-21"), "{problems}");
+}
+
 /// A linker or archiver older than the compiler is passed over for the Rust
 /// toolchain's, which is new enough; without either, every missing tool is
 /// listed at once.
