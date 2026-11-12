@@ -74,6 +74,10 @@ pub enum Error {
     Hda(crate::audio::Error),
     HdaNative(native::hda::RetirementError),
     Usb4(native::usb4::Refusal),
+    /// A driver here claimed the function and its start recorded no
+    /// device, no failure and no reason: the probe names it, so no claimed
+    /// device ends up silently absent.
+    Unrecorded,
 }
 
 impl fmt::Display for Error {
@@ -101,6 +105,9 @@ impl fmt::Display for Error {
             Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
             Self::HdaNative(error) => write!(f, "HD Audio native: {error:?}"),
             Self::Usb4(refusal) => write!(f, "USB4 host: {refusal}"),
+            Self::Unrecorded => {
+                f.write_str("its driver started and recorded no device and no failure")
+            }
         }
     }
 }
@@ -714,6 +721,27 @@ pub struct Devices {
 /// when a driver's per-step bounds would add up to more.
 pub const DEVICE_START_US: u64 = 30_000_000;
 
+/// The function a driver here claimed whose start is being accounted for,
+/// with the count of outcomes recorded before it started.
+#[derive(Default)]
+struct Claimed(Option<(Address, usize)>);
+
+impl Claimed {
+    fn begin(&mut self, address: Address, recorded: usize) {
+        self.0 = Some((address, recorded));
+    }
+
+    /// Once its start has ended: a start that recorded no outcome is named
+    /// a failure, so no claimed function is silently absent.
+    fn settle(&mut self, recorded: usize, failures: &mut Vec<(Address, Error)>) {
+        if let Some((address, before)) = self.0.take()
+            && recorded == before
+        {
+            failures.push((address, Error::Unrecorded));
+        }
+    }
+}
+
 /// One function's start under its [`DEVICE_START_US`] budget; a passed
 /// budget is recorded as the function's abandonment when the start ends.
 struct DeviceStart<'a> {
@@ -754,6 +782,31 @@ impl Drop for DeviceStart<'_> {
 }
 
 impl Devices {
+    /// How many outcomes the PCI functions' starts have recorded so far:
+    /// devices, hosts, failures and reasons.
+    fn recorded(&self) -> usize {
+        self.disks.len()
+            + self.gpus.len()
+            + self.inputs.len()
+            + self.audio.len()
+            + self.usb_devices.len()
+            + self.usb_hosts.len()
+            + self.ehci_hosts.len()
+            + self.hda_hosts.len()
+            + self.usb4_hosts.len()
+            + self.sd_hosts.len()
+            + self.rtsx_hosts.len()
+            + self.ahci_hosts.len()
+            + self.bluetooth.len()
+            + self.pcie_bluetooth.len()
+            + self.nics.len()
+            + self.failures.len()
+            + self.device_failures.len()
+            + self.usb_failures.len()
+            + self.platform_failures.len()
+            + self.unsupported.len()
+    }
+
     /// Take up what an xHCI controller brought, at its start or later
     /// through a port change: disks, inputs, links, audio and Bluetooth,
     /// failures and the owners that keep them.
@@ -1244,9 +1297,29 @@ pub unsafe fn probe_with_provider(
         .filter(|function| function.class[0] == 0x03 && function.address.function == 0)
         .map(|function| function.address)
         .collect();
+    // Everything a function's start can record, here or in a later attach.
+    macro_rules! recorded {
+        () => {{
+            #[cfg(feature = "native-acpi")]
+            let smbus = smbus_functions.len();
+            #[cfg(not(feature = "native-acpi"))]
+            let smbus = 0;
+            devices.recorded()
+                + smbus
+                + ehci_hosts.len()
+                + usb_handoff_failures.len()
+                + broadcom_bluetooth.len()
+                + usb4_hosts.len()
+        }};
+    }
+    let mut claimed = Claimed::default();
     for found in scanned {
         for mut function in found {
+            claimed.settle(recorded!(), &mut devices.failures);
             let address = function.address;
+            if claims(&function) || native::Kind::of(&function).is_some() {
+                claimed.begin(address, recorded!());
+            }
             if function.class[0] == 0x02 {
                 devices.network_functions.push(function.identity());
             }
@@ -1646,6 +1719,7 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    claimed.settle(recorded!(), &mut devices.failures);
     devices.abandoned = abandoned;
     let companions_released = pci_scan_complete
         && !usb_handoff_failures
@@ -2274,7 +2348,7 @@ mod tests {
     use crate::firmware::{
         self, Catalog, HandoffProvider, Provenance, Provider, Requirement, Resource, Target,
     };
-    use alloc::format;
+    use alloc::{format, string::ToString};
     use sha2::{Digest, Sha256};
 
     fn identity(
@@ -2495,6 +2569,122 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// A claimed function whose start recorded nothing is a named failure;
+    /// one that recorded anything is left to that record.
+    #[test]
+    fn a_claimed_start_that_records_nothing_is_a_failure() {
+        let address = |device| Address {
+            segment: 0,
+            bus: 7,
+            device,
+            function: 0,
+        };
+        let mut failures = Vec::new();
+        let mut claimed = Claimed::default();
+        claimed.settle(3, &mut failures);
+        assert!(failures.is_empty());
+        claimed.begin(address(0), 3);
+        claimed.settle(4, &mut failures);
+        assert!(failures.is_empty());
+        claimed.begin(address(1), 4);
+        claimed.settle(4, &mut failures);
+        assert!(matches!(
+            failures.as_slice(),
+            [(found, Error::Unrecorded)] if *found == address(1)
+        ));
+        assert_eq!(
+            failures[0].1.to_string(),
+            "its driver started and recorded no device and no failure"
+        );
+        // Settled once only.
+        claimed.settle(4, &mut failures);
+        assert_eq!(failures.len(), 1);
+    }
+
+    /// Every function a driver here claims ends its probe with a record:
+    /// storage, network, audio, USB and native starts that all refuse.
+    #[test]
+    fn every_claimed_function_ends_its_probe_recorded() {
+        let mut ecam = alloc::vec![u32::MAX; (1 << 20) / 4];
+        let functions = [
+            (0x144d_a808, 0x0108_0200),
+            (0x10ec_8125, 0x0200_0000),
+            (0x8086_a352, 0x0106_0100),
+            (0x1022_15b6, 0x0c03_3000),
+            (0x8086_a348, 0x0403_0000),
+            (0x14e4_1686, 0x0200_0000),
+            (0x1af4_1042, 0x0100_0000),
+            (0x1234_5678, 0x0880_0000),
+        ];
+        for (device, (id, class)) in functions.iter().enumerate() {
+            let start = device * (1 << 15) / 4;
+            let page = &mut ecam[start..start + 4096 / 4];
+            page.fill(0);
+            // Vendor in the low half, device in the high half.
+            page[0] = (id & 0xffff) << 16 | id >> 16;
+            page[2] = *class;
+        }
+        let window = EcamWindow {
+            base: ecam.as_mut_ptr() as u64,
+            segment: 0,
+            start_bus: 0,
+            end_bus: 0,
+        };
+        let handoff = Handoff {
+            ecam: alloc::vec![window],
+            mapped: alloc::vec![window.range()],
+            dma: 0..0,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: None,
+        };
+        let services = services::tests::Refusing::minimum_only();
+        // SAFETY: as in the EHCI fixture above: no DMA pages, only the
+        // synthetic ECAM mapped, and every native grant refused.
+        let mut dma = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+        // SAFETY: as above.
+        let devices = unsafe {
+            probe_with_provider(
+                &handoff,
+                PlatformCaptures::default(),
+                &mut dma,
+                handoff_provider(&handoff),
+                Some(&services),
+                None,
+            )
+        };
+        for (device, (id, class)) in functions.iter().enumerate() {
+            let address = Address {
+                segment: 0,
+                bus: 0,
+                device: device as u8,
+                function: 0,
+            };
+            let named = format!("{address} ");
+            let failed = devices.failures.iter().any(|(at, _)| *at == address)
+                || devices
+                    .platform_failures
+                    .iter()
+                    .any(|(at, _)| at.starts_with(&named));
+            let unsupported = devices.unsupported.iter().any(|(at, ..)| *at == address);
+            if *class == 0x0880_0000 {
+                assert!(!failed && !unsupported, "{id:08x}");
+            } else {
+                assert!(failed || unsupported, "{id:08x} {:?}", devices.failures);
+            }
+        }
+        assert!(
+            !devices
+                .failures
+                .iter()
+                .any(|(_, error)| matches!(error, Error::Unrecorded)),
+            "{:?}",
+            devices.failures
+        );
     }
 
     /// The chooser refuses a disk whose controller no driver here takes,
