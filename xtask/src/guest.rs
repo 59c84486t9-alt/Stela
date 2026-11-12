@@ -144,6 +144,8 @@ fn build_bundle(component: &Path, output: &Path, include: &Path) -> Result<PathB
 
 /// Objective-C against the bundle's own declarations of macOS: no SDK.
 const BUNDLE_FLAGS: &[&str] = &[
+    // No distribution configuration file reaches another platform's code.
+    "--no-default-config",
     "-xobjective-c",
     "-std=gnu17",
     "-O2",
@@ -331,6 +333,7 @@ fn embed_kext(kext: &Path, code: &[CodeHash], source: &Path) -> Result<()> {
 /// pointer-authentication intrinsics, which xnu's `ptrauth.h` tests. The kernel
 /// authenticates every function pointer by its type, `kmod_info`'s first.
 const KEXT_FLAGS: &[&str] = &[
+    "--no-default-config",
     "-std=gnu++20",
     "-O2",
     "-Wall",
