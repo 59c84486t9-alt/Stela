@@ -72,8 +72,10 @@ pub(super) enum Source {
     Kept(PathBuf),
     /// The USB's full install medium of the build.
     Medium(medium::Medium),
-    /// Apple's servers: `bytes` to download, of the image's `whole`.
-    Remote { bytes: u64, whole: u64 },
+    /// Apple's servers: the image's boot files, `boot` bytes read by range,
+    /// and for a whole image the `pieces` bytes of it the USB lacks, of the
+    /// image's `whole`.
+    Remote { boot: u64, pieces: u64, whole: u64 },
 }
 
 impl Source {
@@ -198,9 +200,19 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
     };
     match (environment.image_size)(lookup.build, lookup.model) {
         Ok((boot, whole)) => Ok(Source::Remote {
-            bytes: match lookup.need {
-                Need::BootFiles => boot,
-                Need::WholeImage => whole,
+            boot,
+            // A damaged copy of the build keeps its intact pieces.
+            pieces: match lookup.need {
+                Need::BootFiles => 0,
+                Need::WholeImage => match lookup.medium {
+                    Some(m) if m.build == lookup.build => medium::missing_bytes(
+                        &m.volume,
+                        lookup.build,
+                        whole,
+                        environment.piece_bytes,
+                    ),
+                    _ => whole,
+                },
             },
             whole,
         }),
@@ -232,20 +244,45 @@ pub(super) fn describe(source: &Source, lookup: &Lookup<'_>) -> String {
             "from this USB's copy of macOS {build} in {}; nothing is downloaded",
             medium.directory().display()
         ),
-        Source::Remote { bytes, whole } => match lookup.need {
-            Need::BootFiles => format!(
-                "download {} of the macOS {build} image's {} from Apple, its boot files: no \
-                 copy of it is on this USB or this computer (pass --ipsw FILE to use one you \
-                 have)",
-                bytes_text(*bytes),
-                bytes_text(*whole)
-            ),
-            Need::WholeImage => format!(
-                "download the whole macOS {build} image, {}, from Apple straight onto the USB: \
-                 no copy of it is on this computer (pass --ipsw FILE to use one you have)",
-                bytes_text(*whole)
-            ),
-        },
+        Source::Remote { .. } => format!(
+            "download {}: no copy of it is on this {}computer (pass --ipsw FILE to use one you \
+             have)",
+            remote_text(source, build),
+            match lookup.need {
+                Need::BootFiles => "USB or this ",
+                Need::WholeImage => "",
+            }
+        ),
+    }
+}
+
+/// What a [`Source::Remote`] downloads of `build`'s image, with the sizes.
+fn remote_text(source: &Source, build: &str) -> String {
+    let Source::Remote {
+        boot,
+        pieces,
+        whole,
+    } = *source
+    else {
+        return String::new();
+    };
+    let total = bytes_text(boot + pieces);
+    match pieces {
+        0 => format!(
+            "{total} of the macOS {build} image's {} from Apple: its boot files, read by range",
+            bytes_text(whole)
+        ),
+        _ if pieces == whole => format!(
+            "{total} from Apple: the macOS {build} image's boot files, read by range, then the \
+             whole image, {}, straight onto the USB",
+            bytes_text(whole)
+        ),
+        _ => format!(
+            "{total} from Apple: the macOS {build} image's boot files, read by range, then the \
+             {} of it this USB's copy lacks, straight onto the USB; the pieces it holds are \
+             checked and kept",
+            bytes_text(pieces)
+        ),
     }
 }
 
@@ -307,23 +344,12 @@ pub(super) fn obtain(
                 _temporary: Some(temporary),
             })
         }
-        Source::Remote { bytes, whole } => {
-            match lookup.need {
-                Need::BootFiles => eprintln!(
-                    "Downloading {} of the macOS {} image's {}: its boot files, read by range. \
-                     No copy of the image is on this USB or this computer; pass --ipsw FILE to \
-                     use one you have",
-                    bytes_text(*bytes),
-                    lookup.build,
-                    bytes_text(*whole)
-                ),
-                Need::WholeImage => eprintln!(
-                    "Downloading the macOS {} image, {}, straight onto the USB. No copy of it is \
-                     on this computer; pass --ipsw FILE to use one you have",
-                    lookup.build,
-                    bytes_text(*whole)
-                ),
-            }
+        Source::Remote { .. } => {
+            eprintln!(
+                "Downloading {}. No copy of it is on this computer; pass --ipsw FILE to use one \
+                 you have",
+                remote_text(source, lookup.build)
+            );
             let directory = lookup.download_dir(environment);
             let (directory, temporary) = match lookup.need {
                 // Kept, so a later command finds it.

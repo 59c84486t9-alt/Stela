@@ -2633,6 +2633,45 @@ fn os_update_checks_everything_before_any_download() {
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
 }
 
+#[test]
+fn repair_of_a_short_piece_downloads_the_boot_files_and_that_piece_saying_so() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let medium = record(&f).active_medium().cloned().unwrap();
+    let first = medium
+        .directory()
+        .join(stela_formats::payload::piece_name(0));
+    let piece = fs::read(&first).unwrap();
+    fs::write(&first, &piece[1..]).unwrap();
+    let whole = fs::metadata(&f.ipsw).unwrap().len();
+    let boot = 2_200_000_000;
+    let size = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((boot, whole)) };
+    let environment = Environment {
+        image_size: &size,
+        ..environment(&f.host)
+    };
+    let repair = |ipsw: Option<&Path>| {
+        let mut request = update_request(&f, &f._dir.path().join("cache"));
+        request.action = Action::Repair;
+        request.dry_run = true;
+        request.ipsw = ipsw.map(Path::to_path_buf);
+        request.dispatch(&environment).unwrap()
+    };
+    let plan = repair(None);
+    let total = host::bytes_text(boot + piece.len() as u64);
+    assert!(
+        plan.contains(&format!("download {total} from Apple")),
+        "{plan}"
+    );
+    assert!(plan.contains("this USB's copy lacks"), "{plan}");
+    assert!(plan.contains("checked and kept"), "{plan}");
+    // From an image on this computer it writes that piece alone.
+    let plan = repair(Some(&f.ipsw));
+    let piece_text = host::bytes_text(piece.len() as u64);
+    assert!(plan.contains(&format!("({piece_text} to write)")), "{plan}");
+}
+
 /// A full-installer setup whose USB has room for one copy of macOS only,
 /// and the newer build's image.
 fn one_copy_setup() -> (Fixture, PathBuf, u64) {

@@ -255,6 +255,23 @@ pub(super) fn needed_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_by
     need
 }
 
+/// The bytes of the IPSW's pieces not on `volume` at their size: what a
+/// download onto it fetches, the intact pieces being kept.
+pub(super) fn missing_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_bytes: u64) -> u64 {
+    let directory = directory(volume, build);
+    piece_sizes(ipsw_bytes, piece_bytes)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, size)| {
+            fs::metadata(directory.join(piece_name(*index)))
+                .map(|m| m.len())
+                .ok()
+                != Some(*size)
+        })
+        .map(|(_, size)| size)
+        .sum()
+}
+
 /// Volume and piece layout whose required capacity is checked.
 pub(super) struct SpaceOptions<'a> {
     pub(super) volume: &'a Path,

@@ -61,8 +61,11 @@ pub(super) struct MediumPlan {
     /// It names the IPSW on Apple's servers (`medium::write_remote`).
     pub(super) remote: bool,
     pub(super) ipsw_bytes: u64,
-    /// Bytes still to write, with the hash files and a margin.
+    /// Room it needs: the bytes still to write, less a damaged piece's
+    /// that goes first, with the hash files and a margin.
     pub(super) need: u64,
+    /// The bytes of the pieces still to write.
+    pub(super) write: u64,
     pub(super) expected: medium::Expected,
     /// Directories it creates, deepest first.
     pub(super) created: Vec<PathBuf>,
@@ -143,6 +146,7 @@ pub(super) fn plan_install(
             remote,
             ipsw_bytes: 0,
             need: MARGIN,
+            write: 0,
             expected: medium::Expected::default(),
             created: missing_directories(&record.volume, &medium::directory(&record.volume, build)),
         }),
@@ -154,6 +158,7 @@ pub(super) fn plan_install(
                 None => fs::metadata(ipsw)?.len(),
             };
             let need = medium::needed_bytes(&volume, build, ipsw_bytes, environment.piece_bytes);
+            let write = medium::missing_bytes(&volume, build, ipsw_bytes, environment.piece_bytes);
             let created = missing_directories(&volume, &medium::directory(&volume, build));
             Some(MediumPlan {
                 volume,
@@ -161,6 +166,7 @@ pub(super) fn plan_install(
                 remote,
                 ipsw_bytes,
                 need,
+                write,
                 expected: match environment.download {
                     Some(download) => medium::Expected {
                         sha256: None,
@@ -250,7 +256,7 @@ pub(super) fn describe_install(
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
             medium.guid,
-            host::bytes_text(medium.need)
+            host::bytes_text(medium.write)
         )?;
         if medium.expected.sha1.is_none() {
             writeln!(
