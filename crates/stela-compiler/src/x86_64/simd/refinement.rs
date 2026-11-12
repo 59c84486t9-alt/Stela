@@ -1,5 +1,5 @@
 //! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half;
-//! S/D FRECPS with FMA3 and FPCR.AH clear for every input.
+//! S/D FRECPS and FRSQRTS with FMA3 and FPCR.AH clear for every input.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
@@ -10,11 +10,12 @@ use super::numerical::{
     restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
 use super::numerical::{
-    NanRegisters, commit_flush_status, commit_invalid_lanes, commit_rounded_status, environment,
-    flush_subnormal_lanes, jump, merge_nans, select_input_nans,
+    NanRegisters, clear_environment_status, commit_flush_status, commit_invalid_lanes,
+    commit_rounded_status, environment, float_lanes, flush_subnormal_lanes, jump, merge_nans,
+    select_input_nans,
 };
 use super::{Host, commit, half, packed};
-use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
+use crate::x86_64::asm::{Alu, Code, FloatOp, Gpr, Mem, Rm, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -255,8 +256,10 @@ fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, targ
         // addend's (Intel SDM, VFNMADD132SS/SD). LEFT still holds Vn.
         LEFT
     };
-    let rounded = (native_fma && operand.kind == Kind::Reciprocal)
-        .then(|| rounded_reciprocal_step(code, operand, target));
+    let rounded = native_fma.then(|| match operand.kind {
+        Kind::Reciprocal => rounded_reciprocal_step(code, operand, target),
+        Kind::ReciprocalSquareRoot => rounded_square_root_step(code, operand, target),
+    });
     normal_sources(code, operand, &mut helper);
     if operand.kind == Kind::ReciprocalSquareRoot {
         prehalve(code, operand);
@@ -428,6 +431,154 @@ fn rounded_reciprocal_step(code: &mut Code, operand: &Operand, target: TargetCpu
     restore_environment(code);
     commit_flush_status(code);
     commit_invalid_lanes(code, format, shape, NAN_REGISTERS.mask);
+    commit_rounded_status(code);
+    let done = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    done
+}
+
+/// [`rounded_square_root_step`]'s NaN registers: ORIGINAL_LEFT keeps a
+/// scalar's Vn for the merge.
+const SQUARE_ROOT_NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 2,
+    inputs: 3,
+    invalid: 4,
+    mask: 5,
+    temporary: CONSTANT,
+};
+
+/// `bits` in every S or D lane of `xmm`. Clobbers RAX.
+fn splat(code: &mut Code, format: Format, xmm: u8, bits: u64) {
+    code.asm().mov_imm64(Rax, bits);
+    packed(code, Host::MoveGprQword, xmm, Rax as u8);
+    if format == Format::Single {
+        super::shuffle(code, xmm, xmm, 0);
+    } else {
+        packed(code, Host::UnpackLowQword, xmm, xmm);
+    }
+}
+
+/// `destination` = all ones in each S/D lane of `source` whose magnitude is
+/// finite and at least twice the minimum normal, so that halving it by an
+/// exponent decrement is exact. Clobbers `scratch` and RAX.
+fn halvable_lanes(code: &mut Code, format: Format, destination: u8, source: u8, scratch: [u8; 2]) {
+    const LESS: u8 = 1;
+    const LESS_EQUAL: u8 = 2;
+    let lanes = float_lanes(format, Shape::Vector128);
+    let [lower, upper] = scratch;
+    packed(code, Host::EqualDword, destination, destination);
+    if format == Format::Single {
+        ShiftOpcode::RightDword.emit(code, destination, SIGN_BITS as u8);
+    } else {
+        ShiftOpcode::RightQword.emit(code, destination, SIGN_BITS as u8);
+    }
+    packed(code, Host::And, destination, source);
+    splat(code, format, lower, 2 << format.fraction_bits());
+    code.asm()
+        .float_compare(lanes, lower, Rm::Xmm(destination), LESS_EQUAL);
+    splat(code, format, upper, format.exponent_mask());
+    code.asm()
+        .float_compare(lanes, destination, Rm::Xmm(upper), LESS);
+    packed(code, Host::And, destination, lower);
+}
+
+/// S/D FRSQRTS with FMA3 and FPCR.AH clear, for every input: FZ or FIZ
+/// flush subnormal inputs first (FZ raising IDC). Arm's (3 - Vn*Vm) / 2,
+/// rounded once, is FPMulAdd(1.5, -Vn/2, Vm) when halving an operand is
+/// exact: Vn's, or else Vm's, decrementing its exponent. When neither is
+/// halvable (each below twice the minimum normal, or a zero, an infinity
+/// or a NaN), a finite nonzero Vn scales by 2^(fraction bits + 2) first:
+/// a product of two such values is far below 1.5's ulp, so only its sign
+/// and being nonzero round, which the scale keeps. A NaN propagates by
+/// Arm's rules from the negated Vn and Vm ([`select_input_nans`],
+/// [`merge_nans`]); infinity times zero gives 1.5 without IOC, and an
+/// infinity times a nonzero value the host's signed infinity. A result is
+/// never tiny. Leaves the result in LEFT and returns the jump past the
+/// commit's status; AH continues past it.
+fn rounded_square_root_step(code: &mut Code, operand: &Operand, target: TargetCpu) -> usize {
+    const ORDERED: u8 = 7;
+    let (format, shape) = (operand.format, operand.shape);
+    let lanes = float_lanes(format, Shape::Vector128);
+    let [a, b, halve_right, halve_left, mixed] = [2, 3, 4, 5, CONSTANT];
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    for source in [LEFT, RIGHT] {
+        flush_subnormal_lanes(code, format, shape, source, FLUSH_SCRATCH);
+    }
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    // Arm negates Vn before its NaN selection.
+    splat(code, format, a, format.sign_mask());
+    packed(code, Host::Xor, LEFT, a);
+    environment(code);
+    halvable_lanes(code, format, halve_left, LEFT, [a, b]);
+    halvable_lanes(code, format, mixed, RIGHT, [a, b]);
+    packed(code, Host::MoveAligned, halve_right, halve_left);
+    packed(code, Host::AndNot, halve_right, mixed);
+    // `mixed`: the non-NaN Vn lanes with neither operand halvable.
+    packed(code, Host::MoveAligned, mixed, halve_left);
+    packed(code, Host::Or, mixed, halve_right);
+    packed(code, Host::MoveAligned, b, LEFT);
+    code.asm().float_compare(lanes, b, Rm::Xmm(b), ORDERED);
+    packed(code, Host::AndNot, mixed, b);
+    splat(
+        code,
+        format,
+        b,
+        u64::from(format.exponent_bias() + format.fraction_bits() + 2) << format.fraction_bits(),
+    );
+    code.asm().float(FloatOp::Mul, lanes, b, Rm::Xmm(LEFT));
+    packed(code, Host::MoveAligned, a, mixed);
+    packed(code, Host::And, a, b);
+    packed(code, Host::AndNot, mixed, LEFT);
+    packed(code, Host::Or, mixed, a);
+    packed(code, Host::MoveAligned, LEFT, mixed);
+    halvable_lanes(code, format, halve_left, LEFT, [a, b]);
+    // Halve by an exponent decrement.
+    let subtract = if format == Format::Single {
+        Host::SubDword
+    } else {
+        Host::SubQword
+    };
+    splat(code, format, a, 1 << format.fraction_bits());
+    packed(code, Host::MoveAligned, b, a);
+    packed(code, Host::And, b, halve_left);
+    packed(code, subtract, LEFT, b);
+    packed(code, Host::And, a, halve_right);
+    packed(code, subtract, RIGHT, a);
+    select_input_nans(
+        code,
+        format,
+        shape,
+        &[LEFT, RIGHT],
+        SQUARE_ROOT_NAN_REGISTERS,
+    );
+    constant(code, format, Kind::ReciprocalSquareRoot, CONSTANT);
+    // The scale's status is not the guest's.
+    clear_environment_status(code);
+    emit_fma(code, format, shape, FusedOpcode::MultiplyAdd, target);
+    merge_nans(code, format, shape, LEFT, SQUARE_ROOT_NAN_REGISTERS);
+    // Infinity times zero: 1.5, and no IOC.
+    let NanRegisters {
+        selected: kept,
+        invalid,
+        mask,
+        ..
+    } = SQUARE_ROOT_NAN_REGISTERS;
+    constant(code, format, Kind::ReciprocalSquareRoot, CONSTANT);
+    packed(code, Host::MoveAligned, kept, mask);
+    packed(code, Host::AndNot, kept, LEFT);
+    packed(code, Host::And, CONSTANT, mask);
+    packed(code, Host::Or, kept, CONSTANT);
+    packed(code, Host::MoveAligned, LEFT, kept);
+    packed(code, Host::AndNot, mask, invalid);
+    restore_environment(code);
+    commit_flush_status(code);
+    commit_invalid_lanes(code, format, shape, mask);
     commit_rounded_status(code);
     let done = jump(code);
     let alternative_start = code.len();

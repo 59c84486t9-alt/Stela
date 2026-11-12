@@ -4,8 +4,8 @@
 //! (DIT included), with FPCR.DN on and off and FPSR with and without every
 //! cumulative flag: every inline completion matches the reference in its
 //! result, FPSR and the rest of the state; every other run exits at the
-//! instruction with the state unchanged. FRECPS with FMA3 completes every
-//! input inline.
+//! instruction with the state unchanged. FRECPS and FRSQRTS with FMA3
+//! complete every input inline.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::{
@@ -282,11 +282,12 @@ fn products_select_arm_nans_under_dn_on_every_tier() {
                                             actual, initial,
                                             "{op:?} {format:?} {lanes} {index:?} {target:?}"
                                         );
-                                        // FRECPS with FMA3 completes every input.
+                                        // FRECPS and FRSQRTS with FMA3 complete
+                                        // every input.
                                         assert!(
-                                            !(matches!(op, Op::Refinement(Kind::Reciprocal))
+                                            !(matches!(op, Op::Refinement(_))
                                                 && target.supports(TargetCpu::Fma)),
-                                            "FRECPS exited: {format:?} {lanes} n {n:x?} m {m:x?} fpcr {fpcr:#x} {target:?}"
+                                            "refinement exited: {format:?} {lanes} n {n:x?} m {m:x?} fpcr {fpcr:#x} {target:?}"
                                         );
                                         continue;
                                     }
