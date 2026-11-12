@@ -15,6 +15,12 @@ use alloc::{borrow::Cow, format, vec::Vec};
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest;
 
+/// The boot log line `stela.efi` writes when a block of the medium fails
+/// its check, followed by the block (`ipsw.003 block 12`): `stela setup
+/// status` reads it to name the damaged piece and send the user to
+/// `repair`.
+pub const DAMAGED_LOG_LINE: &str = "INSTALL MEDIUM DAMAGED ";
+
 /// A run of a piece's bytes on the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extent {

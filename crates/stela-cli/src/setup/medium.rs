@@ -170,6 +170,82 @@ impl Medium {
     }
 }
 
+impl Medium {
+    /// The pieces whose bytes differ from the SHA-256 `payload.json`
+    /// records for them, each read whole: what a block check during an
+    /// install would refuse. Missing or short pieces are [`Medium::problems`]
+    /// and are named here too.
+    pub(super) fn damaged_pieces(&self) -> Result<Vec<String>> {
+        let directory = self.directory();
+        let manifest = fs::read(directory.join(MANIFEST_FILE))
+            .with_context(|| format!("reading {}", directory.join(MANIFEST_FILE).display()))?;
+        let parsed = stela_formats::payload::PayloadManifest::parse(&manifest)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", directory.display()))?;
+        let Layout::Pieces { pieces, .. } = &parsed.layout else {
+            return Ok(Vec::new());
+        };
+        let total = pieces.iter().map(|piece| piece.bytes).sum();
+        let progress =
+            crate::progress::Phase::bytes("Checking every piece of the install medium", total);
+        let mut damaged = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            let path = directory.join(piece_name(index));
+            let intact = fs::metadata(&path).is_ok_and(|m| m.len() == piece.bytes)
+                && hash_file(&path, piece.bytes, &progress).is_ok_and(|sha| sha == piece.sha256);
+            if !intact {
+                damaged.push(piece_name(index));
+            }
+        }
+        progress.finish();
+        Ok(damaged)
+    }
+}
+
+/// The pieces of the install medium the USB's boot log says failed their
+/// block check during an install (`DAMAGED_LOG_LINE`, `ipsw.003 block 12`),
+/// in lines written after byte `after` of the log's stream: the log's head
+/// when a repair last checked the medium ([`log_head`]). Each piece once.
+pub(super) fn reported_damage(esp: &Path, after: u64) -> Vec<String> {
+    use stela_formats::payload::pieces::DAMAGED_LOG_LINE;
+    let Some(log) = fs::read(esp.join(efi::BOOT_LOG))
+        .ok()
+        .and_then(|region| stela_runtime::pc::boot_log::read(&region).ok())
+    else {
+        return Vec::new();
+    };
+    let start = log.head - log.stream.len() as u64;
+    let mut found: Vec<String> = Vec::new();
+    let mut offset = 0u64;
+    for line in log.stream.split(|&byte| byte == b'\n') {
+        offset += line.len() as u64 + 1;
+        if start + offset <= after {
+            continue;
+        }
+        let text = String::from_utf8_lossy(line);
+        let Some((_, block)) = text.split_once(DAMAGED_LOG_LINE) else {
+            continue;
+        };
+        let piece = block
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        if !piece.is_empty() && !found.contains(&piece) {
+            found.push(piece);
+        }
+    }
+    found
+}
+
+/// The end of the USB's boot log stream: what a check of the medium now
+/// has seen ([`reported_damage`]). Zero without a log.
+pub(super) fn log_head(esp: &Path) -> u64 {
+    fs::read(esp.join(efi::BOOT_LOG))
+        .ok()
+        .and_then(|region| stela_runtime::pc::boot_log::read(&region).ok())
+        .map_or(0, |log| log.head)
+}
+
 /// `stela/install/<build>` on `volume`.
 pub(super) fn directory(volume: &Path, build: &str) -> PathBuf {
     super::join_slashed(volume, &install_directory(build))

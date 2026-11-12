@@ -89,6 +89,11 @@ pub(super) struct Record {
     /// macOS, and running that update again finishes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) replacing: Option<String>,
+    /// The USB boot log's head when the install medium was last written or
+    /// checked whole: a damaged piece the log names before it is put right
+    /// (`medium::reported_damage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) medium_checked: Option<u64>,
     /// The translation store `stela.efi` keeps its packs in, if the USB
     /// has room for one (`setup::translations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

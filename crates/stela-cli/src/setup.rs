@@ -400,6 +400,8 @@ struct Request {
     nor: Option<String>,
     disk_serial: Option<String>,
     erase_target: bool,
+    /// `repair --verify`: read every piece of the install medium.
+    verify: bool,
     initialize_nor: bool,
     install: Option<String>,
     ecid: Option<Ecid>,

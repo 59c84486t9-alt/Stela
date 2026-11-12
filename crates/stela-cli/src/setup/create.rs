@@ -327,6 +327,8 @@ pub(super) fn apply_install(
         if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
             medium.manifest_sha256 = written.manifest_sha256;
         }
+        // Every piece was checked or written and read back.
+        record.medium_checked = Some(medium::log_head(&record.esp));
         write_record(&record.esp.clone(), record)?;
         return remove_replaced(record, &build, previous.as_ref());
     }
@@ -348,6 +350,8 @@ pub(super) fn apply_install(
     if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
         medium.manifest_sha256 = written.manifest_sha256;
     }
+    // Every piece was checked or written and read back.
+    record.medium_checked = Some(medium::log_head(&record.esp));
     write_record(&record.esp.clone(), record)?;
     remove_replaced(record, &build, previous.as_ref())
 }
@@ -756,6 +760,7 @@ pub(super) fn plan(
         profile: command.profile,
         install_image: command.install_image,
         replacing: None,
+        medium_checked: None,
         translations: None,
         wifi: command.wifi.clone().map(|ssid| wifi::Network {
             ssid,

@@ -7,7 +7,9 @@
 //! them, [`open`] finds each piece's clusters through Stela's FAT32 reader
 //! on the partition the storage drivers opened by its GUID, and joins them
 //! into one IPSW whose every block is checked against the piece hashes the
-//! manifest names.
+//! manifest names. A block that fails its check is named once in the boot
+//! log ([`DAMAGED_LOG_LINE`]), which `stela setup status` reads to send the
+//! user to `repair`.
 use super::bundle::{self, Bytes};
 use crate::Result;
 use crate::output;
@@ -16,13 +18,43 @@ use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 use uefi::proto::media::file::Directory;
 use {
-    stela_formats::payload::Layout, stela_formats::payload::PayloadManifest,
-    stela_formats::payload::piece_name, stela_formats::payload::pieces::Joined,
-    stela_runtime::pc::fat32::Fat32,
+    stela_formats::payload::Layout, stela_formats::payload::PayloadError,
+    stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt,
+    stela_formats::payload::piece_name, stela_formats::payload::pieces::DAMAGED_LOG_LINE,
+    stela_formats::payload::pieces::Joined, stela_runtime::pc::fat32::Fat32,
 };
 
-/// The joined install medium the restore host reads.
-pub(super) type Medium = Joined<Bytes<Box<dyn BlockDevice>>>;
+/// The joined install medium the restore host reads. The first block that
+/// fails its hash is named in the boot log and on the screen; the read
+/// fails as before, so nothing damaged reaches the restore.
+pub(super) struct Medium {
+    joined: Joined<Bytes<Box<dyn BlockDevice>>>,
+    reported: bool,
+}
+
+impl ReadAt for Medium {
+    type Error = PayloadError;
+
+    fn len(&self) -> u64 {
+        self.joined.len()
+    }
+
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> core::result::Result<(), Self::Error> {
+        let result = self.joined.read_at(offset, buffer);
+        if let Err(PayloadError::Verification { member, .. }) = &result
+            && !self.reported
+        {
+            self.reported = true;
+            output::arguments(format_args!("{DAMAGED_LOG_LINE}{member}\n"));
+            crate::status::info(
+                "The macOS install files on the USB are damaged: run `stela setup repair` on \
+                 this USB on another computer, then install again.",
+            );
+            output::flush_log();
+        }
+        result
+    }
+}
 
 /// Check, through the firmware's FAT driver on `root`, that every piece
 /// `manifest` lists is in `directory` with its exact size. Each missing or
@@ -105,6 +137,9 @@ pub(super) fn open(
         extents.push(file.extents);
     }
     Joined::from_static_hashes(volume.into_inner(), manifest, extents, hashes)
-        .map(|joined| joined.with_two_block_reads(read_limit, sector_bytes))
+        .map(|joined| Medium {
+            joined: joined.with_two_block_reads(read_limit, sector_bytes),
+            reported: false,
+        })
         .map_err(|error| refuse!("install medium: {error}", %error))
 }

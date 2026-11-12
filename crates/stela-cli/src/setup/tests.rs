@@ -296,6 +296,7 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         nor: None,
         disk_serial: None,
         erase_target: false,
+        verify: false,
         initialize_nor: false,
         install: None,
         ecid: None,
@@ -2666,6 +2667,89 @@ fn a_new_setup_takes_an_image_this_computer_holds_instead_of_downloading() {
         );
         assert_eq!(record(&f).install_kind(), installer);
     }
+}
+
+#[test]
+fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair() {
+    use stela_formats::payload::pieces::DAMAGED_LOG_LINE;
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let medium = record(&f).active_medium().cloned().unwrap();
+    let first = medium
+        .directory()
+        .join(stela_formats::payload::piece_name(0));
+    let good = fs::read(&first).unwrap();
+    // One byte changed, the size kept: only reading the piece finds it.
+    let mut bad = good.clone();
+    bad[7] ^= 1;
+    fs::write(&first, &bad).unwrap();
+    let status = || rerun(&f, |c| c.action = Action::Status);
+    let clean = status().unwrap();
+    assert!(
+        clean.contains("every block is checked as the install reads it"),
+        "{clean}"
+    );
+    // The image, downloaded earlier.
+    let cache = f._dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::copy(
+        &f.ipsw,
+        cache.join(format!(
+            "UniversalMac_0_{}_Restore.ipsw",
+            restore::payload::SYNTHETIC_BUILD
+        )),
+    )
+    .unwrap();
+    let repair = |verify: bool, dry_run: bool| {
+        let mut request = update_request(&f, &cache);
+        request.action = Action::Repair;
+        request.verify = verify;
+        request.dry_run = dry_run;
+        request.dispatch(&environment(&f.host)).unwrap()
+    };
+    // Asked to, repair reads every piece, and names what it finds.
+    let plan = repair(true, true);
+    assert!(
+        plan.contains("ipsw.000 damaged: would be removed"),
+        "{plan}"
+    );
+    assert_eq!(fs::read(&first).unwrap(), bad);
+    // An install that found the block: status names the piece and repair.
+    let line = format!("[   12.000] {DAMAGED_LOG_LINE}ipsw.000 block 0\n");
+    fs::write(
+        f.esp.join(efi::BOOT_LOG),
+        crate::boot_log::tests::region(&[&line]),
+    )
+    .unwrap();
+    let problems = format!("{:#}", status().unwrap_err());
+    assert!(
+        problems.contains("ipsw.000 failed its block check"),
+        "{problems}"
+    );
+    assert!(problems.contains("setup repair --usb"), "{problems}");
+    // Repair finds it by itself, and writes it again from the image.
+    let done = repair(false, false);
+    assert!(done.contains("ipsw.000 damaged: removed"), "{done}");
+    assert_eq!(fs::read(&first).unwrap(), good);
+    // The log still names it; it is put right since.
+    assert!(status().unwrap().contains("No problems found."));
+    let again = repair(true, false);
+    assert!(
+        again.contains("every piece read and checked: intact"),
+        "{again}"
+    );
+    // A later install that finds a damaged block is named again.
+    fs::write(
+        f.esp.join(efi::BOOT_LOG),
+        crate::boot_log::tests::region(&[&line, &line]),
+    )
+    .unwrap();
+    let problems = format!("{:#}", status().unwrap_err());
+    assert!(
+        problems.contains("ipsw.000 failed its block check"),
+        "{problems}"
+    );
 }
 
 #[test]

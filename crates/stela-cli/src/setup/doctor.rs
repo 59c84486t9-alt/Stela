@@ -369,7 +369,20 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         ));
     }
     for medium in &record.media {
-        let problems = medium.problems();
+        let mut problems = medium.problems();
+        // A piece an install found damaged since the medium was last
+        // written or checked whole.
+        if !medium.remote && problems.is_empty() {
+            for piece in
+                super::medium::reported_damage(&record.esp, record.medium_checked.unwrap_or(0))
+            {
+                problems.push(format!(
+                    "{} failed its block check when an install read it (the USB's boot log \
+                     says so)",
+                    medium.directory().join(&piece).display()
+                ));
+            }
+        }
         if medium.build != record.build {
             report.line(
                 "leftover",
@@ -393,10 +406,12 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
                     true => "Online, downloads during installation".into(),
                     false => format!("Offline, on partition {}", medium.partition_guid),
                 },
-                if problems.is_empty() {
-                    "intact"
-                } else {
-                    "DAMAGED"
+                match (problems.is_empty(), medium.remote) {
+                    (false, _) => "DAMAGED",
+                    (true, true) => "intact",
+                    // Its bytes are read only by an install, or by
+                    // `repair --verify`.
+                    (true, false) => "complete; every block is checked as the install reads it",
                 }
             ),
         );
@@ -754,6 +769,59 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     // and where it comes from, is decided before anything is downloaded.
     let rebuild = command.ipsw.is_some() || command.fetch;
     let has_media = record.installs_media();
+    // The full medium's bytes, read whole when asked or when an install
+    // found a piece damaged since it was last checked: a damaged piece is
+    // removed (in a dry run, named) and written again like a missing one.
+    let mut checked = None;
+    if let Some(medium) = record
+        .active_medium()
+        .filter(|m| !m.remote && m.problems().is_empty())
+        .cloned()
+    {
+        let reported =
+            super::medium::reported_damage(&record.esp, record.medium_checked.unwrap_or(0));
+        if command.verify || !reported.is_empty() {
+            let damaged = medium.damaged_pieces()?;
+            match damaged.is_empty() {
+                true => writeln!(
+                    text,
+                    "  install medium every piece read and checked: intact{}",
+                    match reported.is_empty() {
+                        true => String::new(),
+                        false => format!(
+                            " (the boot log named {}, which reads back correctly now)",
+                            reported.join(", ")
+                        ),
+                    }
+                )?,
+                false => writeln!(
+                    text,
+                    "  install medium {} damaged: {}",
+                    damaged.join(", "),
+                    match command.dry_run {
+                        true => "would be removed and written again",
+                        false => "removed, to be written again",
+                    }
+                )?,
+            }
+            if !command.dry_run {
+                for piece in &damaged {
+                    fs::remove_file(medium.directory().join(piece))?;
+                }
+            }
+            checked = Some(super::medium::log_head(&record.esp));
+        }
+    } else if command.verify {
+        writeln!(
+            text,
+            "  install medium {}",
+            match record.active_medium() {
+                Some(m) if m.remote => "streams from Apple: no piece is on the USB to check",
+                Some(_) => "incomplete: the missing or short pieces are written again",
+                None => "none",
+            }
+        )?;
+    }
     let damaged_bundles = has_media
         && super::restore_bundles(&record.install_machines())
             .into_iter()
@@ -1070,6 +1138,11 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             ..*environment
         };
         apply_install(&environment, &mut record, &obtained.path, plan)?;
+    }
+    // A check that found the medium intact; one that removed pieces had
+    // them written again above, which records its own.
+    if checked.is_some() && record.medium_checked < checked {
+        record.medium_checked = checked;
     }
     publish(&mut record)?;
     write_record(&esp, &record)?;

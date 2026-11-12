@@ -450,6 +450,11 @@ struct Repair {
     /// ECID one, from wherever the image is found.
     #[arg(long, conflicts_with = "ipsw")]
     fetch: bool,
+    /// Read every piece of the install medium and put right those whose
+    /// bytes differ; repair does it by itself when an install found one
+    /// damaged.
+    #[arg(long)]
+    verify: bool,
     /// Erase the other file system an install's SSD partition holds: the
     /// PC's own OS would mount it and clear Stela's machine state.
     #[arg(long)]
@@ -480,6 +485,7 @@ impl Repair {
             ecid: self.ecid,
             new_ecid: self.new_ecid,
             dry_run: self.dry_run,
+            verify: self.verify,
             ..self.usb.request(Action::Repair)
         };
         self.image.apply_optional(&mut request, self.fetch);
