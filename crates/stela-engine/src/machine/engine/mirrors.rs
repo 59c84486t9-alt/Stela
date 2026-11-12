@@ -213,6 +213,7 @@ pub(super) const TIMER: register_read::TimerPlaces = register_read::TimerPlaces 
     compare: cell_place(TIMER_COMPARE),
     control: cell_place(TIMER_CONTROL),
     lines_until: Place::new(Anchor::Mirrors, offset_of!(Mirrors, lines_until)),
+    interrupt_status: INTERRUPT_STATUS,
     count: Place::new(Anchor::Count, 0),
 };
 

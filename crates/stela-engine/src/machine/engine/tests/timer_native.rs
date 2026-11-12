@@ -1,8 +1,8 @@
 //! Native EL2 virtual timer accesses (`x86_64::register_read::timer_thunk`)
 //! run on the machine's own frame and cells against the engine path: a
-//! write completes natively only when it moves the next rise no earlier
-//! than the engine looks again, and the engine then takes the timer from
-//! storage, never from what it cached before the write.
+//! write completes natively only when it leaves the line low, pulling the
+//! native deadlines down to an earlier rise, and the engine then takes the
+//! timer from storage, never from what it cached before the write.
 
 use super::super::transitions::tests::run_native;
 use super::*;
@@ -166,20 +166,18 @@ fn plain_timer_accesses_open_the_cells_where_they_reach_the_el2_virtual_timer() 
 }
 
 /// A later deadline completes natively; the engine, which looked again at
-/// its old deadline, raises nothing there and the FIQ at the new one. An
-/// earlier one, or one due at once, exits and changes nothing.
+/// its old deadline, raises nothing there and the FIQ at the new one. One
+/// due at once exits and changes nothing.
 #[test]
 fn later_deadlines_complete_natively_and_fire_at_the_new_count() {
     let clock = count_state();
     let mut machine = armed(&clock);
-    assert!(!native(&mut machine, TimerAccess::WriteValue, 20));
     assert!(!native(&mut machine, TimerAccess::WriteValue, 0));
     assert!(!native(
         &mut machine,
         TimerAccess::WriteValue,
         (-5i32) as u32 as u64
     ));
-    assert!(!native(&mut machine, TimerAccess::WriteCompare, 149));
     assert_eq!(stored(&machine), (150, ENABLE));
     assert!(native(&mut machine, TimerAccess::WriteValue, 100));
     assert_eq!(stored(&machine), (200, ENABLE));
@@ -195,6 +193,45 @@ fn later_deadlines_complete_natively_and_fire_at_the_new_count() {
     assert!(!native(&mut machine, TimerAccess::WriteCompare, 400));
     let written = fixed(&machine);
     assert!(!native(&mut machine, TimerAccess::WriteControl(written), 0));
+}
+
+/// An earlier deadline completes natively too: it pulls the count where
+/// native code stops letting the line pass unseen, and the native ISR_EL1
+/// read's deadline, down to the new compare, where the engine raises the
+/// FIQ; a native ISR_EL1 read past it exits.
+#[test]
+fn earlier_deadlines_complete_natively_and_pull_the_native_deadlines_down() {
+    let clock = count_state();
+    let mut machine = armed(&clock);
+    assert_eq!(machine.mirrors.interrupt_status.readable, 150);
+    assert!(native(&mut machine, TimerAccess::WriteValue, 20));
+    assert_eq!(stored(&machine), (120, ENABLE));
+    assert_eq!(
+        (
+            machine.mirrors.lines_until,
+            machine.mirrors.interrupt_status.readable
+        ),
+        (120, 120)
+    );
+    assert!(native(&mut machine, TimerAccess::WriteCompare, 110));
+    assert_eq!(machine.mirrors.lines_until, 110);
+    assert!(!fiq_at(&mut machine, &clock, 109));
+    assert_eq!(machine.mirrors.interrupt_status.readable, 110);
+    at(&mut machine, &clock, 110);
+    let isr = register_read::interrupt_status_thunk(
+        GuestAddress(BASE),
+        10,
+        INTERRUPT_STATUS,
+        Place::new(stela_compiler::Anchor::Control, offset_of_epoch()),
+        Place::new(stela_compiler::Anchor::Count, 0),
+    );
+    let (pc, kind) = run_native(&mut machine, &isr.code);
+    assert_eq!((pc, kind), (BASE, ExitKind::System as u64), "ISR past it");
+    assert!(fiq_at(&mut machine, &clock, 110));
+}
+
+fn offset_of_epoch() -> usize {
+    core::mem::offset_of!(chain::ChainControl, interrupt_epoch)
 }
 
 fn fixed(machine: &Machine<FakeHost, NoDevices>) -> register_read::Written {

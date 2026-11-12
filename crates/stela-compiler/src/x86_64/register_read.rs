@@ -1165,12 +1165,15 @@ pub enum TimerAccess {
 /// Where a [`timer_thunk`] finds its channel and the engine's words: two
 /// cells whose `value` is the address of the compare's storage and the
 /// control's, the count before which the engine looks at the lines again
-/// ([`crate::x86_64::transition::Places::lines_until`]) and the count reader.
+/// ([`crate::x86_64::transition::Places::lines_until`]), the native ISR_EL1
+/// read's cell, open until a count ([`interrupt_status_thunk`]), and the
+/// count reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimerPlaces {
     pub compare: Place,
     pub control: Place,
     pub lines_until: Place,
+    pub interrupt_status: Place,
     pub count: Place,
 }
 
@@ -1183,15 +1186,17 @@ const TIMER_STATUS_SHIFT: u8 = 2;
 
 /// The thunk completing `access` of a timer channel at `pc` with Xt, else
 /// exiting at `pc`. Both cells must be open. A write completes only when it
-/// leaves the channel's output low and its next rise no earlier than the
-/// engine's `lines_until`, which must name a count (not 0): the output was
-/// low (disabled, masked or before the compare), and once the write is done
-/// it is disabled, masked or armed for a compare after the count and at or
-/// past `lines_until`. The engine, which looks at the lines again at
-/// `lines_until`, then finds the new compare in storage; anything else,
-/// which could raise or lower the line or move its rise earlier, exits. A
-/// count that passes the new compare after the thunk read it is at or past
-/// `lines_until` too. It clobbers RAX, RCX and RDX.
+/// leaves the channel's output low, and the engine's `lines_until` names a
+/// count (not 0): the output was low (disabled, masked or before the
+/// compare), and once the write is done it is disabled, masked or armed for
+/// a compare after the count. A compare before `lines_until` pulls it, and
+/// the deadline of an open ISR_EL1 cell, down to the compare: every native
+/// path that could let the line's rise pass unseen (an unmasking ERET or
+/// GEXIT, an ISR_EL1 read, a WFE's spin) stops there, and the engine, which
+/// looks at the lines again at the next boundary, finds the new compare in
+/// storage. Anything else, which could raise or lower the line now, exits.
+/// A count that passes the new compare after the thunk read it is at or
+/// past those deadlines too. It clobbers RAX, RCX and RDX.
 pub fn timer_thunk(pc: GuestAddress, rt: u8, access: TimerAccess, places: TimerPlaces) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::{Dword, Qword};
@@ -1287,9 +1292,17 @@ pub fn timer_thunk(pc: GuestAddress, rt: u8, access: TimerAccess, places: TimerP
     // Armed: after the count, and no earlier than the engine looks again.
     asm.alu(Alu::Cmp, Qword, Rax, Rdx);
     let at_once = asm.jcc(Cond::Be);
+    // Earlier than the engine looks again: pull its deadlines down.
     asm.place(Rdx, places.lines_until);
     asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
-    let earlier = asm.jcc(Cond::B);
+    let later = asm.jcc(Cond::Ae);
+    asm.mov_store(Qword, Mem::base(Rdx, 0), Rax);
+    asm.place(Rdx, places.interrupt_status);
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    let read_later = asm.jcc(Cond::Ae);
+    asm.mov_store(Qword, Mem::base(Rdx, 0), Rax);
+    asm.bind(later);
+    asm.bind(read_later);
     asm.bind(quiet);
     let target = match access {
         TimerAccess::WriteControl(_) => places.control,
@@ -1299,7 +1312,7 @@ pub fn timer_thunk(pc: GuestAddress, rt: u8, access: TimerAccess, places: TimerP
     asm.mov_store(Qword, Mem::base(Rax, 0), Rcx);
     finish_unless(
         code,
-        [closed, control_closed, unknown, was_high, at_once, earlier],
+        [closed, control_closed, unknown, was_high, at_once],
         pc,
     )
 }
@@ -2456,10 +2469,11 @@ mod tests {
     }
 
     /// Timer thunks run on the host against a count the test moves: writes
-    /// that keep the output low and arm no compare before `lines_until`
-    /// complete into storage, every other write exits with storage as it
-    /// was, and CTL reads give ENABLE and IMASK as stored with ISTATUS from
-    /// the count.
+    /// that keep the output low complete into storage, one that arms a
+    /// compare before `lines_until` pulling it and an open ISR_EL1 cell's
+    /// deadline down to the compare; every other write exits with storage
+    /// as it was, and CTL reads give ENABLE and IMASK as stored with
+    /// ISTATUS from the count.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn timer_thunks_complete_only_writes_that_raise_nothing_before_the_engine_looks() {
@@ -2474,6 +2488,7 @@ mod tests {
             cval: u64,
             ctl: u64,
             lines_until: u64,
+            status: Cell,
         }
         const ENABLE: u64 = 1;
         const IMASK: u64 = 2;
@@ -2483,6 +2498,7 @@ mod tests {
             compare: place(offset_of!(Timer, compare)),
             control: place(offset_of!(Timer, control)),
             lines_until: place(offset_of!(Timer, lines_until)),
+            interrupt_status: place(offset_of!(Timer, status)),
             count: READER,
         };
         let mut timer = alloc::boxed::Box::new(Timer::default());
@@ -2560,14 +2576,26 @@ mod tests {
             NEXT,
             (180, ENABLE),
         );
-        // Earlier than the engine looks again: exit.
-        expect(100, 150, armed, &value, 30, MISS, armed);
+        // Earlier than the engine looks again: completes and pulls its
+        // deadlines down to the compare, an open ISR_EL1 cell's only.
+        for (status, pulled) in [(150, 130), (0, 0), (120, 120)] {
+            data(&mut |d| d.status.readable = status);
+            expect(100, 150, armed, &value, 30, NEXT, (130, ENABLE));
+            data(&mut |d| {
+                assert_eq!((d.lines_until, d.status.readable), (130, pulled));
+            });
+        }
+        data(&mut |d| d.status.readable = 0);
+        // A later one leaves them.
+        expect(100, 150, armed, &value, 80, NEXT, (180, ENABLE));
+        data(&mut |d| assert_eq!(d.lines_until, 150));
         // Due at once, or already past: exit.
         expect(100, 150, armed, &value, 0, MISS, armed);
         expect(100, 150, armed, &value, 0xffff_fff6, MISS, armed);
         // CVAL: at lines_until itself completes.
         expect(100, 150, armed, &compare, 150, NEXT, (150, ENABLE));
-        expect(100, 150, armed, &compare, 149, MISS, armed);
+        expect(100, 150, armed, &compare, 149, NEXT, (149, ENABLE));
+        data(&mut |d| assert_eq!(d.lines_until, 149));
         // The output is high (armed and past its compare): every write exits.
         expect(100, 150, (90, ENABLE), &compare, 500, MISS, (90, ENABLE));
         expect(100, 150, (90, ENABLE), &control, 0, MISS, (90, ENABLE));
@@ -2604,14 +2632,24 @@ mod tests {
             MISS,
             (90, ENABLE | IMASK),
         );
-        // Enabling arms the stored compare: before lines_until exits.
-        expect(100, 150, (120, 0), &control, ENABLE, MISS, (120, 0));
+        // Enabling arms the stored compare, before lines_until pulling it.
+        expect(100, 150, (120, 0), &control, ENABLE, NEXT, (120, ENABLE));
+        data(&mut |d| assert_eq!(d.lines_until, 120));
         expect(100, 150, (160, 0), &control, ENABLE, NEXT, (160, ENABLE));
-        // No count named (0): every write exits; none armed (MAX): only a
-        // write that arms a compare exits.
+        // No count named (0): every write exits; none (MAX): a write that
+        // arms a compare names it.
         expect(100, 0, armed, &control, 0, MISS, armed);
         expect(100, u64::MAX, armed, &control, 0, NEXT, (200, 0));
-        expect(100, u64::MAX, armed, &value, 1 << 20, MISS, armed);
+        expect(
+            100,
+            u64::MAX,
+            armed,
+            &value,
+            1 << 20,
+            NEXT,
+            (100 + (1 << 20), ENABLE),
+        );
+        data(&mut |d| assert_eq!(d.lines_until, 100 + (1 << 20)));
         expect(
             100,
             u64::MAX,
