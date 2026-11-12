@@ -35,6 +35,30 @@ pub enum Error {
     UnmapFailed,
     Assignment(crate::bus::pci::assignment::Error),
 }
+/// A plain account for the boot log.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ConfigurationOperationRequired => {
+                "configuration space needs its own configuration access"
+            }
+            Self::InvalidRange => "the range lies outside the resource",
+            Self::OutsideResource => "the address is outside every resource the firmware reserves",
+            Self::ResourceConflict => "the range overlaps another owner's resource",
+            Self::CacheConflict => "an existing mapping of the range uses another cache type",
+            Self::UnsupportedCache => "the cache type is unsupported for this range",
+            Self::Unavailable => "the mapping service is unavailable",
+            Self::AlreadyActive => "the mapping service is already active",
+            Self::Busy => "the resource is still in use",
+            Self::Exhausted => "no mapping slot is left",
+            Self::InvalidPlatformReply => "the page tables answered inconsistently",
+            Self::Retired => "the resource is retired",
+            Self::MappingFailed => "the page tables refused the mapping",
+            Self::UnmapFailed => "the page tables refused to remove the mapping",
+            Self::Assignment(error) => return error.fmt(f),
+        })
+    }
+}
 
 /// Checked nonempty half-open physical interval. Whole-page coverage is checked
 /// separately: rounding a request must never acquire an unowned neighbor page.

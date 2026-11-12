@@ -219,7 +219,12 @@ impl HostNetwork {
                         "NETWORK adapter={location} addresses={:?} dns={:?}\n",
                         config.addresses, config.dns
                     ));
-                    let description = format!("{:?} on adapter {location}", config.addresses);
+                    let addresses: Vec<String> = config
+                        .addresses
+                        .iter()
+                        .map(alloc::string::ToString::to_string)
+                        .collect();
+                    let description = format!("{} on adapter {location}", addresses.join(", "));
                     return Ok(Self {
                         stack,
                         description,
@@ -238,10 +243,12 @@ impl HostNetwork {
         if failures.is_empty() {
             Err(refuse!("{NO_ADAPTER}", NO_ADAPTER))
         } else {
+            // One line each: the screen shows every line of the refusal on
+            // its own.
             Err(refuse!(
-                "{NO_LEASE} {failures}",
+                "{NO_LEASE}\n{failures}",
                 NO_LEASE,
-                failures = failures.join("; ")
+                failures = failures.join("\n")
             ))
         }
     }

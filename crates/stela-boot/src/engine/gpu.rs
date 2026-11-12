@@ -437,7 +437,7 @@ impl Platform for Host {
                 .filter(|&now| now != i64::MAX)
                 .ok_or(WorkError::Exhausted)
         });
-        sample.unwrap_or_else(|error| output::fatal(format_args!("Linux clock failed: {error:?}")))
+        sample.unwrap_or_else(|error| output::fatal(format_args!("Linux clock failed: {error}")))
     }
 
     fn boottime_ns(&self) -> Result<u64, WorkError> {

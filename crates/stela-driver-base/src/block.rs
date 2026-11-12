@@ -223,15 +223,15 @@ impl fmt::Display for BlockError {
             Self::Protocol(what) => write!(f, "transport protocol violation: {what}"),
             Self::Timeout => f.write_str("device timeout"),
             Self::NoDmaMemory => f.write_str("DMA pages exhausted"),
-            Self::Dma(error) => write!(f, "DMA allocation: {error:?}"),
-            Self::Mmio(error) => write!(f, "MMIO mapping: {error:?}"),
-            Self::Irq(error) => write!(f, "IRQ: {error:?}"),
+            Self::Dma(error) => write!(f, "DMA allocation: {error}"),
+            Self::Mmio(error) => write!(f, "MMIO mapping: {error}"),
+            Self::Irq(error) => write!(f, "interrupt: {error}"),
             Self::Config(error) => write!(f, "PCI configuration: {error}"),
-            Self::PciCapability(error) => write!(f, "PCI capability: {error:?}"),
+            Self::PciCapability(error) => write!(f, "PCI capability: {error}"),
             Self::PciPower(crate::bus::pci::power::Error::StartBudget) => {
                 f.write_str("the device's start budget passed while it was not answering")
             }
-            Self::PciPower(error) => write!(f, "PCI power/timing: {error:?}"),
+            Self::PciPower(error) => write!(f, "PCI power/timing: {error}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
         }
     }

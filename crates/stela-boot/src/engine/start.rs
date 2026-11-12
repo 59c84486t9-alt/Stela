@@ -426,9 +426,11 @@ fn open_host(
     if options.install.is_some()
         && let Some(Err(reason)) = &devices.host_network
     {
+        // The network step's lines name each adapter; the one stop line
+        // reads them as sentences.
         output::fatal(stela_runtime::restore::tss::no_network(
             remote_image,
-            &reason.to_string(),
+            &reason.to_string().replace('\n', " "),
         ));
     }
     let built = devices.preboot.take().map(|partition| {
@@ -489,7 +491,7 @@ fn open_host(
             Err(stela_runtime::net::NetError::Status(_)) => {
                 output::arguments(format_args!("NETWORK CHECK passed\n"))
             }
-            Err(error) => output::fatal(format_args!("the network check failed: {error:?}")),
+            Err(error) => output::fatal(format_args!("the network check failed: {error}")),
         }
     }
     OpenedHost {
@@ -1326,7 +1328,7 @@ fn open_gpus(
     if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
         crate::status::warn(&stela_boot_core::work_status::gpu_without_clock(
             crate::cpu::INVARIANT_TSC.present(),
-            &format!("{error:?}"),
+            &format!("{error}"),
         ));
         return false;
     }
@@ -2923,7 +2925,12 @@ fn start_devices(
                     .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {
                         output::arguments(format_args!("host network refusal: {error}\n"));
-                        crate::status::warn(&error.to_string());
+                        // The step ends with the first line; each adapter's
+                        // line and the advice follow on lines of their own.
+                        let text = error.to_string();
+                        let mut lines = text.lines();
+                        crate::status::warn(lines.next().unwrap_or_default());
+                        lines.for_each(crate::status::info);
                     })
             });
             (

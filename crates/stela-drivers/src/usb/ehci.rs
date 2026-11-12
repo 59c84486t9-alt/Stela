@@ -95,6 +95,32 @@ pub enum Error {
     Exhausted,
     Clock,
 }
+
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Minimum(error) => error.fmt(f),
+            Self::Config(error) => error.fmt(f),
+            Self::Mapping(error) => write!(f, "its registers could not be mapped ({error})"),
+            Self::Irq(error) => error.fmt(f),
+            Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::Invalid => f.write_str("a request was invalid"),
+            Self::Stale => f.write_str("a request outlived its device"),
+            Self::Busy => f.write_str("the controller is busy"),
+            Self::Timeout => f.write_str("the controller timed out"),
+            Self::Removed => f.write_str("the controller or device was removed"),
+            Self::Device(_) => f.write_str("the device reported a transfer error"),
+            Self::Quarantined => f.write_str("an earlier failure left it unusable"),
+            Self::Dma(error) => error.fmt(f),
+            Self::Preparation(error) => error.fmt(f),
+            Self::Memory(error) => error.fmt(f),
+            Self::Register => f.write_str("a controller register is invalid"),
+            Self::Exhausted => f.write_str("the controller has no room left"),
+            Self::Clock => f.write_str("the delay clock is unavailable"),
+        }
+    }
+}
 impl Error {
     /// A pure STALL: the endpoint halted with no other transaction error.
     pub fn stalled(&self) -> bool {

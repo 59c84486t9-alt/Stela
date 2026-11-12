@@ -37,6 +37,31 @@ pub enum CapabilityError {
     Malformed { offset: u16 },
 }
 
+/// A plain account for the boot log.
+impl core::fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Config { offset, error } => {
+                write!(f, "its capability at {offset:#x} did not read ({error})")
+            }
+            Self::FailedRead { offset } => {
+                write!(f, "its capability at {offset:#x} reads all ones")
+            }
+            Self::Misaligned { offset } => {
+                write!(f, "its capability list points off alignment at {offset:#x}")
+            }
+            Self::OutOfRange { offset } => {
+                write!(f, "its capability at {offset:#x} lies outside its list")
+            }
+            Self::Cycle { offset } => write!(f, "its capability list loops at {offset:#x}"),
+            Self::Overlap { offset } => {
+                write!(f, "its capability at {offset:#x} overlaps another")
+            }
+            Self::Malformed { offset } => write!(f, "its capability at {offset:#x} is malformed"),
+        }
+    }
+}
+
 impl CapabilityError {
     pub fn offset(&self) -> u16 {
         match *self {

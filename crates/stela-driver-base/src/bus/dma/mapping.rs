@@ -57,6 +57,24 @@ pub enum DmaError {
     DrainUnavailable,
     Unmapped,
 }
+/// A plain account for the boot log.
+impl core::fmt::Display for DmaError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Config(error) => return write!(f, "PCI configuration: {error}"),
+            Self::PciCapability(error) => return write!(f, "PCI capability: {error}"),
+            Self::IommuUnavailable => "no IOMMU unit can translate it",
+            Self::InvalidRange => "the DMA range is invalid",
+            Self::AddressLimit => "the memory lies above what the device can address",
+            Self::MappingFailed => "the IOMMU refused the mapping",
+            Self::InvalidationFailed => "the IOMMU did not confirm its invalidation",
+            Self::VisibilityFailed => "the device's writes could not be made visible",
+            Self::CoherenceUnavailable => "the device cannot snoop the processor caches",
+            Self::DrainUnavailable => "its earlier DMA cannot be proven finished",
+            Self::Unmapped => "the DMA mapping is already removed",
+        })
+    }
+}
 impl From<crate::bus::pci::ConfigError> for DmaError {
     fn from(error: crate::bus::pci::ConfigError) -> Self {
         Self::Config(error)

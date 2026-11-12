@@ -21,6 +21,18 @@ pub enum AllocationError {
     },
 }
 
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for AllocationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Region(_) => f.write_str("the DMA region could not be set up"),
+            Self::Metadata(error) => error.fmt(f),
+            Self::LiveBuffers => f.write_str("DMA buffers are still in use"),
+            Self::Cleanup { .. } => f.write_str("a refused DMA region could not be removed"),
+        }
+    }
+}
+
 pub(super) struct Allocation {
     region: Option<DmaRegion>,
 }

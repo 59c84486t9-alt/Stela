@@ -811,7 +811,13 @@ pub fn rewrite_wrapped(segments: &[(&str, Color)], indent: usize) {
                 if text.column > indent && text.column + length > text.columns && length <= room {
                     text.wrap(indent);
                 }
-                for character in word.bytes().filter(|&c| c != b'\n') {
+                for character in word.bytes() {
+                    // A line break in the text starts the next row, so
+                    // lines a message lists never run together.
+                    if character == b'\n' {
+                        text.wrap(indent);
+                        continue;
+                    }
                     if text.column == text.columns {
                         if character == b' ' {
                             continue;

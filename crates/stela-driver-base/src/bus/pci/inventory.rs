@@ -19,6 +19,16 @@ impl EnumerationError {
         }
     }
 }
+
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for EnumerationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Config { address, error } => write!(f, "{address}: {error}"),
+            Self::Capability { address, error } => write!(f, "{address}: {error}"),
+        }
+    }
+}
 pub struct EnumerationFailure {
     pub error: EnumerationError,
     pub functions: Vec<Function>,

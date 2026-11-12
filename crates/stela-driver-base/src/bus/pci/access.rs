@@ -118,12 +118,41 @@ impl core::fmt::Display for ConfigError {
                 "a {width}-byte access at {offset:#x} is misaligned or outside configuration space"
             )?,
             ConfigFailure::Mapping(error) => {
-                write!(f, "the configuration space could not be mapped ({error:?})")?
+                write!(f, "the configuration space could not be mapped ({error})")?
             }
             ConfigFailure::UnqualifiedControl => {
                 f.write_str("a control is in a state Stela does not change")?
             }
-            reason => write!(f, "the configuration access failed ({reason:?})")?,
+            ConfigFailure::Ownership(error) => {
+                write!(f, "the configuration space is not Stela's to use ({error})")?
+            }
+            ConfigFailure::Window
+            | ConfigFailure::Address
+            | ConfigFailure::PhysicalSpan
+            | ConfigFailure::CacheAttribute
+            | ConfigFailure::Protection
+            | ConfigFailure::CpuAddress => {
+                f.write_str("the configuration space window is unusable")?
+            }
+            ConfigFailure::ForeignGrant => {
+                f.write_str("the configuration access came with another device's grant")?
+            }
+            ConfigFailure::CommandAdmission => {
+                f.write_str("the command register change was refused")?
+            }
+            ConfigFailure::FaultPublishing => {
+                f.write_str("an earlier failure of the device is still being recorded")?
+            }
+            ConfigFailure::Busy => f.write_str("the configuration space is busy")?,
+            ConfigFailure::Interrupted => {
+                f.write_str("the configuration access was interrupted")?
+            }
+            ConfigFailure::BusMasterSealed => {
+                f.write_str("bus mastering stays off until the device is taken over")?
+            }
+            ConfigFailure::RoutingSealed => {
+                f.write_str("the bridge's bus routing is fixed while it is held")?
+            }
         }
         match self.effect {
             ConfigEffect::None => Ok(()),

@@ -35,6 +35,30 @@ pub enum IrqError {
     Unregistered,
     Delivery(posted_msi::Error),
 }
+
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for IrqError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Config(error) => error.fmt(f),
+            Self::FaultPublishing => {
+                f.write_str("an earlier interrupt failure is still being recorded")
+            }
+            Self::Interrupted => f.write_str("the interrupt setup was interrupted"),
+            Self::Unavailable => f.write_str("interrupts are unavailable"),
+            Self::WrongCpu => f.write_str("the interrupt was set up on the wrong processor"),
+            Self::Exhausted => f.write_str("no interrupt vector is free"),
+            Self::Unsupported => f.write_str("the device's interrupt kind is unsupported"),
+            Self::FailedRead => f.write_str("the interrupt registers read all ones"),
+            Self::Mask => f.write_str("the interrupt could not be masked"),
+            Self::Quiesce => f.write_str("the interrupt could not be quiesced"),
+            Self::Route => f.write_str("the interrupt could not be routed"),
+            Self::Drain => f.write_str("pending interrupts could not be drained"),
+            Self::Unregistered => f.write_str("the interrupt is not registered"),
+            Self::Delivery(_) => f.write_str("the interrupt could not be delivered"),
+        }
+    }
+}
 impl From<crate::bus::pci::ConfigError> for IrqError {
     fn from(error: crate::bus::pci::ConfigError) -> Self {
         Self::Config(error)

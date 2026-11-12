@@ -108,6 +108,27 @@ pub enum WorkError {
     CorruptContext,
     Pending,
 }
+
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for WorkError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "the work service is unavailable",
+            Self::WrongCpu => "the work ran on the wrong processor",
+            Self::InterruptContext => "the work was asked for from an interrupt",
+            Self::Busy => "the work service is busy",
+            Self::Full => "the work queue is full",
+            Self::Closed => "the work queue is closed",
+            Self::Exhausted => "the work service has no room left",
+            Self::InvalidStack => "a work stack is invalid",
+            Self::InvalidTicket => "a work ticket is invalid",
+            Self::WouldDeadlock => "the work would wait on itself",
+            Self::TimedOut => "the work timed out",
+            Self::CorruptContext => "a work context is corrupt",
+            Self::Pending => "the work has not finished",
+        })
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
     General,

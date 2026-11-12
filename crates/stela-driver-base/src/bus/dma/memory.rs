@@ -23,6 +23,21 @@ pub enum MemoryError {
     Unavailable,
 }
 
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidSize => "a DMA buffer size is invalid",
+            Self::InvalidAlignment => "a DMA buffer alignment is invalid",
+            Self::OutOfMemory => "DMA memory is exhausted",
+            Self::OutsideReservation => "a DMA buffer lies outside the reserved memory",
+            Self::InvalidPageList => "a DMA page list is invalid",
+            Self::CacheAttributeUnavailable => "the DMA memory's cache mode is unavailable",
+            Self::Unavailable => "DMA memory is unavailable",
+        })
+    }
+}
+
 /// The native allocation granules attested by one [`PageSource`].
 ///
 /// Every power-of-two granule in the inclusive range is supported. A provider

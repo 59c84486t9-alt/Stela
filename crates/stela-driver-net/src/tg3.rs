@@ -68,6 +68,53 @@ pub enum Error {
     Memory(crate::bus::dma::memory::MemoryError),
 }
 
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Config(error) => error.fmt(f),
+            Self::PciCapability(error) => error.fmt(f),
+            Self::Access => f.write_str("a register access failed"),
+            Self::Timing(error) => error.fmt(f),
+            Self::Removed => f.write_str("the adapter stopped answering"),
+            Self::Bounds => f.write_str("a register lies outside its window"),
+            Self::UnsupportedDevice => f.write_str("this Broadcom device ID is unsupported"),
+            Self::UnsupportedRevision => f.write_str("this chip revision is unsupported"),
+            Self::UnsupportedMedia => {
+                f.write_str("its media type (fiber or SerDes) is unsupported")
+            }
+            Self::ApeTimeout => f.write_str("its management processor (APE) did not answer"),
+            Self::MdioTimeout => f.write_str("the PHY does not answer on its management bus"),
+            Self::MdioReadFailed => f.write_str("a PHY register read failed"),
+            Self::FirmwareTimeout => f.write_str("its firmware did not finish starting"),
+            Self::StopTimeout(register) => {
+                write!(f, "its engine at {register:#x} did not stop")
+            }
+            Self::UnsupportedManaged => {
+                f.write_str("its management firmware runs a mode Stela does not support")
+            }
+            Self::UnmanagedNotObserved => {
+                f.write_str("Stela could not confirm that no management firmware runs")
+            }
+            Self::UnsupportedPcie => f.write_str("its PCIe setup is unsupported"),
+            Self::ConfigDidNotLatch => f.write_str("a setting did not take"),
+            Self::NvramTimeout => f.write_str("its NVRAM did not answer"),
+            Self::Poisoned => f.write_str("an earlier failure left it unusable"),
+            Self::NotIdentified => f.write_str("its chip could not be identified"),
+            Self::Stopped => f.write_str("it is stopped"),
+            Self::PhyResetTimeout => f.write_str("the PHY did not finish its reset"),
+            Self::UnsupportedBoard => f.write_str("its board configuration is unsupported"),
+            Self::InvalidMac => f.write_str("its MAC address in NVRAM is invalid"),
+            Self::RingCorrupt => f.write_str("a descriptor ring is corrupt"),
+            Self::Attention { .. } => f.write_str("the chip reported an internal error"),
+            Self::RingFull => f.write_str("the transmit ring is full"),
+            Self::Dma(error) => error.fmt(f),
+            Self::Preparation(error) => error.fmt(f),
+            Self::Memory(error) => error.fmt(f),
+        }
+    }
+}
+
 impl From<crate::bus::pci::CapabilityError> for Error {
     fn from(error: crate::bus::pci::CapabilityError) -> Self {
         Self::PciCapability(error)

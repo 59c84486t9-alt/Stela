@@ -27,6 +27,16 @@ pub enum Error {
     Dma(DmaError),
     ForeignOwner,
 }
+/// A plain account for the boot log.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Claim(error) => error.fmt(f),
+            Self::Dma(error) => error.fmt(f),
+            Self::ForeignOwner => f.write_str("another owner changed its configuration"),
+        }
+    }
+}
 
 /// Unique control of one attached requester, beside its shareable DMA domain.
 ///

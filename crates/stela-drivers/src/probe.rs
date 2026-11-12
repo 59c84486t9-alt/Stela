@@ -84,13 +84,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Device(error) => error.fmt(f),
-            Self::Enumeration(error) => write!(f, "PCI enumeration: {error:?}"),
+            Self::Enumeration(error) => write!(f, "PCI enumeration: {error}"),
             Self::Realtek(error) => error.fmt(f),
-            Self::Pch(error) => error.fmt(f),
+            Self::Pch(error) => write!(f, "e1000e: {error}"),
             Self::Native(error) => error.fmt(f),
             Self::Vmd(error) => write!(f, "VMD: {error}"),
-            Self::Tg3(error) => write!(f, "tg3: {error:?}"),
-            Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
+            Self::Tg3(error) => write!(f, "tg3: {error}"),
+            Self::Aqtion(error) => write!(f, "atlantic: {error}"),
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
             Self::SfhCold(error) => write!(f, "AMD SFH original-owner preparation: {error:?}"),
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
@@ -100,7 +100,7 @@ impl fmt::Display for Error {
             Self::RealtekWifi(error) => write!(f, "rtw88: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
             Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
-            Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
+            Self::Ehci(error) => write!(f, "EHCI: {error}"),
             Self::HdaPci(error) => write!(f, "HD Audio PCI: {error:?}"),
             Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
             Self::HdaNative(error) => write!(f, "HD Audio native: {error:?}"),
@@ -944,6 +944,10 @@ impl Devices {
                 .iter()
                 .any(|nic| nic.location().split(' ').next() == Some(at.as_str()));
             let failure = self.failures.iter().find(|(found, _)| *found == address);
+            // Broadcom's PCIe Bluetooth shares class 02/80 with Wi-Fi.
+            if let Some((_, Error::Bcm4377(_) | Error::IntelBluetooth(_))) = failure {
+                continue;
+            }
             let abandoned = self.abandoned.iter().any(|(found, _)| *found == address);
             let why = match (failure, abandoned) {
                 (Some((_, error)), false) => alloc::format!("{error}"),
@@ -2567,6 +2571,30 @@ mod tests {
         assert!(
             devices.network_account()[0].ends_with("(its start took over 30 s and was given up)")
         );
+    }
+
+    /// Each wired driver's failure, as the network account shows it, reads
+    /// as words: no Rust debug text reaches the screen.
+    #[test]
+    fn wired_driver_failures_read_as_words() {
+        use crate::bus::dma::memory::MemoryError;
+        let failures = [
+            Error::Tg3(net::tg3::Error::MdioTimeout),
+            Error::Tg3(net::tg3::Error::Memory(MemoryError::OutOfMemory)),
+            Error::Aqtion(net::aqtion::native::Error::Device(
+                net::aqtion::Error::Firmware { status: 0x10 },
+            )),
+            Error::Ehci(usb::ehci::Error::Timeout),
+            Error::Device(BlockError::Irq(crate::bus::irq::IrqError::Exhausted)),
+        ];
+        for error in failures {
+            let text = alloc::format!("{error}");
+            assert!(
+                !text.contains('{') && !text.contains('(') || text.contains("(status"),
+                "{text}"
+            );
+            assert!(!text.contains("Error") && !text.contains("::"), "{text}");
+        }
     }
 
     #[test]

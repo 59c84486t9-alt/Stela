@@ -22,6 +22,21 @@ pub enum Error {
     Exhausted,
     Context,
 }
+/// A plain account for the boot log.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Closed => f.write_str("its resource is already retired"),
+            Self::Open => f.write_str("its resource is still in use"),
+            Self::Busy { uses, retentions } => write!(
+                f,
+                "its resource has {uses} users and {retentions} retentions left"
+            ),
+            Self::Exhausted => f.write_str("its resource has no use slots left"),
+            Self::Context => f.write_str("its resource belongs to another processor context"),
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UseKind {
     Resource,

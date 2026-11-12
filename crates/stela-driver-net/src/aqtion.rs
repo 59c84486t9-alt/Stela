@@ -41,6 +41,37 @@ pub enum Error {
     RingHead(u32),
     Stopped,
 }
+
+/// A plain account for the boot log and screen.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Config(error) => error.fmt(f),
+            Self::PciCapability(error) => error.fmt(f),
+            Self::Pci(error) => error.fmt(f),
+            Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::Timeout { register } => {
+                write!(
+                    f,
+                    "its register {register:#x} did not reach its expected state"
+                )
+            }
+            Self::Removed => f.write_str("the adapter stopped answering"),
+            Self::Firmware { status } => write!(f, "its firmware failed (status {status:#x})"),
+            Self::Dma(error) => error.fmt(f),
+            Self::Memory(error) => error.fmt(f),
+            Self::Mapping(error) => write!(f, "its registers could not be mapped ({error})"),
+            Self::Readback { register, .. } => {
+                write!(
+                    f,
+                    "its register {register:#x} did not keep what was written"
+                )
+            }
+            Self::RingHead(_) => f.write_str("a descriptor ring head is out of range"),
+            Self::Stopped => f.write_str("it is stopped"),
+        }
+    }
+}
 pub type Result<T> = core::result::Result<T, Error>;
 impl From<DmaError> for Error {
     fn from(e: DmaError) -> Self {

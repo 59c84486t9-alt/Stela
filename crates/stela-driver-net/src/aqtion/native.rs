@@ -41,9 +41,29 @@ impl From<super::Error> for Error {
         Self::Device(error)
     }
 }
+/// A plain account for the boot log and screen.
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Stela AQtion native: {self:?}")
+        match self {
+            Self::Config(error) => error.fmt(f),
+            Self::Device(error) => error.fmt(f),
+            Self::Preparation(error) => error.fmt(f),
+            Self::Configuration(error) => {
+                write!(f, "its configuration space is unavailable ({error})")
+            }
+            Self::Power(error) => error.fmt(f),
+            Self::Detach(error) => write!(f, "its DMA could not be detached ({error})"),
+            Self::Profile { vendor, device, .. } => {
+                write!(
+                    f,
+                    "{vendor:04x}:{device:04x} is not an adapter this driver takes"
+                )
+            }
+            Self::Bar { .. } => f.write_str("its register BAR is unusable"),
+            Self::BusMaster(_) => f.write_str("it was still bus mastering"),
+            Self::ConfigurationEpoch => f.write_str("its configuration changed under the driver"),
+            Self::Retired => f.write_str("it was already retired"),
+        }
     }
 }
 impl core::error::Error for Error {}

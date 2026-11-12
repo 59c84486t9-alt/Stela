@@ -60,7 +60,7 @@ impl core::fmt::Display for ClaimError {
         use super::access::Register;
         match *self {
             Self::Config(error) => write!(f, "{error}"),
-            Self::Mapping(error) => write!(f, "its configuration space is unavailable ({error:?})"),
+            Self::Mapping(error) => write!(f, "its configuration space is unavailable ({error})"),
             Self::AlreadyBound => f.write_str("it is already claimed"),
             Self::IdentityChanged => f.write_str("its identity changed since the census"),
             Self::ReadFailed { offset } => {
@@ -71,7 +71,16 @@ impl core::fmt::Display for ClaimError {
                 write!(f, "its capability at {offset:#x} is malformed")
             }
             Self::UnsupportedHeader(kind) => write!(f, "its header type {kind} is unsupported"),
-            Self::UnsupportedRole(role) => write!(f, "its role is unsupported ({role:?})"),
+            Self::UnsupportedRole(FunctionRole::Unverified) => f.write_str(
+                "Stela could not confirm it is a physical PCI function: its PCI census did not \
+                 complete",
+            ),
+            Self::UnsupportedRole(FunctionRole::Virtual) => {
+                f.write_str("it is an SR-IOV virtual function, which no driver here takes")
+            }
+            Self::UnsupportedRole(FunctionRole::Physical) => {
+                f.write_str("its PCI function role is unsupported")
+            }
             Self::UnsupportedCapability { id, extended } => write!(
                 f,
                 "its {}capability {id:#x} has an unsupported layout",
