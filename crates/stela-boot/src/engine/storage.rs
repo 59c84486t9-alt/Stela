@@ -1508,10 +1508,15 @@ fn role_of(at: usize, targets: usize, medium: bool, preboot: bool) -> &'static s
     }
 }
 
+/// The most USB devices, USB failures and unused USB devices the account
+/// names each; the rest are counted.
+const ACCOUNT_USB_LINES: usize = 6;
+
 /// The few lines a failed disk search leaves on the screen, its only
 /// record when the USB's log is not reached (`logged`): what is missing,
 /// where the firmware had found the stick, each controller Stela's drivers
-/// found, and each disk with the partitions its GPT holds
+/// found, each USB device with what failed or was left unused, and each
+/// disk with the partitions its GPT holds
 /// ([`storage::disk_account`]). No whole serial numbers.
 fn account(
     devices: &mut stela_drivers::probe::Devices,
@@ -1564,13 +1569,43 @@ fn account(
             lines.push(format!("{address} not driven: {why}."));
         }
     }
-    if let Some((location, error)) = devices.usb_failures.first() {
+    // Each USB device found, and what failed or was left unused, so the
+    // account tells a stick that never answered from one Stela passed over.
+    let listed = |count: usize, shown: usize, what: &str| match count.checked_sub(shown) {
+        Some(rest) if rest > 0 => Some(format!("{rest} more {what}.")),
+        _ => None,
+    };
+    lines.push(match devices.usb_devices.len() {
+        0 => String::from("USB devices found: none."),
+        count => format!("USB devices found: {count}."),
+    });
+    for device in devices.usb_devices.iter().take(ACCOUNT_USB_LINES) {
+        lines.push(format!("USB {}.", device.summary()));
+    }
+    lines.extend(listed(
+        devices.usb_devices.len(),
+        ACCOUNT_USB_LINES,
+        "USB devices",
+    ));
+    for (location, error) in devices.usb_failures.iter().take(ACCOUNT_USB_LINES) {
         lines.push(format!(
-            "USB failures: {}, first {location}: {}.",
-            devices.usb_failures.len(),
+            "USB failed {location}: {}.",
             stela_drivers::usb::xhci::explain(error)
         ));
     }
+    lines.extend(listed(
+        devices.usb_failures.len(),
+        ACCOUNT_USB_LINES,
+        "USB failures",
+    ));
+    for (location, why) in devices.usb_unused.iter().take(ACCOUNT_USB_LINES) {
+        lines.push(format!("USB unused {location}: {why}."));
+    }
+    lines.extend(listed(
+        devices.usb_unused.len(),
+        ACCOUNT_USB_LINES,
+        "unused USB devices",
+    ));
     let firmware_block = boot_disk
         .and_then(|at| at.rsplit_once(" block="))
         .and_then(|(_, block)| block.parse::<u32>().ok());

@@ -58,11 +58,55 @@ impl Device {
             ),
         }
     }
+    /// One line for the account of a failed disk search: where it is, its
+    /// speed, IDs, product, and the class, subclass and protocol of each
+    /// interface of its selected configuration, so a USB disk Stela did not
+    /// take (UAS 08/06/62, bulk-only 08/06/50, a hub 09) can be told apart.
+    /// No serial number.
+    pub fn summary(&self) -> String {
+        let speed = match self.speed {
+            LOW_SPEED => "low speed",
+            FULL_SPEED => "full speed",
+            HIGH_SPEED => "high speed",
+            SUPER_SPEED => "SuperSpeed",
+            SUPER_SPEED_PLUS => "SuperSpeedPlus",
+            _ => "unknown speed",
+        };
+        let mut line = format!(
+            "{}: {speed} {:04x}:{:04x}",
+            self.location,
+            u16::from_le_bytes([self.descriptor[8], self.descriptor[9]]),
+            u16::from_le_bytes([self.descriptor[10], self.descriptor[11]])
+        );
+        if let Some(product) = self.product.as_deref().map(str::trim)
+            && !product.is_empty()
+        {
+            line.push_str(&format!(" {product:?}"));
+        }
+        let mut classes: Vec<(u8, u8, u8)> = Vec::new();
+        for interface in interfaces(&self.configuration) {
+            let class = (interface.class, interface.subclass, interface.protocol);
+            if !classes.contains(&class) {
+                classes.push(class);
+            }
+        }
+        if classes.is_empty() {
+            line.push_str(&format!(" class {:02x}", self.descriptor[4]));
+        } else {
+            line.push_str(" interfaces");
+            for (class, subclass, protocol) in classes {
+                line.push_str(&format!(" {class:02x}/{subclass:02x}/{protocol:02x}"));
+            }
+        }
+        line
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::dma::TestRegion;
+    use alloc::collections::BTreeMap;
 
     #[test]
     fn configuration_descriptors_split_into_interfaces_with_their_endpoints() {
@@ -81,5 +125,39 @@ mod tests {
         assert_eq!(found[0].endpoints[0].dci(), 3);
         assert_eq!(found[0].endpoints[1].dci(), 4);
         assert_eq!(found[0].endpoints[0].max_packet, 512);
+    }
+
+    /// The account of a failed disk search names each USB device by place,
+    /// speed, IDs, product and interface classes, never by serial.
+    #[test]
+    fn a_device_summary_names_speed_ids_product_and_interface_classes() {
+        let nodes = BTreeMap::from([(0, hub::model::Node::leaf(SUPER_SPEED))]);
+        let mut dma = TestRegion::new(256 * 1024 * 8);
+        let (mut controller, _) = hub::tests::controller(&mut dma, 32, nodes);
+        let mut failures = Vec::new();
+        let mut device = controller.enumerate(&mut dma, &mut failures).remove(0);
+        device.location = String::from("00:14.0 port 3");
+        device.descriptor[8..12].copy_from_slice(&[0x81, 0x07, 0x81, 0x55]);
+        device.product = Some(String::from(" Flash Drive "));
+        device.serial = Some(String::from("SERIAL123"));
+        device.configuration = vec![
+            9, 2, 41, 0, 1, 1, 0, 0x80, 50, //
+            9, 4, 0, 0, 2, 8, 6, 0x50, 0, //
+            7, 5, 0x81, 2, 0, 4, 0, //
+            7, 5, 0x02, 2, 0, 4, 0, //
+            9, 4, 0, 1, 2, 8, 6, 0x62, 0,
+        ];
+        assert_eq!(
+            device.summary(),
+            "00:14.0 port 3: SuperSpeed 0781:5581 \"Flash Drive\" interfaces 08/06/50 08/06/62"
+        );
+        device.product = None;
+        device.configuration.clear();
+        device.descriptor[4] = 9;
+        device.speed = HIGH_SPEED;
+        assert_eq!(
+            device.summary(),
+            "00:14.0 port 3: high speed 0781:5581 class 09"
+        );
     }
 }
