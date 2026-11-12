@@ -1,5 +1,6 @@
 //! FP min/max: ordered (normal, infinite, S/D zero) selection and Half integer ordering.
 use super::super::isa::ShiftOpcode;
+use super::encode::guest;
 use super::numerical::helper_section;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, branch, clear_high_qword, clear_scalar, exponent_range,
@@ -7,7 +8,7 @@ use super::numerical::{
     test_control, vector_ordered_range, zero_scalar,
 };
 use super::{Host, commit, packed, packed_imm, read_vector};
-use crate::x86_64::asm::{Code, Gpr, Rm, vector_extensions};
+use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size, vector_extensions};
 use crate::x86_64::asm::{FloatLanes, FloatOp};
 use crate::{
     GuestAddress, TargetCpu,
@@ -207,14 +208,14 @@ fn quick_guard_supported(target: TargetCpu) -> bool {
     super::three::test_zero_supported(target) && !target.data_independent_timing()
 }
 
-/// With FZ, FIZ and AH clear no S/D input is flushed and a subnormal input
-/// raises no IDC (AH=1 reports it), and the selection is exact for every
-/// ordered pair (subnormals and infinities included, without status): only
-/// a NaN in either operand needs the full Arm rules. One
-/// unordered compare (UCOMIS for a scalar, CMPUNORD and PTEST over both
-/// whole registers for a vector, whose 8-byte form has its high qword clear)
+/// With AH clear the selection is exact for every ordered pair (subnormals
+/// and infinities included, without status) once FZ or FIZ has flushed
+/// subnormal inputs to their signed zeros (FZ raising IDC, FIZ nothing):
+/// only a NaN in either operand needs the full Arm rules. One unordered
+/// compare (UCOMIS for a scalar, CMPUNORD and PTEST over both whole
+/// registers for a vector, whose 8-byte form has its high qword clear)
 /// sends it to the helper. Returns the branch past the full classification
-/// that follows, which handles FZ, FIZ or AH set.
+/// that follows, which handles AH set (AH=1 reports IDC for a subnormal).
 fn quick_guard(
     code: &mut Code,
     shape: Shape,
@@ -224,7 +225,7 @@ fn quick_guard(
 ) -> usize {
     use crate::aarch64::floating::{FPCR_FIZ, FPCR_FZ};
     const UNORDERED: u8 = 3;
-    test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+    test_control(code, FPCR_AH);
     let flushing = branch(code, Condition::NotZero);
     let double = format == Format::Double;
     if shape == Shape::Scalar {
@@ -247,10 +248,163 @@ fn quick_guard(
         super::three::test_zero(code, SELECTION_SCRATCH, target);
         helper.push(branch(code, Condition::NotZero));
     }
+    // After the NaN check, which leaves for the helper with the state
+    // untouched: FZ or FIZ flush a subnormal input to its signed zero, FZ
+    // with IDC.
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let plain = branch(code, Condition::Zero);
+    for source in [RESULT_VECTOR, RIGHT_VECTOR] {
+        flush_subnormal_lanes(code, format, shape, source);
+    }
+    let plain_start = code.len();
+    resolve(code, plain, plain_start);
     let unflushed = jump(code);
     let end = code.len();
     resolve(code, flushing, end);
     unflushed
+}
+
+/// Replace each active subnormal S/D lane of `source` by its signed zero,
+/// adding IDC to FPSR where FPCR.FZ is set (with AH clear). A scalar's
+/// other lanes stay. Clobbers XMM2-5 and EAX.
+fn flush_subnormal_lanes(code: &mut Code, format: Format, shape: Shape, source: u8) {
+    use crate::aarch64::floating::{FPCR_FZ, INPUT_DENORMAL};
+    const MAGNITUDE: u8 = SELECTION_SCRATCH;
+    const SUBNORMAL: u8 = SIGN_VECTOR;
+    const CONSTANT: u8 = 4;
+    const ZERO: u8 = 5;
+    let double = format == Format::Double;
+    let constant = |code: &mut Code, xmm: u8, bits: u64| {
+        if double {
+            code.asm().mov_imm64(Gpr::Rax, bits);
+            packed(code, Host::MoveGprQword, xmm, 0);
+            packed(code, Host::UnpackLowQword, xmm, xmm);
+        } else {
+            let mut asm = code.asm();
+            asm.mov_imm32(Gpr::Rax, bits as u32);
+            asm.movd_to_xmm(xmm, Gpr::Rax);
+            packed_imm(code, Host::ShuffleDword, xmm, xmm, 0);
+        }
+    };
+    constant(code, CONSTANT, format.sign_mask() - 1);
+    packed(code, Host::MoveAligned, MAGNITUDE, source);
+    packed(code, Host::And, MAGNITUDE, CONSTANT);
+    // Integer compares only, so that no lane (a scalar's poisoned upper
+    // lanes included) raises host status: a zero exponent field and a
+    // nonzero magnitude, each Double judged by its high dword's exponent
+    // and both its dwords.
+    constant(code, CONSTANT, format.exponent_mask());
+    packed(code, Host::MoveAligned, SUBNORMAL, MAGNITUDE);
+    packed(code, Host::And, SUBNORMAL, CONSTANT);
+    packed(code, Host::Xor, ZERO, ZERO);
+    packed(code, Host::EqualDword, SUBNORMAL, ZERO);
+    packed(code, Host::EqualDword, MAGNITUDE, ZERO);
+    if double {
+        const HIGH_DWORDS: u8 = 0xf5;
+        const SWAP_DWORDS: u8 = 0xb1;
+        packed_imm(code, Host::ShuffleDword, SUBNORMAL, SUBNORMAL, HIGH_DWORDS);
+        packed_imm(code, Host::ShuffleDword, CONSTANT, MAGNITUDE, SWAP_DWORDS);
+        packed(code, Host::And, MAGNITUDE, CONSTANT);
+    }
+    packed(code, Host::AndNot, MAGNITUDE, SUBNORMAL);
+    packed(code, Host::MoveAligned, SUBNORMAL, MAGNITUDE);
+    if shape == Shape::Scalar {
+        // Only the low element is an input.
+        let spare = 16 - format.bits() as u8 / 8;
+        ShiftOpcode::LeftBytes.emit(code, SUBNORMAL, spare);
+        ShiftOpcode::RightBytes.emit(code, SUBNORMAL, spare);
+    }
+    // Keep the sign alone where subnormal.
+    constant(code, CONSTANT, format.sign_mask() - 1);
+    packed(code, Host::And, CONSTANT, SUBNORMAL);
+    packed(code, Host::AndNot, CONSTANT, source);
+    packed(code, Host::MoveAligned, source, CONSTANT);
+    Host::ByteSignMask.register(code, 0, SUBNORMAL, TargetCpu::Baseline);
+    code.asm().test(Size::Dword, Gpr::Rax, Gpr::Rax);
+    let none = branch(code, Condition::Zero);
+    test_control(code, FPCR_FZ);
+    let quiet = branch(code, Condition::Zero);
+    code.asm().alu_imm32(
+        Alu::Or,
+        Size::Dword,
+        guest(core::mem::offset_of!(crate::GuestState, fpsr) as u32),
+        INPUT_DENORMAL as i32,
+    );
+    let end = code.len();
+    resolve(code, none, end);
+    resolve(code, quiet, end);
+}
+
+/// Whether [`half_quick_guard`] runs on `target`; the DIT profile keeps its
+/// reviewed classification.
+fn half_quick_guard_supported(target: TargetCpu) -> bool {
+    !target.data_independent_timing()
+}
+
+/// With AH clear every non-NaN Half (zeros, subnormals, infinities) is
+/// ordered by the signed-word key ([`half_order`]), whose order gives Arm's
+/// zero signs, and Half inputs raise no IDC: only a NaN needs the full
+/// rules. FZ16 flushes subnormal inputs to their signed zeros first.
+/// Returns the branch past the full classification, which handles AH.
+fn half_quick_guard(code: &mut Code, shape: Shape, helper: &mut Vec<usize>) -> usize {
+    use crate::aarch64::floating::FPCR_FZ16;
+    const MAGNITUDE: u8 = SELECTION_SCRATCH;
+    const CONSTANT: u8 = 4;
+    const MASK: u8 = 5;
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    let active = match shape {
+        Shape::Scalar => 0x3,
+        Shape::Vector64 => 0xff,
+        Shape::Vector128 => 0xffff,
+    };
+    let word_constant = |code: &mut Code, xmm: u8, bits: u16| {
+        let mut asm = code.asm();
+        asm.mov_imm32(Gpr::Rax, u32::from(bits) * 0x1_0001);
+        asm.movd_to_xmm(xmm, Gpr::Rax);
+        packed_imm(code, Host::ShuffleDword, xmm, xmm, 0);
+    };
+    let flush = |code: &mut Code, source: u8| {
+        // Subnormal: 0 < magnitude < 0x400.
+        word_constant(code, CONSTANT, 0x7fff);
+        packed(code, Host::MoveAligned, MAGNITUDE, source);
+        packed(code, Host::And, MAGNITUDE, CONSTANT);
+        packed(code, Host::MoveAligned, SIGN_VECTOR, MAGNITUDE);
+        packed(code, Host::Xor, MASK, MASK);
+        packed(code, Host::GreaterWord, MAGNITUDE, MASK);
+        word_constant(code, MASK, 0x0400);
+        packed(code, Host::GreaterWord, MASK, SIGN_VECTOR);
+        packed(code, Host::And, MASK, MAGNITUDE);
+        if shape == Shape::Scalar {
+            ShiftOpcode::LeftBytes.emit(code, MASK, 14);
+            ShiftOpcode::RightBytes.emit(code, MASK, 14);
+        }
+        packed(code, Host::And, MASK, CONSTANT);
+        packed(code, Host::AndNot, MASK, source);
+        packed(code, Host::MoveAligned, source, MASK);
+    };
+    for source in [RESULT_VECTOR, RIGHT_VECTOR] {
+        // NaN: magnitude above infinity's.
+        word_constant(code, CONSTANT, 0x7fff);
+        packed(code, Host::MoveAligned, MAGNITUDE, source);
+        packed(code, Host::And, MAGNITUDE, CONSTANT);
+        word_constant(code, CONSTANT, 0x7c00);
+        packed(code, Host::GreaterWord, MAGNITUDE, CONSTANT);
+        Host::ByteSignMask.register(code, 0, MAGNITUDE, TargetCpu::Baseline);
+        code.asm().test_imm(Size::Dword, Gpr::Rax, active);
+        helper.push(branch(code, Condition::NotZero));
+    }
+    test_control(code, FPCR_FZ16);
+    let unflushed = branch(code, Condition::Zero);
+    for source in [RESULT_VECTOR, RIGHT_VECTOR] {
+        flush(code, source);
+    }
+    let unflushed_start = code.len();
+    resolve(code, unflushed, unflushed_start);
+    let done = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    done
 }
 
 fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
@@ -415,8 +569,11 @@ fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCp
     exception_guard(code, &mut helper);
     read_numerical_vector(code, shape, left, RESULT_VECTOR);
     read_numerical_vector(code, shape, right, RIGHT_VECTOR);
-    let unflushed = (format != Format::Half && quick_guard_supported(target))
-        .then(|| quick_guard(code, shape, format, &mut helper, target));
+    let unflushed = if format == Format::Half {
+        half_quick_guard_supported(target).then(|| half_quick_guard(code, shape, &mut helper))
+    } else {
+        quick_guard_supported(target).then(|| quick_guard(code, shape, format, &mut helper, target))
+    };
     if shape != Shape::Scalar {
         prepare_vector_input_range(code, format);
     }

@@ -54,6 +54,12 @@ mod half_integer;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod half_integer_tests;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod half_minmax_tests;
 mod halving;
 mod i8mm;
 mod immediates;

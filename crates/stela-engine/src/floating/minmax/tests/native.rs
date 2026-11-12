@@ -130,11 +130,33 @@ fn input(operand: &Operand, a: u64, b: u64, fpcr: u32) -> GuestState {
     state
 }
 
-fn eligible(state: &GuestState, operand: &Operand) -> bool {
+/// Whether the block completes `operand` inline on `target`: with AH clear,
+/// a binary form's quick guard (any non-DIT tier for Half, SSE4.1 for S/D)
+/// takes every input but a NaN, FZ and FIZ flushing subnormals inline;
+/// otherwise only normal inputs and S/D zeros.
+fn eligible(state: &GuestState, operand: &Operand, target: TargetCpu) -> bool {
     if state.fpcr & FPCR_EXCEPTION_ENABLE_MASK != 0 {
         return false;
     }
     let format = operand.format();
+    let quick = state.fpcr & FPCR_AH == 0
+        && !target.data_independent_timing()
+        && (format == Format::Half || target.supports(TargetCpu::Sse41));
+    if let (
+        true,
+        Operand::Binary {
+            shape, left, right, ..
+        },
+    ) = (quick, *operand)
+    {
+        let ordered = |source: u8| {
+            (0..shape.lane_count(format)).all(|lane| {
+                let bits = read_lane(&state.v[usize::from(source)], format.bits(), lane);
+                bits & !sign_mask(format) <= exponent_mask(format)
+            })
+        };
+        return ordered(left) && ordered(right);
+    }
     let valid = |source: u8, count| {
         (0..count).all(|lane| {
             let bits = read_lane(&state.v[usize::from(source)], format.bits(), lane);
@@ -169,8 +191,14 @@ fn set_mxcsr(value: u32) {
     }
 }
 
-fn check(mapping: &Mapping, operand: &Operand, mut state: GuestState, caller: u32) {
-    let fast = eligible(&state, operand);
+fn check(
+    mapping: &Mapping,
+    operand: &Operand,
+    target: TargetCpu,
+    mut state: GuestState,
+    caller: u32,
+) {
+    let fast = eligible(&state, operand, target);
     let mut expected = state.clone();
     expected.x[8] += 1;
     if fast {
@@ -291,7 +319,7 @@ fn signed_zero_normal_and_infinite_selection_match_full_helper_state() {
                             };
                             for caller in [0x1f80, 0xe07f, 0] {
                                 // includes unmasked exceptions, DAZ and FTZ
-                                check(&mapping, &operand, state.clone(), caller);
+                                check(&mapping, &operand, target, state.clone(), caller);
                             }
                         }
                     }
@@ -337,7 +365,7 @@ fn signed_zero_normal_and_infinite_selection_match_full_helper_state() {
                             );
                         }
                         state.fpsr = 0x8000_0000;
-                        check(&mapping, &operand, state, 0x6040);
+                        check(&mapping, &operand, target, state, 0x6040);
                     }
                 }
             }
@@ -393,8 +421,13 @@ fn exceptional_active_lanes_and_enables_exit_before_any_effect() {
                 for (source, lane) in active_inputs(&operand) {
                     let mut state = input(&operand, 0, sign, fpcr);
                     write_lane(&mut state.v[usize::from(source)], format.bits(), lane, bad);
-                    assert!(!eligible(&state, &operand));
-                    check(&mapping, &operand, state, 0xe07f);
+                    // A NaN always takes the helper; the quick guards
+                    // take the other classes.
+                    let nan = bad & !sign > maximum;
+                    if nan || fpcr & FPCR_AH != 0 {
+                        assert!(!eligible(&state, &operand, TargetCpu::Baseline));
+                    }
+                    check(&mapping, &operand, TargetCpu::Baseline, state, 0xe07f);
                 }
             }
         }
@@ -413,7 +446,7 @@ fn exceptional_active_lanes_and_enables_exit_before_any_effect() {
                 sign,
                 FPCR_AH | FPCR_NEP | enable << FPCR_EXCEPTION_ENABLE_SHIFT,
             );
-            check(&mapping, &operand, state, 0x1f80);
+            check(&mapping, &operand, TargetCpu::Baseline, state, 0x1f80);
         }
     }
 }

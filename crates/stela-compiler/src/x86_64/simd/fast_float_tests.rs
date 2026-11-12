@@ -2,9 +2,9 @@
 //! FADD/FSUB/FSQRT against the scalar Arm references, compiled as blocks
 //! for every tier this host has: every inline completion matches the
 //! reference in every V register, FPSR and FPCR; every other run exits at
-//! the instruction with the state unchanged. Ordered min/max inputs with FZ
-//! and FIZ clear, and finite vector sums and roots after IXC, must complete
-//! inline.
+//! the instruction with the state unchanged. Ordered min/max inputs with AH
+//! clear (FZ and FIZ flushing inline), and finite vector sums and roots
+//! after IXC, must complete inline.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -48,12 +48,14 @@ fn compile(word: u32, target: TargetCpu) -> Vec<u8> {
         .x86_64_code
 }
 
-fn controls() -> [u32; 9] {
+fn controls() -> [u32; 11] {
     [
         0,
         1 << FPCR_ROUNDING_SHIFT,
         3 << FPCR_ROUNDING_SHIFT,
         FPCR_FZ,
+        FPCR_FIZ,
+        FPCR_FZ | FPCR_NEP,
         FPCR_FIZ | FPCR_AH,
         FPCR_AH,
         FPCR_DN,
@@ -313,15 +315,10 @@ fn quick_float_guards_match_the_reference() {
                                         actual, initial,
                                         "{op:?} {format:?} {lanes} {target:?}"
                                     );
+                                    // FZ and FIZ flush subnormal inputs inline.
                                     let must_inline = matches!(op, Op::MinMax(..))
-                                        && lanes != 0
                                         && ordered
-                                        && fpcr
-                                            & (FPCR_FZ
-                                                | FPCR_FIZ
-                                                | FPCR_AH
-                                                | FPCR_EXCEPTION_ENABLE_MASK)
-                                            == 0
+                                        && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0
                                         && !target.data_independent_timing()
                                         && target.supports(TargetCpu::Sse41);
                                     assert!(
