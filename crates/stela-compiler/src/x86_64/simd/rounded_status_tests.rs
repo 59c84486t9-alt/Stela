@@ -446,3 +446,44 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
     }
     assert!(inline > runs / 8, "{inline} of {runs} inline");
 }
+
+/// An inexact result that rounds up to the minimum normal is tiny before
+/// rounding for Arm (UFC with AH clear), but a host's FMA and CVTSD2SS may
+/// find it tiny after rounding and raise no underflow. FDIV, FMSUB and
+/// FCVT D to S take the helper for that one value on every tier
+/// (intentionally: one result value), leaving the state unchanged.
+#[test]
+fn minimum_normal_results_take_the_helper() {
+    let below = 0x00ff_ffffu64; // 2^-125 (1 - 2^-24)
+    let two = 0x4000_0000u64;
+    let minimum = 0x0080_0000u64;
+    let cases: [(u32, [u64; 3]); 3] = [
+        // FDIV S3, S4, S17: 2^-126 - 2^-150 rounds to 2^-126.
+        (0x1e20_1800 | M << 16 | N << 5 | D, [below, two, 0]),
+        // FMSUB S3, S4, S17, S12: 2^-126 - 2^-252 rounds to 2^-126.
+        (
+            0x1f00_8000 | M << 16 | A << 10 | N << 5 | D,
+            [minimum, minimum, minimum],
+        ),
+        // FCVT S3, D4 of a Double just below 2^-126.
+        (0x1e62_4000 | N << 5 | D, [0x380f_ffff_ffff_ffff, 0, 0]),
+    ];
+    for target in targets() {
+        for &(word, [n, m, a]) in &cases {
+            let code = compile(word, target);
+            let mut initial = GuestState::default();
+            initial.x[30] = RETURN;
+            initial.v[N as usize] = [n, 0];
+            initial.v[M as usize] = [m, 0];
+            initial.v[A as usize] = [a, 0];
+            let mut actual = initial.clone();
+            assert_eq!(run(&code, &mut actual), PC.0, "{word:08x} {target:?}");
+            assert_eq!(actual, initial, "{word:08x} {target:?}");
+        }
+    }
+    // The helper's result: the minimum normal with UFC and IXC.
+    let outcome =
+        floating::evaluate(Format::Single, BinaryOperation::Divide, 0, below, two).unwrap();
+    assert_eq!(outcome.bits, minimum);
+    assert_eq!(outcome.exceptions, floating::UNDERFLOW | floating::INEXACT);
+}
