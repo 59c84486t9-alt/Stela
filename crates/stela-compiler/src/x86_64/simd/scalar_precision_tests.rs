@@ -84,6 +84,9 @@ fn floats(format: Format) -> Vec<u64> {
         infinity,
         infinity | quiet,
         infinity | 1,
+        // NaNs with payloads, signalling and quiet.
+        infinity | (quiet - 1),
+        infinity | quiet | quiet >> 3 | 5,
     ];
     if format == Format::Double {
         let single_bias = u64::from(Format::Single.exponent_bias());
@@ -191,16 +194,17 @@ fn scalar_conversions_complete_subnormal_tiny_and_flushed_inputs_inline() {
             }
         }
     }
-    assert!(inline > runs / 2, "{inline} of {runs} inline");
+    // Scalar NaNs take the helper.
+    assert!(inline > runs * 2 / 5, "{inline} of {runs} inline");
 }
 
 /// FCVTL, FCVTL2, FCVTN and FCVTN2 between S and D lanes over every input
 /// class, two distinct classes per vector: with the trap enables and AH
-/// clear, widening completes every vector without a NaN inline (zeros,
-/// subnormals and infinities included, a subnormal flushed under FZ or
-/// FIZ), and with FZ, FIZ and AH clear too, narrowing completes every
-/// vector without a NaN or a result exactly the Single minimum normal
-/// inline (tiny, subnormal, zero and overflowing results included). Every
+/// clear, widening completes every vector inline (zeros, subnormals,
+/// infinities and NaNs included, a subnormal flushed under FZ or FIZ), and
+/// with FZ, FIZ and AH clear too, narrowing completes every vector without
+/// a result exactly the Single minimum normal inline (tiny, subnormal,
+/// zero, overflowing and NaN results included). Every
 /// inline completion matches the reference, every exit leaves the state
 /// unchanged.
 #[test]
@@ -269,12 +273,8 @@ fn vector_conversions_complete_zero_subnormal_and_tiny_lanes_inline() {
                             )
                         })
                         .collect();
-                    let nan = lanes
-                        .iter()
-                        .any(|&bits| bits & !source.sign_mask() > source.exponent_mask());
                     let usable = fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0
-                        && !target.data_independent_timing()
-                        && !nan;
+                        && !target.data_independent_timing();
                     let must_inline = usable
                         && (source == Format::Single
                             || fpcr & (FPCR_FZ | FPCR_FIZ) == 0

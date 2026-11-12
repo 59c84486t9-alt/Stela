@@ -1074,6 +1074,22 @@ pub(super) fn reject_invalid(code: &mut Code) -> usize {
     branch(code, Condition::NotZero)
 }
 
+/// Accumulate FPSR.IOC from MXCSR invalid in ECX, after the environment is
+/// restored: an S/D precision conversion raises it for a signalling NaN
+/// input alone, as Arm does.
+pub(super) fn commit_invalid_status(code: &mut Code) {
+    code.asm().test_imm(Size::Dword, Rcx, MXCSR_INVALID as i32);
+    let valid = branch(code, Condition::Zero);
+    code.asm().alu_imm8(
+        Alu::Or,
+        Size::Dword,
+        state(core::mem::offset_of!(GuestState, fpsr)),
+        crate::aarch64::floating::INVALID as i8,
+    );
+    let end = code.len();
+    resolve(code, valid, end);
+}
+
 /// Accumulate IXC, UFC, OFC and DZC from ECX's MXCSR status, which all
 /// move to FPSR by one shift. With FPCR.FZ, FIZ and AH clear, the host's
 /// unflushed result in Arm's rounding mode is the guest's, and its status
