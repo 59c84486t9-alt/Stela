@@ -409,7 +409,10 @@ pub fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<()
     if header & 0x7f != 0 {
         return Err(ClaimError::UnsupportedHeader(header & 0x7f));
     }
-    if inactive(config, regs::COMMAND, regs::COMMAND_MASTER)? & regs::COMMAND_INTX_DISABLE == 0 {
+    let command = inactive(config, regs::COMMAND, regs::COMMAND_MASTER)?;
+    if command & regs::COMMAND_INTX_DISABLE == 0
+        && regs::intx_disable_required(config.read8(regs::INTERRUPT_PIN)?)
+    {
         return Err(ClaimError::Active {
             offset: regs::COMMAND,
         });
