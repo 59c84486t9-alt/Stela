@@ -197,7 +197,7 @@ fn exact_initial_i219_cohort_uses_integrated_nvm_and_forced_ulp_exit() {
 }
 #[test]
 fn foreign_required_flush_and_live_config_failures_refuse_without_foreign_dma() {
-    for failure in 0..4 {
+    for failure in 0..3 {
         let (state, released, io, timer) = fixture_spt();
         {
             let mut m = state.borrow_mut();
@@ -212,23 +212,31 @@ fn foreign_required_flush_and_live_config_failures_refuse_without_foreign_dma() 
                 2 => {
                     m.fail_at = Some(5);
                 }
-                3 => {
-                    m.power_stuck = true;
-                }
                 _ => unreachable!(),
             }
         }
         assert!(start_spt(0x156f, io, timer).is_err());
         let m = state.borrow();
-        if failure < 3 {
-            assert!(
-                !m.operations
-                    .iter()
-                    .any(|o| o[0] == 1 && matches!(o[1], super::super::CTRL | 0x3818))
-            );
-        }
+        assert!(
+            !m.operations
+                .iter()
+                .any(|o| o[0] == 1 && matches!(o[1], super::super::CTRL | 0x3818))
+        );
         assert_eq!(released.load(Ordering::SeqCst), 0);
     }
+}
+
+/// `e1000_init_phy_workarounds_pchlan`: a ULP exit whose power cycle never
+/// reports done is noted, as Linux logs "Failed to disable ULP", and the
+/// start goes on to the PHY access checks, which settle it.
+#[test]
+fn a_ulp_exit_that_fails_is_noted_and_the_start_goes_on() {
+    let (state, _, io, timer) = fixture_spt();
+    state.borrow_mut().power_stuck = true;
+    let controller = start_spt(0x156f, io, timer).unwrap();
+    assert!(controller.ulp_exit_failed());
+    assert!(!controller.is_poisoned());
+    drop(controller);
 }
 #[test]
 fn ulp_mode_switch_recovers_only_the_specific_mdi_transition_and_verifies_state() {
@@ -429,8 +437,13 @@ fn an_i219_the_me_manages_leaves_ulp_through_the_me() {
                 | super::super::ULP_CONFIG_DONE,
         );
     }
+    // An ME that never finishes the ULP exit is noted, as Linux logs
+    // "Failed to disable ULP", and the start goes on to the PHY access
+    // checks, which find this PHY answering.
     // SAFETY: as above.
-    let error = unsafe { Controller::new_i219(0x15b8, io, timer) }.err();
-    assert!(matches!(error, Some(Error::MeUlpTimeout)));
-    assert_eq!(released.load(Ordering::SeqCst), 0);
+    let controller = unsafe { Controller::new_i219(0x15b8, io, timer) }.unwrap();
+    assert!(controller.ulp_exit_failed());
+    assert!(!controller.is_poisoned());
+    drop(controller);
+    assert_eq!(released.load(Ordering::SeqCst), 1);
 }

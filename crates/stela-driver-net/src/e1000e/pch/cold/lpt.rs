@@ -163,6 +163,7 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
             poisoned: false,
             profile: Profile::Lpt(limits),
             config_read: None,
+            ulp_exit_failed: false,
         })
     }
 }

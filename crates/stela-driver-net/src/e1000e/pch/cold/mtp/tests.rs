@@ -368,7 +368,9 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
         }
         // An adapter the Intel ME manages starts: see
         // `spt::tests::an_i219_the_me_manages_leaves_ulp_through_the_me`.
-        for failure in 0..8 {
+        // A ULP exit whose power cycle never reports done goes on, as
+        // Linux does: see `spt::tests::a_ulp_exit_that_fails_is_noted_and_the_start_goes_on`.
+        for failure in 0..7 {
             let (state, released, io, timer) = spt::tests::fixture_spt();
             {
                 let mut m = state.borrow_mut();
@@ -385,17 +387,16 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
                     2 => {
                         m.phy.insert((2, 0, 3), 0x93);
                     }
-                    3 => m.power_stuck = true,
-                    4 => {
+                    3 => {
                         m.smb_stuck = true;
                         m.phy.insert((1, 769, 23), 0x7f01);
                     }
-                    5 => m.ulp_stuck = true,
-                    6 => {
+                    4 => m.ulp_stuck = true,
+                    5 => {
                         m.mac.insert(0x3808, 512);
                         m.config.insert(0xe4, 0x100);
                     }
-                    7 => m.reset_stuck = true,
+                    6 => m.reset_stuck = true,
                     _ => unreachable!(),
                 }
             }

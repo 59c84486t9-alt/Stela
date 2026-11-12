@@ -117,6 +117,7 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
             poisoned: false,
             profile: profile(limits),
             config_read: Some(R::read_config16),
+            ulp_exit_failed: false,
         })
     }
 }
@@ -162,13 +163,16 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         // first PHY read: a PHY the last OS left in ULP, as it does with no
         // cable at shutdown, or behind SMBus answers no MDIO cycle until
         // then. The ME does it on request when it manages the adapter, a
-        // LANPHYPC toggle otherwise. A PHY that still does not answer is
-        // woken as Linux does; its identity is checked right after.
-        if managed {
-            self.me_ulp_exit()?;
+        // LANPHYPC toggle otherwise. A failed exit is noted, as Linux logs
+        // "Failed to disable ULP", and the start goes on: whether the PHY
+        // answers is settled by the recovery that follows, which wakes it
+        // as Linux does. Its identity is checked right after.
+        let exit = if managed {
+            self.me_ulp_exit()
         } else {
-            self.spt_ulp_exit()?;
-        }
+            self.spt_ulp_exit()
+        };
+        self.ulp_exit_failed = exit.is_err();
         self.recover_phy_access(managed)?;
         self.identity = self.phy.identify()?;
         // The donor releases SWFLAG before this hardware PHY reset. No PHY
@@ -179,8 +183,10 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.phy.wait_minimum(50_000)?;
         self.identity = self.phy.identify()?;
         // The ME keeps the ULP configuration and the interconnect of an
-        // adapter it manages as it chose; Linux reads neither back then.
-        if !managed && self.phy.read(ULP_CONFIG)? & ULP_CLEAR != 0 {
+        // adapter it manages as it chose; Linux reads neither back then. A
+        // ULP exit that failed leaves the configuration as it was, as Linux
+        // does, and only a clean exit is read back.
+        if !managed && !self.ulp_exit_failed && self.phy.read(ULP_CONFIG)? & ULP_CLEAR != 0 {
             return Err(Error::UlpState);
         }
         if !managed

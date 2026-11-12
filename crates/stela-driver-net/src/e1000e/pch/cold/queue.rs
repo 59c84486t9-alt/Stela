@@ -159,6 +159,10 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
     pub fn nvm_repair_left_out(&self) -> bool {
         self.controller.nvm.repair_left_out()
     }
+    /// Whether the PHY did not leave ULP when asked and the start went on.
+    pub fn ulp_exit_failed(&self) -> bool {
+        self.controller.ulp_exit_failed()
+    }
     fn check(&mut self) -> Result<(), Error> {
         if let Some(error) = &self.failure
             && error.minimum_cause().is_some()

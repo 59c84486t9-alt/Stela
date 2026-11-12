@@ -252,6 +252,8 @@ pub struct Controller<R: Registers + nvm::Registers, D: Delay + Clone> {
     poisoned: bool,
     profile: Profile,
     config_read: Option<ConfigRead<R>>,
+    /// The PHY's ULP exit failed and the start went on without it.
+    ulp_exit_failed: bool,
 }
 impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     /// # Safety
@@ -287,6 +289,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
             poisoned: false,
             profile: Profile::I82579,
             config_read: None,
+            ulp_exit_failed: false,
         };
         if let Err(error) = this.initialize() {
             this.poisoned = true;
@@ -305,6 +308,11 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.phy
             .minimum_failure
             .or_else(|| self.nvm.minimum_failure())
+    }
+    /// Whether the PHY did not leave ULP when asked, which Linux logs as
+    /// "Failed to disable ULP" before it goes on to its PHY access checks.
+    pub fn ulp_exit_failed(&self) -> bool {
+        self.ulp_exit_failed
     }
     pub fn is_poisoned(&self) -> bool {
         self.poisoned || self.phy.is_poisoned() || self.nvm.is_poisoned()

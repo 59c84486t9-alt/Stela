@@ -1734,6 +1734,17 @@ pub unsafe fn probe_observed(
                         ),
                     ));
                 }
+                if let Ok(device) = &attached
+                    && device.ulp_exit_failed()
+                {
+                    devices.warnings.push((
+                        address,
+                        Warning::Message(
+                            "e1000e: the PHY did not leave its low-power state when asked; \
+                             Stela went on to its PHY checks, as Linux does",
+                        ),
+                    ));
+                }
                 attach_link!(attached.map(Box::new), Adapter::Pch);
             } else if net::igb::matches(&function) {
                 let minimum = minimum_for_function!().clone();

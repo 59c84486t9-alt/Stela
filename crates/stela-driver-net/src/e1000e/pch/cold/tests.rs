@@ -497,6 +497,7 @@ fn raw(io: Io, timer: Timer) -> Controller<Io, Timer> {
         poisoned: false,
         profile: Profile::I82579,
         config_read: None,
+        ulp_exit_failed: false,
     }
 }
 #[test]

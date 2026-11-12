@@ -298,6 +298,12 @@ impl Pch {
     pub fn nvm_repair_left_out(&self) -> bool {
         self.link.nvm_repair_left_out()
     }
+
+    /// Whether the PHY did not leave ULP when asked and the start went on,
+    /// as Linux goes on after "Failed to disable ULP".
+    pub fn ulp_exit_failed(&self) -> bool {
+        self.link.ulp_exit_failed()
+    }
 }
 
 impl Link for Pch {
