@@ -245,8 +245,12 @@ pub fn read(budget: u64) -> Option<Opened> {
                 let size = file
                     .get_boxed_info::<FileInfo>()
                     .map_or(0, |info| info.file_size());
-                let loaded = read_journal(&mut file, &translator, size, limit)?;
-                (loaded, size, writable && size >= bound)
+                let allocated = writable && size >= bound;
+                // A pack the boot may write gets the rest of its limit as
+                // the arena its new segments' records move to.
+                let arena = allocated && partition.is_some() && limit >= PACK_FLOOR;
+                let loaded = read_journal(&mut file, &translator, size, limit, arena)?;
+                (loaded, size, allocated)
             }
             None => (blank()?, 0, false),
         };
@@ -363,12 +367,16 @@ fn blank() -> Option<Loaded> {
 /// records that end within what is left, its index trimmed to name only
 /// them (`translation_store::within`). Segments are not checked whole here:
 /// a pack checks its index, and each record its own bytes when first used.
-/// `None` only when no memory is left for the region.
+/// With `arena`, the region holds `limit` bytes of blobs in all: the room
+/// the pack read leaves is the writer's arena ([`pack::Arena`]), outside
+/// the heap as the pack is. `None` only when no memory is left for the
+/// region.
 fn read_journal(
     file: &mut RegularFile,
     translator: &Digest,
     size: u64,
     limit: u64,
+    arena: bool,
 ) -> Option<Loaded> {
     let mut slots = vec![0; DATA_START as usize];
     let commit = if size >= DATA_START && read_exact(file, &mut slots).is_some() {
@@ -415,7 +423,12 @@ fn read_journal(
         .map(|&length| (length as usize).next_multiple_of(8))
         .sum();
     let head = PLACEMENT_BYTES + SLOT_BYTES as usize + 8 * entries.len();
-    let bytes = head + blobs;
+    let spare = if arena {
+        usize::try_from(limit).unwrap_or(usize::MAX).saturating_sub(blobs) / PAGE * PAGE
+    } else {
+        0
+    };
+    let bytes = head + blobs + spare;
     let pages = bytes.div_ceil(PAGE);
     let physical = firmware::pages(pages).ok()?;
     // SAFETY: firmware returned this exclusive allocation of `bytes` or
@@ -856,16 +869,32 @@ pub fn share(bound: usize) {
     });
 }
 
-/// Make the store of the handoff file `contents` the engine's: the GPT
-/// partition to open for writing it, when it can be written.
-pub fn install(contents: &'static [u8]) -> Option<Guid> {
+/// Make the store of the handoff file `region` the engine's: the GPT
+/// partition to open for writing it, when it can be written. What follows
+/// its blobs is the writer's arena.
+pub fn install(region: &'static mut [u8]) -> Option<Guid> {
     let head = PLACEMENT_BYTES + SLOT_BYTES as usize;
-    if contents.len() < head || contents[..8] != PLACEMENT_MAGIC {
+    if region.len() < head || region[..8] != PLACEMENT_MAGIC {
         return None;
     }
+    let word = |at: usize| u32::from_le_bytes(region[at..at + 4].try_into().expect("a word"));
+    let count = word(36) as usize;
+    // The blobs end where their lengths, after the head, say.
+    let lengths = head.checked_add(count.checked_mul(8)?)?;
+    let blobs = region
+        .get(head..lengths)?
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .try_fold(lengths, |at, length| {
+            at.checked_add(usize::try_from(u64::from_le_bytes(*length)).ok()?.next_multiple_of(8))
+        })?
+        .min(region.len());
+    let (contents, arena) = region.split_at_mut(blobs);
+    let contents: &'static [u8] = contents;
     let field = |at: usize| u64::from_le_bytes(contents[at..at + 8].try_into().expect("a field"));
     let word = |at: usize| u32::from_le_bytes(contents[at..at + 4].try_into().expect("a word"));
-    let (limit, flags, count, size) = (field(8), word(32), word(36) as usize, field(40));
+    let (limit, flags, size) = (field(8), word(32), field(40));
     let translator = translations::translator_id();
     let slot = &contents[PLACEMENT_BYTES..head];
     let committed = (0..2).find_map(|index| Commit::decode(slot, index, DOMAIN, size));
@@ -917,6 +946,7 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
         segments: segments.clone(),
         used,
         partial,
+        arena: pack::Arena::new(arena),
     };
     let held = PackWriter {
         writer: Writer::new(file, super::host::COUNTER_HZ),
@@ -1255,7 +1285,8 @@ pub fn write() {
         let stats = held.writer.stats();
         output::arguments(format_args!(
             "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} \
-             pressed={} held={} pairs={} merges={} sheds={} resident_peak={}M released={}\n",
+             pressed={} held={} pairs={} merges={} sheds={} resident_peak={}M released={} \
+             arena={}M/{}M\n",
             held.steps,
             held.longest * 1_000_000 / super::host::COUNTER_HZ,
             stats.deltas,
@@ -1268,6 +1299,8 @@ pub fn write() {
             stats.sheds,
             stats.resident_peak >> 20,
             held.writer.shedding().1,
+            held.writer.arena().0 >> 20,
+            (held.writer.arena().0 + held.writer.arena().1) >> 20,
         ));
         let name = pack_name(&translations::translator_id());
         let stopped = held.writer.stop(&mut Parts, &mut |execution| {

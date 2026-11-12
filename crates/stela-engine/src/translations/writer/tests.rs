@@ -1,4 +1,5 @@
 use super::*;
+use crate::translations::pack::Arena;
 use crate::translations::translator_id;
 use alloc::collections::BTreeSet;
 use stela_formats::journal::Target;
@@ -19,6 +20,8 @@ struct Disk {
     /// each commit left, once durable.
     slot: bool,
     contents: Vec<BTreeSet<Digest>>,
+    /// Whether each commit's keys are kept in `contents`.
+    track: bool,
 }
 
 impl Disk {
@@ -30,6 +33,7 @@ impl Disk {
             written: 0,
             slot: false,
             contents: Vec::new(),
+            track: true,
         }
     }
 }
@@ -58,7 +62,7 @@ impl Target for Disk {
         if self.cut {
             return Err(String::from("cut"));
         }
-        if core::mem::take(&mut self.slot) {
+        if core::mem::take(&mut self.slot) && self.track {
             let found = keys(&self.bytes);
             self.contents.push(found);
         }
@@ -83,6 +87,8 @@ struct Boot {
     resident: u64,
     shedding: bool,
     shed: u64,
+    /// The code bytes of each entry added: 0 for records of none.
+    entry_bytes: usize,
 }
 
 impl Boot {
@@ -101,13 +107,14 @@ impl Boot {
             resident: 0,
             shedding: false,
             shed: 0,
+            entry_bytes: 0,
         }
     }
 
     /// The heap's room the boot measures: what the rest, the writer's
     /// segments and the entries added leave.
     fn room(&self) -> u64 {
-        let added = self.added.len() as u64 * ENTRY_HEAP_BYTES;
+        let added = self.added.len() as u64 * (ENTRY_HEAP_BYTES + self.entry_bytes as u64);
         self.heap_total
             .saturating_sub(self.filler + self.resident + added)
     }
@@ -127,7 +134,11 @@ impl Boot {
                 continue;
             }
             let key = Digest::of(&self.next.to_le_bytes());
-            self.added.insert(key, Record::new(translator, key));
+            let mut record = Record::new(translator, key);
+            if self.entry_bytes != 0 {
+                record.insert(entry(0, self.next as u8, self.entry_bytes));
+            }
+            self.added.insert(key, record);
             self.total += 1;
             kept.push(key);
         }
@@ -159,8 +170,23 @@ impl Entries for Boot {
     }
 }
 
-/// The heap bytes an added entry of [`Boot::add`] takes.
+/// The heap bytes an added entry of [`Boot::add`] takes beside its code.
 const ENTRY_HEAP_BYTES: u64 = 256;
+
+/// An entry at page offset `offset` whose code is `bytes` bytes of `fill`.
+fn entry(offset: u16, fill: u8, bytes: usize) -> crate::translations::Entry {
+    crate::translations::Entry {
+        context: Digest::of(b"context"),
+        offset,
+        source_bytes: 4,
+        input: vec![0; 4],
+        code: vec![fill; bytes],
+        relocations: Vec::new(),
+        source_map: Vec::new(),
+        exits: Vec::new(),
+        recovery: Vec::new(),
+    }
+}
 
 /// The pack file as a boot's loader reads it: the newest commit, whose
 /// blobs must read back whole, and its segments and lists.
@@ -196,6 +222,7 @@ fn load(disk: &[u8], limit: u64) -> File<'static> {
         segments,
         used,
         partial: false,
+        arena: Arena::default(),
     }
 }
 
@@ -214,6 +241,8 @@ struct Run<'a> {
     boot: Boot,
     now: u64,
     events: Vec<Event>,
+    /// The most heap bytes the writer's segments held after a step.
+    resident_peak: u64,
 }
 
 impl<'a> Run<'a> {
@@ -230,6 +259,7 @@ impl<'a> Run<'a> {
             boot: Boot::new(seed, found),
             now: 0,
             events: Vec::new(),
+            resident_peak: 0,
         }
     }
 
@@ -244,6 +274,7 @@ impl<'a> Run<'a> {
                         Some(execution.advance(disk, PIECE_BYTES))
                     })?;
             self.events.extend(events);
+            self.resident_peak = self.resident_peak.max(self.writer.resident());
             self.now += HZ / STEPS_PER_SECOND;
         }
         Ok(())
@@ -282,6 +313,8 @@ impl<'a> Run<'a> {
 }
 
 const FILE_BYTES: u64 = DATA_START + 4096 * journal::ALIGN;
+/// The arena of a boot of [`boot_of`].
+const BOOT_ARENA_BYTES: usize = 4 << 20;
 
 /// A boot `seed` of entries added in bursts, each followed by its
 /// seconds, and stopped: the keys it added.
@@ -290,7 +323,11 @@ fn boot_of(
     seed: u32,
     bursts: &[(u64, u32)],
 ) -> Result<(BTreeSet<Digest>, Stopped), String> {
-    let file = load(&disk.bytes.clone(), u64::MAX);
+    // The records of its segments move to an arena of its own, as a boot's
+    // do outside the heap, so merges read them from there.
+    let mut arena = vec![0u8; BOOT_ARENA_BYTES];
+    let mut file: File<'_> = load(&disk.bytes.clone(), u64::MAX);
+    file.arena = Arena::new(&mut arena);
     let mut run = Run::new(file, seed);
     let mut added = BTreeSet::new();
     for &(seconds, count) in bursts {
@@ -627,4 +664,117 @@ fn a_filling_heap_sheds_the_stores_entries_and_then_lets_the_segments_go() {
     let stopped = run.stop(&mut disk).unwrap();
     assert!(keys(&disk.bytes).is_superset(&written));
     assert_eq!(stopped.lists, 1);
+}
+
+#[test]
+fn a_first_boots_records_all_reach_the_file_while_the_heap_holds_their_index_alone() {
+    // A first boot's offers, scaled to a 256 MiB heap as build 96's 600 MB
+    // were to its 2.9 GB: about 54 MB of records in 8 KiB entries, added
+    // faster than their bound, the store pressing every few seconds.
+    const HEAP: u64 = 256 << 20;
+    const ENTRY: usize = 8 << 10;
+    let mut disk = Disk::new(DATA_START + 50_000 * journal::ALIGN);
+    disk.track = false;
+    let mut arena = vec![0u8; 72 << 20];
+    let mut file: File<'_> = load(&disk.bytes.clone(), u64::MAX);
+    file.arena = Arena::new(&mut arena);
+    let mut run = Run::new(file, 1);
+    run.boot.heap_total = HEAP;
+    run.boot.filler = HEAP / 2;
+    run.boot.bound = (HEAP / 32) as usize / ENTRY;
+    run.boot.entry_bytes = ENTRY;
+    let mut added = BTreeSet::new();
+    for _ in 0..22 {
+        added.extend(run.boot.add(300));
+        run.run(&mut disk, 1).unwrap();
+    }
+    run.run(&mut disk, 2 * FIRST_DELTA_SECONDS).unwrap();
+    assert_eq!(added.len(), 6600);
+    // No entry was refused or shed: the heap never pressed.
+    assert_eq!((run.boot.unkept, run.boot.shed), (0, 0));
+    assert!(
+        !run.events
+            .iter()
+            .any(|event| matches!(event, Event::Shed { .. } | Event::Released { .. })),
+        "{:?}",
+        run.events
+    );
+    // Written, every record moved to the arena; the heap held at most a
+    // pressed segment not yet moved, and keeps the indexes alone.
+    let (used, _) = run.writer.arena();
+    assert!(used >= 6600 * ENTRY as u64, "{used}");
+    let segment = run.boot.bound as u64 * (ENTRY as u64 + 512);
+    // About a segment and a half: the one being written, and what of the
+    // one before has not moved yet.
+    assert!(
+        run.resident_peak <= 2 * segment && run.resident_peak < HEAP / RESIDENT_SHARE,
+        "{} over {}",
+        run.resident_peak,
+        2 * segment
+    );
+    assert!(
+        run.writer.resident() < 6600 * 256,
+        "{}",
+        run.writer.resident()
+    );
+    assert!(run.writer.stats().pairs >= 2, "{:?}", run.writer.stats());
+    run.stop(&mut disk).unwrap();
+    assert_eq!(keys(&disk.bytes), added);
+}
+
+/// Layouts of `records` new records from `first`, each one entry at
+/// `offset` of `bytes` code bytes.
+fn layout_of(first: u32, records: u32, offset: u16, bytes: usize) -> Layout<'static> {
+    let translator = translator_id();
+    let records = (first..first + records)
+        .map(|n| {
+            let key = Digest::of(&n.to_le_bytes());
+            let mut record = Record::new(translator, key);
+            record.insert(entry(offset, n as u8, bytes));
+            (key, crate::translations::pack::Piece::New(record.encode()))
+        })
+        .collect();
+    Layout::new(&translator, records)
+}
+
+#[test]
+fn a_merge_of_segments_moved_to_the_arena_equals_one_of_them_in_the_heap() {
+    // Two segments sharing a third of their keys, those records holding
+    // entries at other offsets: the merge keeps one and merges the shared.
+    let translator = translator_id();
+    let older = || layout_of(0, 300, 0, 3000);
+    let newer = || layout_of(200, 300, 64, 2000);
+    let merge = |segments: Vec<Segment<'_>>| {
+        Merge::new(translator, segments, Vec::new(), u64::MAX)
+            .finish()
+            .layout
+            .to_vec()
+    };
+    let in_heap = merge(vec![
+        Segment::Laid(Arc::new(older())),
+        Segment::Laid(Arc::new(newer())),
+    ]);
+    let mut bytes = vec![0u8; 4 << 20];
+    let mut arena = Arena::new(&mut bytes);
+    let mut settled = Vec::new();
+    for mut layout in [older(), newer()] {
+        let before = layout.to_vec();
+        let owned = layout.owned();
+        while layout.settle(&mut arena, 64 << 10) == crate::translations::pack::Settled::More {}
+        assert!(layout.settled());
+        assert_eq!(layout.to_vec(), before);
+        assert!(layout.owned() < owned / 20, "{} of {owned}", layout.owned());
+        settled.push(Segment::Laid(Arc::new(layout)));
+    }
+    assert!(arena.used() >= 300 * (3000 + 2000), "{}", arena.used());
+    assert_eq!(merge(settled), in_heap);
+    // A full arena keeps the rest in the heap.
+    let mut small = [0u8; 10_000];
+    let mut layout = older();
+    assert_eq!(
+        layout.settle(&mut Arena::new(&mut small), usize::MAX),
+        crate::translations::pack::Settled::Full
+    );
+    assert!(!layout.settled());
+    assert_eq!(layout.to_vec(), older().to_vec());
 }

@@ -81,6 +81,22 @@ pub(super) fn contents(file: &File) -> &'static [u8] {
     }
 }
 
+/// `file`'s contents to change: once, by the one owner of the file.
+///
+/// # Safety
+/// Nothing else reads or writes `file`'s contents for as long as the slice
+/// lives.
+pub(super) unsafe fn contents_mut(file: &File) -> &'static mut [u8] {
+    // SAFETY: the loader left every bundle file allocated; the physmap maps
+    // it, and the caller owns it alone.
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            layout::physical(file.contents.physical) as *mut u8,
+            file.contents.bytes as usize,
+        )
+    }
+}
+
 fn open(root: &mut Directory, path: &str) -> Result<RegularFile> {
     let path = CString16::try_from(path).map_err(|_| refuse!("bundle path is not UCS-2"))?;
     root.open(&path, FileMode::Read, FileAttribute::empty())

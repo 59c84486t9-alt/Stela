@@ -333,7 +333,9 @@ fn open_host(
     let translation_store = handoff.files[..handoff.file_count]
         .iter()
         .find(|file| file.name() == translations::FILE)
-        .and_then(|file| translations::install(bundle::contents(file)))
+        // SAFETY: the store's file is read here alone, once, and its
+        // region is the store's for the rest of the boot.
+        .and_then(|file| translations::install(unsafe { bundle::contents_mut(file) }))
         .filter(|_| handoff.storage.present);
     // The Metal device's stored pipelines, before any GPU opens.
     #[cfg(feature = "nvk")]

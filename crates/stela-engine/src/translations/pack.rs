@@ -525,8 +525,59 @@ pub struct Layout<'a> {
     /// Each record's offset and bytes, by offset.
     records: Vec<(u64, Piece<'a>)>,
     length: u64,
-    /// The heap bytes it holds ([`Layout::owned`]).
+    /// The heap bytes it holds ([`Layout::owned`]), and its records
+    /// encoded for it and not yet moved to an arena ([`Layout::settle`]).
     owned: u64,
+    fresh: usize,
+}
+
+/// What [`Layout::settle`] did: moved every record, has more to move, or
+/// found the arena without room for the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    Done,
+    More,
+    Full,
+}
+
+/// Memory outside the heap that holds the bytes of records a boot wrote to
+/// its pack file, as the pack the loader read is held: written once, each
+/// record's bytes stay until the boot ends, and laid-out segments keep only
+/// their index in the heap. Handed out from the front, never given back.
+#[derive(Debug, Default)]
+pub struct Arena<'a> {
+    free: &'a mut [u8],
+    used: u64,
+}
+
+impl<'a> Arena<'a> {
+    pub fn new(bytes: &'a mut [u8]) -> Self {
+        Self {
+            free: bytes,
+            used: 0,
+        }
+    }
+
+    /// The bytes handed out, and those left.
+    pub fn used(&self) -> u64 {
+        self.used
+    }
+
+    pub fn left(&self) -> u64 {
+        self.free.len() as u64
+    }
+
+    /// `bytes`, copied into the arena: `None` when it has no room for them.
+    fn keep(&mut self, bytes: &[u8]) -> Option<&'a [u8]> {
+        if bytes.len() > self.free.len() {
+            return None;
+        }
+        let (kept, rest) = core::mem::take(&mut self.free).split_at_mut(bytes.len());
+        self.free = rest;
+        self.used += bytes.len() as u64;
+        kept.copy_from_slice(bytes);
+        Some(kept)
+    }
 }
 
 /// Zeros for the room between records.
@@ -592,13 +643,49 @@ impl<'a> Layout<'a> {
                 Piece::New(bytes) => bytes.capacity(),
             })
             .sum();
+        let fresh = records
+            .iter()
+            .filter(|(_, piece)| matches!(piece, Piece::New(_)))
+            .count();
         let owned = prefix.capacity() + records.capacity() * size_of::<(u64, Piece<'a>)>() + pieces;
         Self {
             prefix,
             records,
             length,
             owned: owned as u64,
+            fresh,
         }
+    }
+
+    /// Move records encoded for it to `arena`, about `budget` bytes of
+    /// them, while the arena has room. Its bytes stay the same.
+    pub fn settle(&mut self, arena: &mut Arena<'a>, budget: usize) -> Settled {
+        let mut moved = 0;
+        for (_, piece) in &mut self.records {
+            if self.fresh == 0 || moved >= budget {
+                break;
+            }
+            let Piece::New(bytes) = piece else {
+                continue;
+            };
+            let Some(kept) = arena.keep(bytes) else {
+                return Settled::Full;
+            };
+            moved += bytes.len();
+            self.owned -= bytes.capacity() as u64;
+            self.fresh -= 1;
+            *piece = Piece::Kept(kept);
+        }
+        if self.fresh == 0 {
+            Settled::Done
+        } else {
+            Settled::More
+        }
+    }
+
+    /// Whether every record is held outside the heap.
+    pub fn settled(&self) -> bool {
+        self.fresh == 0
     }
 
     pub fn records(&self) -> usize {

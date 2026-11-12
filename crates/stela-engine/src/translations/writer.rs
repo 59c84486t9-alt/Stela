@@ -34,16 +34,24 @@
 //! committed is left, and what is left and the boot's used-key list are
 //! written.
 //!
-//! The segments this boot laid out stay in the heap, beside everything the
-//! guest and the GPU need from it, so the writer bounds them by the heap
+//! Once a segment is written, its records move out of the heap to an arena
+//! ([`Arena`]) outside it, as the pack the loader read is held, a step's
+//! share ([`SETTLE_BYTES`]) at a time, whatever else it does: merges read
+//! them there, and the heap keeps each laid-out segment's index alone. A
+//! merge moves its inputs' records rather than copying them, so the arena
+//! holds each record written this boot once, and a record several segments
+//! hold, merged, once more.
+//!
+//! What stays in the heap, beside everything the guest and the GPU need
+//! from it, the writer bounds by the heap
 //! ([`Entries::heap`]): the store sheds new entries while the heap's room is
 //! under [`SHED_SHARE`] or the laid-out segments reach [`RESIDENT_SHARE`]
 //! of it, and once the room falls under [`RELEASE_SHARE`] the writer lets
 //! every segment it holds go, for the rest of the boot: they stay in the
 //! file, and no merge runs, as one would leave them out.
 use super::pack::{
-    Delta, JOURNAL_DOMAIN, Layout, MAX_SEGMENTS, MAX_USED_KEYS, MAX_USED_LISTS, Merge, Merged,
-    Pack, SEGMENT_BLOB, Segment, USED_BLOB, UsedKeys,
+    Arena, Delta, JOURNAL_DOMAIN, Layout, MAX_SEGMENTS, MAX_USED_KEYS, MAX_USED_LISTS, Merge,
+    Merged, Pack, SEGMENT_BLOB, Segment, Settled, USED_BLOB, UsedKeys,
 };
 use super::{Digest, Record};
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
@@ -79,6 +87,8 @@ const LOOKS_PER_SECOND: u64 = 10;
 pub const STEP_WORK: usize = 32;
 /// The most bytes a write step queues.
 pub const PIECE_BYTES: u64 = 512 << 10;
+/// The record bytes a step moves to the arena.
+pub const SETTLE_BYTES: usize = 4 << 20;
 /// The share of the heap (a fraction's denominator) the segments laid out
 /// this boot may hold.
 pub const RESIDENT_SHARE: u64 = 16;
@@ -260,6 +270,9 @@ pub struct Writer<'a> {
     /// The store sheds new entries; the writer let its segments go.
     shedding: bool,
     released: bool,
+    /// Where written records move, and whether it ran out of room.
+    arena: Arena<'a>,
+    arena_full: bool,
     failed: bool,
     stats: Stats,
 }
@@ -277,6 +290,8 @@ pub struct File<'a> {
     pub used: Vec<UsedKeys>,
     /// A segment was left out or cut.
     pub partial: bool,
+    /// Where the records of the segments this boot writes move.
+    pub arena: Arena<'a>,
 }
 
 impl<'a> Writer<'a> {
@@ -304,6 +319,8 @@ impl<'a> Writer<'a> {
             quiet_since: None,
             shedding: false,
             released: false,
+            arena: file.arena,
+            arena_full: false,
             failed: false,
             stats: Stats::default(),
         }
@@ -330,6 +347,35 @@ impl<'a> Writer<'a> {
         });
         let waiting = self.waiting.iter().map(|layout| layout.owned());
         laid.chain(waiting).sum()
+    }
+
+    /// The arena's bytes holding records, and those left.
+    pub fn arena(&self) -> (u64, u64) {
+        (self.arena.used(), self.arena.left())
+    }
+
+    /// Move a step's share of the records of a segment written to the
+    /// arena, until it has no room.
+    fn settle(&mut self) {
+        if self.arena_full || self.released {
+            return;
+        }
+        for segment in &mut self.segments {
+            let Segment::Laid(layout) = segment else {
+                continue;
+            };
+            if layout.settled() {
+                continue;
+            }
+            // A write in flight shares its layout: it moves once written.
+            let Some(layout) = Arc::get_mut(layout) else {
+                continue;
+            };
+            if layout.settle(&mut self.arena, SETTLE_BYTES) == Settled::Full {
+                self.arena_full = true;
+            }
+            return;
+        }
     }
 
     /// Whether the store sheds new entries, and whether the writer let its
@@ -706,6 +752,7 @@ impl<'a> Writer<'a> {
             return Ok(events);
         }
         events.extend(self.govern(entries));
+        self.settle();
         if self.idle() {
             events.extend(self.begin(clock(), entries));
         } else {
