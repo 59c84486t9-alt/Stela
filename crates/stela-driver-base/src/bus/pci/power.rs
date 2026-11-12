@@ -17,7 +17,7 @@ const D3_DELAY: u64 = 10_000;
 const READY_TIMEOUT: u64 = 60_000_000;
 
 mod error;
-pub use error::Error;
+pub use error::{Error, START_BUDGET};
 
 #[derive(Clone, Copy)]
 enum Phase {

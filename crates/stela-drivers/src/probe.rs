@@ -975,6 +975,17 @@ impl Devices {
     /// not start, with its PCI address, IDs and why, or the one line that
     /// says none answered at all. Started adapters have none.
     pub fn network_account(&self) -> Vec<String> {
+        let bluetooth: Vec<&str> = self
+            .pcie_bluetooth
+            .iter()
+            .filter_map(|hci| hci.location.split(' ').next())
+            .collect();
+        self.network_lines(&bluetooth)
+    }
+
+    /// [`Self::network_account`], with the PCIe Bluetooth functions that
+    /// started given by their addresses.
+    fn network_lines(&self, bluetooth: &[&str]) -> Vec<String> {
         let mut lines = Vec::new();
         for function in &self.network_functions {
             let address = function.address;
@@ -984,15 +995,28 @@ impl Devices {
                 .iter()
                 .any(|nic| nic.location().split(' ').next() == Some(at.as_str()));
             let failure = self.failures.iter().find(|(found, _)| *found == address);
-            // Broadcom's PCIe Bluetooth shares class 02/80 with Wi-Fi.
-            if let Some((_, Error::Bcm4377(_) | Error::IntelBluetooth(_))) = failure {
+            // Broadcom's PCIe Bluetooth shares class 02/80 with Wi-Fi, started
+            // or not; it is no network adapter.
+            if bluetooth.contains(&at.as_str())
+                || matches!(
+                    failure,
+                    Some((_, Error::Bcm4377(_) | Error::IntelBluetooth(_)))
+                )
+            {
                 continue;
             }
             let abandoned = self.abandoned.iter().any(|(found, _)| *found == address);
+            // A wait that ended for the budget only repeats the abandonment.
+            let failure = failure.filter(|(_, error)| {
+                !(abandoned
+                    && alloc::format!("{}", plain(error))
+                        .contains(crate::bus::pci::power::START_BUDGET))
+            });
             let why = match (failure, abandoned) {
-                (Some((_, error)), false) => alloc::format!("{error}"),
+                (Some((_, error)), false) => alloc::format!("{}", plain(error)),
                 (Some((_, error)), true) => alloc::format!(
-                    "{error} (its start took over {} s and was given up)",
+                    "{} (its start took over {} s and was given up)",
+                    plain(error),
                     DEVICE_START_US / 1_000_000
                 ),
                 (None, true) => alloc::format!(
@@ -1032,6 +1056,27 @@ impl Devices {
         }
         lines
     }
+}
+
+/// A network adapter's failure as its account line shows it: the line
+/// already names the adapter by its IDs and kind, so no driver's name leads
+/// the reason, for any wired or Wi-Fi driver.
+fn plain(error: &Error) -> impl fmt::Display + '_ {
+    struct Plain<'a>(&'a Error);
+    impl fmt::Display for Plain<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self.0 {
+                Error::Pch(error) => error.fmt(f),
+                Error::Tg3(error) => error.fmt(f),
+                Error::Aqtion(error) => error.fmt(f),
+                Error::IntelWifi(error) => error.fmt(f),
+                Error::MediatekWifi(error) => error.fmt(f),
+                Error::RealtekWifi(error) => error.fmt(f),
+                error => error.fmt(f),
+            }
+        }
+    }
+    Plain(error)
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
@@ -2581,8 +2626,18 @@ mod tests {
         ];
         let lines = devices.network_account();
         assert_eq!(lines.len(), 2, "{lines:#?}");
-        assert!(lines[0].starts_with("0000:00:00.6 8086:15b8 Ethernet: e1000e: "));
-        assert!(lines[1].starts_with("0000:04:00.0 8086:2725 Wi-Fi: iwlwifi: "));
+        assert!(lines[0].starts_with("0000:00:00.6 8086:15b8 Ethernet: "));
+        assert!(lines[1].starts_with("0000:04:00.0 8086:2725 Wi-Fi: "));
+        // No driver's name leads a reason, wired or Wi-Fi alike.
+        for line in &lines {
+            let reason = line.split(": ").nth(1).unwrap();
+            assert!(
+                !["e1000e", "iwlwifi", "tg3", "atlantic", "r8169"]
+                    .iter()
+                    .any(|driver| reason.starts_with(driver)),
+                "{line}"
+            );
+        }
         for line in &lines {
             assert!(
                 !line.contains('{') && !line.contains("Unverified") && !line.contains("Error"),
@@ -2706,6 +2761,25 @@ mod tests {
         assert!(
             devices.network_account()[0].ends_with("(its start took over 30 s and was given up)")
         );
+        // A failure that is the budget's own ending says it once.
+        devices.failures[0].1 = Error::Device(BlockError::PciPower(
+            crate::bus::pci::power::Error::StartBudget,
+        ));
+        assert_eq!(
+            devices.network_account()[0],
+            "0000:03:00.0 10ec:8168 Ethernet: its start took over 30 s and was given up"
+        );
+        // A started Broadcom PCIe Bluetooth function shares Wi-Fi's class
+        // and is no network adapter.
+        let bluetooth = identity(7, 0, 0x14e4, 0x5fa0, 0x02_80_00);
+        let devices = Devices {
+            network_functions: alloc::vec![bluetooth],
+            ..Devices::default()
+        };
+        let at = alloc::format!("{}", bluetooth.address);
+        let named = |lines: Vec<String>| lines.iter().any(|line| line.contains("14e4:5fa0"));
+        assert!(!named(devices.network_lines(&[at.as_str()])));
+        assert!(named(devices.network_lines(&[])));
     }
 
     /// Each wired driver's failure, as the network account shows it, reads

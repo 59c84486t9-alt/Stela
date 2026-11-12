@@ -27,6 +27,10 @@ impl From<ConfigError> for Error {
     }
 }
 
+/// How [`Error::StartBudget`] reads: an account that already says the
+/// start was given up for its budget leaves a reason in these words out.
+pub const START_BUDGET: &str = "its start budget passed while it was not answering";
+
 /// A plain account for the boot log.
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -45,7 +49,7 @@ impl core::fmt::Display for Error {
             Self::BusMaster => f.write_str("it is still bus mastering"),
             Self::Bars => f.write_str("its BARs were lost in the power change"),
             Self::NotReady => f.write_str("it did not become ready after the power change"),
-            Self::StartBudget => f.write_str("its start budget passed while it was not answering"),
+            Self::StartBudget => f.write_str(START_BUDGET),
         }
     }
 }
