@@ -369,7 +369,9 @@ fn timeout_unknown_revision_and_alignment_are_explicit() {
             Err(BlockError::Timeout)
         ));
     }
-    for revision in [0x4c20, 0x5c10, 0x6010, 0x7030, 0x7410, 0xffff] {
+    // Unimplemented revisions refuse after the identity read. Patched
+    // revisions start without their file (every_patched_revision_...).
+    for revision in [0x4c20, 0xffff] {
         let model = Rc::new(RefCell::new(Model::new(revision)));
         assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
         assert_eq!(model.borrow().trace.len(), 1);
@@ -617,7 +619,7 @@ fn rtl815x_firmware_uses_ep0_dma_wrapping_and_poison_guards() {
 }
 
 #[test]
-fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
+fn rtl8153_missing_firmware_starts_the_chip_unpatched() {
     for revision in [
         0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
     ] {
@@ -627,6 +629,8 @@ fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
             &[vec![9, 2, 9, 0, 0, 7, 0, 0x80, 50]],
         );
         controller.set_slot_speed(1, HIGH_SPEED);
+        model.borrow_mut().ethernet_upload =
+            Some(ethernet::rtl815x::FirmwareModel::new(revision, &[]));
         let config = vec![
             9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2, 0,
             7, 5, 2, 2, 0, 2, 0,
@@ -647,10 +651,24 @@ fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
         let shared = Rc::new(RefCell::new(controller));
         let mut found = Found::default();
         bind(&shared, dev, &mut dma, &mut found);
-        assert!(found.vendor_links.is_empty() && found.failures.is_empty());
-        assert_eq!(found.vendor_failures.len(), 1);
-        let ethernet::Error::Firmware { request, .. } = &found.vendor_failures[0].1 else {
-            panic!("{:?}", found.vendor_failures)
+        // rtl8152_request_firmware: without the file the chip starts
+        // unpatched, and the link names what it runs without.
+        assert!(
+            found.vendor_failures.is_empty() && found.failures.is_empty(),
+            "{revision:04x}: {:?} {:?}",
+            found.vendor_failures,
+            found.failures
+        );
+        assert_eq!(found.vendor_links.len(), 1, "{revision:04x}");
+        let link = &found.vendor_links[0];
+        assert!(link.firmware.is_none());
+        assert!(
+            link.location.ends_with("without its firmware patch"),
+            "{}",
+            link.location
+        );
+        let Some(ethernet::Error::Firmware { request, .. }) = &link.firmware_skipped else {
+            panic!("{:?}", link.firmware_skipped)
         };
         assert_eq!(
             request.name,
@@ -910,6 +928,24 @@ fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_keeps_owned_recei
         }
         link.stop().unwrap();
         assert!(link.transmit(&[0; 60]).is_err());
+    }
+}
+
+#[test]
+fn every_patched_revision_starts_without_its_firmware_file() {
+    use ethernet::rtl815x::{FirmwareIo, FirmwareModel};
+    // rtl8152_apply_firmware skips a patch request_firmware did not find:
+    // each revision with a firmware file starts and initializes without it.
+    for revision in [
+        0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
+    ] {
+        assert!(Revision(revision).firmware().is_some());
+        let model = Rc::new(RefCell::new(FirmwareModel::new(revision, &[])));
+        let (chip, mac) =
+            Chip::attach_with_firmware(FirmwareIo(model), Revision(revision), 4, None)
+                .unwrap_or_else(|error| panic!("{revision:04x}: {error:?}"));
+        assert!(chip.initialized, "{revision:04x}");
+        assert!(!mac.is_multicast() && mac.0 != [0; 6]);
     }
 }
 

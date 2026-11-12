@@ -230,6 +230,9 @@ pub struct UsbEthernet {
     closed: bool,
     stopped: bool,
     pub firmware: Option<firmware::Receipt>,
+    /// Why the chip runs without its firmware patch: the file was missing
+    /// or failed validation, and r8152 then starts the chip unpatched.
+    pub firmware_skipped: Option<firmware::Error>,
     pub location: String,
 }
 
@@ -265,9 +268,15 @@ impl UsbEthernet {
             controller: controller.clone(),
             id: device.id,
         };
-        let (chip, mac, firmware, family) = match binding.kind {
+        let (chip, mac, firmware, family, firmware_skipped) = match binding.kind {
             Kind::Realtek(revision) => {
-                let firmware = firmware::load(provider, &device.descriptor, revision)?;
+                // rtl8152_request_firmware: a missing or invalid patch is
+                // reported and the chip starts without it.
+                let (firmware, skipped) =
+                    match firmware::load(provider, &device.descriptor, revision) {
+                        Ok(firmware) => (firmware, None),
+                        Err(error) => (None, Some(error)),
+                    };
                 let (chip, mac) = Chip::attach_with_policy(
                     io,
                     revision,
@@ -291,7 +300,11 @@ impl UsbEthernet {
                     "RTL8152"
                 };
                 let receipt = firmware.map(|(image, _)| firmware::Receipt::from_image(image));
-                (Backend::Realtek(chip), mac, receipt, String::from(family))
+                let family = match skipped {
+                    Some(_) => format!("{family} without its firmware patch"),
+                    None => String::from(family),
+                };
+                (Backend::Realtek(chip), mac, receipt, family, skipped)
             }
             Kind::Asix(identity) => {
                 let (chip, mac) = asix::Device::attach(io, identity)?;
@@ -310,7 +323,7 @@ impl UsbEthernet {
                     chip.identity().0,
                     chip.identity().1
                 );
-                (Backend::Asix(chip), mac, None, family)
+                (Backend::Asix(chip), mac, None, family, None)
             }
         };
         let receive_bytes = chip.receive_bytes();
@@ -328,6 +341,7 @@ impl UsbEthernet {
             closed: false,
             stopped: false,
             firmware,
+            firmware_skipped,
             location: format!("{} {family}", device.location),
         })
     }

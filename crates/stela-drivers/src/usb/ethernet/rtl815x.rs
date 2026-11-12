@@ -167,9 +167,12 @@ impl<C: Control> Chip<C> {
                 "RTL815x unimplemented or changed chip revision",
             ));
         }
+        // A patch must be the one this revision requests; without one the
+        // chip starts unpatched, as rtl8152_apply_firmware skips it.
         if !(1..=5).contains(&speed)
-            || firmware.map(|image| image.revision())
-                != chip.revision.firmware().map(|_| chip.revision)
+            || firmware.is_some_and(|image| {
+                Some(image.revision()) != chip.revision.firmware().map(|_| chip.revision)
+            })
         {
             return Err(BlockError::Unsupported(
                 "RTL815x USB speed or required firmware identity",
