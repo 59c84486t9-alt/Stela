@@ -1052,8 +1052,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }))
         .then(|| (code.0 + code_bytes.len() - chain::DYNAMIC_EXIT_BYTES) as u64);
         let first = self.admit(u32::from_le_bytes(source[..4].try_into().expect("a word")));
-        // A device site's stub completes nothing natively.
-        if !single && !self.device_site(physical) {
+        // A device site's stub completes only a plain device load natively.
+        if !single && self.installing_stub {
+            successors.extend(self.complete_device_read_natively(
+                code,
+                code_bytes,
+                terminal_pc,
+                terminal,
+                physical,
+            ));
+        } else if !single && !self.device_site(physical) {
             let (successor, dynamic) = self
                 .complete_pointer_natively(code, code_bytes, terminal_pc, terminal)
                 .unwrap_or_default();
@@ -1509,6 +1517,41 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 register_read::checked_write_thunk(pc, rt, cell, refused)
             }
         };
+        self.attach_thunk(code, site, pc, thunk)
+    }
+
+    /// Complete the plain device load `word` of the device site stub at
+    /// `pc` and physical `site` natively while the read the engine kept
+    /// there holds (`register_read::device_read_thunk`), on a host whose
+    /// counter native code reads.
+    fn complete_device_read_natively(
+        &mut self,
+        code: NativeCode,
+        native: &[u8],
+        pc: u64,
+        word: u32,
+        site: u64,
+    ) -> Option<Successor> {
+        let load = register_read::DeviceLoad::of(word)?;
+        let at = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
+        if !chain::is_direct_exit(&native[at..], GuestAddress(pc), ExitKind::System) {
+            return None;
+        }
+        self.clock.native(self.host.tsc_counter()?);
+        let thunk = register_read::device_read_thunk(GuestAddress(pc), site, load, DEVICE_READ);
+        self.attach_thunk(code, at, pc, thunk)
+    }
+
+    /// Install `thunk` and jump to it from the System exit at `site` bytes
+    /// into block code `code`, completing the instruction at `pc`: the
+    /// successor its direct exit to the next instruction is, once ready.
+    fn attach_thunk(
+        &mut self,
+        code: NativeCode,
+        site: usize,
+        pc: u64,
+        thunk: x86_64_pointer::Thunk,
+    ) -> Option<Successor> {
         self.install_stream = self.stream_at(code.0 as u64);
         let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;

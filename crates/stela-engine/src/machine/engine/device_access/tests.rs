@@ -193,3 +193,102 @@ fn a_device_site_that_reaches_ram_runs_natively_and_keeps_writeback_and_size() {
             .any(|(_, block)| block.pc == BASE && machine.variants[block.variant.0 as usize].single)
     );
 }
+
+/// [`Registers`] whose reads are plain, each in the epoch it names.
+#[derive(Default)]
+struct PlainRegisters {
+    registers: Registers,
+    epoch: Arc<core::sync::atomic::AtomicU64>,
+    served: Option<PlainRead>,
+}
+
+impl Devices for PlainRegisters {
+    fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        let value = self.registers.read(cpu, physical, bytes, now)?;
+        self.served = Some(PlainRead {
+            epoch: Arc::clone(&self.epoch),
+            seen: self.epoch.load(core::sync::atomic::Ordering::SeqCst),
+            value,
+            until: u64::MAX,
+        });
+        Ok(value)
+    }
+    fn take_plain_read(&mut self) -> Option<PlainRead> {
+        self.served.take()
+    }
+    fn write(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        self.registers.write(cpu, physical, bytes, value, now)
+    }
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
+        Lines::default()
+    }
+}
+
+#[test]
+fn a_plain_read_at_a_device_site_is_kept_for_native_code_until_translation_may_change() {
+    use register_read::{device_read_key, device_read_slot};
+    // add x3, x3, #1; ldr w0, [x1, #8]; add x2, x2, #1; ret
+    let words = [0x9100_0463, 0xb940_0820, 0x9100_0442, 0xd65f_03c0];
+    let mut machine = board(&words, PlainRegisters::default(), Vec::new());
+    machine.cpu.state.x[1] = DEVICE;
+    let (_, offset) =
+        native_fault_site_in_entry(&mut machine, BASE, BASE + 4, RecoverySiteKind::GuestAccess);
+    machine
+        .host
+        .exits
+        .push(device_fault(offset, DEVICE + 8, false));
+    machine.step().unwrap();
+    assert!(machine.device_site(BASE + 4));
+    let slot = device_read_slot(BASE + 4);
+    // The fault path keeps nothing: only a site's stub is completed again.
+    assert_eq!(machine.mirrors.device_reads[slot].site, 0);
+    machine.cpu.pc = BASE + 4;
+    machine.host.exits.push(exit(BASE + 4, ExitKind::System));
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.state.x[0], 0x8000_0a08);
+    let state = machine.mirror_state();
+    let key = device_read_key(machine.device_read_generation, state, false);
+    assert_eq!(machine.mirrors.cells()[DEVICE_READ_KEY].readable, 1);
+    assert_eq!(machine.mirrors.cells()[DEVICE_READ_KEY].value, key);
+    let read = machine.mirrors.device_reads[slot];
+    assert_eq!(
+        (
+            read.site,
+            read.address,
+            read.key,
+            read.seen,
+            read.value,
+            read.until
+        ),
+        (
+            BASE + 4,
+            DEVICE + 8,
+            key | u64::from(machine.cpu.pstate.pan),
+            0,
+            0x8000_0a08,
+            u64::MAX
+        )
+    );
+    assert_eq!(read.epoch, Arc::as_ptr(&machine.devices.epoch) as u64);
+    // A TLBI moves the generation and closes the key in every state.
+    machine.forget_device_reads();
+    assert_eq!(machine.mirrors.cells()[DEVICE_READ_KEY].readable, 0);
+    assert_ne!(
+        device_read_key(machine.device_read_generation, state, false),
+        key
+    );
+    // The next read at the site keeps it again, under the new key.
+    machine.mirrors.device_reads[slot] = Default::default();
+    machine.cpu.pc = BASE + 4;
+    machine.devices.served = None;
+    machine.host.exits.push(exit(BASE + 4, ExitKind::System));
+    machine.step().unwrap();
+    assert_eq!(machine.mirrors.device_reads[slot].site, BASE + 4);
+}

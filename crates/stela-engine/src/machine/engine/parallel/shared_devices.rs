@@ -441,6 +441,8 @@ pub struct SharedDevices<D> {
     /// ([`Devices::plain_epoch`]), which it serves again without them while
     /// their model's epoch holds.
     plain: PlainReads,
+    /// The plain read the last scalar read served ([`Devices::take_plain_read`]).
+    last_plain: Option<super::super::PlainRead>,
     /// The ticks this handle's calls waited for the lock since
     /// [`Devices::take_lock_wait`].
     waited: AtomicU64,
@@ -467,26 +469,34 @@ struct PlainRead {
 }
 
 impl PlainReads {
-    /// The value a plain read of `bytes` at `physical` gave, while no access
-    /// that may change its model began since.
-    fn read(&self, physical: u64, bytes: u8) -> Option<u64> {
+    /// The plain read of `bytes` at `physical`, while no access that may
+    /// change its model began since.
+    fn read(&self, physical: u64, bytes: u8) -> Option<&PlainRead> {
         let read = self
             .reads
             .iter()
             .find(|read| read.physical == physical && read.bytes == bytes)?;
-        (read.epoch.load(Ordering::SeqCst) == read.seen).then_some(read.value)
+        (read.epoch.load(Ordering::SeqCst) == read.seen).then_some(read)
     }
 
-    /// Keep `value`, read while `epoch` held `seen`, if it still holds it: an
-    /// access that may change the model began during the read otherwise.
-    fn keep(&mut self, physical: u64, bytes: u8, epoch: Arc<AtomicU64>, seen: u64, value: u64) {
+    /// Keep `value`, read while `epoch` held `seen`, if it still holds it
+    /// (an access that may change the model began during the read
+    /// otherwise): whether it did.
+    fn keep(
+        &mut self,
+        physical: u64,
+        bytes: u8,
+        epoch: &Arc<AtomicU64>,
+        seen: u64,
+        value: u64,
+    ) -> bool {
         if epoch.load(Ordering::SeqCst) != seen {
-            return;
+            return false;
         }
         let read = PlainRead {
             physical,
             bytes,
-            epoch,
+            epoch: Arc::clone(epoch),
             seen,
             value,
         };
@@ -502,6 +512,7 @@ impl PlainReads {
             self.reads[self.next] = read;
             self.next = (self.next + 1) % PLAIN_READS;
         }
+        true
     }
 }
 
@@ -561,6 +572,7 @@ impl<D: Devices> SharedDevices<D> {
             local: Vec::new(),
             passive,
             plain: PlainReads::default(),
+            last_plain: None,
             waited: AtomicU64::new(0),
         }
     }
@@ -573,6 +585,7 @@ impl<D: Devices> SharedDevices<D> {
             local: Vec::new(),
             passive: self.passive.clone(),
             plain: PlainReads::default(),
+            last_plain: None,
             waited: AtomicU64::new(0),
         }
     }
@@ -786,19 +799,35 @@ impl<D: Devices> Devices for SharedDevices<D> {
         if let Some(value) = self.passive.as_ref().and_then(|p| p.read(physical, bytes)) {
             return ScalarRead::Served(Ok(value));
         }
+        self.last_plain = None;
         // A device deadline that passed may change what a model reads.
-        if now < self.board.time.load(Ordering::Acquire)
-            && let Some(value) = self.plain.read(physical, bytes)
+        let until = self.board.time.load(Ordering::Acquire);
+        if now < until
+            && let Some(read) = self.plain.read(physical, bytes)
         {
+            let value = read.value;
+            self.last_plain = Some(super::super::PlainRead {
+                epoch: Arc::clone(&read.epoch),
+                seen: read.seen,
+                value,
+                until,
+            });
             return ScalarRead::Served(Ok(value));
         }
-        let (read, plain) = self.changing(Call::Access, cpu, now, |devices, now| {
+        let (read, plain, until) = self.changing(Call::Access, cpu, now, |devices, now| {
             let plain = devices.plain_epoch(physical, bytes);
             let read = devices.read_scalar(cpu, physical, bytes, now);
-            (read, plain)
+            (read, plain, self.board.time.load(Ordering::Acquire))
         });
-        if let (ScalarRead::Served(Ok(value)), Some((epoch, seen))) = (&read, plain) {
-            self.plain.keep(physical, bytes, epoch, seen, *value);
+        if let (ScalarRead::Served(Ok(value)), Some((epoch, seen))) = (&read, plain)
+            && self.plain.keep(physical, bytes, &epoch, seen, *value)
+        {
+            self.last_plain = Some(super::super::PlainRead {
+                epoch,
+                seen,
+                value: *value,
+                until,
+            });
         }
         read
     }
@@ -1172,6 +1201,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     fn register_name(&self, physical: u64) -> Option<&'static str> {
         self.with(|devices| devices.register_name(physical))
+    }
+    fn take_plain_read(&mut self) -> Option<super::super::PlainRead> {
+        self.last_plain.take()
     }
     fn take_lock_wait(&mut self) -> u64 {
         self.waited.swap(0, Ordering::Relaxed)

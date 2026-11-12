@@ -145,6 +145,9 @@ pub(super) struct Mirrors {
     /// and the PEs they found halted, which the engine wakes when native
     /// code returns ([`Machine::take_fast_ipi_wakes`]).
     pub(super) fast_ipi: register_read::FastIpi,
+    /// The plain device reads native device sites complete again
+    /// ([`DEVICE_READ_KEY`]), a slot per site.
+    pub(super) device_reads: [register_read::DeviceRead; register_read::DEVICE_READS],
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -329,8 +332,24 @@ pub(super) const FAST_IPI: register_read::FastIpiPlaces = register_read::FastIpi
     interrupt_status: INTERRUPT_STATUS,
 };
 
+/// The cell whose `value` is the key ([`register_read::device_read_key`])
+/// native device reads of the state match
+/// (`x86_64::register_read::device_read_thunk`): open on the PE's device
+/// read generation once the engine kept a plain device read in the state
+/// ([`Machine::keep_device_read`]). A translation that may have changed
+/// moves the generation ([`Machine::forget_device_reads`]); any other change
+/// of derived state closes every cell.
+pub(super) const DEVICE_READ_KEY: usize = FAST_IPI_WRITES + 1;
+
+/// Where native device reads find theirs.
+pub(super) const DEVICE_READ: register_read::DeviceReadPlaces = register_read::DeviceReadPlaces {
+    reads: Place::new(Anchor::Mirrors, offset_of!(Mirrors, device_reads)),
+    key: cell_place(DEVICE_READ_KEY),
+    count: Place::new(Anchor::Count, 0),
+};
+
 /// The cell of the first of the [`STORED_WRITES`].
-const STORED_WRITE_CELLS: usize = FAST_IPI_WRITES + 1;
+const STORED_WRITE_CELLS: usize = DEVICE_READ_KEY + 1;
 
 /// The IMPLEMENTATION DEFINED registers that a store completes writes of
 /// that get a cell of their own the first time code naming them is installed
@@ -441,6 +460,7 @@ impl Default for Mirrors {
             instructions: register_read::InstructionCounter::default(),
             spin: register_read::EventSpin::default(),
             fast_ipi: register_read::FastIpi::default(),
+            device_reads: [register_read::DeviceRead::default(); register_read::DEVICE_READS],
         }
     }
 }

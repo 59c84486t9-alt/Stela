@@ -251,6 +251,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// state derived from System registers left as it is.
     pub(super) fn sync_host_regime(&mut self) {
         self.sync_monitor();
+        self.forget_device_reads();
         let watch = Watch {
             pass: self.watch.pass,
             ..Watch::from_ranges(&debug::watched(&self.cpu))

@@ -176,6 +176,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// An architectural cache epoch must never wrap back to an old permission.
     pub(super) fn advance_translation_generation(&mut self) {
         self.mirrors.close_code_page();
+        self.forget_device_reads();
         self.mirrors.transitions.contexts_moved();
         self.translation_generation = self
             .translation_generation
@@ -186,6 +187,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What TTBR0 or its ASID selects may have changed.
     fn advance_table_generation(&mut self) {
         self.mirrors.close_code_page();
+        self.forget_device_reads();
         self.mirrors.transitions.contexts_moved();
         self.table_generation = self
             .table_generation
@@ -493,6 +495,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         asid: Option<u16>,
     ) {
         self.mirrors.close_code_page();
+        self.forget_device_reads();
         match everywhere {
             mmu::tlbi::Everywhere::Addresses(addresses)
             | mmu::tlbi::Everywhere::AsidAddresses(addresses, _) => {

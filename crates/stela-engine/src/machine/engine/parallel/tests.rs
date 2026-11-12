@@ -2607,11 +2607,25 @@ fn plain_reads_are_served_again_without_the_lock_while_their_epoch_holds() {
     let home = SharedDevices::new(Plain::default(), hub);
     let mut worker = home.worker();
     let reads = |home: &SharedDevices<Plain>| home.with(|devices| devices.reads);
+    // Each plain read it serves is native code's to serve again.
+    let plain = |worker: &mut SharedDevices<Plain>| {
+        worker.take_plain_read().map(|read| {
+            (
+                read.epoch.load(Ordering::SeqCst),
+                read.seen,
+                read.value,
+                read.until,
+            )
+        })
+    };
     assert_eq!(worker.read_scalar(1, 0x40, 8, 0), ScalarRead::Served(Ok(0)));
+    assert_eq!(plain(&mut worker), Some((0, 0, 0, u64::MAX)));
+    assert_eq!(plain(&mut worker), None);
     assert_eq!(reads(&home), 1);
     // Served again while another call holds the devices' lock.
     let held = home.board.lock(Call::Other);
     assert_eq!(worker.read_scalar(1, 0x40, 8, 1), ScalarRead::Served(Ok(0)));
+    assert_eq!(plain(&mut worker), Some((0, 0, 0, u64::MAX)));
     drop(held);
     assert_eq!(reads(&home), 1);
     // A write by another PE moves the epoch: the next read reaches the model.
@@ -2622,11 +2636,15 @@ fn plain_reads_are_served_again_without_the_lock_while_their_epoch_holds() {
     assert_eq!(reads(&home), 2);
     // Other reads, and any read once a device deadline passed, reach it.
     assert_eq!(worker.read_scalar(1, 0x48, 8, 5), ScalarRead::Served(Ok(5)));
+    assert_eq!(plain(&mut worker), None);
     assert_eq!(worker.read_scalar(1, 0x40, 4, 5), ScalarRead::Served(Ok(5)));
+    assert_eq!(plain(&mut worker), None);
     assert_eq!(reads(&home), 4);
     home.board.time.store(6, Ordering::Release);
     assert_eq!(worker.read_scalar(1, 0x40, 8, 6), ScalarRead::Served(Ok(5)));
     assert_eq!(reads(&home), 5);
+    // Kept with the deadline it found.
+    assert_eq!(plain(&mut worker), Some((1, 1, 5, 6)));
 }
 
 /// The copies a transfer leaves ([`Devices::take_unlocked`]) run on the PE

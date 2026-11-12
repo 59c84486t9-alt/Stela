@@ -214,11 +214,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match device {
             Some((access, target)) => {
                 site.device = site.device.saturating_add(1);
-                self.outside_run(|machine| {
+                let load = register_read::DeviceLoad::of(word).filter(|_| !access.write);
+                let address = load.map(|load| {
+                    self.cpu.state.x[usize::from(load.rn)]
+                        .wrapping_add_signed(i64::from(load.offset))
+                });
+                self.devices.take_plain_read();
+                let step = self.outside_run(|machine| {
                     machine.completing(pc, |machine| {
                         machine.device_access(word, access.address, target, access.write)
                     })
-                })
+                });
+                let plain = self.devices.take_plain_read();
+                if let (Ok(()), Some(load), Some(address), Some(plain)) =
+                    (&step, load, address, plain)
+                    && u64::from(load.bytes) == access.bytes
+                    && !self
+                        .watches
+                        .iter()
+                        .any(|&(first, last)| (first..=last).contains(&target))
+                {
+                    self.keep_device_read(physical, address, plain);
+                }
+                step
             }
             None => {
                 site.ram = site.ram.saturating_add(1);
@@ -229,6 +247,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.run_one_natively(pc)
             }
         }
+    }
+
+    /// Keep the plain read the load at the device site `site` made at
+    /// `address` for native code to complete again
+    /// (`x86_64::register_read::device_read_thunk`), in the PE's state and
+    /// PAN, while nothing that may change its translation happens
+    /// ([`Self::forget_device_reads`]).
+    fn keep_device_read(&mut self, site: u64, address: u64, plain: PlainRead) {
+        use register_read::{DeviceRead, device_read_key, device_read_slot};
+        let state = self.mirror_state();
+        if self.mirrors.cells()[DEVICE_READ_KEY].readable == 0 {
+            // Closed by a change of derived state: what earlier keys kept
+            // may not hold, in this state or another.
+            self.forget_device_reads();
+            self.mirrors.banks[state][DEVICE_READ_KEY] = register_read::Cell {
+                readable: 1,
+                value: device_read_key(self.device_read_generation, state, false),
+            };
+        }
+        let key = self.mirrors.banks[state][DEVICE_READ_KEY].value | u64::from(self.cpu.pstate.pan);
+        let slot = device_read_slot(site);
+        self.mirrors.device_reads[slot] = DeviceRead {
+            site,
+            address,
+            key,
+            epoch: Arc::as_ptr(&plain.epoch) as u64,
+            seen: plain.seen,
+            value: plain.value,
+            until: plain.until,
+        };
+        self.device_read_epochs[slot] = Some(plain.epoch);
+    }
+
+    /// The PE's translations or their controls may have changed: no device
+    /// read kept so far completes natively again.
+    pub(super) fn forget_device_reads(&mut self) {
+        self.device_read_generation += 1;
+        self.mirrors.close(DEVICE_READ_KEY);
     }
 
     /// Run the instruction at `pc` as a block of its own, as the step of a

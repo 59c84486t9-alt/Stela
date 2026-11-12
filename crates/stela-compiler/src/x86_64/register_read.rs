@@ -1528,6 +1528,155 @@ pub fn timer_thunk(pc: GuestAddress, rt: u8, access: TimerAccess, places: TimerP
     )
 }
 
+/// A plain device read a [`device_read_thunk`] serves again: the device
+/// site's physical address (`site`, 0 for none), the address it read
+/// (`address`, the base register plus the offset), the `key` of the state it
+/// read in ([`device_read_key`]), the model's epoch word (`epoch`, its
+/// address) and the count it held (`seen`), the value read, and the system
+/// count before which no device deadline came (`until`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceRead {
+    pub site: u64,
+    pub address: u64,
+    pub key: u64,
+    pub epoch: u64,
+    pub seen: u64,
+    pub value: u64,
+    pub until: u64,
+}
+
+const READ_SITE: i8 = core::mem::offset_of!(DeviceRead, site) as i8;
+const READ_ADDRESS: i8 = core::mem::offset_of!(DeviceRead, address) as i8;
+const READ_KEY: i8 = core::mem::offset_of!(DeviceRead, key) as i8;
+const READ_EPOCH: i8 = core::mem::offset_of!(DeviceRead, epoch) as i8;
+const READ_SEEN: i8 = core::mem::offset_of!(DeviceRead, seen) as i8;
+const READ_VALUE: i8 = core::mem::offset_of!(DeviceRead, value) as i8;
+const READ_UNTIL: i8 = core::mem::offset_of!(DeviceRead, until) as i8;
+
+/// The [`DeviceRead`]s a PE keeps, a slot per site ([`device_read_slot`]).
+pub const DEVICE_READS: usize = 64;
+
+/// The slot of the device site at physical address `site`.
+pub const fn device_read_slot(site: u64) -> usize {
+    ((site >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - DEVICE_READS.ilog2())) as usize
+}
+
+/// The key a [`DeviceRead`] made in mirror state `state` with PSTATE.PAN
+/// `pan` holds while the state's key cell holds `device_read_key(generation,
+/// state, false)`: the PE's translation and its controls as they were.
+pub const fn device_read_key(generation: u64, state: usize, pan: bool) -> u64 {
+    generation << 4 | (state as u64) << 1 | pan as u64
+}
+
+/// A load a [`device_read_thunk`] completes: `LDR` or `LDUR` of a B, H, W or X
+/// register, zero-extending, without writeback, from a base other than SP
+/// (`rn`) plus `offset`, into `rt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceLoad {
+    pub rn: u8,
+    pub offset: i32,
+    pub rt: u8,
+    pub bytes: u8,
+}
+
+impl DeviceLoad {
+    /// The load `word` makes, if a [`device_read_thunk`] completes it.
+    pub fn of(word: u32) -> Option<Self> {
+        let size = word >> 30;
+        let rn = (word >> 5 & 31) as u8;
+        let rt = (word & 31) as u8;
+        let offset = if word & 0x3fc0_0000 == 0x3940_0000 {
+            // LDR (immediate, unsigned offset).
+            ((word >> 10 & 0xfff) << size) as i32
+        } else if word & 0x3fe0_0c00 == 0x3840_0000 {
+            // LDUR.
+            ((word << 11) as i32) >> 23
+        } else {
+            return None;
+        };
+        (rn != 31).then_some(Self {
+            rn,
+            offset,
+            rt,
+            bytes: 1 << size,
+        })
+    }
+}
+
+/// Where a [`device_read_thunk`] finds its reads: the PE's [`DeviceRead`]s,
+/// the key cell of its state, whose `value` the read's key must match, and
+/// the count reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceReadPlaces {
+    pub reads: Place,
+    pub key: Place,
+    pub count: Place,
+}
+
+/// The thunk completing the plain device load `load` of the site at `pc`
+/// and physical `site` natively, while the [`DeviceRead`] of its slot holds
+/// that site, the address the load reads now, the key of the PE's state
+/// and PSTATE.PAN, a model epoch that still holds the count it held, and a
+/// count below `until`: it writes the read's value to Xt and leaves through
+/// a direct exit to the next instruction. Else it exits at `pc`. It also
+/// clobbers RCX and RDX.
+pub fn device_read_thunk(
+    pc: GuestAddress,
+    site: u64,
+    load: DeviceLoad,
+    places: DeviceReadPlaces,
+) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
+    let slot = Place::new(
+        places.reads.anchor,
+        places.reads.offset + device_read_slot(site) * core::mem::size_of::<DeviceRead>(),
+    );
+    let read = |offset| Mem::base_disp8(Rcx, offset);
+    let (mut code, closed) = open(places.key);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+    asm.alu_load(
+        Alu::Or,
+        Qword,
+        Rdx,
+        frame_field(core::mem::offset_of!(GuestState, pan)),
+    );
+    asm.place(Rcx, slot);
+    asm.alu_load(Alu::Cmp, Qword, Rdx, read(READ_KEY));
+    let other_key = asm.jcc(Cond::Ne);
+    asm.mov_imm64(Rax, site);
+    asm.alu_load(Alu::Cmp, Qword, Rax, read(READ_SITE));
+    let other_site = asm.jcc(Cond::Ne);
+    asm.mov_load(Qword, Rax, register(load.rn));
+    if load.offset != 0 {
+        asm.alu_imm32(Alu::Add, Qword, Rax, load.offset);
+    }
+    asm.alu_load(Alu::Cmp, Qword, Rax, read(READ_ADDRESS));
+    let other_address = asm.jcc(Cond::Ne);
+    asm.mov_load(Qword, Rax, read(READ_EPOCH));
+    asm.mov_load(Qword, Rax, Mem::base(Rax, 0));
+    asm.alu_load(Alu::Cmp, Qword, Rax, read(READ_SEEN));
+    let changed = asm.jcc(Cond::Ne);
+    asm.alu_imm8(Alu::Cmp, Qword, read(READ_UNTIL), -1);
+    let timeless = asm.jcc(Cond::E);
+    read_count(&mut asm, places.count);
+    asm.place(Rcx, slot);
+    asm.alu_load(Alu::Cmp, Qword, Rdx, read(READ_UNTIL));
+    let due = asm.jcc(Cond::Ae);
+    asm.bind(timeless);
+    if load.rt != 31 {
+        asm.mov_load(Qword, Rax, read(READ_VALUE));
+        asm.mov_store(Qword, register(load.rt), Rax);
+    }
+    finish_unless(
+        code,
+        [closed, other_key, other_site, other_address, changed, due],
+        pc,
+    )
+}
+
 /// The count of the reader at `count` into RDX, as [`count_thunk`] reads
 /// it. Clobbers RAX and RCX.
 pub(super) fn read_count(asm: &mut Asm<'_>, count: Place) {
@@ -2123,6 +2272,160 @@ mod tests {
         let discard = count_thunk(PC, 31, CELL, READER);
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x, last()), (before, 500));
+    }
+
+    #[test]
+    fn device_loads_name_their_base_offset_and_width() {
+        // ldr w8, [x9, #0x14]; ldr x0, [x1]; ldrb w2, [x3, #1]; ldrh w4, [x5, #6]
+        assert_eq!(
+            DeviceLoad::of(0xb940_1528),
+            Some(DeviceLoad {
+                rn: 9,
+                offset: 0x14,
+                rt: 8,
+                bytes: 4
+            })
+        );
+        assert_eq!(
+            DeviceLoad::of(0xf940_0020),
+            Some(DeviceLoad {
+                rn: 1,
+                offset: 0,
+                rt: 0,
+                bytes: 8
+            })
+        );
+        assert_eq!(
+            DeviceLoad::of(0x3940_0462),
+            Some(DeviceLoad {
+                rn: 3,
+                offset: 1,
+                rt: 2,
+                bytes: 1
+            })
+        );
+        assert_eq!(
+            DeviceLoad::of(0x7940_0ca4),
+            Some(DeviceLoad {
+                rn: 5,
+                offset: 6,
+                rt: 4,
+                bytes: 2
+            })
+        );
+        // ldur w0, [x1, #-4]
+        assert_eq!(
+            DeviceLoad::of(0xb85f_c020),
+            Some(DeviceLoad {
+                rn: 1,
+                offset: -4,
+                rt: 0,
+                bytes: 4
+            })
+        );
+        // ldr x0, [sp]; ldrsw x0, [x1]; str w0, [x1]; ldr w0, [x1], #4;
+        // ldr w0, [x1, x2]
+        for other in [
+            0xf940_03e0_u32,
+            0xb980_0020,
+            0xb900_0020,
+            0xb840_4420,
+            0xb862_6820,
+        ] {
+            assert_eq!(DeviceLoad::of(other), None, "{other:#x}");
+        }
+    }
+
+    /// A device read runs on the host: it completes from its slot while the
+    /// key, site, address, epoch and count all agree, and exits otherwise.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn device_reads_complete_from_their_slot_while_everything_agrees() {
+        use crate::GuestState;
+        use core::mem::offset_of;
+        use core::sync::atomic::Ordering::Relaxed;
+        #[repr(C)]
+        struct Data {
+            key: Cell,
+            reads: [DeviceRead; DEVICE_READS],
+        }
+        const SITE: u64 = 0x8_0000_1234;
+        let load = DeviceLoad {
+            rn: 1,
+            offset: 0x10,
+            rt: 2,
+            bytes: 4,
+        };
+        let mut data = alloc::boxed::Box::new(Data {
+            key: Cell::default(),
+            reads: [DeviceRead::default(); DEVICE_READS],
+        });
+        let base = &mut *data as *mut Data;
+        let epoch = alloc::boxed::Box::new(AtomicU64::new(7));
+        let published = alloc::boxed::Box::new(CountState::default());
+        published.offset.store(100, Relaxed);
+        published.ceiling.store(u64::MAX, Relaxed);
+        let mut count = alloc::boxed::Box::new(Count {
+            state: &*published as *const CountState as u64,
+            ..Count::default()
+        });
+        let places = DeviceReadPlaces {
+            reads: Place::new(Anchor::Mirrors, offset_of!(Data, reads)),
+            key: Place::new(Anchor::Mirrors, offset_of!(Data, key)),
+            count: READER,
+        };
+        let thunk = device_read_thunk(PC, SITE, load, places);
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = base as u64;
+        state.anchors[Anchor::Count] = &mut *count as *mut Count as u64;
+        state.x[1] = 0xffff_fe00_1000_0000;
+        let key = device_read_key(3, 1, false);
+        let slot = device_read_slot(SITE);
+        // SAFETY: `base` points into the live box; written between runs.
+        let data = |f: &mut dyn FnMut(&mut Data)| unsafe { f(&mut *base) };
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        data(&mut |d| {
+            d.key = Cell {
+                readable: 1,
+                value: key,
+            };
+            d.reads[slot] = DeviceRead {
+                site: SITE,
+                address: 0xffff_fe00_1000_0010,
+                key,
+                epoch: &*epoch as *const AtomicU64 as u64,
+                seen: 7,
+                value: 0xabcd,
+                until: u64::MAX,
+            };
+        });
+        assert_eq!(run(&thunk.code, &mut state), NEXT);
+        assert_eq!(state.x[2], 0xabcd);
+        state.x[2] = 0;
+        // Another address, PAN, key, epoch or a passed deadline exit.
+        state.x[1] += 8;
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        state.x[1] -= 8;
+        state.pan = 1;
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        state.pan = 0;
+        data(&mut |d| d.key.value = device_read_key(4, 1, false));
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        data(&mut |d| d.key.value = key);
+        epoch.store(8, Relaxed);
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        epoch.store(7, Relaxed);
+        data(&mut |d| d.reads[slot].until = 50);
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        data(&mut |d| d.reads[slot].until = 1000);
+        assert_eq!(run(&thunk.code, &mut state), NEXT);
+        assert_eq!(state.x[2], 0xabcd);
+        data(&mut |d| d.reads[slot].site = SITE + 4);
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        data(&mut |d| d.reads[slot].site = SITE);
+        data(&mut |d| d.key.readable = 0);
+        assert_eq!(run(&thunk.code, &mut state), MISS);
+        assert_eq!(state.x[2], 0xabcd);
     }
 
     /// What the event thunks of these tests find at [`Anchor::Mirrors`].

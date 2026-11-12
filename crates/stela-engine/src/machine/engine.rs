@@ -7,8 +7,8 @@ mod reports;
 use boundary::*;
 pub use boundary::{
     CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
-    LockedMemory, NativeView, NoDevices, PassiveRegisters, ScalarRead, Settled, Start, UnlockedDma,
-    WriteSettled,
+    LockedMemory, NativeView, NoDevices, PassiveRegisters, PlainRead, ScalarRead, Settled, Start,
+    UnlockedDma, WriteSettled,
 };
 use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;
@@ -741,6 +741,11 @@ pub struct Machine<H: Host, D: Devices> {
     /// The board's fast-IPI table while this PE's native IPI writes use it
     /// (`Mirrors::fast_ipi`), which keeps its words alive.
     fast_ipi: Option<Arc<crate::machine::fast_ipi::Table>>,
+    /// The generation native device reads' keys hold
+    /// ([`mirrors::DEVICE_READ_KEY`]), and the model epochs of the reads
+    /// in `Mirrors::device_reads`, which those keep alive.
+    device_read_generation: u64,
+    device_read_epochs: Vec<Option<Arc<core::sync::atomic::AtomicU64>>>,
     /// The register the native fault being handled reached, which its
     /// exit's ticks are charged to ([`Self::timing_exit`]).
     timed_device: Option<u64>,
@@ -1308,6 +1313,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             entered_total: 0,
             device_registers: BTreeMap::new(),
             fast_ipi: None,
+            device_read_generation: 0,
+            device_read_epochs: alloc::vec![None; stela_compiler::x86_64::register_read::DEVICE_READS],
             timed_device: None,
             timed_write: None,
             system_words: BTreeMap::new(),

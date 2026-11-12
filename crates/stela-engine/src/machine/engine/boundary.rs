@@ -431,6 +431,17 @@ pub struct ConsumedPair {
     pub settlement: Result<(), DeviceError>,
 }
 
+/// A plain read the devices served ([`Devices::take_plain_read`]): its
+/// model's epoch and the count it held, the value, and the count before
+/// which no device deadline comes (`u64::MAX`: none).
+#[derive(Debug, Clone)]
+pub struct PlainRead {
+    pub epoch: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    pub seen: u64,
+    pub value: u64,
+    pub until: u64,
+}
+
 /// How [`Devices::read_scalar`] answered a scalar read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarRead {
@@ -797,6 +808,12 @@ pub trait Devices {
     /// The name the model mapped at `physical` gives that register, for
     /// reports.
     fn register_name(&self, _physical: u64) -> Option<&'static str> {
+        None
+    }
+    /// The plain read the last [`Self::read_scalar`] served, if it was one
+    /// whose value stays while its epoch holds the count and the count is
+    /// below `until`: native code may serve it again on those terms.
+    fn take_plain_read(&mut self) -> Option<PlainRead> {
         None
     }
     /// For a plain read of `bytes` at `physical`, one that changes nothing
