@@ -105,6 +105,12 @@ mod rounding;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod scalar_precision_tests;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod vector_conversion_tests;
 pub(super) use rounding::kernel as rounding_kernel;
 #[cfg(all(
     test,

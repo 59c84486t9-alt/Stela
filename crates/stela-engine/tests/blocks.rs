@@ -168,8 +168,8 @@ mod numerical {
         for (fpcr, lanes, helpers) in [
             (0, small, 0),
             (FPCR_AH, small, 0),
-            (FPCR_FZ, small, 1),
-            (FPCR_FIZ, small, 1),
+            (FPCR_FZ, small, 0),
+            (FPCR_FIZ, small, 0),
             (FPCR_AH | FPCR_FZ, small, 1),
             (FPCR_FZ, signed_zeros, 0),
             (FPCR_FIZ, signed_zeros, 0),
@@ -178,14 +178,19 @@ mod numerical {
             (FPCR_FZ, [0x0080_0000, 0x8080_0000, 0, 0x8000_0000], 0),
             (FPCR_FZ | FPCR_FIZ, normals, 0),
             (0, normals, 0),
-            (0, [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000], 1),
+            (0, [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000], 0),
             (
                 FPCR_FZ,
                 [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000],
+                0,
+            ),
+            (0, [0x4f00_0000, 0xcf00_0001, 1, 0x8000_0000], 0),
+            (FPCR_FIZ, [0x4f00_0000, 0xcf00_0001, 0, 0x8000_0000], 0),
+            (
+                FPCR_AH,
+                [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000],
                 1,
             ),
-            (0, [0x4f00_0000, 0xcf00_0001, 1, 0x8000_0000], 1),
-            (FPCR_FIZ, [0x4f00_0000, 0xcf00_0001, 0, 0x8000_0000], 1),
         ] {
             let mut thread = input(false);
             thread.registers.fpcr = fpcr;

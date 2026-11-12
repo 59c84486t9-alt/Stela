@@ -6,6 +6,7 @@ use super::numerical::{
     prepare_vector_input_range, read_numerical_vector, reject_other_status, resolve,
     restore_environment, test_control, vector_exponent_range,
 };
+use super::numerical::{commit_flush_status, flush_subnormal_lanes};
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size, vector_extensions};
@@ -18,8 +19,8 @@ use crate::{
     aarch64::{
         Register,
         floating::{
-            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_MASK,
-            FPCR_ROUNDING_SHIFT, Format, INEXACT,
+            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_MASK,
+            FPCR_ROUNDING_SHIFT, Format, INEXACT, INVALID,
             integer::{IntegerFormat, IntegerRounding, IntegerWidth},
         },
         simd::{
@@ -895,6 +896,8 @@ fn to_integer_with(
         && mode == IntegerRounding::TowardZero
         && operand.frac_bits == 0;
     let mut helper_patches = Vec::new();
+    let saturated = (signed_single && packed_result && operand.frac_bits == 0)
+        .then(|| saturating_single(code, operand, mode));
     let other_controls = if packed_truncate {
         read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
         // With input flushing disabled, CVTTPS2DQ reports inexact for
@@ -979,7 +982,90 @@ fn to_integer_with(
     for patch in fast.map(|(_, success)| success).unwrap_or_default() {
         resolve(code, patch, success_start);
     }
+    if let Some(saturated) = saturated {
+        resolve(code, saturated, success_start);
+    }
     finish_integer(code, operand, packed_result);
+}
+
+/// MXCSR's invalid-operation status.
+const MXCSR_INVALID_STATUS: i32 = 1;
+
+/// FCVTNS, FCVTMS, FCVTPS and FCVTZS of S lanes to 32-bit integers with
+/// FPCR.AH and the trap enables clear, for every input: FZ or FIZ flush
+/// subnormal inputs first (FZ raising IDC); CVT(T)PS2DQ in the guest's
+/// rounding gives each in-range lane, and 0x80000000 for a NaN or an
+/// out-of-range lane, which becomes zero for a NaN and the largest
+/// integer for a positive input, as Arm saturates; the host's invalid
+/// status is FPSR.IOC exactly where Arm raises it, and its inexact IXC
+/// (no lane raises both). Reads the input from RESULT_VECTOR and leaves
+/// the result there and the status in ECX. Returns the jump to the
+/// commit; other controls continue past it.
+fn saturating_single(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding) -> usize {
+    const INPUT: u8 = 6;
+    const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+    let shape = operand.integer.shape();
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH);
+    let other = branch(code, Condition::NotZero);
+    read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(code, Format::Single, shape, RESULT_VECTOR, FLUSH_SCRATCH);
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    packed(code, Host::MoveAligned, INPUT, RESULT_VECTOR);
+    environment_round(code, rounding(mode));
+    if mode == IntegerRounding::TowardZero {
+        code.asm().cvttps2dq(RESULT_VECTOR, Rm::Xmm(RESULT_VECTOR));
+    } else {
+        Host::ConvertPackedSingleToDword.register(
+            code,
+            RESULT_VECTOR,
+            RESULT_VECTOR,
+            TargetCpu::Baseline,
+        );
+    }
+    restore_environment(code);
+    let [indefinite, nan, positive, cleared] = FLUSH_SCRATCH;
+    // Lanes holding the host's integer indefinite, 0x80000000.
+    packed(code, Host::EqualDword, indefinite, indefinite);
+    ShiftOpcode::LeftDword.emit(code, indefinite, 31);
+    packed(code, Host::EqualDword, indefinite, RESULT_VECTOR);
+    // NaN lanes: a magnitude above the infinity's.
+    packed(code, Host::EqualDword, nan, nan);
+    ShiftOpcode::RightDword.emit(code, nan, 1);
+    packed(code, Host::And, nan, INPUT);
+    packed(code, Host::EqualDword, positive, positive);
+    ShiftOpcode::RightDword.emit(code, positive, 24);
+    ShiftOpcode::LeftDword.emit(code, positive, 23);
+    packed(code, Host::GreaterDword, nan, positive);
+    // A NaN converts to zero.
+    packed(code, Host::MoveAligned, cleared, indefinite);
+    packed(code, Host::And, cleared, nan);
+    packed(code, Host::AndNot, cleared, RESULT_VECTOR);
+    packed(code, Host::MoveAligned, RESULT_VECTOR, cleared);
+    // A positive input out of range saturates to 0x7fffffff.
+    packed(code, Host::MoveAligned, positive, INPUT);
+    ShiftOpcode::ArithmeticDword.emit(code, positive, 31);
+    packed(code, Host::Or, positive, nan);
+    packed(code, Host::AndNot, positive, indefinite);
+    packed(code, Host::Xor, RESULT_VECTOR, positive);
+    code.asm().test_imm(Size::Dword, Rcx, MXCSR_INVALID_STATUS);
+    let valid = branch(code, Condition::Zero);
+    code.asm().alu_imm8(
+        Alu::Or,
+        Size::Dword,
+        super::numerical::state(core::mem::offset_of!(crate::GuestState, fpsr)),
+        INVALID as i8,
+    );
+    let end = code.len();
+    resolve(code, valid, end);
+    commit_flush_status(code);
+    let done = jump(code);
+    let other_start = code.len();
+    resolve(code, other, other_start);
+    done
 }
 
 pub(in crate::x86_64) fn javascript(
