@@ -57,18 +57,19 @@ impl Drop for Permit<'_> {
 
 /// The screen's text state, which any processor may reach: the boot PE's
 /// reports, and the host drivers' waits on whichever processor runs them.
-/// One at a time, and none waits: a processor that finds it in use skips
-/// its change, as a firmware timer tick that interrupts a draw does. A
-/// `RefCell` is not enough, as two processors updating its borrow count
-/// at once can leave it counting a borrow nobody holds, which freezes the
-/// screen for the rest of the boot.
+/// One at a time: a marker tick that finds it in use skips its frame, as a
+/// firmware timer tick that interrupts a draw does, while a report waits a
+/// bounded time for another processor's turn to end. A `RefCell` is not
+/// enough, as two processors updating its borrow count at once can leave
+/// it counting a borrow nobody holds, which freezes the screen for the
+/// rest of the boot.
 pub struct Exclusive<T> {
     busy: AtomicBool,
     value: UnsafeCell<T>,
 }
 
 // SAFETY: `busy` admits one processor at a time to `value`, which moves
-// between them only through `try_with`'s exclusive borrow.
+// between them only through `with_until`'s exclusive borrow.
 unsafe impl<T: Send> Sync for Exclusive<T> {}
 
 impl<T> Exclusive<T> {
@@ -82,15 +83,33 @@ impl<T> Exclusive<T> {
     /// Run `f` on the value unless another processor, or this one further
     /// up its stack, has it now.
     pub fn try_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.with_until(|| true, f)
+    }
+
+    /// Run `f` on the value once it is free, asking `give_up` after each
+    /// failed try whether to stop waiting: the holder may be this processor
+    /// further up its stack, which never lets it go while this one waits.
+    pub fn with_until<R>(
+        &self,
+        mut give_up: impl FnMut() -> bool,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Option<R> {
         struct Release<'a>(&'a AtomicBool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::Release);
             }
         }
-        self.busy
+        while self
+            .busy
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()?;
+            .is_err()
+        {
+            if give_up() {
+                return None;
+            }
+            core::hint::spin_loop();
+        }
         let _release = Release(&self.busy);
         // SAFETY: `busy` was false and is now ours until `_release` drops,
         // so this is the only reference to the value.
@@ -211,6 +230,49 @@ mod tests {
         });
         assert_eq!(nested, Some(None));
         assert_eq!(state.try_with(|value| *value), Some(1));
+    }
+
+    /// A report waits out another processor's turn instead of skipping,
+    /// and gives up on a holder that never lets go.
+    #[test]
+    fn exclusive_state_waits_for_a_turn_and_gives_up_on_a_stuck_holder() {
+        use std::{sync::Arc, sync::mpsc, thread};
+        let state = Arc::new(Exclusive::new(0u32));
+        let (taken, take) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let holder = {
+            let state = Arc::clone(&state);
+            thread::spawn(move || {
+                state.try_with(|value| {
+                    taken.send(()).unwrap();
+                    released.recv().unwrap();
+                    *value += 1;
+                })
+            })
+        };
+        take.recv().unwrap();
+        assert_eq!(state.try_with(|value| *value), None);
+        let mut tries = 0;
+        let stuck = state.with_until(
+            || {
+                tries += 1;
+                tries > 3
+            },
+            |value| *value,
+        );
+        assert_eq!((stuck, tries), (None, 4));
+        let mut release = Some(release);
+        let seen = state.with_until(
+            || {
+                if let Some(release) = release.take() {
+                    release.send(()).unwrap();
+                }
+                false
+            },
+            |value| *value,
+        );
+        assert_eq!(seen, Some(1));
+        assert_eq!(holder.join().unwrap(), Some(()));
     }
 
     /// Processors that update the state at once never lose it: every

@@ -92,8 +92,10 @@ struct State {
 }
 
 /// The boot PE's reports and the host drivers' waits on any processor
-/// ([`tick`]) reach the state, one at a time: a line drawn while it is in
-/// use is skipped rather than re-entered or waited for.
+/// ([`tick`]) reach the state, one at a time: a marker frame due while it
+/// is in use is skipped, and a report waits at most [`REPORT_WAIT_SPINS`]
+/// tries for its turn, so a step's end or a failure line is not lost to
+/// another processor's tick.
 static STATE: Exclusive<State> = Exclusive::new(State {
     tsc_hz: 0,
     running: None,
@@ -295,8 +297,20 @@ impl State {
     }
 }
 
-fn with(f: impl FnOnce(&mut State)) {
-    STATE.try_with(f);
+/// Tries a report makes for the state before it is skipped: far longer
+/// than another processor's frame takes, and still short when the holder
+/// is this processor further up its stack.
+const REPORT_WAIT_SPINS: u64 = 1 << 22;
+
+fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    let mut spins = 0u64;
+    STATE.with_until(
+        || {
+            spins += 1;
+            spins >= REPORT_WAIT_SPINS
+        },
+        f,
+    )
 }
 
 /// The time-stamp counter's rate, for the times steps show.
@@ -367,7 +381,7 @@ pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
 /// the state or the console is in use.
 pub fn tick() {
     output::pump_serial();
-    with(|state| {
+    STATE.try_with(|state| {
         let frame = state.tsc_hz / 8;
         let Some(running) = state.running.as_mut().filter(|_| frame > 0) else {
             return;
@@ -462,13 +476,12 @@ pub fn take_screen(screen: Option<console::Framebuffer>) {
 
 /// The finished lines so far.
 pub fn history(into: &mut [u8; HISTORY_BYTES]) -> usize {
-    STATE
-        .try_with(|state| {
-            let bytes = state.history.len();
-            into[..bytes].copy_from_slice(state.history.as_bytes());
-            bytes
-        })
-        .unwrap_or(0)
+    with(|state| {
+        let bytes = state.history.len();
+        into[..bytes].copy_from_slice(state.history.as_bytes());
+        bytes
+    })
+    .unwrap_or(0)
 }
 
 /// Draw the loader's finished lines again, as the system engine's screen
