@@ -92,7 +92,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // stay EL2's.
         let pstate = self.cpu.pstate;
         let host_user = pstate.el == 0 && !pstate.guarded && self.cpu.in_host();
-        let deadline = if pstate.el == 2 || host_user {
+        // A set IPI_SR is the PE's to clear natively ([`Devices::own_fiq`]),
+        // which no epoch reports: ISR_EL1 then reads in the engine.
+        let deadline = if (pstate.el == 2 || host_user) && !self.devices.own_fiq(self.current) {
             self.lines_steady_until(now)
         } else {
             0
@@ -107,8 +109,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The lines the devices drive into PE `pe` at count `now`: the cached
     /// ones, or the latched pins of another PE, until a device changes or
     /// the devices' deadline passes; else the devices are brought up to
-    /// `now` and asked.
+    /// `now` and asked. The FIQ the PE's own handle drives (an Apple fast
+    /// IPI's IPI_SR) is read live at every look and never cached
+    /// ([`Devices::own_fiq`]): native code may set or clear it between.
     pub(super) fn device_lines_of(&mut self, pe: usize, now: u64) -> Lines {
+        // Read first: a shared board's first read of it takes the PE's
+        // handle under the lock, which moves the count the cached lines
+        // keep (`Devices::generation`).
+        let own = self.devices.own_fiq(pe);
+        let mut lines = self.cached_device_lines(pe, now);
+        lines.fiq |= own;
+        lines
+    }
+
+    /// [`Self::device_lines_of`] without the PE's own FIQ: what the cache
+    /// holds.
+    fn cached_device_lines(&mut self, pe: usize, now: u64) -> Lines {
         match self.device_lines {
             Some((lines, until, cached)) if now < until && cached == pe => lines,
             Some((_, until, _))

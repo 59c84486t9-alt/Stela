@@ -53,6 +53,9 @@ pub(super) struct Board<D> {
     /// serve, by op1, CRm and op2 ([`register_bit`]): a PE's machine asks
     /// for every one it reaches, and the others take no lock.
     pub(super) registers: [u64; 16],
+    /// What native code completes immediate fast IPIs by, built with the
+    /// board ([`Devices::fast_ipi_table`]).
+    pub(super) ipi_table: Option<Arc<crate::machine::fast_ipi::Table>>,
 }
 
 pub(super) struct BoardState<D> {
@@ -452,6 +455,17 @@ impl<D: Devices> SharedDevices<D> {
                 registers[bit / 64] |= 1 << (bit % 64);
             }
         }
+        let words = devices.fast_ipi_words();
+        let ipi_table = (!words.is_empty()).then(|| {
+            Arc::new(crate::machine::fast_ipi::Table::new(&words, pes, |pe| {
+                let inbox = &hub.inboxes[pe];
+                (
+                    inbox.lines.as_ptr() as u64,
+                    inbox.chain.interrupt_epoch().as_ptr() as u64,
+                    inbox.sleeping.as_ptr() as u64,
+                )
+            }))
+        });
         let board = Board {
             devices: Mutex::new(BoardState {
                 devices,
@@ -475,6 +489,7 @@ impl<D: Devices> SharedDevices<D> {
             starting: AtomicBool::new(false),
             asleep: AtomicBool::new(false),
             registers,
+            ipi_table,
         };
         drop(board.lock(Call::Other));
         Self {
@@ -858,12 +873,31 @@ impl<D: Devices> Devices for SharedDevices<D> {
         devices.notify(cpu, now);
         lines
     }
-    /// The pins every call left, with the FIQ the PE's own handle drives
-    /// ([`LocalRegisters::fiq`]): an Apple fast IPI sent without the lock.
+    /// The pins every call left.
     fn pins(&mut self, cpu: usize) -> Option<Lines> {
-        let mut lines = unpack(self.board.pins.get(cpu)?.load(Ordering::Acquire))?;
-        lines.fiq |= self.signalled_fiq(cpu);
-        Some(lines)
+        unpack(self.board.pins.get(cpu)?.load(Ordering::Acquire))
+    }
+    /// The FIQ the PE's own handle drives ([`LocalRegisters::fiq`]): an
+    /// Apple fast IPI sent without the lock, read without it.
+    fn own_fiq(&mut self, cpu: usize) -> bool {
+        self.signalled_fiq(cpu)
+    }
+    fn fast_ipi_words(&self) -> Vec<crate::machine::fast_ipi::Word> {
+        self.with(|devices| devices.fast_ipi_words())
+    }
+    fn fast_ipi_table(&self) -> Option<Arc<crate::machine::fast_ipi::Table>> {
+        self.board.ipi_table.clone()
+    }
+    /// Timed as the engine's own lock-free sends are (`DEVICE WAKES
+    /// register=`).
+    fn wake_signalled(&mut self, pe: usize) {
+        let hub = &self.board.hub;
+        let start = hub.ticks();
+        hub.wake(pe);
+        let spent = hub.ticks().wrapping_sub(start);
+        let call = Call::Register as usize;
+        self.board.woken[call].fetch_add(1, Ordering::Relaxed);
+        self.board.wake_ticks[call].fetch_add(spent, Ordering::Relaxed);
     }
     /// The home machine advances the devices with time and tells the other
     /// PEs what that changes ([`Self::notify`]); their machines wait for

@@ -158,6 +158,21 @@ impl Signals {
             .map_or(0, |word| word.pending.load(Acquire))
     }
 
+    /// Every CPU's affinity and where its IPI_SR and deferred-IPI flag lie,
+    /// for the board's life ([`stela_engine::machine::fast_ipi::Word`]).
+    pub fn words(&self) -> Vec<stela_engine::machine::fast_ipi::Word> {
+        self.cpus
+            .iter()
+            .zip(self.words.iter())
+            .map(|(affinity, word)| stela_engine::machine::fast_ipi::Word {
+                cluster: affinity.cluster,
+                cpu: affinity.cpu,
+                status: word.pending.as_ptr() as u64,
+                armed: word.armed.as_ptr() as u64,
+            })
+            .collect()
+    }
+
     /// Where `cpu`'s IPI_SR lies, for the board's life.
     pub fn storage(&self, cpu: CpuIndex) -> Option<u64> {
         Some(self.words.get(cpu)?.pending.as_ptr() as u64)

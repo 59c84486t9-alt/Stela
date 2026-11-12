@@ -1433,6 +1433,8 @@ fn a_fast_ipi_write_keeps_what_derives_from_the_pes_registers() {
 #[derive(Default)]
 struct Signalling {
     words: Arc<[AtomicU64; 2]>,
+    /// Each CPU's deferred-request flag, which only native completion reads.
+    armed: Arc<[AtomicBool; 2]>,
     signalled: u64,
     register_calls: usize,
     /// The SoC sleeps ([`Devices::waits_on_host`]).
@@ -1473,14 +1475,19 @@ impl Devices for Signalling {
     fn lines(&mut self, pe: usize, _: u64) -> Lines {
         self.pins(pe).unwrap()
     }
-    fn pins(&mut self, pe: usize) -> Option<Lines> {
-        Some(Lines {
-            irq: false,
-            fiq: self.words[pe].load(Ordering::Acquire) != 0,
-        })
-    }
-    fn latched_pins(&mut self, _: usize) -> Option<Lines> {
+    /// No latched line: the FIQ is each PE's word ([`Devices::own_fiq`]).
+    fn pins(&mut self, _: usize) -> Option<Lines> {
         Some(Lines::default())
+    }
+    fn fast_ipi_words(&self) -> Vec<crate::machine::fast_ipi::Word> {
+        (0..2)
+            .map(|pe| crate::machine::fast_ipi::Word {
+                cluster: 0,
+                cpu: pe as u8,
+                status: self.words[pe].as_ptr() as u64,
+                armed: self.armed[pe].as_ptr() as u64,
+            })
+            .collect()
     }
     fn take_signalled(&mut self, pe: usize) -> bool {
         let raised = self.signalled & 1 << pe != 0;
@@ -1516,7 +1523,7 @@ impl Devices for Signalling {
 }
 
 /// A signal its handle completes takes no lock and wakes its target, which
-/// finds the FIQ in its lines beside the published pins; one the board
+/// reads the FIQ live from its own word, never in its lines; one the board
 /// raises under the lock wakes the target through the call's notification.
 #[test]
 fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
@@ -1537,8 +1544,8 @@ fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
     drop(held);
     assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
     assert_eq!(kicks.load(Ordering::Relaxed), 1, "the sleeping target");
-    assert!(target.pins(1).unwrap().fiq && target.lines(1, 0).fiq);
-    assert!(!sender.pins(0).unwrap().fiq);
+    assert!(target.own_fiq(1) && !target.lines(1, 0).fiq);
+    assert!(!sender.own_fiq(0));
     assert_eq!(calls(&home), 0);
     // Pending already: no line changes, no wake.
     let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
@@ -1547,7 +1554,7 @@ fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
     assert_eq!(kicks.load(Ordering::Relaxed), 1);
     // Held low while the SoC sleeps, as the latched pins are.
     board.asleep.store(true, Ordering::Release);
-    assert!(!target.pins(1).unwrap().fiq);
+    assert!(!target.own_fiq(1));
     board.asleep.store(false, Ordering::Release);
     // Under the lock: the call's notification wakes the target, though its
     // latched pins did not change.
@@ -1560,7 +1567,96 @@ fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
     assert_eq!(calls(&home), 1);
     assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
     assert_eq!(kicks.load(Ordering::Relaxed), 2);
-    assert!(target.lines(1, 0).fiq);
+    assert!(target.own_fiq(1));
+}
+
+/// A PE's own FIQ is read live at every look past its cached lines: an
+/// acknowledgement between the cache fill and the next look delivers no
+/// FIQ, and a send between them is not lost, while the cache holds.
+#[test]
+fn a_pes_own_fiq_is_read_live_past_its_cached_lines() {
+    use super::super::tests::board;
+    use stela_contracts::identity::Identity;
+    struct Own {
+        word: Arc<AtomicBool>,
+        queries: usize,
+    }
+    impl Devices for Own {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            self.queries += 1;
+            Lines::default()
+        }
+        fn own_fiq(&mut self, _: usize) -> bool {
+            self.word.load(Ordering::SeqCst)
+        }
+    }
+    let word = Arc::new(AtomicBool::new(true));
+    let identities = vec![Identity {
+        midr: 0x611f_0320,
+        mpidr: 0x8000_0000,
+        clock: None,
+        caches: None,
+    }];
+    let devices = Own {
+        word: Arc::clone(&word),
+        queries: 0,
+    };
+    let mut machine = board(&[], devices, identities);
+    assert!(machine.device_lines_of(0, 0).fiq);
+    word.store(false, Ordering::SeqCst);
+    assert!(!machine.device_lines_of(0, 1).fiq, "acknowledged: no FIQ");
+    word.store(true, Ordering::SeqCst);
+    assert!(machine.device_lines_of(0, 2).fiq, "sent: not lost");
+    assert_eq!(machine.devices.queries, 1, "the cached lines held");
+}
+
+/// The board's frozen fast-IPI table names each PE's own word and the
+/// hub's counters for it: a request completed by it raises the target's
+/// FIQ, tells it, and has a halted target woken through the board.
+#[test]
+fn the_fast_ipi_table_completes_a_request_through_the_hubs_words() {
+    use crate::machine::fast_ipi::{Register, Sent};
+    let (hub, kicks) = hub(2);
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    let mut target = home.worker();
+    let table = home.fast_ipi_table().expect("a table");
+    assert!(Arc::ptr_eq(&table, &target.fast_ipi_table().unwrap()));
+    let entry = *table.target(0, 1).unwrap();
+    assert_eq!(entry.lines, hub.inboxes[1].lines.as_ptr() as u64);
+    assert_eq!(entry.sleeping, hub.inboxes[1].sleeping.as_ptr() as u64);
+    assert_eq!(
+        entry.interrupt,
+        hub.inboxes[1].chain.interrupt_epoch().as_ptr() as u64
+    );
+    assert_eq!(entry.pe, 1);
+    let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    let interrupt = hub.inboxes[1]
+        .chain
+        .interrupt_epoch()
+        .load(Ordering::SeqCst);
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    assert_eq!(table.send(0, Register::RequestLocal, 1), Sent::Wake(1));
+    assert!(target.own_fiq(1) && !target.lines(1, 0).fiq);
+    assert_eq!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch + 1);
+    assert_eq!(
+        hub.inboxes[1]
+            .chain
+            .interrupt_epoch()
+            .load(Ordering::SeqCst),
+        interrupt + 1
+    );
+    assert_eq!(kicks.load(Ordering::Relaxed), 0, "the engine wakes it");
+    target.wake_signalled(1);
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    // The engine's own path then finds it pending and changes nothing.
+    assert_eq!(table.send(0, Register::RequestLocal, 1), Sent::Done);
+    assert_eq!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch + 1);
 }
 
 /// A board that signals CPUs by number, which may name one no PE runs: a
@@ -1691,10 +1787,7 @@ fn a_signal_pending_when_the_soc_wakes_wakes_its_target() {
     let mut target = home.worker();
     home.with(|devices| devices.asleep = true);
     assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
-    assert!(
-        !target.pins(1).unwrap().fiq,
-        "held low while the SoC sleeps"
-    );
+    assert!(!target.own_fiq(1), "held low while the SoC sleeps");
     // The target looked at its lines and sleeps again.
     let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
     hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
@@ -1702,7 +1795,7 @@ fn a_signal_pending_when_the_soc_wakes_wakes_its_target() {
     home.with(|devices| devices.asleep = false);
     assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
     assert_eq!(kicks.load(Ordering::Relaxed), before + 1);
-    assert!(target.pins(1).unwrap().fiq);
+    assert!(target.own_fiq(1));
 }
 
 /// Invariant: a shared board publishes only latched pins, never a PE's own
@@ -1717,7 +1810,7 @@ fn a_signal_cleared_without_the_lock_leaves_no_stale_published_fiq() {
     let mut target = home.worker();
     let words = home.with(|devices| Arc::clone(&devices.words));
     assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
-    assert!(target.pins(1).unwrap().fiq);
+    assert!(target.own_fiq(1));
     // Unrelated calls under the lock while the word is set: each release
     // publishes every PE's pins, and a write notifies the others.
     home.with(|_| ());
@@ -1728,7 +1821,7 @@ fn a_signal_cleared_without_the_lock_leaves_no_stale_published_fiq() {
     );
     // The target acknowledges on its own word.
     words[1].store(0, Ordering::Release);
-    assert!(!target.pins(1).unwrap().fiq && !target.lines(1, 0).fiq);
+    assert!(!target.own_fiq(1) && !target.lines(1, 0).fiq);
 }
 
 /// No lost wake-up: a PE that saw no FIQ and halts (`Hub::sleep`) is kicked
@@ -1772,7 +1865,7 @@ fn a_signal_racing_with_a_halt_always_wakes_the_target() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
-                if target.pins(1).unwrap().fiq {
+                if target.own_fiq(1) {
                     break;
                 }
                 hub.sleep(1, epoch, true, || {

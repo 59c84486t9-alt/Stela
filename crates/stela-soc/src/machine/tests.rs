@@ -2656,7 +2656,11 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
         devices.system_register(0, request, Some(1 << 16), 0),
         Some(Ok(0))
     );
-    assert!(devices.lines(2, 0).fiq && !devices.lines(0, 0).fiq);
+    assert!(devices.own_fiq(2) && !devices.own_fiq(0));
+    assert!(
+        !devices.lines(2, 0).fiq,
+        "the lines leave IPI_SR to own_fiq"
+    );
     assert_eq!(devices.system_register(2, status, None, 0), Some(Ok(1)));
     let local = devices.local_registers(2).unwrap();
     assert_eq!(local.register(status, None), Some(1));
@@ -2665,17 +2669,17 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     // SAFETY: the board keeps the word for its life.
     assert_eq!(unsafe { word.read_volatile() }, 1);
     assert_eq!(devices.system_register(2, status, Some(1), 0), Some(Ok(0)));
-    assert!(!devices.lines(2, 0).fiq && !local.fiq());
+    assert!(!devices.own_fiq(2) && !local.fiq());
     assert_eq!(local.register(status, None), Some(0));
     // The same send and acknowledgement without the devices' lock: the
     // sender's handle names the PE to wake, the target's clears its word.
     let sender = devices.local_registers(0).unwrap();
     assert_eq!(sender.send(request, 1 << 16), Some(Some(2)));
     assert_eq!(sender.send(request, 1 << 16), Some(None), "already pending");
-    assert!(devices.lines(2, 0).fiq && local.fiq());
+    assert!(devices.own_fiq(2) && local.fiq());
     assert_eq!(devices.latched_pins(2).map(|pins| pins.fiq), Some(false));
     assert_eq!(local.register(status, Some(1)), Some(0));
-    assert!(!devices.lines(2, 0).fiq);
+    assert!(!devices.own_fiq(2));
     assert!(devices.take_signalled(2), "the locked send above");
     assert!(!devices.take_signalled(2) && !devices.take_signalled(0));
     assert_eq!(sender.send(status, 1), None, "IPI_SR is the PE's own");
@@ -2704,11 +2708,11 @@ fn ipi_status_writes_complete_on_the_pes_word() {
     assert_eq!(local.register(status, Some(0)), Some(0));
     assert_eq!(local.register(status, Some(2)), None, "the model refuses");
     assert_eq!(devices.system_register(0, request, Some(1), 0), Some(Ok(0)));
-    assert!(devices.lines(1, 0).fiq);
+    assert!(devices.own_fiq(1));
     assert_eq!(local.register(status, Some(0)), Some(0));
-    assert!(devices.lines(1, 0).fiq);
+    assert!(devices.own_fiq(1));
     assert_eq!(local.register(status, Some(1)), Some(0), "clears PENDING");
-    assert!(!devices.lines(1, 0).fiq);
+    assert!(!devices.own_fiq(1));
     // Reports name the model at an address.
     devices.add_cpu_start(START, 1, &[0x8000_0000]).unwrap();
     assert_eq!(devices.device_name(START + 4), Some("cpu-start"));

@@ -605,20 +605,43 @@ pub trait Devices {
         })
     }
     /// Bring time-driven state up to `now` and report the interrupt lines
-    /// the devices drive into PE `cpu`.
+    /// the devices drive into PE `cpu`, without the FIQ its own handle
+    /// drives ([`Self::own_fiq`]), which the engine reads live at each look.
     fn lines(&mut self, cpu: usize, now: u64) -> Lines;
     /// The lines the devices drive into PE `cpu` as the last [`Self::lines`]
     /// left them, with no time brought forward: `None` when only `lines`
     /// can tell. The engine asks after a PE switch, before the deadline.
+    /// Without [`Self::own_fiq`], as [`Self::lines`].
     fn pins(&mut self, _cpu: usize) -> Option<Lines> {
         None
     }
-    /// [`Self::pins`] without the FIQ PE `cpu`'s
-    /// [`LocalRegisters::fiq`] drives, which that PE reads itself: what a
-    /// shared board publishes for it.
+    /// [`Self::pins`] as a shared board publishes them for PE `cpu`.
     fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
         self.pins(cpu)
     }
+    /// The FIQ PE `cpu`'s own handle drives without the devices' lock
+    /// ([`LocalRegisters::fiq`]: an Apple fast IPI's IPI_SR), read live.
+    /// No answer of [`Self::lines`] or [`Self::pins`] holds it, so no cache
+    /// of theirs can keep it: an acknowledgement that clears the word, from
+    /// native code or not, takes the FIQ away at the next look, and a send
+    /// that sets it is seen there.
+    fn own_fiq(&mut self, _cpu: usize) -> bool {
+        false
+    }
+    /// Every CPU's Apple fast-IPI word, CPU `n` being PE `n`: empty for a
+    /// board without fast IPIs.
+    fn fast_ipi_words(&self) -> Vec<crate::machine::fast_ipi::Word> {
+        Vec::new()
+    }
+    /// The frozen table native code completes immediate fast-IPI requests
+    /// by ([`crate::machine::fast_ipi::Table`]), the same for the board's
+    /// life: `None` where there are no fast IPIs or no shared board.
+    fn fast_ipi_table(&self) -> Option<Arc<crate::machine::fast_ipi::Table>> {
+        None
+    }
+    /// Wake PE `pe`, which a request completed natively found halted
+    /// ([`crate::machine::fast_ipi::Sent::Wake`]).
+    fn wake_signalled(&mut self, _pe: usize) {}
     /// The PEs whose [`Self::latched_pins`] or [`Self::take_signalled`] may
     /// have changed since the last call, by bit: bit `pe` for a PE below 64,
     /// and every bit for a change past it. A shared board looks at those

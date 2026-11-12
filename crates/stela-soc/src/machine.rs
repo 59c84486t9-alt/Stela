@@ -1179,19 +1179,9 @@ impl Devices for AppleDevices {
 
     /// The latched pins: [`Self::lines`] advances every device and settles
     /// every PE's pins at once, so another PE's need no advance until a
-    /// device changes or its deadline passes.
+    /// device changes or its deadline passes. A PE's FIQ from the fast IPIs
+    /// is its IPI_SR, read live ([`Self::own_fiq`]).
     fn pins(&mut self, cpu: usize) -> Option<Lines> {
-        let pins = self.latched_pins(cpu)?;
-        let ipi = !self.sleep.asleep && self.ipi.as_ref().is_some_and(|ipi| ipi.fiq(cpu));
-        Some(Lines {
-            irq: pins.irq,
-            fiq: pins.fiq || ipi,
-        })
-    }
-
-    /// The latch alone: a PE's FIQ from the fast IPIs is its IPI_SR, which
-    /// it reads itself ([`LocalRegisters::fiq`]).
-    fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
         if self.sleep.asleep {
             return Some(Lines::default());
         }
@@ -1200,6 +1190,18 @@ impl Devices for AppleDevices {
             irq: pins.irq,
             fiq: pins.fiq,
         })
+    }
+
+    fn fast_ipi_words(&self) -> Vec<stela_engine::machine::fast_ipi::Word> {
+        self.ipi
+            .as_ref()
+            .map(|ipi| ipi.signals().words())
+            .unwrap_or_default()
+    }
+
+    /// The PE's IPI_SR, held low while the SoC sleeps, as the latch is.
+    fn own_fiq(&mut self, cpu: usize) -> bool {
+        !self.sleep.asleep && self.ipi.as_ref().is_some_and(|ipi| ipi.fiq(cpu))
     }
 
     fn take_signalled(&mut self, cpu: usize) -> bool {
