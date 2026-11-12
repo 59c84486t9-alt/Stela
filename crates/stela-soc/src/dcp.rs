@@ -533,6 +533,11 @@ impl Coprocessor {
         self.link.borrow().service().refresh_deadline()
     }
 
+    /// Whether a compose runs, whose present a transfer finishes.
+    pub fn composing(&self) -> bool {
+        self.link.borrow().service().composing()
+    }
+
     /// Whether a submitted swap waits for its pixels.
     pub fn frame_pending(&self) -> bool {
         self.link.borrow().service().frame_pending()

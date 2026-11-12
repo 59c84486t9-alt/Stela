@@ -1628,13 +1628,28 @@ impl AppleDevices {
     /// notice the AP sent is seen by this step's vblank; then the display at
     /// `now` (its vblank, a present latched at it); then the link DMA again
     /// for the callbacks the vblank queued, its vsync and the completions.
+    /// After a write that reached none of a DCP's devices (its ASC, link
+    /// DART, surface DART) the DCP skips its step unless it has work
+    /// ([`Self::dcp_due`]); the home machine's transfers always run it.
     fn transfer_dcp(
         &mut self,
         cpu: usize,
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        let written = self.written_device();
         for index in 0..self.dcp_masters.len() {
+            let master = &self.dcp_masters[index];
+            let optional = written.is_some_and(|device| {
+                device.is_some_and(|device| {
+                    device != master.asc
+                        && device != master.dart
+                        && master.surface.is_none_or(|(surface, _)| device != surface)
+                })
+            });
+            if optional && !self.dcp_due(index, now) {
+                continue;
+            }
             self.service_dcp_link(index, cpu, memory, now)?;
             let master = &self.dcp_masters[index];
             let mut finished = Ok(false);
@@ -1745,6 +1760,37 @@ impl AppleDevices {
         })
     }
 
+    /// Whether DCP `index`'s step has work at `now`: link DMA queued, a
+    /// compose to finish, or the display's look due ([`dcp::Coprocessor::
+    /// refresh_deadline`]: a vblank while anyone listens, a swap waits or the
+    /// scanout queued work). That deadline is what the home machine's DMA
+    /// deadline holds for it, and a DCP's own writes reach its devices, so
+    /// a step without either changes nothing a later one would not.
+    fn dcp_due(&self, index: usize, now: u64) -> bool {
+        let master = &self.dcp_masters[index];
+        let Some(asc) = self.bus.device::<Asc>(master.asc) else {
+            return true;
+        };
+        asc.dma_pending()
+            || asc.execution_enabled()
+                && asc
+                    .firmware::<dcp::Coprocessor>()
+                    .is_some_and(|coprocessor| {
+                        coprocessor.composing()
+                            || coprocessor.refresh_deadline().is_some_and(|due| due <= now)
+                    })
+    }
+
+    /// The device the write being settled ([`Self::writer`]) reached, if
+    /// one is being settled: `Some(None)` for an address no device takes.
+    fn written_device(&self) -> Option<Option<DeviceId>> {
+        self.writer.map(|(physical, bytes)| {
+            Width::from_bytes(u64::from(bytes))
+                .and_then(|width| self.bus.route(physical, width).ok())
+                .map(|(device, _)| device)
+        })
+    }
+
     /// Whether USB master `master`'s schedule has work at `now`, its cable
     /// and PHY already brought up to date: what the home machine's DMA
     /// deadline is for ([`Devices::dma_deadline`]), and the work a step takes
@@ -1776,11 +1822,7 @@ impl AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
-        let written = self.writer.map(|(physical, bytes)| {
-            Width::from_bytes(u64::from(bytes))
-                .and_then(|width| self.bus.route(physical, width).ok())
-                .map(|(device, _)| device)
-        });
+        let written = self.written_device();
         for master in &mut self.usb_masters {
             let (controller, dart) = self
                 .bus

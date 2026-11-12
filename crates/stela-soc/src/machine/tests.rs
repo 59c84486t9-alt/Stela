@@ -2418,6 +2418,10 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
         0xc,
         1,
     );
+    // The swap waits for the next vblank: until it, a write that reaches
+    // none of the DCP's devices leaves the DCP's step out.
+    assert!(!d.dcp_due(0, PERIOD - 1));
+    assert!(d.dcp_due(0, PERIOD));
     for gate in [4, 0x40f, 0] {
         d.write(0, SUPPLY, 4, gate, 0).unwrap();
         let before = (memory.reads, memory.writes);
