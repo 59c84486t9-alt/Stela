@@ -670,7 +670,13 @@ const _: () = assert!(matches!(
 /// The [`MIRRORED`] indices of the cycle and instruction counters. They
 /// move at every instruction but no read depends on it: between transitions
 /// they read the count of the last one, as exceptions are what a kernel
-/// charges to threads, and later reads never go back.
+/// charges to threads, and later reads never go back. Exactly: a read
+/// opens its cell on the count it took, and native reads in that state
+/// answer that value, across native runs, until the next exception entry
+/// or return there (the engine's takes the count anew, `cells_moved`; a
+/// native one closes the cell, the record's `close`) or a change of derived
+/// state closes every cell. Nothing else bounds how stale it is, in
+/// instructions or in time: a loop that takes no exception reads one value.
 pub(super) const COUNTER_MIRRORS: [usize; 2] = [8, 9];
 const _: () = assert!(COUNTER_MIRRORS[0] == 8);
 
