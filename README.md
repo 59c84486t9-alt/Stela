@@ -51,7 +51,11 @@ plug the stick in and run `sudo ./stela setup update stela` (Linux, macOS) or
 
 ## Build
 
-You need [Rust](https://rustup.rs) and LLVM with Clang 21 or newer.
+You need [Rust](https://rustup.rs), git, Python 3.10 or newer, and LLVM 21,
+22 or 23 with Clang, LLD and libclang. The build takes the newest supported
+LLVM it finds, including versioned installs such as `/usr/lib/llvm-21` or
+Homebrew's `llvm`. To choose one, set `CLANG` to its `clang`. If something
+is missing, the build stops at the start and lists all of it.
 
 ```sh
 git clone https://github.com/tylertms/Stela
