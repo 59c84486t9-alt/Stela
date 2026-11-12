@@ -1212,13 +1212,14 @@ pub fn write() {
         let stats = held.writer.stats();
         output::arguments(format_args!(
             "TRANSLATIONS writer steps={} longest_us={} segments={} records={} bytes={} \
-             pressed={} pairs={} merges={}\n",
+             pressed={} held={} pairs={} merges={}\n",
             held.steps,
             held.longest * 1_000_000 / super::host::COUNTER_HZ,
             stats.deltas,
             stats.delta_records,
             stats.delta_bytes,
             stats.pressed,
+            stats.held,
             stats.pairs,
             stats.merges,
         ));

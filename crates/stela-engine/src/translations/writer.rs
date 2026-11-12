@@ -10,7 +10,8 @@
 //! [`FIRST_DELTA_SECONDS`], whichever comes first, then at doubling
 //! intervals; and whenever the entries held reach half their bound
 //! ([`Entries::pressed`]), so none is refused for want of room while the
-//! writer keeps up.
+//! writer keeps up. Pressed while it writes or merges, it takes them at once
+//! and holds them, one batch, for the segment it starts next.
 //!
 //! The newest two segments are merged, keeping every record and its age,
 //! once the newer is at least half the older: segment sizes stay geometric,
@@ -130,8 +131,10 @@ pub struct Stats {
     pub deltas: u64,
     pub delta_records: u64,
     pub delta_bytes: u64,
-    /// Segments started because the entries held pressed.
+    /// Segments started because the entries held pressed, and batches
+    /// taken while the writer was busy.
     pub pressed: u64,
+    pub held: u64,
     /// Merges of the newest two segments, and full merges.
     pub pairs: u64,
     pub merges: u64,
@@ -211,6 +214,8 @@ pub struct Writer<'a> {
     /// slower than [`QUIET_RATE`].
     looked: Option<(u64, u64)>,
     pressed: bool,
+    /// Entries taken while pressed and busy, for the next segment.
+    held: BTreeMap<Digest, Record>,
     quiet_since: Option<u64>,
     failed: bool,
     stats: Stats,
@@ -252,6 +257,7 @@ impl<'a> Writer<'a> {
             delta_interval: hz * FIRST_DELTA_SECONDS,
             looked: None,
             pressed: false,
+            held: BTreeMap::new(),
             quiet_since: None,
             failed: false,
             stats: Stats::default(),
@@ -430,6 +436,11 @@ impl<'a> Writer<'a> {
         if !self.waiting.is_empty() {
             return None;
         }
+        // A batch taken while busy goes before any merge of the newest two.
+        if !self.held.is_empty() && self.count(SEGMENT_BLOB) + 1 < MAX_SEGMENTS {
+            let held = core::mem::take(&mut self.held);
+            return self.start_delta(now, held, entries, Trigger::Pressed);
+        }
         if let Some(offsets) = self.pair_due() {
             let pair = self.segments.split_off(self.segments.len() - 2);
             let merge = Merge::new(self.translator, pair, Vec::new(), self.limit);
@@ -444,9 +455,23 @@ impl<'a> Writer<'a> {
         if self.count(SEGMENT_BLOB) + 1 >= MAX_SEGMENTS {
             return None;
         }
+        let held = core::mem::take(&mut self.held);
+        self.start_delta(now, held, entries, trigger)
+    }
+
+    /// Start a segment of `held` and the entries added since.
+    fn start_delta(
+        &mut self,
+        now: u64,
+        mut added: BTreeMap<Digest, Record>,
+        entries: &mut dyn Entries,
+        trigger: Trigger,
+    ) -> Option<Event> {
         self.settled = true;
         self.pressed = false;
-        let added = entries.take_added();
+        let taken = entries.take_added();
+        self.note_added(&taken);
+        join(&mut added, taken);
         if added.is_empty() {
             self.next_delta = self.next_delta.max(now + self.hz * RECHECK_SECONDS);
             return None;
@@ -457,10 +482,22 @@ impl<'a> Writer<'a> {
             self.next_delta = now + self.delta_interval;
             self.delta_interval = (self.delta_interval * 2).min(self.hz * LAST_DELTA_SECONDS);
         }
-        self.note_added(&added);
         self.stats.delta_records += added.len() as u64;
         self.task = Task::Delta(Box::new(Delta::new(self.translator, added)), trigger);
         None
+    }
+
+    /// While busy: take the entries added at once when they press, as one
+    /// batch held for the next segment.
+    fn hold(&mut self, now: u64, entries: &mut dyn Entries) {
+        self.look(now, entries);
+        if self.pressed && self.held.is_empty() {
+            self.pressed = false;
+            let held = entries.take_added();
+            self.note_added(&held);
+            self.stats.held += u64::from(!held.is_empty());
+            self.held = held;
+        }
     }
 
     /// The plan that writes `change`, which commits once beside the file's
@@ -547,6 +584,8 @@ impl<'a> Writer<'a> {
         }
         if self.idle() {
             events.extend(self.begin(clock(), entries));
+        } else {
+            self.hold(clock(), entries);
         }
         loop {
             self.task = match core::mem::replace(&mut self.task, Task::Idle) {
@@ -677,8 +716,10 @@ impl<'a> Writer<'a> {
             Task::Merge(..) | Task::Write { .. } => stopped.merge_left = true,
             Task::Idle => {}
         }
-        let added = entries.take_added();
-        self.note_added(&added);
+        let mut added = core::mem::take(&mut self.held);
+        let taken = entries.take_added();
+        self.note_added(&taken);
+        join(&mut added, taken);
         layouts.extend(Delta::new(self.translator, added).finish());
         let mut change = Change::default();
         let room = MAX_SEGMENTS.saturating_sub(self.count(SEGMENT_BLOB));
@@ -719,3 +760,17 @@ impl<'a> Writer<'a> {
 
 #[cfg(test)]
 mod tests;
+
+/// Add `from`'s entries to `into`'s.
+fn join(into: &mut BTreeMap<Digest, Record>, from: BTreeMap<Digest, Record>) {
+    for (key, record) in from {
+        match into.entry(key) {
+            alloc::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(record);
+            }
+            alloc::collections::btree_map::Entry::Occupied(mut slot) => {
+                slot.get_mut().merge(record)
+            }
+        }
+    }
+}

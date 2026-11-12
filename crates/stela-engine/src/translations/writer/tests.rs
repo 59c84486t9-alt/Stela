@@ -497,3 +497,25 @@ fn the_first_segment_comes_when_translation_goes_quiet_or_at_its_delay() {
     assert_eq!(run.triggers(), [Trigger::Due]);
     run.stop(&mut disk).unwrap();
 }
+
+#[test]
+fn entries_that_press_while_a_write_waits_are_held_for_the_next_segment() {
+    let mut disk = Disk::new(FILE_BYTES);
+    let mut run = Run::new(load(&disk.bytes.clone(), u64::MAX), 1);
+    run.boot.bound = 1000;
+    let mut added: BTreeSet<Digest> = run.boot.add(400).into_iter().collect();
+    // The first segment starts once translation is quiet; its write waits.
+    run.stall(QUIET_SECONDS + 2);
+    assert!(!run.writer.idle());
+    // More than the bound arrives while it waits: the writer takes a batch
+    // once it presses, and the store refuses none.
+    for _ in 0..3 {
+        added.extend(run.boot.add(400));
+        run.stall(1);
+    }
+    assert_eq!(run.boot.unkept, 0);
+    assert_eq!(run.writer.stats().held, 1);
+    run.run(&mut disk, 5).unwrap();
+    run.stop(&mut disk).unwrap();
+    assert_eq!(keys(&disk.bytes), added);
+}
