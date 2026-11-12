@@ -965,23 +965,19 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     } else if command.install_image.is_none() {
         // An interrupted setup the USB holds keeps its own choice: a full
         // installer goes on from the pieces already on the USB.
-        let esp = super::locate_esp(host, &command.usb);
-        let interrupted = esp
-            .as_ref()
-            .ok()
-            .and_then(|esp| super::record::interrupted(host, esp, &command.usb));
-        if let Some(record) = interrupted {
+        // A USB named by one of its mounted volumes is otherwise set up as
+        // the same USB erased by setup would be: macOS goes on it when it
+        // is large enough. A finished setup is refused by `plan`.
+        let esp = super::locate_esp(host, &command.usb)?;
+        if let Some(record) = super::record::interrupted(host, &esp, &command.usb) {
             command.install_image = Some(record.install_kind());
-        } else if command.target.is_none() {
-            // A USB named by one of its mounted volumes is set up as the
-            // same USB erased by setup would be: macOS goes on it when it
-            // is large enough.
-            if !esp?.join(RECORD).exists() {
-                let capacity = usb_capacity(host, &command.usb)?;
-                command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
-            }
+        } else if !esp.join(RECORD).exists() {
+            let capacity = usb_capacity(host, &command.usb)?;
+            command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
         }
     }
+    // Every new or resumed setup knows its installer from here on.
+    let install_image = command.install_image.unwrap_or(InstallImage::Network);
     // Downloaded boot archives are kept in one place until setup finishes,
     // so a setup run again after a stop reuses them, and removed once it
     // has. A full image goes directly to the USB after preparation and
@@ -1048,7 +1044,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         if let Some(path) = &command.efi {
             read_efi(environment, path)?;
         }
-        let remote = download.is_none() && image_is_remote(&ipsw, command.install_image)?;
+        let remote = download.is_none() && image_is_remote(&ipsw, install_image)?;
         // The portable installer knows its identity before the target PC is
         // connected. Prepare and sign once, and measure it before erasing USB.
         if command.target.is_none() {

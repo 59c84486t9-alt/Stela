@@ -1363,22 +1363,26 @@ fn full_install_requires_system_image() {
     full.dry_run = true;
     let error = format!("{:#}", setup(&environment(&f.host), full).unwrap_err());
     assert!(error.contains("only the recovery members"), "{error}");
-    // A new setup names no image choice and streams the install, from a
-    // recovery archive and from a whole image alike.
-    for ipsw in [recovery, f.ipsw.clone()] {
+    // A new setup without an image choice on this 128 GB USB, with
+    // `--target` too, puts a whole image on it, and streams the install
+    // from a recovery archive.
+    for (ipsw, line) in [
+        (recovery, "file list only"),
+        (f.ipsw.clone(), "install medium "),
+    ] {
         let mut default = installed_command(&f);
         default.ipsw = Some(ipsw);
         default.install_image = None;
         default.dry_run = true;
         let report = setup(&environment(&f.host), default).unwrap();
-        assert!(report.contains("file list only"), "{report}");
+        assert!(report.contains(line), "{report}");
     }
     let mut default = installed_command(&f);
     default.install_image = None;
     setup(&environment(&f.host), default).unwrap();
     let record = record(&f);
-    assert_eq!(record.install_image, None);
-    assert!(record.active_medium().unwrap().remote);
+    assert_eq!(record.install_image, Some(InstallImage::Full));
+    assert!(!record.active_medium().unwrap().remote);
 }
 
 #[test]

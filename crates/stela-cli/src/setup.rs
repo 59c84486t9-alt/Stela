@@ -315,20 +315,18 @@ pub(super) fn default_install_image(capacity: u64) -> InstallImage {
     }
 }
 
-fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
-    let complete = restore::payload::holds_system_image(ipsw)?;
+fn image_is_remote(ipsw: &Path, choice: InstallImage) -> Result<bool> {
     match choice {
-        Some(InstallImage::Network) => Ok(true),
-        Some(InstallImage::Full) => {
+        InstallImage::Network => Ok(true),
+        InstallImage::Full => {
             ensure!(
-                complete,
+                restore::payload::holds_system_image(ipsw)?,
                 "{} holds only the recovery members, without the macOS system image this USB's \
                  install reads from it; pass the whole IPSW with --ipsw",
                 ipsw.display()
             );
             Ok(false)
         }
-        None => Ok(true),
     }
 }
 
@@ -806,15 +804,8 @@ impl Request {
         self.model.get_or_insert_with(|| record.model.clone());
         // A USB that holds the whole macOS image keeps holding it: its
         // repairs and updates download whole images.
-        if self.install_image.is_none() {
-            self.install_image = record.install_image.or_else(|| {
-                record
-                    .media
-                    .iter()
-                    .any(|medium| !medium.remote)
-                    .then_some(InstallImage::Full)
-            });
-        }
+        self.install_image
+            .get_or_insert_with(|| record.install_kind());
         // Every maintenance command works on the active build's files, so
         // what it downloads is that build; only `update os` names another.
         if !matches!(action, Action::UpdateOs) {

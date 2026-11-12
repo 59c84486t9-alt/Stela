@@ -112,11 +112,12 @@ pub(super) const RECORD_SCHEMA: u32 = 9;
 
 impl Record {
     /// Whether installs stream `ipsw`'s build from Apple's servers rather
-    /// than read it from the USB, as every setup does but one that already
-    /// holds whole images. An erase restore needs the macOS system image,
-    /// which a recovery archive (`restore::payload::trim`) leaves out.
+    /// than read it from the USB, by the setup's installer
+    /// ([`Self::install_kind`]). A full installer's erase restore needs the
+    /// macOS system image, which a recovery archive
+    /// (`restore::payload::trim`) leaves out.
     pub(super) fn remote_install(&self, ipsw: &Path) -> Result<bool> {
-        image_is_remote(ipsw, self.install_image)
+        image_is_remote(ipsw, self.install_kind())
     }
 
     /// The installer this setup was made as: its recorded choice, else (a
