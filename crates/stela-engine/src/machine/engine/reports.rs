@@ -620,6 +620,11 @@ pub struct Statistics {
     pub page_ticks: u64,
     pub shared_ticks: u64,
     pub install_ticks: u64,
+    /// Counter ticks fetches spent walking the translation of a PC the
+    /// ITLB or block table lacked, and walking again the pages of dropped
+    /// entries and remade contexts (`Machine::refill_pages`).
+    pub walk_ticks: u64,
+    pub refill_ticks: u64,
     /// Fetch pages read again whose key a check of their bytes gave
     /// without hashing them ([`stored::page_check`]).
     pub known_keys: u64,
@@ -785,6 +790,8 @@ impl core::ops::AddAssign for Statistics {
             record_misses,
             shared_ticks,
             install_ticks,
+            walk_ticks,
+            refill_ticks,
             due_transfers,
             transfer_ticks,
             native_transitions,
@@ -944,6 +951,8 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.offered_low, offered_low),
             (&mut self.shared_ticks, shared_ticks),
             (&mut self.install_ticks, install_ticks),
+            (&mut self.walk_ticks, walk_ticks),
+            (&mut self.refill_ticks, refill_ticks),
             (&mut self.due_transfers, due_transfers),
             (&mut self.transfer_ticks, transfer_ticks),
             (&mut self.line_queries, line_queries),

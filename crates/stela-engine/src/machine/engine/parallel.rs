@@ -412,6 +412,10 @@ pub struct Counts {
     pub page_ticks: u64,
     pub shared_ticks: u64,
     pub install_ticks: u64,
+    /// Counter ticks its fetches spent walking translations and refilling
+    /// pages ([`super::Statistics::walk_ticks`]).
+    pub walk_ticks: u64,
+    pub refill_ticks: u64,
     /// Device transfers whose deadline came and device line queries, with
     /// their profile clock ticks ([`super::Statistics::due_transfers`]).
     pub due_transfers: u64,
@@ -2238,6 +2242,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             page_ticks: statistics.page_ticks,
             shared_ticks: statistics.shared_ticks,
             install_ticks: statistics.install_ticks,
+            walk_ticks: statistics.walk_ticks,
+            refill_ticks: statistics.refill_ticks,
             due_transfers: statistics.due_transfers,
             transfer_ticks: statistics.transfer_ticks,
             line_queries: statistics.line_queries,

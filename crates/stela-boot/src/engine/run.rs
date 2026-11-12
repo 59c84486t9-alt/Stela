@@ -1548,8 +1548,10 @@ impl Heartbeat {
             let mut shares =
                 String::from("PES TIME idle%/spin%/sync%/waits/compiled/shared/halt%/short");
             // Per PE: the interval's share compiling, reading and hashing
-            // fetch pages, finding shared blocks and installing blocks.
-            let mut fetches = String::from("PES FETCH compile%/page%/shared%/install%");
+            // fetch pages, finding shared blocks, installing blocks, walking
+            // fetch translations and refilling dropped or remade pages.
+            let mut fetches =
+                String::from("PES FETCH compile%/page%/shared%/install%/walk%/refill%");
             // Per PE: the blocks it holds, its block table's slots, the
             // pages its index finds blocks in, and the code arena parts it
             // released for heap pressure since the last beat; on a shared
@@ -1697,11 +1699,13 @@ impl Heartbeat {
                     now.short_waits.saturating_sub(before.short_waits),
                 ));
                 fetches.push_str(&format!(
-                    " {pe}:{}/{}/{}/{}",
+                    " {pe}:{}/{}/{}/{}/{}/{}",
                     percent(now.compile_ticks.saturating_sub(before.compile_ticks)),
                     percent(now.page_ticks.saturating_sub(before.page_ticks)),
                     percent(now.shared_ticks.saturating_sub(before.shared_ticks)),
                     percent(now.install_ticks.saturating_sub(before.install_ticks)),
+                    percent(now.walk_ticks.saturating_sub(before.walk_ticks)),
+                    percent(now.refill_ticks.saturating_sub(before.refill_ticks)),
                 ));
                 code.push_str(&format!(
                     " {pe}:{}/{}/{}/{}",

@@ -49,11 +49,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         let contexts = self.contexts(el, context);
         self.chain.set_contexts(contexts);
-        if !self.dropped_refills.is_empty() {
-            self.refill_dropped(contexts);
-        }
-        if !self.refills.is_empty() {
-            self.refill_pages(el, context);
+        if !self.dropped_refills.is_empty() || !self.refills.is_empty() {
+            let refilling = self.host.counter();
+            if !self.dropped_refills.is_empty() {
+                self.refill_dropped(contexts);
+            }
+            if !self.refills.is_empty() {
+                self.refill_pages(el, context);
+            }
+            self.statistics.refill_ticks += self.host.counter().wrapping_sub(refilling);
         }
         // A fetch elsewhere came between the exit waiting for a block and
         // its target: an exception, an interrupt or another PE's run.
@@ -100,7 +104,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.statistics.fetch_paths[path as usize] += 1;
         let generation = self.translation_generation;
-        let physical = match self.fetch_physical(pc) {
+        let walking = self.host.counter();
+        let walked = self.fetch_physical(pc);
+        self.statistics.walk_ticks += self.host.counter().wrapping_sub(walking);
+        let physical = match walked {
             Ok(physical) => physical,
             Err(Ok(exception)) => return Ok(Fetched::Exception(exception)),
             Err(Err(stop)) => return Err(stop),

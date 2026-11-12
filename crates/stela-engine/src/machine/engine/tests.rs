@@ -1618,6 +1618,23 @@ fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
     assert_eq!(machine.cpu.retired, retired);
 }
 
+/// A fetch counts the ticks it spent walking the PC's translation, and
+/// refills only when pages wait to be walked again.
+#[test]
+fn a_fetch_times_its_translation_walk_apart_from_refills() {
+    let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
+    machine.host.counter_step = 1;
+    assert!(matches!(
+        machine.fetch_block(BASE, false),
+        Ok(Fetched::Block(_))
+    ));
+    assert!(
+        machine.statistics.walk_ticks >= 1,
+        "the counter moved across it"
+    );
+    assert_eq!(machine.statistics.refill_ticks, 0, "nothing to refill");
+}
+
 #[test]
 fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
     // add x0, x0, #1; svc #0
