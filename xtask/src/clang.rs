@@ -367,7 +367,10 @@ pub fn select(host: &dyn Host) -> Result<Toolset, Problems> {
             Ok(Toolset {
                 version,
                 clang: real,
-                clangxx: host.canonical(&clangxx),
+                // Clang picks C++ by the name it runs under: Homebrew's
+                // `clang++` is a link to `clang-NN`, which run by its own name
+                // links no C++ library.
+                clangxx,
                 linker,
                 archiver,
                 symbols,

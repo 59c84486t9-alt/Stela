@@ -427,3 +427,39 @@ fn macos_command_line_tools_alone() {
         path(&format!("{tools}/lib/libclang.dylib"))
     );
 }
+
+/// Homebrew's `clang++` is a link to `clang`, and that to `clang-NN`: the
+/// C++ driver keeps the name it is run by, since `clang-NN` links no C++
+/// library.
+#[test]
+fn the_cxx_driver_keeps_its_name() {
+    let cellar = "/opt/homebrew/Cellar/llvm/23.1.4/bin";
+    let mut host = Fake::new(&["/usr/bin"])
+        .tool(
+            &format!("{cellar}/clang-23"),
+            "Homebrew clang version 23.1.4\n",
+        )
+        .link(
+            "/opt/homebrew/opt/llvm/bin/clang",
+            &format!("{cellar}/clang-23"),
+        )
+        .link(
+            "/opt/homebrew/opt/llvm/bin/clang++",
+            "/opt/homebrew/opt/llvm/bin/clang",
+        )
+        .file("/opt/homebrew/Cellar/llvm/23.1.4/lib/libclang.dylib")
+        .file("/rust/bin/gcc-ld/ld.lld")
+        .file("/rust/bin/llvm-ar")
+        .file("/rust/bin/llvm-nm");
+    host.rust = Some((
+        path("/rust/bin"),
+        Version {
+            major: 23,
+            minor: 1,
+            patch: 1,
+        },
+    ));
+    let toolset = select(&host).unwrap();
+    assert_eq!(toolset.clang, path(&format!("{cellar}/clang-23")));
+    assert_eq!(toolset.clangxx, path("/opt/homebrew/opt/llvm/bin/clang++"));
+}
