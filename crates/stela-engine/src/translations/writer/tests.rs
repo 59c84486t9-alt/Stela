@@ -1147,3 +1147,40 @@ fn batches_that_press_through_a_long_wait_join_the_batch_held() {
         assert_eq!(keys(&disk.bytes), added);
     }
 }
+
+/// An arena too small for the boot's records sheds nothing: once full, it
+/// says so once and the rest stay in the heap, within the heap's rules.
+#[test]
+fn a_full_arena_leaves_the_rest_in_the_heap_and_sheds_nothing() {
+    let mut disk = Disk::new(FILE_BYTES);
+    let mut arena = vec![0u8; 64 << 10];
+    let mut file: File<'_> = load(&disk.bytes.clone(), u64::MAX);
+    file.arena = Arena::new(&mut arena);
+    let mut run = Run::new(file, 1);
+    run.boot.heap_total = 1 << 30;
+    run.boot.entry_bytes = 1 << 10;
+    run.boot.bound = 400;
+    let mut added = BTreeSet::new();
+    for _ in 0..6 {
+        added.extend(run.boot.add(200));
+        run.run(&mut disk, 2).unwrap();
+    }
+    run.run(&mut disk, 2 * FIRST_DELTA_SECONDS).unwrap();
+    let full = run
+        .events
+        .iter()
+        .filter(|event| matches!(event, Event::ArenaFull { .. }))
+        .count();
+    assert_eq!(full, 1, "{:?}", run.events);
+    assert!(
+        !run.events
+            .iter()
+            .any(|event| matches!(event, Event::Shed { .. })),
+        "{:?}",
+        run.events
+    );
+    assert_eq!(run.boot.shed, 0);
+    assert!(run.writer.resident() > 0);
+    run.stop(&mut disk).unwrap();
+    assert_eq!(keys(&disk.bytes), added);
+}

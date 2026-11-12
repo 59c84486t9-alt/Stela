@@ -1242,8 +1242,13 @@ fn report_event(event: &Event) {
             match reason {
                 writer::ShedReason::Heap => "while the heap is short",
                 writer::ShedReason::Pack => "past the share of the pack a boot leaves",
-                writer::ShedReason::Arena => "with the arena full",
             }
+        )),
+        Event::ArenaFull { used, resident } => output::arguments(format_args!(
+            "TRANSLATIONS arena full used={}M resident={}M: written records stay in the heap, \
+             within its share\n",
+            used >> 20,
+            resident >> 20
         )),
         Event::Released { room, bytes, lost } => output::arguments(format_args!(
             "TRANSLATIONS released room={}M bytes={}M lost={lost}: the heap is nearly full; \

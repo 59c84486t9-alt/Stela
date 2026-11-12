@@ -146,8 +146,6 @@ pub enum ShedReason {
     Heap,
     /// The pack reached the share of the limit a boot leaves.
     Pack,
-    /// The arena has no room for the next record.
-    Arena,
 }
 
 /// Why a new segment started.
@@ -197,6 +195,11 @@ pub enum Event {
         pack: u64,
         resident: u64,
     },
+    /// The arena, compacted, had no room for the next record, `used` bytes
+    /// of it holding records: the rest of the boot's written records stay
+    /// in the heap, within its share ([`RESIDENT_SHARE`]), as `resident`
+    /// bytes did then. Reported once.
+    ArenaFull { used: u64, resident: u64 },
     /// The heap's room fell under [`RELEASE_SHARE`]: the writer let its
     /// laid-out segments go (`bytes`), and the records of those not yet
     /// written and of the entries held (`lost`).
@@ -315,6 +318,7 @@ pub struct Writer<'a> {
     /// Where written records move, and whether it ran out of room.
     arena: Arena<'a>,
     arena_full: bool,
+    arena_reported: bool,
     failed: bool,
     stats: Stats,
 }
@@ -368,6 +372,7 @@ impl<'a> Writer<'a> {
             delta_bytes: 0,
             arena: file.arena,
             arena_full: false,
+            arena_reported: false,
             failed: false,
             stats: Stats::default(),
         };
@@ -404,24 +409,36 @@ impl<'a> Writer<'a> {
     }
 
     /// Move a step's share of the records of a segment written to the
-    /// arena, until it has no room even compacted.
-    fn settle(&mut self) {
+    /// arena, until it has no room even compacted: the first time, the
+    /// event that says so.
+    fn settle(&mut self) -> Option<Event> {
         // Without an arena (none was set aside) the records stay.
         let (used, left) = self.arena();
         if self.arena_full || self.released || used + left == 0 {
-            return;
+            return None;
         }
         // Merges leave the records they merged anew or evicted behind in
         // the arena: compacted, it holds what the segments keep. The rest
         // stays in the heap until a merge or write in flight is done, and
         // the arena is full when compacted it still has no room, until the
-        // next merge commits.
+        // next merge commits. Records past it stay in the heap, which its
+        // own shares bound: the arena is the room the pack read leaves, and
+        // a merge of read segments that hold one page each re-encodes that
+        // page there while the read bytes stay for lookups.
         if self.settle_next() == Some(Settled::Full)
             && self.compact().is_some()
             && self.settle_next() == Some(Settled::Full)
         {
             self.arena_full = true;
+            if !self.arena_reported {
+                self.arena_reported = true;
+                return Some(Event::ArenaFull {
+                    used: self.arena.used(),
+                    resident: self.resident(),
+                });
+            }
         }
+        None
     }
 
     /// Move a step's share of the first segment written with records
@@ -492,8 +509,6 @@ impl<'a> Writer<'a> {
         });
         let reason = if heap_short {
             Some(ShedReason::Heap)
-        } else if self.arena_full {
-            Some(ShedReason::Arena)
         } else if pack >= left {
             Some(ShedReason::Pack)
         } else {
@@ -928,7 +943,7 @@ impl<'a> Writer<'a> {
             return Ok(events);
         }
         events.extend(self.govern(entries));
-        self.settle();
+        events.extend(self.settle());
         if self.idle() {
             events.extend(self.begin(clock(), entries));
         } else {
