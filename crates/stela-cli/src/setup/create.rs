@@ -1043,6 +1043,24 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     }
     // Every new or resumed setup knows its installer from here on.
     let install_image = command.install_image.unwrap_or(InstallImage::Network);
+    // An image of the build this computer holds already, downloaded by an
+    // earlier command or by another user under sudo, serves as --ipsw.
+    if command.ipsw.is_none()
+        && command.fetch
+        && let Some(path) = super::sources::cached_image(
+            environment,
+            match install_image {
+                InstallImage::Full => super::sources::Need::WholeImage,
+                InstallImage::Network => super::sources::Need::BootFiles,
+            },
+            &command.build,
+            command.model(),
+            command.download_dir.as_deref(),
+        )
+    {
+        command.ipsw = Some(path);
+        command.fetch = false;
+    }
     // Downloaded boot archives are kept in one place until setup finishes,
     // so a setup run again after a stop reuses them, and removed once it
     // has. A full image goes directly to the USB after preparation and

@@ -371,6 +371,30 @@ pub(super) fn obtain(
     }
 }
 
+/// An image this computer holds that serves `need` for `build` and `model`
+/// (`--download-dir` first, then every cache [`image_caches`] names): a new
+/// setup takes it as `--ipsw` instead of downloading.
+pub(super) fn cached_image(
+    environment: &Environment<'_>,
+    need: Need,
+    build: &str,
+    model: &str,
+    download_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let lookup = Lookup {
+        need,
+        build,
+        model,
+        ipsw: None,
+        download_dir,
+        medium: None,
+    };
+    lookup
+        .directories(environment)
+        .iter()
+        .find_map(|directory| cached(directory, &lookup))
+}
+
 /// A complete image of `lookup`'s build and model in `directory`, or for
 /// boot files also a boot archive: the one a command downloaded, or the
 /// one a first setup left.

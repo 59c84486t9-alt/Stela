@@ -2634,6 +2634,32 @@ fn os_update_checks_everything_before_any_download() {
 }
 
 #[test]
+fn a_new_setup_takes_an_image_this_computer_holds_instead_of_downloading() {
+    for installer in [InstallImage::Full, InstallImage::Network] {
+        let mut f = fixture(64 * GIB, false);
+        add_stela(&mut f);
+        let cache = f._dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let cached = cache.join(format!(
+            "UniversalMac_0_{}_Restore.ipsw",
+            restore::payload::SYNTHETIC_BUILD
+        ));
+        fs::copy(&f.ipsw, &cached).unwrap();
+        let mut request = command(&f, &f.esp);
+        request.ipsw = None;
+        request.fetch = true;
+        request.download_dir = Some(cache.clone());
+        request.install_image = Some(installer);
+        let text = setup(&environment(&f.host), request).unwrap();
+        assert!(
+            text.contains(&format!("restore image  {}", cached.display())),
+            "{text}"
+        );
+        assert_eq!(record(&f).install_kind(), installer);
+    }
+}
+
+#[test]
 fn repair_of_a_short_piece_downloads_the_boot_files_and_that_piece_saying_so() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
