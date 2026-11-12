@@ -634,14 +634,22 @@ fn pcie_pending_wait_observes_completion_before_admitting_the_requester() {
 }
 
 fn containment_plan(config: &Config) -> Result<containment::Plan, ClaimError> {
-    containment::Plan::read(|offset, width| {
-        Ok(match width {
-            1 => u32::from(config.read8(offset)?),
-            2 => u32::from(config.read16(offset)?),
-            4 => config.read32(offset)?,
-            _ => panic!("unexpected PCI read width"),
-        })
-    })
+    containment_plan_on(config, true)
+}
+
+/// The census of a function on a root bus, or behind a bridge.
+fn containment_plan_on(config: &Config, root_bus: bool) -> Result<containment::Plan, ClaimError> {
+    containment::Plan::read(
+        |offset, width| {
+            Ok(match width {
+                1 => u32::from(config.read8(offset)?),
+                2 => u32::from(config.read16(offset)?),
+                4 => config.read32(offset)?,
+                _ => panic!("unexpected PCI read width"),
+            })
+        },
+        root_bus,
+    )
 }
 
 #[test]
@@ -783,6 +791,12 @@ fn containment_leaves_a_host_bridges_hardwired_command_as_found() {
     config.command_fixed = 0;
     config.write16(regs::COMMAND, 0x0002).unwrap();
     assert!(plan.check_disabled(|offset| config.read16(offset)).is_err());
+    // A host bridge behind a downstream port is contained like any other
+    // function: its hardwired Bus Master is refused.
+    config.write16(regs::COMMAND, 0x0006).unwrap();
+    config.command_fixed = u16::MAX;
+    let behind = containment_plan_on(config, false).unwrap();
+    assert!(behind.apply(config).is_err());
     // Any other function that keeps Bus Master set stays refused.
     config.write32(8, 0x0604_0000).unwrap();
     config.write16(regs::COMMAND, 0x0006).unwrap();
@@ -872,15 +886,18 @@ fn containment_plan_refuses_when_the_interrupt_pin_cannot_be_read() {
     let refused = ClaimError::ReadFailed {
         offset: regs::INTERRUPT_PIN,
     };
-    let result = containment::Plan::read(|offset, width| {
-        if offset == regs::INTERRUPT_PIN {
-            return Err(refused);
-        }
-        Ok(match width {
-            1 => u32::from(config.read8(offset).unwrap()),
-            2 => u32::from(config.read16(offset).unwrap()),
-            _ => config.read32(offset).unwrap(),
-        })
-    });
+    let result = containment::Plan::read(
+        |offset, width| {
+            if offset == regs::INTERRUPT_PIN {
+                return Err(refused);
+            }
+            Ok(match width {
+                1 => u32::from(config.read8(offset).unwrap()),
+                2 => u32::from(config.read16(offset).unwrap()),
+                _ => config.read32(offset).unwrap(),
+            })
+        },
+        true,
+    );
     assert!(matches!(result, Err(error) if error == refused));
 }

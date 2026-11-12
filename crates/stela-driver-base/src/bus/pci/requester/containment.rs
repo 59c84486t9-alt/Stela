@@ -29,7 +29,12 @@ struct Control {
 pub struct Plan(Vec<Control>);
 
 impl Plan {
-    pub fn read(read: impl FnMut(u16, u8) -> Result<u32, ClaimError>) -> Result<Self, ClaimError> {
+    /// Census the function `read` reaches. `root_bus`: it sits on a root
+    /// complex's own bus, which no bridge forwards to.
+    pub fn read(
+        read: impl FnMut(u16, u8) -> Result<u32, ClaimError>,
+        root_bus: bool,
+    ) -> Result<Self, ClaimError> {
         let reader = RefCell::new(read);
         let read = |offset, width| reader.borrow_mut()(offset, width);
         let mut plan = Self(Vec::new());
@@ -39,12 +44,13 @@ impl Plan {
                 offset: regs::COMMAND,
             });
         }
-        // A host bridge's header is the root complex's own, not a requester's:
-        // Intel's hardwire its Bus Master and Memory Space bits set, and
-        // Linux never writes it. Its COMMAND stays as found and must read
-        // back unchanged.
+        // A host bridge on a root bus (the root complex's own function, or
+        // one integrated in it) is not a requester: Intel's hardwire its Bus
+        // Master and Memory Space bits set, and Linux never writes it. Its
+        // COMMAND stays as found and must read back unchanged. A function
+        // of that class behind a downstream port is contained like any other.
         let class = read(regs::CLASS_REVISION, 4)? >> 8;
-        if class >> 8 == HOST_BRIDGE {
+        if root_bus && class >> 8 == HOST_BRIDGE {
             plan.push(regs::COMMAND, command, command, 0)?;
         } else {
             // INTx Disable is asked of every function and required of those

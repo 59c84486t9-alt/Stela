@@ -541,9 +541,11 @@ struct Input {
 }
 
 impl Input {
+    /// `root_bus`: no bridge the census found forwards to `address`'s bus.
     fn observe(
         reader: &mut ConfigInventory<'_>,
         address: Address,
+        root_bus: bool,
     ) -> Result<Option<Self>, ContainmentError> {
         let identity = reader.read32(address, 0)?;
         match identity as u16 {
@@ -566,11 +568,14 @@ impl Input {
         } else {
             None
         };
-        let plan = Plan::read(|offset, width| {
-            reader
-                .read(address, offset, width)
-                .map_err(ClaimError::Mapping)
-        })?;
+        let plan = Plan::read(
+            |offset, width| {
+                reader
+                    .read(address, offset, width)
+                    .map_err(ClaimError::Mapping)
+            },
+            root_bus,
+        )?;
         let (window, span) = reader
             .geometry
             .function(address, reader.source.platform.wire().roots())?;
@@ -593,9 +598,17 @@ fn census(
     windows: &[EcamWindow],
     reader: &mut ConfigInventory<'_>,
 ) -> Result<Vec<Input>, ContainmentError> {
-    let mut inputs = Vec::new();
+    let mut inputs: Vec<Input> = Vec::new();
     for window in windows {
         for bus in window.start_bus..=window.end_bus {
+            // A bridge's secondary bus is above its own, so every bridge
+            // that forwards to `bus` is already in the census.
+            let root_bus = !inputs.iter().any(|input| {
+                input.address.segment == window.segment
+                    && input.header.bridge.is_some_and(|buses| {
+                        (buses >> 8 & 0xff..=buses >> 16 & 0xff).contains(&u32::from(bus))
+                    })
+            });
             for device in 0..32 {
                 for function in 0..8 {
                     let address = Address {
@@ -604,8 +617,8 @@ fn census(
                         device,
                         function,
                     };
-                    if let Some(input) =
-                        Input::observe(reader, address).map_err(|error| error.at(address))?
+                    if let Some(input) = Input::observe(reader, address, root_bus)
+                        .map_err(|error| error.at(address))?
                     {
                         inputs.try_reserve(1).map_err(|_| Error::Exhausted)?;
                         inputs.push(input);
