@@ -374,6 +374,55 @@ fn publication_invalidates_cross_address_space_alias_reservations_including_aba(
     }
 }
 
+/// A publication across reservation granules, whose parts share one writer
+/// gate per granule, invalidates the reservations of every granule it
+/// writes before its first byte there and keeps those of the others; its
+/// bytes land for every start and length.
+#[test]
+fn publication_across_granules_invalidates_exactly_the_granules_it_writes() {
+    const ERG: usize = 16;
+    for (first, last) in [(20, 40), (16, 32), (3, 61), (47, 49), (0, 64), (33, 34)] {
+        let system = system();
+        let backing = backing(RIGHTS);
+        let domain = domain(&system, &backing, GUEST_BASE);
+        let mut reservations: Vec<_> = (0..STORAGE_BYTES / ERG)
+            .map(|granule| {
+                let mut reservation = system.reservations.thread();
+                let access = reservation_access(&domain, (granule * ERG) as u64);
+                system
+                    .reservations
+                    .load(&mut reservation, &access, || {
+                        let pointer = backing
+                            .host_pointer(granule * ERG, 1, AccessKind::Read)
+                            .unwrap();
+                        // SAFETY: reservation gate protects this live raw read.
+                        unsafe { access::read_part(pointer.as_ptr(), 1, TargetCpu::Baseline) }
+                    })
+                    .unwrap();
+                (reservation, access)
+            })
+            .collect();
+        let bytes: Vec<_> = (first..last).map(|index| index as u8 ^ 0x5a).collect();
+        publish(&system, &backing, first, &bytes).unwrap();
+        let mut expected = vec![0; STORAGE_BYTES];
+        expected[first..last].copy_from_slice(&bytes);
+        assert_eq!(snapshot(&backing), expected, "{first}..{last}");
+        for (granule, (reservation, access)) in reservations.iter_mut().enumerate() {
+            let written = granule * ERG < last && first < (granule + 1) * ERG;
+            let stored = system
+                .reservations
+                .store(reservation, access, || Ok::<_, ()>(()))
+                .unwrap();
+            let expected = if written {
+                monitor::ConditionalWrite::Failed
+            } else {
+                monitor::ConditionalWrite::Stored(())
+            };
+            assert_eq!(stored, expected, "{first}..{last} granule {granule}");
+        }
+    }
+}
+
 #[test]
 fn wrong_coherence_owner_and_invalid_bounds_have_no_byte_effects() {
     let system = system();

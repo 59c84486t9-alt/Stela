@@ -16,6 +16,11 @@ struct SourceMutationState {
     generation: u64,
 }
 impl SourceMutationTracker {
+    /// Whether writes to the backing are being accounted.
+    pub(in crate::memory) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
     pub(in crate::memory) fn new() -> Self {
         Self {
             enabled: AtomicBool::new(false),

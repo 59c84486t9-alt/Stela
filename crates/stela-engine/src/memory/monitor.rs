@@ -341,6 +341,11 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         }))
     }
 
+    /// The bytes of one reservation granule.
+    pub fn erg_bytes(&self) -> u64 {
+        self.erg_bytes
+    }
+
     pub fn thread(self: &Arc<Self>) -> ThreadMonitor<B, M, A> {
         ThreadMonitor {
             domain: Arc::clone(self),

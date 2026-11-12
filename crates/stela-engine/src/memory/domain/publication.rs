@@ -200,7 +200,59 @@ impl MemorySystem {
                 .try_reserve(PublicationParts::new(pointer.as_ptr() as usize, bytes.len()).count())
                 .map_err(|_| preflight_fault(MemoryStatus::Domain))?;
         }
-        for part in PublicationParts::new(pointer.as_ptr() as usize, bytes.len()) {
+        let erg = self.reservations.erg_bytes() as usize;
+        let mut parts = PublicationParts::new(pointer.as_ptr() as usize, bytes.len()).peekable();
+        while let Some(part) = parts.next() {
+            // Untracked parts of one reservation granule share one writer
+            // gate: its reservations go before the first part as before
+            // each, and each part keeps its own scalar store.
+            if receipts.is_none() && !backing.source_mutation.enabled() {
+                let granule = (offset + part.offset) / erg;
+                let mut end = part.offset + part.bytes;
+                while let Some(next) = parts.next_if(|next| (offset + next.offset) / erg == granule)
+                {
+                    end = next.offset + next.bytes;
+                }
+                let start = part.offset;
+                let range = monitor::WriteRange::new(
+                    Arc::clone(backing),
+                    (offset + start) as u64,
+                    (end - start) as u64,
+                )
+                .map_err(|_| PublicationFault {
+                    status: MemoryStatus::Domain,
+                    completed: start,
+                })?;
+                let mut completed = start;
+                self.reservations
+                    .with_writer(&range, monitor::Invalidation::BeforeAttempt, || {
+                        for part in PublicationParts::new(part.address, end - start) {
+                            let at = start + part.offset;
+                            let mut staging = [0; HOST_QUANTITY_BYTES];
+                            staging[..part.bytes].copy_from_slice(&bytes[at..at + part.bytes]);
+                            let value = u128::from(u64::from_le_bytes(staging));
+                            // SAFETY: as for a part of its own below.
+                            unsafe {
+                                access::write_part(
+                                    part.address as *mut u8,
+                                    part.bytes,
+                                    value,
+                                    TargetCpu::Baseline,
+                                )
+                            }?;
+                            completed = at + part.bytes;
+                        }
+                        Ok::<_, access::AccessError>(())
+                    })
+                    .map_err(|error| PublicationFault {
+                        status: match error {
+                            monitor::AccessError::Monitor(_) => MemoryStatus::Domain,
+                            monitor::AccessError::Memory(_) => MemoryStatus::Unsupported,
+                        },
+                        completed,
+                    })?;
+                continue;
+            }
             let mut mutation = self
                 .prepare_source_write(backing, offset + part.offset, part.bytes)
                 .map_err(|status| PublicationFault {
