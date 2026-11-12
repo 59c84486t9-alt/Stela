@@ -6,11 +6,7 @@ use crate::{
     GuestState, Lifter, Limit, TargetCpu,
     aarch64::Decoder,
     block::RecoverySiteKind,
-    x86_64::{
-        MemoryChecks, NativeSystem,
-        asm::{Gpr, Mem, Size},
-        native, pinned,
-    },
+    x86_64::{MemoryChecks, NativeSystem, native, pinned},
 };
 
 /// Guest memory at X1.
@@ -51,7 +47,7 @@ fn word(random: &mut Random) -> u32 {
             | n << 5
             | d
     };
-    match random.below(124) {
+    match random.below(134) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -177,7 +173,22 @@ fn word(random: &mut Random) -> u32 {
         119 => 0x0e16_3c00 | n << 5 | 3,          // umov w3,vn.h[5]
         120 => three(0x6e20_8c00),                // cmeq vd.16b (register)
         121 => three(0x0ea0_3400),                // cmgt vd.2s (D write)
-        _ => three(0x4e20_d400),                  // fadd vd.4s (uncached)
+        122 => 0x7d00_0000 | random.below(224) << 10 | 1 << 5 | d, // str hd,[x1,#2k]
+        123 => 0x3d00_0000 | random.below(448) << 10 | 1 << 5 | d, // str bd,[x1,#k]
+        124 => 0x7d40_0000 | random.below(224) << 10 | 1 << 5 | d, // ldr hd,[x1,#2k]
+        125 => 0x3d40_0000 | random.below(448) << 10 | 1 << 5 | d, // ldr bd,[x1,#k]
+        126 => 0xbd00_0000 | random.below(112) << 10 | 1 << 5 | d, // str sd,[x1,#4k]
+        127 => 0xfd00_0000 | random.below(56) << 10 | 1 << 5 | d, // str dd,[x1,#8k]
+        128 => 0x7c3f_6800 | 1 << 5 | d,          // str hd,[x1,xzr]
+        129 => 0x3cbf_6800 | 1 << 5 | d,          // str qd,[x1,xzr]
+        130 => 0x7c7f_6800 | 1 << 5 | d,          // ldr hd,[x1,xzr]
+        131 => 0x6d00_0000 | random.below(54) << 15 | m << 10 | 1 << 5 | d, // stp dd,dm
+        132 => {
+            // ldp sd,sm,[x1,#4k] (distinct registers; imm7 is signed)
+            let m = if m == d { (d + 1) % 12 } else { m };
+            0x2d40_0000 | random.below(60) << 15 | m << 10 | 1 << 5 | d
+        }
+        _ => three(0x4e20_d400), // fadd vd.4s (uncached)
     }
 }
 
@@ -367,14 +378,12 @@ fn kept_elements_and_lane_constants_run_as_the_frame_layout() {
     }
 }
 
-/// No fault site of a block finds a vector only in a host register: the
-/// encoder refuses one ([`crate::x86_64::asm::Code::guest_access`]), so
-/// emitting blocks whose accesses follow cached writes proves that the
-/// state block a fault's settlement reads is current at every site.
+/// A fault site records the guest vectors only their homes hold: the
+/// fixed case's load of Q6 follows three cached writes, which stay in their
+/// homes and are named by the access's recovery row instead of stored.
 #[test]
-fn every_fault_site_finds_the_cached_writes_stored() {
+fn fault_sites_name_the_dirty_homes_instead_of_storing_them() {
     let mut random = Random(0x0123_4567_89ab_cdef);
-    // Three cached writes, then a load whose fault the engine settles.
     let fixed = [
         0x4ea2_8420_u32, // add v0.4s,v1.4s,v2.4s
         0x6e24_1c63,     // eor v3.16b,v3.16b,v4.16b
@@ -383,7 +392,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         0x4ea6_84c7,     // add v7.4s,v6.4s,v6.4s
         0xf940_0422,     // ldr x2,[x1,#8]
     ];
-    let mut sites = 0;
+    let mut named = 0;
     for case in 0..700 {
         let words: Vec<u32> = if case == 0 {
             fixed.to_vec()
@@ -405,41 +414,375 @@ fn every_fault_site_finds_the_cached_writes_stored() {
             .iter()
             .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
             .collect();
+        for row in &accesses {
+            for binding in &row.bindings {
+                assert!(binding.is_valid(), "{binding:?}");
+            }
+        }
         if case == 0 {
-            // The load of Q6 retires after three instructions, whose three
-            // cached results are stored before it.
             let load = accesses[0];
             assert_eq!(load.retirement.position().unwrap().retired_instructions, 3);
-            // The last is written straight to its slot from the recipe's
-            // register, since the access follows it.
-            let code = &block.x86_64_code[block.source_map[2].1..load.start];
+            // No store before the access; V0, V3 and V5 named in XMM8-15.
+            let code = &block.x86_64_code[block.source_map[0].1..load.start];
             let stores = (0..code.len().saturating_sub(4))
                 .filter(|&at| {
                     code[at..at + 4] == [0xf3, 0x44, 0x0f, 0x7f]
                         || code[at..at + 3] == [0xf3, 0x0f, 0x7f] && code[at + 3] & 0xc7 == 0x87
                 })
                 .count();
-            assert_eq!(stores, 3);
+            assert_eq!(stores, 0);
+            let mut vectors: Vec<u8> = load
+                .bindings
+                .iter()
+                .filter(|binding| binding.guest >= crate::block::VECTOR_BINDING)
+                .map(|binding| binding.guest - crate::block::VECTOR_BINDING)
+                .collect();
+            vectors.sort_unstable();
+            assert_eq!(vectors, [0, 3, 5]);
         }
-        sites += accesses.len();
+        named += accesses
+            .iter()
+            .filter(|row| {
+                row.bindings
+                    .iter()
+                    .any(|binding| binding.guest >= crate::block::VECTOR_BINDING)
+            })
+            .count();
     }
-    assert!(sites > 700, "{sites}");
+    assert!(named > 300, "{named}");
 }
 
+/// A block exit with a guest vector only in its home is refused.
 #[test]
-#[should_panic(expected = "a guest access with V registers only in XMM")]
-fn a_guest_access_after_an_unstored_write_is_refused() {
+#[should_panic(expected = "a block exit with V registers only in XMM")]
+fn an_exit_after_an_unstored_write_is_refused() {
     let mut code = Code::pinned();
     code.set_vector_cache(true);
     code.allocate_vector(2);
     code.mark_vector_dirty(2);
-    code.guest_access(|code| {
-        code.asm()
-            .mov_load(Size::Qword, Gpr::Rax, Mem::base(Gpr::Rax, 0))
-    });
+    super::exit_kind(&mut code, ExitKind::Fallthrough);
 }
 
-/// The cache stores the dirty homes before an access, a side exit, an
+/// Running emitted code until it faults, as the engine's exception entry
+/// does: the GPRs and XMM8-15 at the faulting instruction.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+mod faulting {
+    use crate::GuestState;
+    use core::{arch::global_asm, cell::Cell, ffi::c_void};
+
+    global_asm!(
+        ".globl stela_vreg_test_enter",
+        "stela_vreg_test_enter:",
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "mov [rdx], rsp",
+        "call rsi",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "ret",
+        ".globl stela_vreg_test_recover",
+        "stela_vreg_test_recover:",
+        "mov rsp, [rdi]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "mov rax, -1",
+        "ret",
+    );
+    unsafe extern "sysv64" {
+        fn stela_vreg_test_enter(state: *mut GuestState, code: usize, stack: *mut u64) -> u64;
+        fn stela_vreg_test_recover();
+    }
+
+    /// Where a run faulted: its offset in the code, the GPRs in x86
+    /// encoding order and XMM8-15.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct Fault {
+        pub(super) offset: usize,
+        pub(super) gprs: [u64; 16],
+        pub(super) vectors: [[u64; 2]; 8],
+    }
+
+    struct Active {
+        stack: u64,
+        start: u64,
+        end: u64,
+        fault: Option<Fault>,
+    }
+
+    std::thread_local! {
+        static ACTIVE: Cell<*mut Active> = const { Cell::new(core::ptr::null_mut()) };
+    }
+
+    #[repr(C)]
+    struct SigAction {
+        handler: usize,
+        mask: [u64; 16],
+        flags: i32,
+        restorer: usize,
+    }
+    unsafe extern "C" {
+        fn sigaction(signal: i32, action: *const SigAction, old: *mut SigAction) -> i32;
+        fn mmap(
+            address: *mut c_void,
+            bytes: usize,
+            protection: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut c_void;
+        fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+        fn munmap(address: *mut c_void, bytes: usize) -> i32;
+    }
+    const SIGSEGV: i32 = 11;
+    const SA_SIGINFO: i32 = 4;
+    const MAP_PRIVATE: i32 = 2;
+    const MAP_ANONYMOUS: i32 = 0x20;
+    // ucontext_t on x86-64 Linux: mcontext's gregs at 40, the FXSAVE
+    // image pointer after its 23 registers.
+    const GREGS: usize = 40;
+    const FPREGS: usize = GREGS + 23 * 8;
+    const XMM: usize = 160;
+    // gregs indices of RAX..R15 in x86 encoding order, then RDI and RIP.
+    const ORDER: [usize; 16] = [13, 14, 12, 11, 15, 10, 9, 8, 0, 1, 2, 3, 4, 5, 6, 7];
+    const RDI: usize = 8;
+    const RIP: usize = 16;
+
+    unsafe extern "C" fn handler(_signal: i32, _info: *mut c_void, context: *mut c_void) {
+        let active = ACTIVE.with(Cell::get);
+        // SAFETY: Linux passes a valid ucontext; ACTIVE is this thread's run.
+        unsafe {
+            let gregs = context.cast::<u8>().add(GREGS).cast::<u64>();
+            let rip = gregs.add(RIP).read();
+            if let Some(active) = active.as_mut()
+                && (active.start..active.end).contains(&rip)
+                && active.fault.is_none()
+            {
+                let fpregs = context.cast::<u8>().add(FPREGS).cast::<*const u8>().read();
+                let mut vectors = [[0; 2]; 8];
+                for (index, vector) in vectors.iter_mut().enumerate() {
+                    *vector = fpregs
+                        .add(XMM + 16 * (8 + index))
+                        .cast::<[u64; 2]>()
+                        .read_unaligned();
+                }
+                active.fault = Some(Fault {
+                    offset: (rip - active.start) as usize,
+                    gprs: ORDER.map(|index| gregs.add(index).read()),
+                    vectors,
+                });
+                gregs.add(RDI).write((&raw mut active.stack) as u64);
+                gregs
+                    .add(RIP)
+                    .write(stela_vreg_test_recover as *const () as u64);
+                return;
+            }
+            // Not a test run's fault: default action on return.
+            let default = SigAction {
+                handler: 0,
+                mask: [0; 16],
+                flags: 0,
+                restorer: 0,
+            };
+            sigaction(SIGSEGV, &default, core::ptr::null_mut());
+        }
+    }
+
+    fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let action = SigAction {
+                handler: handler as unsafe extern "C" fn(i32, *mut c_void, *mut c_void) as usize,
+                mask: [0; 16],
+                flags: SA_SIGINFO,
+                restorer: 0,
+            };
+            // SAFETY: a valid SA_SIGINFO action.
+            let result = unsafe { sigaction(SIGSEGV, &action, core::ptr::null_mut()) };
+            assert_eq!(result, 0);
+        });
+    }
+
+    /// A page no access may touch, which stays mapped for the test.
+    pub(super) fn guard_page() -> u64 {
+        // SAFETY: an anonymous PROT_NONE mapping, never unmapped.
+        let page = unsafe {
+            mmap(
+                core::ptr::null_mut(),
+                4096,
+                0,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(page as usize, usize::MAX);
+        page as u64
+    }
+
+    /// Run `code` with RDI = `state`: its exit's RAX, or the fault.
+    pub(super) fn run(
+        code: &[u8],
+        state: &mut GuestState,
+    ) -> Result<u64, alloc::boxed::Box<Fault>> {
+        install();
+        let bytes = (code.len() + 1).next_multiple_of(4096);
+        // SAFETY: private anonymous memory, RX after the copy, unmapped after.
+        unsafe {
+            let page = mmap(
+                core::ptr::null_mut(),
+                bytes,
+                3,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert_ne!(page as usize, usize::MAX);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+            page.cast::<u8>().add(code.len()).write(0xc3);
+            assert_eq!(mprotect(page, bytes, 5), 0);
+            let mut active = Active {
+                stack: 0,
+                start: page as u64,
+                end: page as u64 + code.len() as u64,
+                fault: None,
+            };
+            ACTIVE.with(|cell| cell.set(&raw mut active));
+            let exit = stela_vreg_test_enter(state, page as usize, &raw mut active.stack);
+            ACTIVE.with(|cell| cell.set(core::ptr::null_mut()));
+            assert_eq!(munmap(page, bytes), 0);
+            match active.fault {
+                Some(fault) => Err(alloc::boxed::Box::new(fault)),
+                None => Ok(exit),
+            }
+        }
+    }
+}
+
+/// Every guest access of random blocks faults in turn (its base moved to
+/// a page no access may touch), with cached vectors dirty in their homes:
+/// the frame layout's state at the fault equals the cached block's after
+/// the engine's settlement (pinned GPRs, then the row's bindings, V from
+/// the saved XMM8-15), V registers and all, at every tier.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn faults_at_every_access_recover_the_vectors_only_homes_hold() {
+    use crate::block::{
+        FaultRecovery, HostFaultSnapshot, HostGprSnapshot, HostSpillSnapshot, VECTOR_BINDING,
+    };
+    let guard = faulting::guard_page();
+    for target in tiers() {
+        let mut random = Random(0x7a7a_5151_9e9e_0101);
+        let (mut faults, mut named) = (0, 0);
+        for case in 0..300 {
+            let length = 4 + random.below(30) as usize;
+            let words: Vec<u32> = (0..length).map(|_| word(&mut random)).collect();
+            let accesses: Vec<usize> = lift(&words)
+                .iter()
+                .enumerate()
+                .filter(|(_, instruction)| {
+                    matches!(
+                        instruction.operation,
+                        crate::aarch64::Operation::Memory { .. }
+                            | crate::aarch64::Operation::MemoryPair { .. }
+                            | crate::aarch64::Operation::Simd(
+                                crate::aarch64::simd::Operand::Memory { .. }
+                                    | crate::aarch64::simd::Operand::MemoryPair { .. }
+                                    | crate::aarch64::simd::Operand::MemoryRegisterOffset(_)
+                            )
+                    )
+                })
+                .map(|(index, _)| index)
+                .filter(|&index| words[index] >> 5 & 31 == 1)
+                .collect();
+            let mut memory = [0; WORDS];
+            let initial_state = initial(&mut random, &mut memory);
+            for &at in &accesses {
+                let mut faulting = words.clone();
+                faulting[at] = faulting[at] & !(31 << 5) | 4 << 5;
+                let instructions = lift(&faulting);
+                let end = GuestAddress(0x1000 + 4 * length as u64);
+                let frame = emit(&instructions, None, end);
+                let (block, recovery) = emit_system_mode(
+                    &instructions,
+                    None,
+                    end,
+                    target,
+                    MemoryChecks::DEFAULT,
+                    NativeSystem::NONE,
+                );
+                let entered = pinned::entered(&block.x86_64_code);
+                let prefix = entered.len() - block.x86_64_code.len();
+                let mut expected_memory = memory;
+                let mut expected = initial_state.clone();
+                expected.x[1] = expected_memory.as_mut_ptr() as u64;
+                expected.x[4] = guard;
+                let mut actual_memory = memory;
+                let mut state = initial_state.clone();
+                state.x[1] = actual_memory.as_mut_ptr() as u64;
+                state.x[4] = guard;
+                let frame_run = faulting::run(&frame.x86_64_code, &mut expected);
+                let block_run = faulting::run(&entered, &mut state);
+                let context = alloc::format!("{target:?} case {case} access {at}: {faulting:08x?}");
+                match (frame_run, block_run) {
+                    (Ok(expected_exit), Ok(exit)) => assert_eq!(exit, expected_exit, "{context}"),
+                    (Err(_), Err(fault)) => {
+                        faults += 1;
+                        let offset = fault.offset - prefix;
+                        let gprs = HostGprSnapshot::legacy(fault.gprs).with_vectors(fault.vectors);
+                        pinned::settle(&gprs, &mut state);
+                        let spills = HostSpillSnapshot::new();
+                        let settlement = FaultRecovery::apply(
+                            &recovery,
+                            offset,
+                            HostFaultSnapshot {
+                                gprs: &gprs,
+                                spills: &spills,
+                            },
+                            &mut state,
+                        )
+                        .unwrap_or_else(|error| panic!("{context}: {error}"))
+                        .unwrap_or_else(|| panic!("{context}: no guest site"));
+                        assert_eq!(
+                            usize::from(settlement.position.retired_instructions),
+                            at,
+                            "{context}"
+                        );
+                        named += usize::from(recovery.iter().any(|row| {
+                            (row.start..row.end).contains(&offset)
+                                && row
+                                    .bindings
+                                    .iter()
+                                    .any(|binding| binding.guest >= VECTOR_BINDING)
+                        }));
+                    }
+                    (frame_run, block_run) => {
+                        panic!("{context}: frame {frame_run:?}, block {block_run:?}")
+                    }
+                }
+                state.x[1] = 0;
+                expected.x[1] = 0;
+                assert_eq!(state, expected, "{context}");
+                assert_eq!(actual_memory, expected_memory, "{context}");
+            }
+        }
+        assert!(faults > 200, "{target:?}: {faults} faults");
+        assert!(named > 50, "{target:?}: {named} faults with dirty homes");
+    }
+}
+
+/// The cache stores the dirty homes before a side exit, an
 /// uncached instruction and the terminal, and only there; a result the
 /// next of those follows goes straight to its slot.
 #[test]
@@ -490,10 +833,12 @@ fn dirty_vectors_are_stored_where_the_state_must_be_current() {
     // The second ADD reads V0 from its home: no load of its slot.
     let load = [0xf3, 0x0f, 0x6f, 0x87, 0x08, 0x01, 0, 0];
     assert!(!code[rows[1]..rows[2]].windows(8).any(|w| w == load));
-    // V0, dirty, is stored once, before the access.
-    assert_eq!(stores_of(rows[1]..rows[2]), [0]);
+    // V0 stays dirty across the access, whose fault recovery names it.
+    assert!(stores_of(rows[1]..rows[2]).is_empty());
     assert!(stores_of(rows[2]..rows[3]).is_empty());
-    // Before the uncached USHL: V3.
-    assert_eq!(stores_of(rows[3]..rows[4]), [3]);
+    // Before the uncached USHL: V0 and V3.
+    let mut before_ushl = stores_of(rows[3]..rows[4]);
+    before_ushl.sort_unstable();
+    assert_eq!(before_ushl, [0, 3]);
     assert_eq!(stores_of(rows[5]..code.len()), [5]);
 }

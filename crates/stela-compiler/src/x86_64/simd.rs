@@ -645,7 +645,7 @@ pub(super) fn vector_use(operand: &Operand, target: crate::TargetCpu) -> super::
             _ => Keep,
         },
         Operand::Memory { .. } | Operand::MemoryPair { .. } | Operand::MemoryRegisterOffset(_) => {
-            Flush
+            Access
         }
         _ => Settle,
     }

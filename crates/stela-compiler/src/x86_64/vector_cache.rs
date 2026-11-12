@@ -10,16 +10,18 @@
 //! storing to `GuestState::v` and loading it back at once.
 //!
 //! The state block is made current ([`VectorCache::flush`]) wherever
-//! anything else may read it: before every instruction that can fault or
-//! leave the block (a guest access or check, a conditional branch's side
-//! exit, the terminal and its direct exits, a self-loop's back edge) and
-//! before every instruction the cache does not know (which also forgets
-//! every home, since it may write `GuestState::v` itself or use any XMM
-//! register). So a fault's settlement, an exit, a helper and an interrupt
-//! taken at a block boundary all find the exact architectural V state, and
-//! the precise-exception, SMC and interrupt rules of the blocks are the
-//! ones they had: the cache never holds a dirty register across a fault
-//! site ([`super::asm::Code::guest_access`] asserts it) or a branch out.
+//! anything else may read it: before every instruction that can leave the
+//! block (a conditional branch's side exit, the terminal and its direct
+//! exits, a self-loop's back edge) and before every instruction the cache
+//! does not know (which also forgets every home, since it may write
+//! `GuestState::v` itself or use any XMM register). Guest accesses and
+//! checks keep the dirty homes: each fault site records which V register
+//! only which home holds ([`DirtyHomes`]), and the fault's settlement
+//! takes those from the XMM8-15 the host saved at the fault
+//! ([`crate::block::RecoveryBinding::vector`]). So a fault's settlement,
+//! an exit, a helper and an interrupt taken at a block boundary all find
+//! the exact architectural V state; an exit or a helper call with a dirty
+//! home is refused ([`super::asm::Asm::refuse_dirty_homes`]).
 //!
 //! The pool is the legacy-SSE register file's upper half on every x86-64
 //! host: SSE2 recipes take a home directly as a source operand, which
@@ -53,6 +55,11 @@ pub(crate) const FIRST_HOST: u8 = 8;
 /// The pool's registers.
 pub(crate) const HOSTS: usize = 8;
 const NONE: u8 = u8::MAX;
+
+/// The guest vectors whose only current value is a home, with that home:
+/// what a fault site records so that recovery reads them from the saved
+/// XMM8-15 ([`crate::block::RecoveryBinding::vector`]).
+pub(crate) type DirtyHomes = [Option<(u8, u8)>; HOSTS];
 
 /// Where each guest vector lives in this block, and which homes hold a
 /// value the state block lacks.
@@ -119,6 +126,16 @@ impl VectorCache {
     /// Whether any home holds a value the state block lacks.
     pub(crate) const fn has_dirty(&self) -> bool {
         self.dirty != 0
+    }
+    /// The dirty homes, for a fault site here.
+    pub(crate) fn dirty_homes(&self) -> DirtyHomes {
+        let mut homes = [None; HOSTS];
+        for (index, owner) in self.owner.iter().enumerate() {
+            if *owner != NONE && self.is_dirty(*owner) {
+                homes[index] = Some((*owner, FIRST_HOST + index as u8));
+            }
+        }
+        homes
     }
     /// The pool registers that hold a guest vector: no recipe may write one,
     /// except the destination home it is writing.

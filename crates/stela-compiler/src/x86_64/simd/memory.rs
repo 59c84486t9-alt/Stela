@@ -107,8 +107,13 @@ pub(in crate::x86_64) fn transfer(code: &mut Code, load: bool, bytes: u8, vector
         }
         commit(code, vector, 0);
     } else if bytes <= HALFWORD_BYTES {
-        code.asm()
-            .mov_load(Size::Qword, Gpr::Rcx, guest(vector_offset(vector)));
+        // A home may hold the only current value.
+        if let Some(host) = code.vector_home(vector) {
+            code.asm_unguarded().movq_from_xmm(Gpr::Rcx, host);
+        } else {
+            code.asm()
+                .mov_load(Size::Qword, Gpr::Rcx, guest(vector_offset(vector)));
+        }
         super::super::memory_store::emit(code, bytes, 0, super::super::memory_store::Source::Rcx);
     } else {
         if !held {

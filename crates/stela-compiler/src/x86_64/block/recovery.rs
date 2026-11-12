@@ -42,8 +42,9 @@ pub(super) fn bind(
                 "a faulting instruction has one complete location plan"
             );
             debug_assert!(
-                marker.locals.iter().all(Option::is_none),
-                "regions keep no pinned locals"
+                marker.locals.iter().all(Option::is_none)
+                    && marker.homes.iter().all(Option::is_none),
+                "regions keep no pinned locals or vector homes"
             );
             matched = true;
             output.push(FaultRecovery {
@@ -87,6 +88,14 @@ pub(super) fn bind(
                             .into_iter()
                             .flatten()
                             .map(|(guest, host)| RecoveryBinding::gpr(guest, host.number())),
+                    )
+                    // And the guest vectors only their homes hold.
+                    .chain(
+                        marker
+                            .homes
+                            .into_iter()
+                            .flatten()
+                            .map(|(vector, host)| RecoveryBinding::vector(vector, host)),
                     )
                     .collect(),
                 retirement: RetirementPoint::before(

@@ -23,6 +23,8 @@ pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
 /// `mov edx,word; ret`: the exit to the target in RAX, unpadded
 /// (`chain::dynamic_exit`).
 pub(super) fn exit_kind_with(asm: &mut Asm, word: impl Into<ExitWord>) {
+    // An exit hands the engine the state block, which must be current.
+    asm.refuse_dirty_homes("a block exit");
     // MOV EDX zero-extends to the ABI's u64.
     asm.mov_imm32(Gpr::Rdx, word.into().encoded());
     asm.ret();
@@ -733,10 +735,10 @@ fn emit_selected(
                 // anyway, results go straight to the state.
                 let next_keeps = cursor + 1 < instructions.len()
                     && !landing[cursor + 1]
-                    && class_at(cursor + 1) == VectorUse::Keep;
+                    && matches!(class_at(cursor + 1), VectorUse::Keep | VectorUse::Access);
                 code.set_vector_write_through(!next_keeps);
                 match class {
-                    VectorUse::Keep => code.set_vector_cache(true),
+                    VectorUse::Keep | VectorUse::Access => code.set_vector_cache(true),
                     VectorUse::Flush => {
                         code.set_vector_cache(true);
                         code.flush_vectors();
@@ -1665,6 +1667,10 @@ pub(super) enum VectorUse {
     /// It neither faults nor leaves, reaches V only through the cache's
     /// operand layer and writes no pool register: the homes stay.
     Keep,
+    /// As [`Self::Keep`], but it can fault, at exact sites only, whose
+    /// recovery reads the dirty homes from the saved XMM8-15
+    /// ([`crate::block::RecoveryBinding::vector`]): the homes stay.
+    Access,
     /// As [`Self::Keep`], but it can fault or leave: the dirty homes are
     /// stored first, and stay as clean copies.
     Flush,
@@ -1692,8 +1698,8 @@ fn vector_use(operation: &Operation, target: crate::TargetCpu) -> VectorUse {
         | Operation::Nop => VectorUse::Keep,
         Operation::Memory { .. }
         | Operation::MemoryPair { .. }
-        | Operation::MemoryRegisterOffset(_)
-        | Operation::BranchCondition { .. }
+        | Operation::MemoryRegisterOffset(_) => VectorUse::Access,
+        Operation::BranchCondition { .. }
         | Operation::BranchZero { .. }
         | Operation::BranchBit { .. } => VectorUse::Flush,
         Operation::Simd(operand) => super::simd::vector_use(operand, target),

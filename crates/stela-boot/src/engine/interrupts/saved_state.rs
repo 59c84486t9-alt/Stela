@@ -31,6 +31,24 @@ impl SavedState<'_> {
         })
     }
 
+    /// XMM8-15 as this entry saved them: the legacy region (FXSAVE layout,
+    /// also the start of every XSAVE image this entry writes) holds XMM0-15
+    /// from byte 160, 16 bytes each. A system-mode block keeps guest V
+    /// registers there, which fault recovery reads.
+    pub(crate) fn vectors(&self) -> [[u64; 2]; 8] {
+        const XMM8: usize = 160 + 8 * 16;
+        core::array::from_fn(|index| {
+            let at = XMM8 + 16 * index;
+            let word = |offset: usize| {
+                self.image
+                    .get(offset..offset + 8)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map_or(0, u64::from_le_bytes)
+            };
+            [word(at), word(at + 8)]
+        })
+    }
+
     /// Only the exact enabled bank saved by this entry may be interpreted.
     /// CPU admission remains separate; disabled component19 stays unavailable.
     fn extended_gprs(&self) -> Result<Option<[u64; 16]>, xstate::ImageError> {

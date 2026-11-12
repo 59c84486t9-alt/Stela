@@ -23,7 +23,14 @@ pub(crate) struct Code {
     instruction: usize,
     /// Jumps to check failures, which the block places after its exits,
     /// with the instructions they fail and the locals dirty there.
-    failures: Vec<(super::Patch, usize, super::super::pinned::Dirty)>,
+    failures: Vec<(
+        super::Patch,
+        usize,
+        (
+            super::super::pinned::Dirty,
+            super::super::vector_cache::DirtyHomes,
+        ),
+    )>,
     /// The masked-base plan for the access being emitted, and the plan the
     /// access applied ([`super::super::masked_base`]).
     base_request: Option<super::super::masked_base::Request>,
@@ -44,6 +51,8 @@ pub(crate) struct EmissionSite {
     pub source: Option<usize>,
     /// The locals whose guest values only their hosts hold at the site.
     pub locals: super::super::pinned::Dirty,
+    /// The guest vectors whose only current value is a home at the site.
+    pub homes: super::super::vector_cache::DirtyHomes,
 }
 
 /// A byte and instruction position captured at an emission boundary.
@@ -144,21 +153,20 @@ impl Code {
     /// taken costs no more than the mask a guest range check would pay for,
     /// and needs no address in RAX.
     pub(crate) fn check_failure(&mut self, failed: super::Cond) {
-        assert!(
-            !self.vectors.has_dirty(),
-            "a check failure with V registers only in XMM"
-        );
         let jump = self.asm().jcc(failed);
-        self.failures.push((jump, self.instruction, self.dirty));
+        let homes = self.vectors.dirty_homes();
+        self.failures
+            .push((jump, self.instruction, (self.dirty, homes)));
     }
     /// Place the check failures: a UD2 each, whose site names its instruction.
     pub(crate) fn place_failures(&mut self) {
-        for (jump, instruction, dirty) in core::mem::take(&mut self.failures) {
+        for (jump, instruction, (dirty, homes)) in core::mem::take(&mut self.failures) {
             let mut asm = self.asm();
             asm.bind(jump);
             asm.guest_check_of(instruction);
             if let Some(site) = self.sites.last_mut() {
                 site.locals = dirty;
+                site.homes = homes;
             }
         }
     }
@@ -202,7 +210,7 @@ impl Code {
     /// An encoder that appends here and adds to this count.
     pub(crate) fn asm(&mut self) -> Asm<'_> {
         let guarded = self.vectors.occupied();
-        let vectors_dirty = self.vectors.has_dirty();
+        let homes = self.vectors.dirty_homes();
         Asm {
             code: &mut self.bytes,
             instructions: 0,
@@ -213,7 +221,7 @@ impl Code {
             dirty: self.dirty,
             linked_block: self.linked_block,
             guarded,
-            vectors_dirty,
+            homes,
         }
     }
     /// [`Self::asm`] for the vector cache's own moves, which may write the
@@ -225,10 +233,7 @@ impl Code {
     }
     /// A typed recipe that emits exactly one guest memory instruction.
     pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
-        assert!(
-            !self.vectors.has_dirty(),
-            "a guest access with V registers only in XMM"
-        );
+        let homes = self.vectors.dirty_homes();
         let start = self.bytes.len();
         let count = self.instructions;
         emit(self);
@@ -251,6 +256,7 @@ impl Code {
             stack: None,
             source: None,
             locals: self.dirty,
+            homes,
         });
     }
     pub(crate) fn sites(&self) -> &[EmissionSite] {

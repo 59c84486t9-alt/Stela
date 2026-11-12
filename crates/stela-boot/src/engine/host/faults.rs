@@ -140,9 +140,12 @@ pub(super) fn abandon(
         address,
         write,
         cause,
-        registers: saved.registers().unwrap_or_else(|_| {
-            crate::output::fatal("native fault has no valid owned interrupt register image")
-        }),
+        registers: saved
+            .registers()
+            .unwrap_or_else(|_| {
+                crate::output::fatal("native fault has no valid owned interrupt register image")
+            })
+            .with_vectors(saved.vectors()),
     });
     frame.rip = stela_native_recover as *const () as u64;
 }

@@ -22,7 +22,28 @@ pub struct RecoveryBinding {
     pub guest: u8,
     pub source: RecoverySource,
 }
+/// The first [`RecoveryBinding::guest`] number of a guest V register.
+pub const VECTOR_BINDING: u8 = 32;
+
 impl RecoveryBinding {
+    /// Guest V`vector`, whose only current value is host XMM`register`
+    /// (a system-mode block's home, 8 to 15).
+    pub const fn vector(vector: u8, register: u8) -> Self {
+        Self {
+            guest: VECTOR_BINDING + vector,
+            source: RecoverySource::HostRegister(register),
+        }
+    }
+    /// Whether the binding names a guest register and a source that can
+    /// hold it: X0-X30/SP from a host GPR or a spill, V0-V31 from XMM8-15.
+    pub const fn is_valid(&self) -> bool {
+        match (self.guest, self.source) {
+            (0..=31, RecoverySource::HostRegister(host)) => host < 32,
+            (0..=31, RecoverySource::NativeSpill(_)) => true,
+            (32..=63, RecoverySource::HostRegister(host)) => host >= 8 && host < 16,
+            _ => false,
+        }
+    }
     pub const fn gpr(guest: u8, register: u8) -> Self {
         Self {
             guest,
@@ -112,6 +133,8 @@ impl FaultRecovery {
         let mut settlement: Option<RecoverySettlement> = None;
         let mut values = [0; 32];
         let mut present = 0u32;
+        let mut vectors = [[0; 2]; 32];
+        let mut vectors_present = 0u32;
         for entry in table {
             if entry.start >= entry.end {
                 return Err(FaultRecoveryError::InvalidNativeRange {
@@ -146,6 +169,30 @@ impl FaultRecovery {
                 phase,
             });
             for binding in &entry.bindings {
+                if binding.guest >= VECTOR_BINDING {
+                    let vector = binding.guest - VECTOR_BINDING;
+                    if !binding.is_valid() {
+                        return Err(FaultRecoveryError::InvalidGuestRegister {
+                            register: binding.guest,
+                        });
+                    }
+                    let RecoverySource::HostRegister(register) = binding.source else {
+                        unreachable!("checked by is_valid");
+                    };
+                    let value = capture
+                        .gprs
+                        .vector(register)
+                        .ok_or(FaultRecoveryError::VectorStateUnavailable { register })?;
+                    let bit = 1 << vector;
+                    if vectors_present & bit != 0 && vectors[usize::from(vector)] != value {
+                        return Err(FaultRecoveryError::ConflictingGuestBinding {
+                            register: binding.guest,
+                        });
+                    }
+                    vectors[usize::from(vector)] = value;
+                    vectors_present |= bit;
+                    continue;
+                }
                 if binding.guest > 31 {
                     return Err(FaultRecoveryError::InvalidGuestRegister {
                         register: binding.guest,
@@ -177,6 +224,11 @@ impl FaultRecovery {
                 present |= bit;
             }
         }
+        while vectors_present != 0 {
+            let vector = vectors_present.trailing_zeros() as usize;
+            vectors_present &= vectors_present - 1;
+            state.v[vector] = vectors[vector];
+        }
         while present != 0 {
             let guest = present.trailing_zeros() as usize;
             present &= present - 1;
@@ -199,6 +251,9 @@ pub enum FaultRecoveryError {
         register: u8,
     },
     ExtendedStateUnavailable {
+        register: u8,
+    },
+    VectorStateUnavailable {
         register: u8,
     },
     NativeSpillUnavailable {
@@ -245,6 +300,10 @@ impl core::fmt::Display for FaultRecoveryError {
             Self::ExtendedStateUnavailable { register } => write!(
                 f,
                 "fault recovery needs host R{register}, but its extended bank was not captured"
+            ),
+            Self::VectorStateUnavailable { register } => write!(
+                f,
+                "fault recovery needs host XMM{register}, which was not captured"
             ),
             Self::NativeSpillUnavailable { offset } => write!(
                 f,

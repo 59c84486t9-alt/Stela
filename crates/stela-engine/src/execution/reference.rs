@@ -25,6 +25,9 @@ pub struct HostFault {
     pub error_code: u64,
     /// RAX through R15, by x86 register number.
     pub registers: [u64; 16],
+    /// XMM8-15 at the faulting instruction, the homes of a system-mode
+    /// block's guest vectors.
+    pub vectors: [[u64; 2]; 8],
 }
 
 impl HostFault {
@@ -50,7 +53,8 @@ impl HostFault {
             trap: self.trap,
             error_code: self.error_code,
             spills: stela_compiler::block::HostSpillSnapshot::new(),
-            registers: stela_compiler::block::HostGprSnapshot::legacy(self.registers),
+            registers: stela_compiler::block::HostGprSnapshot::legacy(self.registers)
+                .with_vectors(self.vectors),
         }
     }
 }
@@ -139,6 +143,13 @@ extern "C" fn fault_handler(signal: i32, info: *mut libc::siginfo_t, context: *m
             && recovery.recorded.is_none()
         {
             let get = |index: i32| registers[index as usize] as u64;
+            let mut vectors = [[0; 2]; 8];
+            if let Some(fpregs) = frame.uc_mcontext.fpregs.as_ref() {
+                for (vector, xmm) in vectors.iter_mut().zip(&fpregs._xmm[8..]) {
+                    let [a, b, c, d] = xmm.element.map(u64::from);
+                    *vector = [a | b << 32, c | d << 32];
+                }
+            }
             recovery.recorded = Some(HostFault {
                 rip,
                 address: get(libc::REG_CR2),
@@ -163,6 +174,7 @@ extern "C" fn fault_handler(signal: i32, info: *mut libc::siginfo_t, context: *m
                     get(libc::REG_R14),
                     get(libc::REG_R15),
                 ],
+                vectors,
             });
             registers[libc::REG_RDI as usize] = (&raw mut recovery.stack) as libc::greg_t;
             registers[libc::REG_RIP as usize] =

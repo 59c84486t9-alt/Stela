@@ -7,12 +7,16 @@
 pub struct HostGprSnapshot {
     legacy: [u64; 16],
     extended: Option<[u64; 16]>,
+    /// XMM8-15 (low then high quadword), where the platform captured them:
+    /// the homes a system-mode block keeps guest V registers in.
+    vectors: Option<[[u64; 2]; 8]>,
 }
 impl HostGprSnapshot {
     pub const fn legacy(registers: [u64; 16]) -> Self {
         Self {
             legacy: registers,
             extended: None,
+            vectors: None,
         }
     }
     pub const fn complete(registers: [u64; 32]) -> Self {
@@ -27,6 +31,19 @@ impl HostGprSnapshot {
         Self {
             legacy,
             extended: Some(extended),
+            vectors: None,
+        }
+    }
+    /// This capture with XMM8-15 as saved at the fault.
+    pub const fn with_vectors(mut self, vectors: [[u64; 2]; 8]) -> Self {
+        self.vectors = Some(vectors);
+        self
+    }
+    /// Host XMM`register` (8 to 15) as captured, if it was.
+    pub const fn vector(&self, register: u8) -> Option<[u64; 2]> {
+        match (register, &self.vectors) {
+            (8..=15, Some(vectors)) => Some(vectors[(register - 8) as usize]),
+            _ => None,
         }
     }
     pub const fn extended_available(&self) -> bool {

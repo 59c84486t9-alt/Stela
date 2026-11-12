@@ -336,13 +336,7 @@ impl Entry {
                     && self.retirement_at(range.retirement, 0).is_some()
                     && (range.site == RecoverySiteKind::NativeInternal
                         || range.retirement.phase() == RetirementPhase::Before)
-                    && range.bindings.iter().all(|binding| {
-                        binding.guest <= 31
-                            && match binding.source {
-                                RecoverySource::HostRegister(host) => host < 32,
-                                RecoverySource::NativeSpill(_) => true,
-                            }
-                    })
+                    && range.bindings.iter().all(RecoveryBinding::is_valid)
             })
     }
 }

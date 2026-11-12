@@ -40,9 +40,9 @@ pub(crate) struct Asm<'a> {
     /// Host XMM registers that hold guest vectors
     /// ([`super::vector_cache`]): no instruction emitted here writes one.
     guarded: u32,
-    /// Whether a guest vector's only current value is in a host register,
-    /// which no fault site may then be.
-    vectors_dirty: bool,
+    /// The guest vectors whose only current value is a home: a fault site
+    /// here records them for recovery.
+    homes: super::vector_cache::DirtyHomes,
 }
 
 impl<'a> Asm<'a> {
@@ -73,7 +73,7 @@ impl<'a> Asm<'a> {
             dirty: Default::default(),
             linked_block: None,
             guarded: 0,
-            vectors_dirty: false,
+            homes: Default::default(),
         }
     }
     /// [`Self::new`] for code that keeps guest registers in host registers
@@ -125,6 +125,8 @@ impl<'a> Asm<'a> {
     /// a deliberate helper-return token. The CALL opcode and descriptor tail
     /// remain internal; neither is a hardware guest-access/check instruction.
     pub(crate) fn translated_helper_return(&mut self, bytes: u8, flags: u8) {
+        // A helper may use any XMM register.
+        self.refuse_dirty_homes("a helper call");
         let start = self.len();
         self.data(&[bytes, flags]);
         if let Some(sites) = self.sites.as_deref_mut() {
@@ -139,8 +141,17 @@ impl<'a> Asm<'a> {
                 stack: None,
                 source: None,
                 locals: self.dirty,
+                homes: self.homes,
             });
         }
+    }
+    /// Refuse to emit `what` where a guest vector's only current value is
+    /// a home ([`super::vector_cache`]).
+    pub(crate) fn refuse_dirty_homes(&self, what: &str) {
+        assert!(
+            self.homes.iter().all(Option::is_none),
+            "{what} with V registers only in XMM"
+        );
     }
     /// Refuse to write `xmm` where it holds a guest vector
     /// ([`super::vector_cache`]): a recipe names it only as a source.
@@ -156,10 +167,6 @@ impl<'a> Asm<'a> {
         stack: Option<u8>,
         emit: impl FnOnce(&mut Self),
     ) {
-        assert!(
-            !self.vectors_dirty,
-            "a fault site with V registers only in XMM"
-        );
         let start = self.len();
         let instructions = self.instructions;
         emit(self);
@@ -181,6 +188,7 @@ impl<'a> Asm<'a> {
                 stack,
                 source: None,
                 locals: self.dirty,
+                homes: self.homes,
             });
         }
     }

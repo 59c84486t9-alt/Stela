@@ -40,7 +40,7 @@ pub use recovery::{
     NATIVE_SPILL_WORDS, PackedRecovery, RecoveredPosition, RecoveryBinding,
     RecoveryQualificationError, RecoverySettlement, RecoverySite, RecoverySiteKind, RecoverySource,
     RecoveryTemplate, RetirementPhase, RetirementPoint, SpillOffset, TranslatedAccess,
-    UnqualifiedFaultRecovery,
+    UnqualifiedFaultRecovery, VECTOR_BINDING,
 };
 pub use system::{SystemInstruction, decode_system_instruction, decode_system_mode_instruction};
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
