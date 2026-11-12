@@ -198,9 +198,9 @@ fn wide_floats(format: Format) -> Vec<u64> {
 }
 
 /// Vector FCVT{N,M,P,Z}U of S lanes and FCVT{N,M,P,Z}{S,U} of D lanes on
-/// every tier this host has, against the reference: with AVX-512's packed
-/// conversions, AH and the trap enables clear, every lane set completes
-/// inline, zeros, subnormals (flushed under FZ or FIZ), NaNs (zero with
+/// every tier this host has, against the reference: with AH and the trap
+/// enables clear, every lane set completes inline (AVX-512's packed
+/// conversions, or one lane at a time outside the DIT profile), zeros, subnormals (flushed under FZ or FIZ), NaNs (zero with
 /// IOC), negative inputs of unsigned forms (zero, with IOC from -1 down)
 /// and saturating out-of-range lanes (IOC) included; every exit leaves the
 /// state unchanged.
@@ -310,8 +310,8 @@ fn unsigned_and_double_lanes_saturate_inline() {
                         initial.v[N as usize] = n;
                         initial.v[D as usize] = [0xdead_beef_0bad_f00d, 0xfeed_face_cafe_d00d];
                         let label = alloc::format!("{word:08x} {n:x?} {fpcr:#x} {target:?}");
-                        let must_inline =
-                            packed && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
+                        let must_inline = (packed || !target.data_independent_timing())
+                            && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
                         let mut actual = initial.clone();
                         let exit = run(&code, &mut actual);
                         runs += 1;
@@ -344,8 +344,7 @@ fn unsigned_and_double_lanes_saturate_inline() {
 
 /// Vector FCVTZS and FCVTZU with fixed-point bits complete every lane set
 /// inline like their integer forms (the scale by 2^fbits is exact, or
-/// overflows to a saturated lane), signed S lanes on every tier and the
-/// others with AVX-512's packed conversions; every inline completion
+/// overflows to a saturated lane) on every tier outside the DIT profile; every inline completion
 /// matches the reference, every exit leaves the state unchanged.
 #[test]
 fn fixed_point_lanes_saturate_inline() {
@@ -369,10 +368,6 @@ fn fixed_point_lanes_saturate_inline() {
                 },
                 signed,
             };
-            let packed = format == Format::Single && signed
-                || crate::x86_64::asm::vector_extensions::packed_conversion_supported(
-                    format, integer, target,
-                );
             let code = compile(word, target);
             let all = wide_floats(format);
             let width = format.bits() as usize;
@@ -393,8 +388,7 @@ fn fixed_point_lanes_saturate_inline() {
                     initial.v[N as usize] = n;
                     initial.v[D as usize] = [0xdead_beef_0bad_f00d, 0xfeed_face_cafe_d00d];
                     let label = alloc::format!("{word:08x} {n:x?} {fpcr:#x} {target:?}");
-                    let must_inline = packed
-                        && !target.data_independent_timing()
+                    let must_inline = !target.data_independent_timing()
                         && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
                     let mut actual = initial.clone();
                     let exit = run(&code, &mut actual);
