@@ -170,14 +170,9 @@ fn modern_required_protocol_failures_never_become_warnings_or_publish_dma() {
         );
         let model = Model::modern(&time);
         let mut hw = Hardware::new(&model, &time, revision(version), 0);
-        assert_eq!(
-            hw.configure_phy(None, false),
-            Err(Error::Script(if version == 46 {
-                "RTL8168H/M requires firmware"
-            } else {
-                "RTL8168G/8411B requires firmware"
-            }))
-        );
+        // Linux r8169_apply_firmware: without a file the PHY starts on its
+        // built-in parameters.
+        assert_eq!(hw.configure_phy(None, false), Ok(None));
         model.state.borrow_mut().phy_ocp.insert(0xa406, 0xc912);
         assert_eq!(
             hw.configure_phy(Some(&script), false),

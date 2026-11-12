@@ -91,7 +91,7 @@ fn e_mac_start_clears_inherited_jumbo() {
 }
 
 #[test]
-fn e_warning_does_not_tolerate_required_firmware_phy_or_mac_failures() {
+fn e_warning_starts_without_firmware_and_does_not_tolerate_phy_or_mac_failures() {
     let bytes = 0x8016_a55au32.to_le_bytes();
     let script = Script::parse(&bytes).unwrap();
     for version in [32, 33] {
@@ -100,8 +100,9 @@ fn e_warning_does_not_tolerate_required_firmware_phy_or_mac_failures() {
         let mut hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(
             hw.configure_phy(None, false),
-            Err(Error::Script("RTL8168E requires firmware"))
+            Ok(Some(Warning::EeeAdvertisementDisableUnavailable))
         );
+        assert!(!model.state.borrow().phy.contains_key(&(0, 0x16)));
         for nth in [15, 35, 55] {
             let time = Time::default();
             let mut model = Model::ready(&time);

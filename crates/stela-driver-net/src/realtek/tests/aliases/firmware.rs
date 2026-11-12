@@ -117,7 +117,8 @@ fn alias_admission_preserves_required_phy_identity_capability_and_bus_failures()
                         );
                     }
                     1 => assert!(matches!(result, Err(Error::UnsupportedPhy(0x001c_c999)))),
-                    2 => assert!(matches!(result, Err(Error::Script(_)))),
+                    // Linux r8169_apply_firmware: no file, built-in parameters.
+                    2 => assert!(result.is_ok(), "{result:?}"),
                     3 => assert_eq!(result, Err(Error::Device(BlockError::Timeout))),
                     _ => assert!(result.is_err()),
                 }

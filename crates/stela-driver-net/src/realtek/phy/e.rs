@@ -7,7 +7,7 @@
 use super::{Error, Hardware, Registers, Script, Timer, Warning};
 
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
-    pub(super) fn e(&mut self, script: &Script<'_>) -> Result<Warning, Error> {
+    pub(super) fn e(&mut self, script: Option<&Script<'_>>) -> Result<Warning, Error> {
         self.apply_firmware(script)?;
         self.parameter(0x8b80, 0xffff, 0xc896)?;
         self.batch(&[

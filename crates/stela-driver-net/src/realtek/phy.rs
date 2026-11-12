@@ -226,7 +226,12 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let restore = self.phy_write(PHY_PAGE, old);
         result.and(restore)
     }
-    pub(super) fn apply_firmware(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    /// Linux `r8169_apply_firmware`: every chip's file is optional, and
+    /// without one the chip keeps its built-in parameters.
+    pub(super) fn apply_firmware(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
+        let Some(script) = script else {
+            return Ok(());
+        };
         let timer = self.timer;
         script.execute(self, timer)?;
         // Linux r8169_apply_firmware restores the shared OCP base and then
@@ -245,7 +250,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         Ok(())
     }
-    fn evl(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    fn evl(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         self.apply_firmware(script)?;
         self.extended_page(0xac, 0x18, 0xffff, 6)?;
         self.paged(3, 9, 0xffff, 0xa20f)?;
@@ -372,30 +377,25 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.phy_modify(0x0d, 0, 1 << 5)?;
                     self.paged(1, 0x1d, 0xffff, 0x3d98)?;
                 }
-                25 | 26 => self.d(script.ok_or(Error::Script("RTL8168D requires firmware"))?)?,
+                25 | 26 => {
+                    if let Some(skipped) = self.d(script)? {
+                        warning = Some(skipped);
+                    }
+                }
                 28 => {
                     self.paged(1, 0x17, 0xffff, 0x0cc0)?;
                     self.extended_page(0x2d, 0x18, 0xffff, 0x0040)?;
                     self.phy_modify(0x0d, 0, 1 << 5)?;
                 }
                 31 => {} // Pinned donor's MAC31 PHY dispatch is NULL: generic resume/reset/aneg only.
-                32 | 33 => {
-                    warning =
-                        Some(self.e(script.ok_or(Error::Script("RTL8168E requires firmware"))?)?)
-                }
-                35 | 36 | 38 => {
-                    self.f(script.ok_or(Error::Script("RTL8168F/8411 requires firmware"))?)?
-                }
-                40 | 42 | 44 => {
-                    self.g(script.ok_or(Error::Script("RTL8168G/8411B requires firmware"))?)?
-                }
-                46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
+                32 | 33 => warning = Some(self.e(script)?),
+                35 | 36 | 38 => self.f(script)?,
+                40 | 42 | 44 => self.g(script)?,
+                46 => self.h(script)?,
                 51 => self.ep_phy()?,
                 52 => self.fp_phy()?, // XID54a's MAC firmware executes after MAC setup.
-                61 | 63..=66 | 70 => self.nbase_phy(
-                    script.ok_or(Error::Script("Realtek NBASE requires revision firmware"))?,
-                )?,
-                34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
+                61 | 63..=66 | 70 => self.nbase_phy(script)?,
+                34 => self.evl(script)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
             if gigabyte_sc && self.revision.version == 5 {

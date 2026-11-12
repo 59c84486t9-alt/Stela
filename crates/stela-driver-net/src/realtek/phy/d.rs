@@ -4,7 +4,7 @@
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
 //! MAC25/26 RTL8168D1/D2 PHY initialization from pinned r8169_phy_config.c.
-use super::{BlockError, Error, Hardware, PHY_PAGE, Registers, Script, Timer};
+use super::{BlockError, Error, Hardware, PHY_PAGE, Registers, Script, Timer, Warning};
 
 const CHANNEL: &[(u16, u16)] = &[
     (0x1f, 0x0001),
@@ -48,7 +48,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         Ok(())
     }
-    pub(super) fn d(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn d(&mut self, script: Option<&Script<'_>>) -> Result<Option<Warning>, Error> {
         self.batch(CHANNEL)?;
         let first = self.revision.version == 25;
         if first {
@@ -75,9 +75,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if !first {
             self.paged(2, 0x0f, 0, 0x0017)?;
         }
-        // Linux warns and omits firmware when this sentinel is different.
-        // Refuse the incomplete startup explicitly instead of returning an
-        // initialized adapter without its revision's required firmware.
+        // Linux `rtl8168d_apply_firmware_cond`: a PHY whose sentinel
+        // differs is not ready for firmware, which is then skipped with a
+        // warning and the chip keeps its built-in parameters.
         self.phy_write(PHY_PAGE, 5)?;
         self.phy_write(5, 0x001b)?;
         let readiness = self.phy_read(6);
@@ -85,8 +85,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let readiness = readiness?;
         restored?;
         if readiness != if first { 0xbf00 } else { 0xb300 } {
-            return Err(Error::Script("RTL8168D PHY is not ready for firmware"));
+            return Ok(Some(Warning::PhyNotReadyForFirmware { readiness }));
         }
-        self.apply_firmware(script)
+        self.apply_firmware(script)?;
+        Ok(None)
     }
 }

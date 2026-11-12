@@ -25,7 +25,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.parameter(0x8b79, 0xffff, 0xaa00)?;
         self.paged(3, 1, 0xffff, 0x328a)
     }
-    pub(super) fn f(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn f(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         self.apply_firmware(script)?;
         match self.revision.version {
             35 => {

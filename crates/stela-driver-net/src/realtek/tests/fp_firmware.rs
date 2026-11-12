@@ -77,7 +77,13 @@ fn ep_failed_notification_and_fp_missing_or_failed_mac_firmware_never_publish_dm
         .flat_map(u32::to_le_bytes)
         .collect();
     let script = Script::parse(&bytes).unwrap();
-    for fault in 0..3 {
+    // Linux rtl_hw_start_8117: without its file the MAC starts in full.
+    let time = Time::default();
+    let model = Model::ep(&time, 52, false);
+    let mut hw = Hardware::new(&model, &time, revision(52), 0);
+    hw.configure_mac(None).unwrap();
+    assert!(model.state.borrow().mac.contains_key(&0xc0ac));
+    for fault in 1..3 {
         let time = Time::default();
         let mut model = Model::ep(&time, 52, false);
         if fault == 1 {
@@ -88,11 +94,10 @@ fn ep_failed_notification_and_fp_missing_or_failed_mac_firmware_never_publish_dm
             model.state.borrow_mut().phy_ocp.insert(0xa400, PHY_RESET);
         }
         let mut hw = Hardware::new(&model, &time, revision(52), 0);
-        let result = hw.configure_mac(if fault == 0 { None } else { Some(&script) });
+        let result = hw.configure_mac(Some(&script));
         assert_eq!(
             result,
             Err(match fault {
-                0 => Error::Script("RTL8117 requires MAC firmware"),
                 1 => Error::Device(BlockError::Device { status: 255 }),
                 _ => Error::Device(BlockError::Timeout),
             })

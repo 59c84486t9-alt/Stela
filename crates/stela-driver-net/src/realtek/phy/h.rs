@@ -6,7 +6,7 @@
 //! Exact MAC46 H/M PHY and calibration from pinned r8169_phy_config.c.
 use super::{BlockError, Error, Hardware, Registers, Script, Timer};
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
-    pub(super) fn h(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn h(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         self.apply_firmware(script)?;
         self.g_parameter(0x808a, 0x003f, 0x000a)?;
         self.g_parameter(0x0811, 0, 0x0800)?;

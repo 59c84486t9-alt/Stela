@@ -25,7 +25,7 @@ fn modelled(registers: &mut [u32], memory: &mut [u64], signalled: bool) -> Realt
         mac: Mac([2, 0, 0, 0, 0, 1]),
         link: RuntimeLink::default(),
         revision,
-        warning: None,
+        warnings: Vec::new(),
         function: 0,
         location: "model".into(),
         signalled,

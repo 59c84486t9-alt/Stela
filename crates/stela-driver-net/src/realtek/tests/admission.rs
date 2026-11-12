@@ -198,4 +198,31 @@ fn firmware_catalog_binding_requires_exact_pci_xid_board_and_filename() {
             ..
         }))
     ));
+
+    // Linux rtl_request_firmware: a missing or refused file is left out,
+    // said once, and the chip starts without it.
+    let mut warnings = Vec::new();
+    assert!(optional_firmware(&catalog, "10ec:8168", revision(34), &mut warnings).is_some());
+    assert!(optional_firmware(&catalog, "10ec:8168", revision(18), &mut warnings).is_none());
+    assert!(warnings.is_empty());
+    assert!(optional_firmware(&catalog, "10ec:8168", other, &mut warnings).is_none());
+    assert!(optional_firmware(&catalog, "10ec:8161", revision(34), &mut warnings).is_none());
+    assert_eq!(
+        warnings,
+        [
+            Warning::FirmwareSkipped {
+                name: "rtl_nic/rtl8168e-2.fw",
+                supplied: false
+            },
+            Warning::FirmwareSkipped {
+                name: "rtl_nic/rtl8168e-3.fw",
+                supplied: true
+            },
+        ]
+    );
+    assert_eq!(
+        alloc::string::ToString::to_string(&warnings[0]),
+        "firmware \"rtl_nic/rtl8168e-2.fw\" not supplied: started without it, on the chip's \
+         built-in parameters, as Linux does"
+    );
 }

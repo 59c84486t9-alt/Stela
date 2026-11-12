@@ -1528,8 +1528,13 @@ pub unsafe fn probe_with_provider(
                 // mapped PCI/MMIO and DMA, including upstream ASPM configuration.
                 let attached =
                     unsafe { Realtek::new(&mut function, handoff, dma, firmware, minimum.clone()) };
-                if let Ok(Some(warning)) = attached.as_ref().map(Realtek::warning) {
-                    devices.warnings.push((address, Warning::Realtek(warning)));
+                if let Ok(device) = &attached {
+                    devices.warnings.extend(
+                        device
+                            .warnings()
+                            .iter()
+                            .map(|warning| (address, Warning::Realtek(*warning))),
+                    );
                 }
                 if attached.is_err() {
                     start.quiesce(&mut function);

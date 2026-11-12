@@ -21,7 +21,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let restored = self.phy_write(PHY_PAGE, old);
         result.and(restored)
     }
-    pub(super) fn g(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn g(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         self.apply_firmware(script)?;
         if self.revision.version == 40 {
             let first = self.paged_read(0x0a46, 0x10)?;

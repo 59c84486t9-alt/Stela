@@ -150,17 +150,15 @@ fn f_and_8411_link_patches_differ() {
 }
 
 #[test]
-fn f_required_firmware_mdio_and_mac_protocol_faults_remain_explicit() {
+fn f_starts_without_firmware_and_mdio_and_mac_protocol_faults_remain_explicit() {
     let bytes = 0x8016_a55au32.to_le_bytes();
     let script = Script::parse(&bytes).unwrap();
     for version in [35, 36, 38] {
         let time = Time::default();
         let model = Model::ready(&time);
         let mut hw = Hardware::new(&model, &time, revision(version), 0);
-        assert!(matches!(
-            hw.configure_phy(None, false),
-            Err(Error::Script(_))
-        ));
+        assert_eq!(hw.configure_phy(None, false), Ok(None));
+        assert!(!model.state.borrow().phy.contains_key(&(0, 0x16)));
         for nth in [15, 30, 45] {
             let time = Time::default();
             let mut model = Model::ready(&time);

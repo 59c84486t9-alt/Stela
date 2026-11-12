@@ -191,9 +191,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                         // FP's donor MAC-only firmware runs at the tail of
                         // rtl_hw_start_8117, before exit-L1/RX maximum/lock/DMA.
                         if self.revision.version == 52 && self.revision.firmware.is_some() {
-                            self.apply_firmware(
-                                script.ok_or(Error::Script("RTL8117 requires MAC firmware"))?,
-                            )?;
+                            self.apply_firmware(script)?;
                         }
                         self.mac_ocp_modify(0xc0ac, 0, 0x1f80)?;
                         self.eri_modify(0x1b0, 3, 0)?;

@@ -75,12 +75,12 @@ fn nbase_d_k_9151a_cp_exact_firmware_and_phy_paths_preserve_cp_only_effects() {
 }
 
 #[test]
-fn nbase_d_cp_id_capability_external_and_required_firmware_failures_are_explicit() {
+fn nbase_d_cp_id_capability_and_external_failures_are_explicit_and_firmware_is_optional() {
     let bytes = 0x8016_a55au32.to_le_bytes();
     let script = Script::parse(&bytes).unwrap();
     for version in [64, 65, 66, 70] {
         for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
-            for rejected in 0..4 {
+            for rejected in 0..3 {
                 let time = Time::default();
                 let mut model = Model::nbase(&time);
                 model.state.borrow_mut().phy_ocp.insert(0xa406, id);
@@ -92,14 +92,11 @@ fn nbase_d_cp_id_capability_external_and_required_firmware_failures_are_explicit
                     2 => {
                         model.state.borrow_mut().phy_ocp.insert(0xa406, 0xc861);
                     }
-                    _ => {}
+                    _ => unreachable!(),
                 }
                 let mut hw = Hardware::new(&model, &time, revision(version), 0);
-                let result = hw.configure_phy((rejected != 3).then_some(&script), false);
-                assert!(matches!(
-                    result,
-                    Err(Error::UnsupportedPhy(_)) | Err(Error::Script(_))
-                ));
+                let result = hw.configure_phy(Some(&script), false);
+                assert!(matches!(result, Err(Error::UnsupportedPhy(_))));
                 let s = model.state.borrow();
                 assert!(s.n_parameters.is_empty());
                 assert!(s.g_parameters.is_empty());
@@ -111,6 +108,20 @@ fn nbase_d_cp_id_capability_external_and_required_firmware_failures_are_explicit
                 );
             }
         }
+        // Linux r8169_apply_firmware: without a file the PHY is configured
+        // on its built-in parameters, the script's marker never written.
+        let time = Time::default();
+        let model = Model::nbase(&time);
+        let mut hw = Hardware::new(&model, &time, revision(version), 0);
+        assert!(hw.configure_phy(None, false).is_ok());
+        assert!(
+            !model
+                .state
+                .borrow()
+                .writes
+                .iter()
+                .any(|(r, v, _)| *r == PHY_OCP && *v == 0xd216_a55a)
+        );
     }
 }
 

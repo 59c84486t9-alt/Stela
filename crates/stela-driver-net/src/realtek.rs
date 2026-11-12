@@ -210,6 +210,12 @@ pub enum Warning {
     /// Exact MAC28/31 integrated RTL8211B reports the generic FE/GE ID.
     /// The raw register read remains available; only driver classification changes.
     DpPhyIdentityCorrected { reported: u32, selected: u32 },
+    /// The chip's firmware file was not supplied, or was refused: as Linux
+    /// r8169 does, the chip starts without it, on its built-in parameters.
+    FirmwareSkipped { name: &'static str, supplied: bool },
+    /// An RTL8168D PHY's readiness sentinel differed, so its firmware was
+    /// skipped, as Linux `rtl8168d_apply_firmware_cond` skips it.
+    PhyNotReadyForFirmware { readiness: u16 },
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -218,6 +224,15 @@ impl fmt::Display for Warning {
                 "RTL8168DP PHY identity erratum: reported {reported:08x}, selected {selected:08x} RTL8211B initialization"),
             Self::EeeAdvertisementDisableUnavailable => f.write_str(
                 "optional EEE advertisement cleanup not performed: C45 access unsupported; EEE advertisement state unverified",
+            ),
+            Self::FirmwareSkipped { name, supplied } => write!(
+                f,
+                "firmware \"{name}\" {}: started without it, on the chip's built-in parameters, as Linux does",
+                if *supplied { "refused" } else { "not supplied" }
+            ),
+            Self::PhyNotReadyForFirmware { readiness } => write!(
+                f,
+                "RTL8168D PHY not ready for firmware (sentinel {readiness:04x}): started without it, as Linux does"
             ),
         }
     }
@@ -231,7 +246,7 @@ pub struct Realtek {
     mac: Mac,
     link: RuntimeLink,
     revision: Revision,
-    warning: Option<Warning>,
+    warnings: Vec<Warning>,
     /// The PCI function number, which selects per-function OCP state.
     function: u8,
     pub location: String,
@@ -239,8 +254,9 @@ pub struct Realtek {
     signalled: bool,
 }
 impl Realtek {
-    pub fn warning(&self) -> Option<Warning> {
-        self.warning
+    /// What the start tolerated, each said once.
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
     }
 
     pub fn revision(&self) -> Revision {
@@ -313,11 +329,12 @@ impl Realtek {
         }
         let mac = read_station(&hardware)?;
         let identity = format!("{:04x}:{:04x}", function.vendor, function.device);
-        let image = load_firmware(provider, &identity, revision)?;
+        let mut warnings = Vec::new();
+        let image = optional_firmware(provider, &identity, revision, &mut warnings);
         let script = image
-            .map(|image| Script::parse(image.bytes()))
-            .transpose()?;
-        let warning = hardware.configure_phy(script.as_ref(), subsystem == 0xe000_1458)?;
+            .as_ref()
+            .and_then(|image| Script::parse(image.bytes()).ok());
+        warnings.extend(hardware.configure_phy(script.as_ref(), subsystem == 0xe000_1458)?);
         hardware.reset()?; // Linux resets the MAC again after PHY initialization.
         hardware.configure_mac(script.as_ref())?;
         if revision.version == 28 {
@@ -337,7 +354,7 @@ impl Realtek {
             mac,
             link: RuntimeLink::default(),
             revision,
-            warning,
+            warnings,
             function: function.address.function,
             location: format!(
                 "{} {} XID {:03x}",
@@ -603,6 +620,44 @@ fn load_firmware<'a>(
                 .map_err(Error::from)
         })
         .transpose()
+}
+
+/// Linux `rtl_request_firmware`: every chip's file is optional. One that is
+/// missing or fails its checks is left out, said once in `warnings`, and
+/// the chip starts on its built-in parameters.
+fn optional_firmware<'a>(
+    provider: &'a dyn resources::Provider,
+    hardware: &str,
+    revision: Revision,
+    warnings: &mut Vec<Warning>,
+) -> Option<resources::Image<'a>> {
+    let (image, supplied) = match load_firmware(provider, hardware, revision) {
+        Ok(image) => {
+            let valid = image
+                .as_ref()
+                .is_none_or(|image| Script::parse(image.bytes()).is_ok());
+            if valid {
+                return image;
+            }
+            (None, true)
+        }
+        Err(error) => (
+            None,
+            !matches!(
+                error,
+                Error::Firmware(resources::Error {
+                    kind: resources::ErrorKind::Missing,
+                    ..
+                })
+            ),
+        ),
+    };
+    warnings.extend(
+        revision
+            .firmware
+            .map(|name| Warning::FirmwareSkipped { name, supplied }),
+    );
+    image
 }
 
 /// Linux `rtl_link_chg_patch`: per-speed ERI FIFO thresholds and EEE state

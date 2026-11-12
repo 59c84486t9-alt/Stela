@@ -71,26 +71,20 @@ fn d_revisions_apply_exact_efuse_tuning_and_firmware_only_after_readiness() {
 }
 
 #[test]
-fn d_revisions_refuse_unready_phy_missing_firmware_and_efuse_faults() {
-    for version in [25, 26] {
+fn d_revisions_skip_firmware_unready_or_absent_and_refuse_efuse_faults() {
+    for (version, sentinel) in [(25, 0xbf00), (26, 0xb300)] {
+        // Independent script writes a distinctive page-zero marker.
         let bytes = 0x8016_a55au32.to_le_bytes();
         let script = Script::parse(&bytes).unwrap();
-        for fault in [false, true] {
-            let time = Time::default();
-            let mut model = Model::ready(&time);
-            if fault {
-                model.fault = Some(EFUSE_ACCESS);
-            }
-            let mut hw = Hardware::new(&model, &time, revision(version), 0);
-            let error = hw.configure_phy(Some(&script), false).unwrap_err();
-            if fault {
-                assert_eq!(error, Error::Device(BlockError::Timeout));
-            } else {
-                assert_eq!(
-                    error,
-                    Error::Script("RTL8168D PHY is not ready for firmware")
-                );
-            }
+        let time = Time::default();
+        let mut model = Model::ready(&time);
+        model.fault = Some(EFUSE_ACCESS);
+        let mut hw = Hardware::new(&model, &time, revision(version), 0);
+        assert_eq!(
+            hw.configure_phy(Some(&script), false),
+            Err(Error::Device(BlockError::Timeout))
+        );
+        {
             let s = model.state.borrow();
             assert_eq!(s.page, 0);
             assert!(!s.phy.contains_key(&(0, 0x16)));
@@ -101,13 +95,23 @@ fn d_revisions_refuse_unready_phy_missing_firmware_and_efuse_faults() {
                     .any(|(r, v, _)| *r == COMMAND && *v == u32::from(ENABLE))
             );
         }
+        // Linux rtl8168d_apply_firmware_cond: an unready PHY starts, its
+        // firmware skipped with a warning.
         let time = Time::default();
         let model = Model::ready(&time);
         let mut hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(
-            hw.configure_phy(None, false),
-            Err(Error::Script("RTL8168D requires firmware"))
+            hw.configure_phy(Some(&script), false),
+            Ok(Some(Warning::PhyNotReadyForFirmware { readiness: 0 }))
         );
+        assert!(!model.state.borrow().phy.contains_key(&(0, 0x16)));
+        // Without a file, a ready PHY starts on its built-in parameters.
+        let time = Time::default();
+        let model = Model::ready(&time);
+        model.state.borrow_mut().parameters.insert(0x001b, sentinel);
+        let mut hw = Hardware::new(&model, &time, revision(version), 0);
+        assert_eq!(hw.configure_phy(None, false), Ok(None));
+        assert!(!model.state.borrow().phy.contains_key(&(0, 0x16)));
     }
     let time = Time::default();
     let model = Model::ready(&time);

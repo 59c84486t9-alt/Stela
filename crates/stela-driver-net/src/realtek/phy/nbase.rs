@@ -15,7 +15,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let value = self.phy_ocp_read(0xb87e)?;
         self.phy_ocp_write(0xb87e, (value & !clear) | set)
     }
-    pub(super) fn nbase_phy(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn nbase_phy(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         if !matches!(self.revision.version, 61 | 63..=66 | 70) {
             return Err(Error::UnsupportedRevision(self.revision));
         }
