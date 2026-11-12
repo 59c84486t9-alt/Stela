@@ -43,9 +43,11 @@ fn main() {
         // optimization that can turn constant-time C selections into branches.
         .flag("-mllvm")
         .flag("--disable-select-optimize=true")
-        .flag("-fno-stack-protector")
         .flag("-ffunction-sections")
         .flag("-fdata-sections");
+    for flag in stela_c_build::UNHARDENED {
+        build.flag(flag);
+    }
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
         build
             .flag("-mno-sse")

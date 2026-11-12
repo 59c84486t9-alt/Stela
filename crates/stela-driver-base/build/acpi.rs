@@ -91,7 +91,6 @@ pub fn build() {
         .flag("-fno-builtin")
         .flag("-fno-strict-aliasing")
         .flag("-fwrapv")
-        .flag("-fno-stack-protector")
         .flag("-fno-asynchronous-unwind-tables")
         .flag("-fno-unwind-tables")
         .flag("-mno-red-zone")
@@ -106,6 +105,9 @@ pub fn build() {
         .include(base.join("include"))
         .include(&base)
         .files(&sources);
+    for flag in stela_c_build::UNHARDENED {
+        build.flag(flag);
+    }
     if coff {
         // ACPICA's UEFI objects are COFF with the Win64 C ABI; clang uses
         // this last target over the one cc derives.

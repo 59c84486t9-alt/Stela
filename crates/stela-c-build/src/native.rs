@@ -18,11 +18,11 @@ pub fn configure() -> cc::Build {
         "the native C backends currently target x86-64"
     );
     let mut build = compiler();
-    build
-        .flag("-ffreestanding")
-        .flag("-fno-stack-protector")
-        .flag("-mno-red-zone")
-        .flag("-mgeneral-regs-only");
+    build.flag("-ffreestanding");
+    for flag in crate::UNHARDENED {
+        build.flag(flag);
+    }
+    build.flag("-mno-red-zone").flag("-mgeneral-regs-only");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("uefi") {
         // Native Linux code assumes LP64, as on Linux. Cygwin's target keeps
         // that data model while emitting COFF with the UEFI Win64 C ABI;
