@@ -339,3 +339,76 @@ fn float_comparisons_complete_inline() {
     }
     assert!(runs > 0);
 }
+
+/// Half FCMP and FCMPE, by register and with zero, over every input class
+/// pair: every lane completes inline unless a trap is enabled (FZ16
+/// flushing subnormals, NaNs unordered with IOC for FCMPE or a signalling
+/// NaN), matching the reference flags and FPSR.
+#[test]
+fn half_flag_comparisons_complete_inline() {
+    use crate::aarch64::floating::FPCR_FZ16;
+    let mut runs = 0;
+    let all = floats(Format::Half);
+    for target in targets() {
+        for (base, signal_all, zero) in [
+            (0x1ee0_2000u32, false, false),
+            (0x1ee0_2010, true, false),
+            (0x1ee0_2008, false, true),
+            (0x1ee0_2018, true, true),
+        ] {
+            let word = base | if zero { 0 } else { M << 16 } | N << 5;
+            let code = compile(word, target);
+            for &left in &all {
+                for &right in &all {
+                    if zero && right != all[0] {
+                        continue;
+                    }
+                    for fpcr in [
+                        0,
+                        FPCR_FZ16,
+                        FPCR_AH | FPCR_FZ16,
+                        FPCR_DN,
+                        FPCR_EXCEPTION_ENABLE_MASK,
+                    ] {
+                        let mut initial = GuestState {
+                            fpcr,
+                            fpsr: 0x0800_0000,
+                            nzcv: 0x9000_0000,
+                            ..GuestState::default()
+                        };
+                        initial.x[30] = RETURN;
+                        initial.v[N as usize] =
+                            [0x5a5a_a5a5_3c3c_0000 | left, 0x0123_4567_89ab_cdef];
+                        initial.v[M as usize] =
+                            [0x7654_3210_fedc_0000 | right, 0xc3c3_3c3c_a5a5_5a5a];
+                        let label =
+                            alloc::format!("{word:08x} {left:#x} {right:#x} {fpcr:#x} {target:?}");
+                        let mut actual = initial.clone();
+                        let exit = run(&code, &mut actual);
+                        runs += 1;
+                        if exit == PC.0 {
+                            assert_eq!(actual, initial, "{label}");
+                            assert!(fpcr & FPCR_EXCEPTION_ENABLE_MASK != 0, "exited: {label}");
+                            continue;
+                        }
+                        assert_eq!(exit, RETURN, "{label}");
+                        let right = if zero { 0 } else { right };
+                        let outcome = floating::comparison::flags(
+                            Format::Half,
+                            signal_all,
+                            fpcr,
+                            left,
+                            right,
+                        )
+                        .expect("completed with traps");
+                        let mut expected = initial.clone();
+                        expected.nzcv = outcome.nzcv;
+                        expected.fpsr |= outcome.exceptions;
+                        assert_eq!(actual, expected, "{label}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 0);
+}

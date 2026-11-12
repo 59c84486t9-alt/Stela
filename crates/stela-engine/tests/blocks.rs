@@ -616,9 +616,8 @@ mod numerical {
         Ok(())
     }
 
-    /// Half FCMP orders zeros of either sign and infinities in compiled
-    /// code, and FCVT widens a zero Half there; a NaN or a subnormal still
-    /// takes the helper.
+    /// Half FCMP orders zeros of either sign, infinities, NaNs and
+    /// subnormals in compiled code, and FCVT widens a zero Half there.
     #[test]
     fn half_compares_and_widening_keep_zeros_and_infinities_compiled() -> Result<()> {
         // FCMP H2,H0; CSET X5,GE; FCVT S4,H4; FCVT D6,H6.
@@ -637,8 +636,8 @@ mod numerical {
             (0xfc00, 0x3c00, 0xc000, 0),
             (0x7c00, 0x7c00, 0xbc00, 0),
             (0x3c00, 0xfbff, 0x3555, 0),
-            (0x7e00, 0x3c00, 0x0000, 1),
-            (0x0001, 0x3c00, 0x0000, 1),
+            (0x7e00, 0x3c00, 0x0000, 0),
+            (0x0001, 0x3c00, 0x0000, 0),
         ];
         for (left, right, widened, helpers) in cases {
             for fpcr in [0, FPCR_NEP] {

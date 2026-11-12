@@ -14,7 +14,7 @@ use crate::x86_64::flag_word;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        flags::{NZCV_C, NZCV_N, NZCV_SHIFT, NZCV_Z},
+        flags::{NZCV_C, NZCV_N, NZCV_SHIFT, NZCV_V, NZCV_Z},
         floating::{
             FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP, Format, comparison::Predicate,
         },
@@ -285,22 +285,6 @@ fn half_keys(code: &mut Code, operation: Predicate, shape: Shape) {
     resolve(code, none, end);
 }
 
-/// `register` takes the low Half of `vector` as a signed integer of its
-/// magnitude: both zeros become 0, and finite values and infinities keep
-/// their order. Uses EDX.
-fn half_signed_magnitude(code: &mut Code, register: Gpr, vector: u8) {
-    const MAGNITUDE: i32 = 0x7fff;
-    let mut asm = code.asm();
-    asm.movd_from_xmm(register, vector);
-    asm.mov(Size::Dword, Gpr::Rdx, register);
-    asm.alu_imm32(Alu::And, Size::Dword, register, MAGNITUDE);
-    // EDX becomes all ones for a negative value, then negates the magnitude.
-    asm.shift_imm(ShiftOp::Shl, Size::Dword, Gpr::Rdx, HALF_SIGN_TO_DWORD_TOP);
-    asm.shift_imm(ShiftOp::Sar, Size::Dword, Gpr::Rdx, SINGLE_SIGN_SHIFT);
-    asm.alu(Alu::Xor, Size::Dword, register, Gpr::Rdx);
-    asm.alu(Alu::Sub, Size::Dword, register, Gpr::Rdx);
-}
-
 /// EAX takes EDX's flags when `condition` holds.
 fn select_flags(code: &mut Code, condition: Cond) {
     code.asm().cmov(condition, Size::Dword, Gpr::Rax, Gpr::Rdx);
@@ -345,10 +329,8 @@ fn zero_flags(code: &mut Code, format: Format) {
 
 /// Whether FCMP/FCMPE/FCCMP of S/D registers take [`quick_flags`]: not in
 /// the DIT profile, which keeps its reviewed classification.
-fn quick_flags_supported(format: Format, right: CompareSource, target: TargetCpu) -> bool {
-    format != Format::Half
-        && matches!(right, CompareSource::Register(_))
-        && !target.data_independent_timing()
+fn quick_flags_supported(right: CompareSource, target: TargetCpu) -> bool {
+    matches!(right, CompareSource::Register(_)) && !target.data_independent_timing()
 }
 
 /// With no trap enabled and FZ, FIZ and AH clear, UCOMIS orders every
@@ -386,17 +368,130 @@ fn quick_flags(
     ordered
 }
 
+/// Half FCMP and FCMPE, by register and with zero, for every input under
+/// any AH: FZ16 flushes a subnormal input to its signed zero (without
+/// IDC), the signed magnitudes (both zeros 0) compare
+/// the rest, and a NaN gives the unordered flags, with IOC for FCMPE or a
+/// signalling NaN. Only enabled traps exit.
+fn half_flags(
+    code: &mut Code,
+    left: u8,
+    right: CompareSource,
+    signal_all_nans: bool,
+    pc: GuestAddress,
+) {
+    use crate::aarch64::floating::{FPCR_FZ16, INVALID};
+    const MAGNITUDE: i32 = 0x7fff;
+    const INFINITY: i32 = 0x7c00;
+    const SIGN: i32 = 0x8000;
+    const QUIET_BIT: u8 = 9;
+    let mut helper = Vec::new();
+    exception_guard(code, &mut helper);
+    read_vector(code, left, LEFT_VECTOR);
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Gpr::Rcx, LEFT_VECTOR);
+    asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rcx, 0xffff);
+    match right {
+        CompareSource::Register(right) => {
+            read_vector(code, right, RIGHT_VECTOR);
+            let mut asm = code.asm();
+            asm.movd_from_xmm(Gpr::Rdx, RIGHT_VECTOR);
+            asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rdx, 0xffff);
+        }
+        CompareSource::Zero => code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rdx, Gpr::Rdx),
+    }
+    let operands = [Gpr::Rcx, Gpr::Rdx];
+    test_control(code, FPCR_FZ16);
+    let kept = branch(code, Condition::Zero);
+    for register in operands {
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Gpr::Rax, register);
+        asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rax, INFINITY);
+        let normal = asm.jcc(Cond::Ne).offset();
+        code.asm().alu_imm32(Alu::And, Size::Dword, register, SIGN);
+        let end = code.len();
+        resolve(code, normal, end);
+    }
+    let flushed = code.len();
+    resolve(code, kept, flushed);
+    let mut nan = Vec::new();
+    for register in operands {
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Gpr::Rax, register);
+        asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rax, MAGNITUDE);
+        asm.alu_imm32(Alu::Cmp, Size::Dword, Gpr::Rax, INFINITY);
+        nan.push(asm.jcc(Cond::A).offset());
+    }
+    for register in operands {
+        // The signed magnitude: both zeros 0, the order kept.
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Gpr::Rax, register);
+        asm.alu_imm32(Alu::And, Size::Dword, register, MAGNITUDE);
+        asm.shift_imm(ShiftOp::Shl, Size::Dword, Gpr::Rax, HALF_SIGN_TO_DWORD_TOP);
+        asm.shift_imm(ShiftOp::Sar, Size::Dword, Gpr::Rax, SINGLE_SIGN_SHIFT);
+        asm.alu(Alu::Xor, Size::Dword, register, Gpr::Rax);
+        asm.alu(Alu::Sub, Size::Dword, register, Gpr::Rax);
+    }
+    code.asm().alu(Alu::Cmp, Size::Dword, Gpr::Rcx, Gpr::Rdx);
+    ordered_flags(code, true);
+    let done = jump(code);
+    let nan_start = code.len();
+    for patch in nan {
+        resolve(code, patch, nan_start);
+    }
+    let invalid = |code: &mut Code| {
+        code.asm().alu_imm8(
+            Alu::Or,
+            Size::Dword,
+            super::numerical::state(core::mem::offset_of!(crate::GuestState, fpsr)),
+            INVALID as i8,
+        );
+    };
+    if signal_all_nans {
+        invalid(code);
+    } else {
+        for register in operands {
+            // A signalling NaN: above the infinity, its quiet bit clear.
+            let mut asm = code.asm();
+            asm.mov(Size::Dword, Gpr::Rax, register);
+            asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rax, MAGNITUDE);
+            asm.alu_imm32(Alu::Cmp, Size::Dword, Gpr::Rax, INFINITY);
+            let ordered = asm.jcc(Cond::Be).offset();
+            code.asm().bit_imm(
+                crate::x86_64::asm::BitTest::Bt,
+                Size::Dword,
+                Gpr::Rax,
+                QUIET_BIT,
+            );
+            let quiet = code.asm().jcc(Cond::B).offset();
+            invalid(code);
+            let end = code.len();
+            resolve(code, ordered, end);
+            resolve(code, quiet, end);
+        }
+    }
+    let unordered = flag_word::constant(code, NZCV_C | NZCV_V);
+    flag_word::store_constant(&mut code.asm(), unordered);
+    let end = code.len();
+    resolve(code, done, end);
+    helper_section(code, &helper, pc);
+}
+
 fn emit_flags(
     code: &mut Code,
     format: Format,
     left: u8,
     right: CompareSource,
+    signal_all_nans: bool,
     pc: GuestAddress,
     target: TargetCpu,
 ) {
+    if format == Format::Half {
+        return half_flags(code, left, right, signal_all_nans, pc);
+    }
     let mut helper = Vec::new();
     let quick = match right {
-        CompareSource::Register(register) if quick_flags_supported(format, right, target) => {
+        CompareSource::Register(register) if quick_flags_supported(right, target) => {
             Some(quick_flags(code, format, left, register, &mut helper))
         }
         _ => None,
@@ -405,17 +500,12 @@ fn emit_flags(
     read_vector(code, left, LEFT_VECTOR);
     if let CompareSource::Register(right) = right {
         read_vector(code, right, RIGHT_VECTOR);
-        // UCOMIS, and the signed magnitudes of Half values, order zeros of
-        // either sign and infinities with no host or guest flag; NaNs and
-        // subnormals take the helper.
+        // UCOMIS orders zeros of either sign and infinities with no host or
+        // guest flag; NaNs and subnormals take the helper.
         for source in [LEFT_VECTOR, RIGHT_VECTOR] {
             scalar_zero_guard(code, format, source, &mut helper);
         }
-        if format == Format::Half {
-            half_signed_magnitude(code, Gpr::Rax, LEFT_VECTOR);
-            half_signed_magnitude(code, Gpr::Rcx, RIGHT_VECTOR);
-            code.asm().alu(Alu::Cmp, Size::Dword, Gpr::Rax, Gpr::Rcx);
-        } else if format == Format::Double {
+        if format == Format::Double {
             code.asm().ucomisd(LEFT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
         } else {
             code.asm().ucomiss(LEFT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
@@ -426,7 +516,7 @@ fn emit_flags(
             let mapping = code.len();
             resolve(code, quick, mapping);
         }
-        ordered_flags(code, format == Format::Half);
+        ordered_flags(code, false);
     } else {
         scalar_zero_guard(code, format, LEFT_VECTOR, &mut helper);
         helper_section(code, &helper, pc);
@@ -434,10 +524,12 @@ fn emit_flags(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_conditional_flags(
     code: &mut Code,
     format: Format,
     (left, right): (u8, u8),
+    signal_all_nans: bool,
     condition: u8,
     fallback: u8,
     pc: GuestAddress,
@@ -451,6 +543,7 @@ fn emit_conditional_flags(
         format,
         left,
         CompareSource::Register(right),
+        signal_all_nans,
         pc,
         target,
     );
@@ -864,16 +957,25 @@ pub(in crate::x86_64) fn emit(
             format,
             left,
             right,
-            ..
-        } => emit_flags(code, format, left, right, pc, target),
+            signal_all_nans,
+        } => emit_flags(code, format, left, right, signal_all_nans, pc, target),
         Operand::ConditionalFlags {
             format,
             left,
             right,
+            signal_all_nans,
             condition,
             fallback,
-            ..
-        } => emit_conditional_flags(code, format, (left, right), condition, fallback, pc, target),
+        } => emit_conditional_flags(
+            code,
+            format,
+            (left, right),
+            signal_all_nans,
+            condition,
+            fallback,
+            pc,
+            target,
+        ),
         Operand::Predicate { .. } => emit_predicate(code, operand, pc),
     }
 }
