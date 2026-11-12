@@ -180,9 +180,9 @@ pub(in crate::x86_64) fn emit(
     // ([`commit_rounded_status`]). NaN lanes follow FPProcessNaNs3 over
     // the addend and the multiplicands, after FMLS, FMSUB and FNMADD negate
     // theirs ([`select_input_nans`]), and an invalid operation gives the
-    // default NaN with IOC ([`merge_nans`]). A quiet NaN addend whose
-    // product is invalid (Arm gives the default NaN with IOC) and a minimum
-    // normal result take the helper.
+    // default NaN with IOC ([`merge_nans`]). A quiet NaN addend beside an
+    // infinity times a zero (Arm gives the default NaN with IOC, not the
+    // addend) and a minimum normal result take the helper.
     test_control(code, FPCR_AH);
     let alternative = branch(code, Condition::NotZero);
     test_control(code, FPCR_FZ | FPCR_FIZ);
@@ -226,6 +226,18 @@ pub(in crate::x86_64) fn emit(
             UNORDERED,
         );
         packed(code, Host::And, product, quiet);
+        // Not a NaN factor's product: an infinity times a zero.
+        for factor in [LEFT, RIGHT] {
+            packed(code, Host::MoveAligned, quiet, factor);
+            code.asm().float_compare(
+                float_lanes(operand.format, Shape::Vector128),
+                quiet,
+                Rm::Xmm(quiet),
+                UNORDERED,
+            );
+            packed(code, Host::AndNot, quiet, product);
+            packed(code, Host::MoveAligned, product, quiet);
+        }
         Host::DwordSignMask.register(code, Gpr::Rax as u8, product, TargetCpu::Baseline);
         // The product's status is not the guest's.
         clear_environment_status(code);

@@ -8,8 +8,8 @@
 //! propagation, invalid operations, subnormal inputs and results, UFC, OFC
 //! and DZC included, but for FMULX's infinity times zero and a minimum
 //! normal quotient; FMA lanes complete likewise but for a quiet NaN
-//! addend with a NaN product and a minimum normal result. Under FZ a
-//! result Arm flushes to zero takes the helper.
+//! addend beside an infinity times a zero and a minimum normal result.
+//! Under FZ a fused result Arm flushes to zero takes the helper.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -416,19 +416,18 @@ fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
                         let label =
                             alloc::format!("{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}");
                         let lanes = fused_lanes(form, format, &initial);
-                        // A quiet NaN addend with a NaN product (Arm's
-                        // default NaN for infinity times zero) and a minimum
-                        // normal result (the host may find its tininess
-                        // after rounding) take the helper.
+                        // A quiet NaN addend beside an infinity times a
+                        // zero (Arm's default NaN) and a minimum normal
+                        // result (the host may find its tininess after
+                        // rounding) take the helper.
                         let must_inline = fma
                             && rounded(fpcr)
                             && lanes.iter().all(|&(operation, addend, left, right)| {
                                 let magnitude = |bits: u64| bits & !format.sign_mask();
                                 let infinity = format.exponent_mask();
                                 let quiet = 1 << (format.fraction_bits() - 1);
-                                let invalid_product = is_nan(format, left)
-                                    || is_nan(format, right)
-                                    || magnitude(left) == 0 && magnitude(right) == infinity
+                                let invalid_product = magnitude(left) == 0
+                                    && magnitude(right) == infinity
                                     || magnitude(left) == infinity && magnitude(right) == 0;
                                 !(is_nan(format, addend) && addend & quiet != 0 && invalid_product)
                                     && floating::fused::evaluate(
@@ -591,8 +590,7 @@ fn run_lanes(
 /// addend of FNMADD and FNMSUB before FPProcessNaNs, so a NaN there
 /// propagates with its sign flipped (quieted, or the default NaN under DN),
 /// in the order addend, Vn, Vm with signaling NaNs first. On an FMA tier
-/// every NaN lane completes inline but for a quiet NaN addend with a NaN
-/// product, which takes the helper.
+/// every NaN lane completes inline.
 #[test]
 fn fused_nan_operands_keep_arm_negation_signs() {
     for target in targets() {
@@ -647,20 +645,11 @@ fn fused_nan_operands_keep_arm_negation_signs() {
                                 if let Some(other) = second {
                                     inputs[(position + 1) % 3] = other;
                                 }
-                                let [left, right, addend] = inputs;
-                                let (exit, initial, actual, expected) =
+                                let (exit, _, actual, expected) =
                                     run_lanes(target, case, format, fpcr, inputs);
                                 let label = alloc::format!(
                                     "{case:x?} {format:?} {inputs:x?} {fpcr:#x} {target:?}"
                                 );
-                                let helper = addend & quiet != 0
-                                    && is_nan(format, addend)
-                                    && (is_nan(format, left) || is_nan(format, right));
-                                if helper {
-                                    assert_eq!(exit, PC.0, "{label}");
-                                    assert_eq!(actual, initial, "{label}");
-                                    continue;
-                                }
                                 assert_eq!(exit, RETURN, "{label}");
                                 assert_eq!(actual, expected, "{label}");
                             }
