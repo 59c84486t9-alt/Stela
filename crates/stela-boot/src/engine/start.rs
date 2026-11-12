@@ -2714,8 +2714,10 @@ fn start_devices(
             // Disks that can signal their completions wake the BSP, which
             // runs the engine's devices.
             let bsp = native_processors.expect("validated native roster");
-            storage_handoff.completion =
-                host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
+            let bsp_apic = bsp.processors[bsp.selected[0] as usize].apic_id;
+            storage_handoff.completion = host::completion_signal(bsp_apic);
+            // A disk step given up to another core's hold wakes it too.
+            storage::ring_owed_steps_at(bsp_apic);
             #[cfg(feature = "diagnostics")]
             if options.audio_check.is_some() {
                 // The audio check keeps the final slice even after shutdown.

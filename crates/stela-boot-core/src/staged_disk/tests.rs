@@ -692,6 +692,31 @@ fn a_busy_core_steps_at_a_disk_signal_without_waiting_for_the_fallback() {
 }
 
 #[test]
+fn a_release_rings_once_for_the_steps_given_up_and_the_next_step_settles_them() {
+    let owed = OwedStep::new();
+    // Nothing owed: a release rings for nothing, and a step settles nothing.
+    assert!(!owed.ring_due());
+    assert_eq!(owed.stepped(5), None);
+    // Two cores give up while a third holds the drivers: the first one's
+    // time is the oldest.
+    owed.owe(100);
+    owed.owe(140);
+    // The holder's release rings once; later releases leave it to that ring.
+    assert!(owed.ring_due());
+    assert!(!owed.ring_due());
+    owed.owe(150);
+    assert!(!owed.ring_due());
+    // The rung step settles all three and reports the oldest one's wait.
+    assert_eq!(owed.stepped(400), Some(300));
+    assert!(!owed.ring_due());
+    assert_eq!(owed.stepped(410), None);
+    // A step given up after that rings again, even at counter 0.
+    owed.owe(0);
+    assert!(owed.ring_due());
+    assert_eq!(owed.stepped(7), Some(6));
+}
+
+#[test]
 fn a_completion_posted_after_a_fruitless_step_is_taken_by_the_next_step() {
     let (mut model, worker, disk) = staged(4);
     let tag = model.start(write(9, 3)).unwrap();

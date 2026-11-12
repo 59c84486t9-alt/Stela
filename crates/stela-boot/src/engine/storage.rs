@@ -471,6 +471,10 @@ impl Drop for RestoreRoot {
             HOST_DRIVERS_HOLDER.store(ptr::from_ref(self.site).cast_mut(), Ordering::Relaxed);
         }
         HOST_DRIVERS.store(false, Ordering::Release);
+        // A disk step given up while this core held the lock is due now.
+        if !super::host::in_interrupt() && OWED.ring_due() {
+            ring_owed();
+        }
         // SAFETY: only IF was changed by enter().
         unsafe {
             if self.flags & (1 << 9) != 0 {
@@ -942,18 +946,58 @@ pub(super) fn released() -> bool {
     finished
 }
 
+/// Steps given up while another core held the host drivers, which its
+/// release rings for ([`staged_disk::OwedStep`]).
+static OWED: staged_disk::OwedStep = staged_disk::OwedStep::new();
+/// The APIC ID of the processor a ring for owed steps wakes: the one the
+/// disks' completion signals wake, which runs the engine's devices.
+static OWED_DOORBELL: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Since the last report: the rings for owed steps, and the counter ticks
+/// owed steps waited for the step that settled them, in all and at most.
+static OWED_TIMES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Ring the processor with APIC ID `id` for the disk steps given up while
+/// another core held the host drivers, as the disks' completion signals do.
+pub(super) fn ring_owed_steps_at(id: u64) {
+    if let Ok(id) = u32::try_from(id) {
+        OWED_DOORBELL.store(id, Ordering::Relaxed);
+    }
+}
+
+/// Wake the owed steps' processor: through the line it waits on with
+/// MWAIT, else its doorbell interrupt.
+fn ring_owed() {
+    let destination = OWED_DOORBELL.load(Ordering::Relaxed);
+    if destination == u32::MAX {
+        return;
+    }
+    OWED_TIMES[0].fetch_add(1, Ordering::Relaxed);
+    if !crate::native_idle::doorbell(destination).is_some_and(|doorbell| doorbell.ring()) {
+        super::host::ring(destination);
+    }
+}
+
 /// One step of `worker`, unless another core is inside the host drivers:
-/// a step would wait for it there, and the work keeps for the next.
+/// a step would wait for it there, and the work keeps for the next, which
+/// that core's release rings for.
 fn step(worker: &DiskWorker) -> Option<staged_disk::Step> {
     if host_drivers_taken() {
-        STEPS[1].fetch_add(1, Ordering::Relaxed);
-        return None;
+        OWED.owe(super::host::fresh_counter());
+        // A holder that let go before the debt was recorded rings for none.
+        if host_drivers_taken() {
+            STEPS[1].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
     }
     STEPS[0].fetch_add(1, Ordering::Relaxed);
     // Read before the step's look: a signal after it is still unanswered.
     SEEN_DOORBELLS.store(super::host::doorbells(), Ordering::Relaxed);
     let now = super::host::fresh_counter();
     STEPPED.store(now, Ordering::Relaxed);
+    if let Some(waited) = OWED.stepped(now) {
+        OWED_TIMES[1].fetch_add(waited, Ordering::Relaxed);
+        OWED_TIMES[2].fetch_max(waited, Ordering::Relaxed);
+    }
     // A step ends once it has had its time: the rest waits for the next.
     let budget = super::host::COUNTER_HZ / 1_000_000 * STEP_MICROS;
     let mut over = || super::host::fresh_counter().wrapping_sub(now) >= budget;
@@ -1143,6 +1187,18 @@ impl HostDisks {
             " after_calls={}/{}",
             RELEASED_STEPS[0].swap(0, Ordering::Relaxed),
             micros(RELEASED_STEPS[1].swap(0, Ordering::Relaxed))
+        ));
+        // The rings for steps given up to another core's hold, and how
+        // long those steps waited for the one that settled them.
+        let counter_micros = |slot: &AtomicU64| {
+            u128::from(slot.swap(0, Ordering::Relaxed)) * 1_000_000
+                / u128::from(super::host::COUNTER_HZ)
+        };
+        line.push_str(&format!(
+            " owed=rings/waited_us/longest_us:{}/{}/{}",
+            OWED_TIMES[0].swap(0, Ordering::Relaxed),
+            counter_micros(&OWED_TIMES[1]),
+            counter_micros(&OWED_TIMES[2]),
         ));
         output::arguments(format_args!("{line}\n"));
     }

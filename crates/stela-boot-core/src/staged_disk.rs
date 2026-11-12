@@ -28,7 +28,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, collections::VecDeque, sync::Arc, vec::Vec};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use stela_drivers::block::{BlockDevice, BlockError, Command, Finished, Identity};
 
 /// The commands the model may have queued, at the host disk or finished and
@@ -403,6 +403,56 @@ pub fn step_due(
     seen: u64,
 ) -> bool {
     whole || now.saturating_sub(stepped) >= fallback || doorbells != seen
+}
+
+/// A step a core gave up because another core was inside the host drivers.
+///
+/// A step never waits for the host drivers' lock, whose holder (a USB or
+/// network service turn, another disk's call) can keep it for
+/// milliseconds. But the core that gave up is often one whose guest then
+/// waits for that very disk: it sleeps until its next poll, tens of
+/// milliseconds away, and so does every other waiting core, while the
+/// queued command or the completion waits in memory. So the core that
+/// releases the lock rings the engine's doorbell once for the steps owed
+/// meanwhile, as a disk's completion signal does, and the next step,
+/// whoever takes it, settles them.
+#[derive(Debug, Default)]
+pub struct OwedStep {
+    /// The counter when the oldest step still owed was given up; 0 for
+    /// none.
+    since: AtomicU64,
+    /// Whether a release rang for them already.
+    rung: AtomicBool,
+}
+
+impl OwedStep {
+    pub const fn new() -> Self {
+        Self {
+            since: AtomicU64::new(0),
+            rung: AtomicBool::new(false),
+        }
+    }
+
+    /// A step was given up at counter `now`.
+    pub fn owe(&self, now: u64) {
+        let _ = self
+            .since
+            .compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Relaxed);
+    }
+
+    /// Whether the core that just released the host drivers rings for the
+    /// steps owed: once until the next step settles them.
+    pub fn ring_due(&self) -> bool {
+        self.since.load(Ordering::Acquire) != 0 && !self.rung.swap(true, Ordering::AcqRel)
+    }
+
+    /// A step started at counter `now`: it settles every step owed, and
+    /// answers how long the oldest of them waited, if any was.
+    pub fn stepped(&self, now: u64) -> Option<u64> {
+        let since = self.since.swap(0, Ordering::AcqRel);
+        self.rung.store(false, Ordering::Release);
+        (since != 0).then(|| now.saturating_sub(since))
+    }
 }
 
 impl BlockDevice for StagedDisk {
