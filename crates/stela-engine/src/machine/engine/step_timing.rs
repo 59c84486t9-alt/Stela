@@ -195,13 +195,15 @@ impl SystemExit {
 /// System exits by [`system_key`] since they were last taken, under step
 /// timing: an open-addressed table, with the keys past its size in `other`;
 /// the device accesses the engine completed; and the floating-point exits
-/// by what their completion found ([`FloatingReason`]).
+/// by what their completion found ([`FloatingReason`]), in all and by word
+/// with their operands ([`FloatingWords`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemExits {
     pub entries: [SystemExit; SYSTEM_KEYS],
     pub other: SystemExit,
     pub devices: DeviceExits,
     pub floating: [u64; FloatingReason::COUNT],
+    pub floating_words: FloatingWords,
 }
 
 /// What the software completion of a floating-point exit found, which names
@@ -267,6 +269,412 @@ impl FloatingReason {
     }
 }
 
+/// What the operands of a floating-point exit held, which names the recipe
+/// guard that sent it to the engine where its flags do not (a subnormal
+/// input raises no flag with FZ clear, a quiet NaN none at all): a NaN, a
+/// subnormal, a zero or an infinity in an active source lane; a nonzero
+/// result lane below twice the minimum normal (`Tiny`, which recipes leave
+/// to the engine in case it was tiny before rounding); none of those
+/// (`Ordinary`); and a form whose lanes [`census_lanes`] does not read
+/// (`Unread`). An exit counts in every class its operands show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operands {
+    Nan,
+    Subnormal,
+    Zero,
+    Infinite,
+    Tiny,
+    Ordinary,
+    Unread,
+}
+
+impl Operands {
+    pub const COUNT: usize = Self::Unread as usize + 1;
+    pub const NAMES: [&'static str; Self::COUNT] = [
+        "nan",
+        "subnormal",
+        "zero",
+        "infinite",
+        "tiny",
+        "ordinary",
+        "unread",
+    ];
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// A register the census reads: its lanes, from one lane alone when
+/// indexed.
+#[derive(Debug, Clone, Copy)]
+struct CensusRegister {
+    register: u8,
+    lane: Option<u8>,
+    lanes: u32,
+}
+
+impl CensusRegister {
+    const fn whole(register: u8, lanes: u32) -> Self {
+        Self {
+            register,
+            lane: None,
+            lanes,
+        }
+    }
+}
+
+/// The lanes of an operation the census reads: its format, up to three
+/// sources and the result.
+#[derive(Debug, Clone, Copy)]
+struct CensusLanes {
+    format: stela_compiler::aarch64::floating::Format,
+    sources: [Option<CensusRegister>; 3],
+    result: CensusRegister,
+}
+
+/// The lanes [`Operands`] classifies for the families with the most exits
+/// (fused, binary arithmetic, min/max, estimates, roots and rounding); none
+/// for the rest, which count as [`Operands::Unread`].
+fn census_lanes(
+    operation: &stela_compiler::aarch64::FloatingPointOperation,
+) -> Option<CensusLanes> {
+    use stela_compiler::aarch64::{
+        FloatingPointOperation as Operation,
+        simd::{arithmetic::Inputs, estimate::Kind, minmax},
+    };
+    let whole = CensusRegister::whole;
+    let lanes =
+        |format, shape: stela_compiler::aarch64::simd::arithmetic::Shape| shape.lane_count(format);
+    Some(match operation {
+        Operation::Fused(operand) => {
+            let count = lanes(operand.format, operand.shape);
+            CensusLanes {
+                format: operand.format,
+                sources: [
+                    Some(whole(operand.left, count)),
+                    Some(CensusRegister {
+                        register: operand.right,
+                        lane: operand.right_lane,
+                        lanes: count,
+                    }),
+                    Some(whole(operand.addend, count)),
+                ],
+                result: whole(operand.destination, count),
+            }
+        }
+        Operation::Binary(operand) => {
+            let count = lanes(operand.format, operand.shape);
+            let (left, right) = match operand.inputs {
+                Inputs::Elementwise { left, right } | Inputs::Pairwise { left, right } => {
+                    (whole(left, count), Some(whole(right, count)))
+                }
+                Inputs::Indexed {
+                    left,
+                    right,
+                    right_lane,
+                } => (
+                    whole(left, count),
+                    Some(CensusRegister {
+                        register: right,
+                        lane: Some(right_lane),
+                        lanes: count,
+                    }),
+                ),
+                Inputs::PairwiseScalar { source } => (whole(source, 2), None),
+            };
+            CensusLanes {
+                format: operand.format,
+                sources: [Some(left), right, None],
+                result: whole(operand.destination, count),
+            }
+        }
+        Operation::MinMax(operand) => match *operand {
+            minmax::Operand::Binary {
+                format,
+                shape,
+                destination,
+                left,
+                right,
+                ..
+            } => {
+                let count = lanes(format, shape);
+                CensusLanes {
+                    format,
+                    sources: [Some(whole(left, count)), Some(whole(right, count)), None],
+                    result: whole(destination, count),
+                }
+            }
+            minmax::Operand::PairwiseScalar {
+                format,
+                destination,
+                source,
+                ..
+            } => CensusLanes {
+                format,
+                sources: [Some(whole(source, 2)), None, None],
+                result: whole(destination, 1),
+            },
+            minmax::Operand::Reduction {
+                format,
+                shape,
+                destination,
+                source,
+                ..
+            } => CensusLanes {
+                format,
+                sources: [Some(whole(source, lanes(format, shape))), None, None],
+                result: whole(destination, 1),
+            },
+        },
+        Operation::Estimate(operand)
+            if !matches!(
+                operand.kind,
+                Kind::UnsignedReciprocal | Kind::UnsignedReciprocalSquareRoot
+            ) =>
+        {
+            let count = lanes(operand.format, operand.shape);
+            CensusLanes {
+                format: operand.format,
+                sources: [Some(whole(operand.source, count)), None, None],
+                result: whole(operand.destination, count),
+            }
+        }
+        Operation::SquareRoot(operand) => {
+            let count = lanes(operand.format, operand.shape);
+            CensusLanes {
+                format: operand.format,
+                sources: [Some(whole(operand.source, count)), None, None],
+                result: whole(operand.destination, count),
+            }
+        }
+        Operation::Rounding(operand) => {
+            let count = lanes(operand.format, operand.shape);
+            CensusLanes {
+                format: operand.format,
+                sources: [Some(whole(operand.source, count)), None, None],
+                result: whole(operand.destination, count),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The lane `lane` of `format` in vector `vector`.
+fn census_lane(
+    vector: &[u64; 2],
+    format: stela_compiler::aarch64::floating::Format,
+    lane: u32,
+) -> u64 {
+    let bits = format.bits();
+    let offset = lane * bits;
+    let word = vector[(offset / u64::BITS) as usize] >> (offset % u64::BITS);
+    word & (u64::MAX >> (u64::BITS - bits))
+}
+
+/// The exponent field and the fraction of `format` value `bits`, and the
+/// field's all-ones value.
+fn census_fields(bits: u64, format: stela_compiler::aarch64::floating::Format) -> (u64, u64, u64) {
+    use stela_compiler::aarch64::floating::Format;
+    let (exponent_bits, fraction_bits) = match format {
+        Format::Half => (5, 10),
+        Format::Single => (8, 23),
+        Format::Double => (11, 52),
+    };
+    let maximum = (1 << exponent_bits) - 1;
+    (
+        (bits >> fraction_bits) & maximum,
+        bits & ((1 << fraction_bits) - 1),
+        maximum,
+    )
+}
+
+/// The operand census of one floating-point exit: what its sources held
+/// before the completion ([`FloatingCensus::read`]), then what its result
+/// held after it ([`FloatingCensus::finish`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FloatingCensus {
+    lanes: Option<CensusLanes>,
+    classes: u8,
+}
+
+impl FloatingCensus {
+    /// Classify the active source lanes of `operation` in `state`.
+    pub fn read(
+        state: &stela_compiler::GuestState,
+        operation: &stela_compiler::aarch64::FloatingPointOperation,
+    ) -> Self {
+        let lanes = census_lanes(operation);
+        let mut classes = 0;
+        let sources = lanes.iter().flat_map(|lanes| {
+            lanes
+                .sources
+                .iter()
+                .flatten()
+                .map(move |source| (lanes.format, source))
+        });
+        for (format, source) in sources {
+            let vector = &state.v[usize::from(source.register & 31)];
+            for lane in 0..source.lanes {
+                let bits = census_lane(vector, format, source.lane.map_or(lane, u32::from));
+                let (exponent, fraction, maximum) = census_fields(bits, format);
+                classes |= match (exponent, fraction == 0) {
+                    (0, true) => Operands::Zero.bit(),
+                    (0, false) => Operands::Subnormal.bit(),
+                    (e, true) if e == maximum => Operands::Infinite.bit(),
+                    (e, false) if e == maximum => Operands::Nan.bit(),
+                    _ => 0,
+                };
+            }
+        }
+        Self { lanes, classes }
+    }
+
+    /// Add the classes of the result lanes in `state` (none when the
+    /// completion trapped and wrote no result), and return every class
+    /// seen as [`Operands`] bits.
+    pub fn finish(self, state: &stela_compiler::GuestState, completed: bool) -> u8 {
+        let Some(lanes) = self.lanes else {
+            return Operands::Unread.bit();
+        };
+        let mut classes = self.classes;
+        if completed {
+            let result = lanes.result;
+            let vector = &state.v[usize::from(result.register & 31)];
+            for lane in 0..result.lanes {
+                let bits = census_lane(vector, lanes.format, lane);
+                let (exponent, fraction, maximum) = census_fields(bits, lanes.format);
+                if exponent < 2 && (exponent != 0 || fraction != 0) && exponent != maximum {
+                    classes |= Operands::Tiny.bit();
+                }
+            }
+        }
+        const DATA: u8 = Operands::Nan.bit() | Operands::Subnormal.bit() | Operands::Tiny.bit();
+        if classes & DATA == 0 {
+            classes |= Operands::Ordinary.bit();
+        }
+        classes
+    }
+}
+
+/// One floating-point exit word's exits since they were last taken, by
+/// [`FloatingReason`] (the `Mode` count apart from the others), by the
+/// [`Operands`] classes they showed, and how many found FPSR.IXC clear,
+/// where no sticky-inexact path runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FloatingWord {
+    pub key: u32,
+    pub reasons: [u32; FloatingReason::COUNT],
+    pub operands: [u32; Operands::COUNT],
+    pub inexact_clear: u32,
+}
+
+impl FloatingWord {
+    /// Its exits: every reason but `Mode`, which they also count in.
+    pub fn count(&self) -> u64 {
+        self.reasons[..FloatingReason::Mode as usize]
+            .iter()
+            .map(|&count| u64::from(count))
+            .sum()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (count, more) in self.reasons.iter_mut().zip(other.reasons) {
+            *count = count.saturating_add(more);
+        }
+        for (count, more) in self.operands.iter_mut().zip(other.operands) {
+            *count = count.saturating_add(more);
+        }
+        self.inexact_clear = self.inexact_clear.saturating_add(other.inexact_clear);
+    }
+}
+
+/// The words [`FloatingWords`] holds apart: a beat's floating-point exits
+/// have reached about 240 words machine-wide.
+pub const FLOATING_WORDS: usize = 256;
+
+/// Floating-point exits by word with their causes ([`FloatingWord`]),
+/// under step timing: an open-addressed table, with the words past its
+/// size in `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingWords {
+    pub entries: [FloatingWord; FLOATING_WORDS],
+    pub other: FloatingWord,
+}
+
+impl Default for FloatingWords {
+    fn default() -> Self {
+        Self {
+            entries: [FloatingWord::default(); FLOATING_WORDS],
+            other: FloatingWord::default(),
+        }
+    }
+}
+
+impl FloatingWords {
+    /// The entry of `key`, or `other` once the table is full.
+    fn entry(&mut self, key: u32) -> &mut FloatingWord {
+        let start =
+            (key.wrapping_mul(0x9e37_79b9) >> (u32::BITS - FLOATING_WORDS.ilog2())) as usize;
+        let found = (0..FLOATING_WORDS)
+            .map(|probe| (start + probe) % FLOATING_WORDS)
+            .find(|&index| {
+                let entry = &self.entries[index];
+                entry.key == key || entry.count() == 0
+            });
+        match found {
+            Some(index) => {
+                let entry = &mut self.entries[index];
+                entry.key = key;
+                entry
+            }
+            None => &mut self.other,
+        }
+    }
+
+    /// Count one exit of `key` for `reason`, in `Mode` too if `moded`,
+    /// with [`Operands`] bits `operands`, that found FPSR.IXC clear if
+    /// `inexact_clear`.
+    pub fn add(
+        &mut self,
+        key: u32,
+        reason: FloatingReason,
+        moded: bool,
+        operands: u8,
+        inexact_clear: bool,
+    ) {
+        let entry = self.entry(key);
+        entry.reasons[reason as usize] = entry.reasons[reason as usize].saturating_add(1);
+        if moded {
+            let mode = &mut entry.reasons[FloatingReason::Mode as usize];
+            *mode = mode.saturating_add(1);
+        }
+        for (class, count) in entry.operands.iter_mut().enumerate() {
+            if operands & (1 << class) != 0 {
+                *count = count.saturating_add(1);
+            }
+        }
+        entry.inexact_clear = entry.inexact_clear.saturating_add(u32::from(inexact_clear));
+    }
+
+    /// Add every exit `words` counts.
+    pub fn merge(&mut self, words: &Self) {
+        for word in words.counted() {
+            self.entry(word.key).merge(word);
+        }
+        self.other.merge(&words.other);
+    }
+
+    /// The words with exits.
+    pub fn counted(&self) -> impl Iterator<Item = &FloatingWord> {
+        self.entries.iter().filter(|word| word.count() != 0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.other.count() == 0 && self.counted().next().is_none()
+    }
+}
+
 /// The keys [`SystemExits`] holds apart. The report merges every PE's into
 /// one table each beat, and a process spawn alone exits on well over 128
 /// keys machine-wide: with 128 the costliest of them landed in `other`
@@ -280,6 +688,7 @@ impl Default for SystemExits {
             other: SystemExit::default(),
             devices: DeviceExits::default(),
             floating: [0; FloatingReason::COUNT],
+            floating_words: FloatingWords::default(),
         }
     }
 }
@@ -312,6 +721,7 @@ impl SystemExits {
         for (count, more) in self.floating.iter_mut().zip(exits.floating) {
             *count += more;
         }
+        self.floating_words.merge(&exits.floating_words);
     }
 
     /// The keys with exits.
@@ -324,6 +734,7 @@ impl SystemExits {
             && self.counted().next().is_none()
             && self.devices.is_empty()
             && self.floating.iter().all(|&count| count == 0)
+            && self.floating_words.is_empty()
     }
 }
 
@@ -1185,6 +1596,105 @@ mod tests {
         // Zeros add exactly: no fresh flag.
         assert_eq!(exits.floating[FloatingReason::Exact as usize], 1);
         assert_eq!(exits.floating.iter().sum::<u64>(), 1);
+        // Its word counts the reason, the zero operands and the clear IXC.
+        let word = *exits
+            .floating_words
+            .counted()
+            .find(|word| word.key == FADD_S0_S1_S2)
+            .unwrap();
+        assert_eq!(word.count(), 1);
+        assert_eq!(word.reasons[FloatingReason::Exact as usize], 1);
+        assert_eq!(word.inexact_clear, 1);
+        assert_eq!(word.operands[Operands::Zero as usize], 1);
+        assert_eq!(word.operands[Operands::Ordinary as usize], 1);
+        assert_eq!(word.operands[Operands::Subnormal as usize], 0);
+    }
+
+    /// The census names what the operands of an exit held: subnormal, NaN
+    /// and zero source lanes, an indexed source's one lane, a tiny result,
+    /// and forms it does not read.
+    #[test]
+    fn a_floating_point_census_classifies_operands() {
+        use stela_compiler::{GuestState, aarch64::FloatingPointOperation};
+        // FMLA V29.4S, V26.4S, V21.S[1].
+        const FMLA_INDEXED_4S: u32 = 0x4fb5_135d;
+        // SCVTF D0, X0.
+        const SCVTF_D0_X0: u32 = 0x9e62_0000;
+        const ONE: u64 = 0x3f80_0000;
+        const SUBNORMAL: u64 = 0x0000_0001;
+        const NAN: u64 = 0x7fc0_0000;
+        let decode = |word| match FloatingPointOperation::decode(word) {
+            Some(Ok(operation)) => operation,
+            other => panic!("{word:#x}: {other:?}"),
+        };
+        let fmla = decode(FMLA_INDEXED_4S);
+        let ones = ONE | ONE << 32;
+        let bit = |class: Operands| 1u8 << class as u8;
+        let mut state = GuestState::default();
+        state.v[26] = [ones, ones];
+        state.v[29] = [ones, ones];
+        // Only lane 1 of V21 is read: a NaN in lane 0 is not.
+        state.v[21] = [NAN | ONE << 32, NAN | NAN << 32];
+        let census = FloatingCensus::read(&state, &fmla);
+        assert_eq!(census.finish(&state, true), bit(Operands::Ordinary));
+        // A subnormal lane of V26 and a tiny result lane.
+        state.v[26][1] = ONE | SUBNORMAL << 32;
+        let census = FloatingCensus::read(&state, &fmla);
+        state.v[29][0] = SUBNORMAL;
+        assert_eq!(
+            census.finish(&state, true),
+            bit(Operands::Subnormal) | bit(Operands::Tiny)
+        );
+        // A trapped completion's result is not read.
+        state.v[29] = [ones, ones];
+        let census = FloatingCensus::read(&state, &fmla);
+        state.v[29][0] = SUBNORMAL;
+        assert_eq!(census.finish(&state, false), bit(Operands::Subnormal));
+        // NaN and zero in the addend.
+        state.v[26] = [ones, ones];
+        state.v[29] = [NAN, ones];
+        let census = FloatingCensus::read(&state, &fmla);
+        state.v[29] = [ones, ones];
+        assert_eq!(
+            census.finish(&state, true),
+            bit(Operands::Nan) | bit(Operands::Zero)
+        );
+        let scvtf = decode(SCVTF_D0_X0);
+        let census = FloatingCensus::read(&state, &scvtf);
+        assert_eq!(census.finish(&state, true), bit(Operands::Unread));
+    }
+
+    #[test]
+    fn floating_words_count_by_word_and_keep_the_rest_in_other() {
+        let mut words = FloatingWords::default();
+        assert!(words.is_empty());
+        let subnormal = 1 << Operands::Subnormal as u8;
+        for key in 0..FLOATING_WORDS as u32 + 2 {
+            words.add(key, FloatingReason::Exact, false, subnormal, true);
+        }
+        words.add(0, FloatingReason::Inexact, true, subnormal, false);
+        let first = *words.counted().find(|word| word.key == 0).unwrap();
+        assert_eq!(first.count(), 2);
+        assert_eq!(first.reasons[FloatingReason::Mode as usize], 1);
+        assert_eq!(first.operands[Operands::Subnormal as usize], 2);
+        assert_eq!(first.inexact_clear, 1);
+        assert_eq!(words.counted().count(), FLOATING_WORDS);
+        assert_eq!(words.other.count(), 2);
+        let exits = SystemExits {
+            floating_words: words,
+            ..SystemExits::default()
+        };
+        assert!(!exits.is_empty());
+        let mut merged = SystemExits::default();
+        merged.merge(&exits);
+        merged.merge(&exits);
+        let first = *merged
+            .floating_words
+            .counted()
+            .find(|word| word.key == 0)
+            .unwrap();
+        assert_eq!((first.count(), first.inexact_clear), (4, 2));
+        assert_eq!(merged.floating_words.other.count(), 4);
     }
 
     /// The reason counter keeps FPSR as the completion leaves it: earlier

@@ -121,6 +121,48 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
     }
     output::arguments(format_args!("{line}\n"));
     numerical_exits_report(numerical, &exits.floating, tsc_hz);
+    numerical_causes_report(&exits.floating_words);
+}
+
+/// `PES FLOATING CAUSES`: the sixteen floating-point exit words with the
+/// most exits since the last beat, each with its exits by reason
+/// (`step_timing::FloatingReason`, `mode` overlapping the others), how many
+/// found FPSR.IXC clear, and its exits by the classes their operands
+/// showed (`step_timing::Operands`, overlapping); nothing when there were
+/// none.
+fn numerical_causes_report(words: &step_timing::FloatingWords) {
+    const SHOWN: usize = 16;
+    if words.is_empty() {
+        return;
+    }
+    let mut counted: Vec<&step_timing::FloatingWord> = words.counted().collect();
+    counted.sort_unstable_by_key(|word| core::cmp::Reverse(word.count()));
+    let join = |counts: &[u32]| {
+        counts
+            .iter()
+            .map(|count| format!("{count}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut line = format!(
+        "PES FLOATING CAUSES reasons:ixc_clear:operands {}:ixc_clear:{} by_count",
+        step_timing::FloatingReason::NAMES.join("/"),
+        step_timing::Operands::NAMES.join("/")
+    );
+    let other = (words.other.count() != 0).then(|| ("other".into(), &words.other));
+    let named = counted
+        .into_iter()
+        .take(SHOWN)
+        .map(|word| (step_timing::system_key_name(word.key), word));
+    for (name, word) in named.chain(other) {
+        line.push_str(&format!(
+            " {name}={}:{}:{}",
+            join(&word.reasons),
+            word.inexact_clear,
+            join(&word.operands)
+        ));
+    }
+    output::arguments(format_args!("{line}\n"));
 }
 
 /// `PES FLOATING count/ns`: every PE's floating-point exits since the last

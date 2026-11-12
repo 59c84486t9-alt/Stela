@@ -576,18 +576,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Under step timing, what the completion found
         // (`step_timing::FloatingReason`): its fresh cumulative flags, with
         // FPSR's earlier ones put back after it, so FPSR ends as it would.
+        // Its word's count adds what its operands held
+        // (`step_timing::FloatingCensus`) and whether FPSR.IXC was clear.
         const CUMULATIVE: u32 = 0x9f;
+        const INEXACT: u32 = 1 << 4;
         let fpcr = self.cpu.state.fpcr;
         let before = self.cpu.state.fpsr;
+        let census = super::step_timing::FloatingCensus::read(&self.cpu.state, operation);
         self.cpu.state.fpsr = before & !CUMULATIVE;
         let completed = self.complete_floating_point_untimed(word, operation);
         let fresh = self.cpu.state.fpsr & CUMULATIVE;
         self.cpu.state.fpsr |= before;
         let reason = super::step_timing::FloatingReason::of(fpcr, fresh, completed.is_err());
+        let moded = super::step_timing::FloatingReason::moded(fpcr);
         self.system_exits.floating[reason as usize] += 1;
-        if super::step_timing::FloatingReason::moded(fpcr) {
+        if moded {
             self.system_exits.floating[super::step_timing::FloatingReason::Mode as usize] += 1;
         }
+        let operands = census.finish(&self.cpu.state, completed.is_ok());
+        self.system_exits.floating_words.add(
+            super::step_timing::system_key(word),
+            reason,
+            moded,
+            operands,
+            before & INEXACT == 0,
+        );
         completed
     }
 
