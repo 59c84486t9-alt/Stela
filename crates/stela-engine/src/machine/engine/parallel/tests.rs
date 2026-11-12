@@ -3323,3 +3323,51 @@ fn engine_waits_open_native_event_spins_only_where_other_pes_run() {
     );
     assert_eq!(machine.mirrors.spin, EventSpin::default());
 }
+
+/// With the board's fast-IPI table named to native code, a plain fast-IPI
+/// write the engine completes opens its state's cell for native writes,
+/// which a change of derived state closes; the PEs native requests found
+/// halted are woken through the board when native code returns.
+#[test]
+fn plain_fast_ipi_writes_open_native_ones_and_native_wakes_reach_the_board() {
+    use super::super::mirrors::{FAST_IPI_WRITES, mirror_state};
+    use super::super::tests::board;
+    use stela_contracts::identity::Identity;
+    const MSR: u32 = 0xd51d_f029; // msr s3_5_c15_c0_1, x9
+    let (hub, kicks) = hub(2);
+    let worker = SharedDevices::new(Signalling::default(), Arc::clone(&hub)).worker();
+    let identities = vec![Identity {
+        midr: 0x611f_0320,
+        mpidr: 0x8000_0000,
+        clock: None,
+        caches: None,
+    }];
+    let mut machine = board(&[MSR], worker, identities);
+    let state = mirror_state(machine.cpu.pstate.el, machine.cpu.pstate.guarded);
+    let write = |machine: &mut Machine<_, _>| {
+        let pc = machine.cpu.pc;
+        machine.cpu.state.x[9] = 1;
+        machine.system_instruction(MSR).unwrap();
+        assert_eq!(machine.cpu.pc, pc + 4);
+        machine.cpu.pc = pc;
+    };
+    write(&mut machine);
+    assert_eq!(
+        machine.mirrors.banks[state][FAST_IPI_WRITES].readable, 0,
+        "no table named"
+    );
+    assert_eq!(machine.enter_fast_ipi(), Some(()));
+    let ipi = machine.mirrors.fast_ipi;
+    let table = machine.devices.fast_ipi_table().unwrap();
+    assert_eq!((ipi.base, ipi.pe), (table.base(), 0));
+    assert_eq!(ipi.status, table.target(0, 0).unwrap().status);
+    write(&mut machine);
+    assert_eq!(machine.mirrors.banks[state][FAST_IPI_WRITES].readable, 1);
+    machine.derived_changed();
+    assert_eq!(machine.mirrors.banks[state][FAST_IPI_WRITES].readable, 0);
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    machine.mirrors.fast_ipi.wakes = 1 << 1;
+    machine.take_fast_ipi_wakes();
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    assert_eq!(machine.mirrors.fast_ipi.wakes, 0);
+}

@@ -737,6 +737,217 @@ pub fn event_wait_thunk(pc: GuestAddress, places: EventWaitPlaces) -> Thunk {
     )
 }
 
+/// A PE's view of the board's frozen fast-IPI table (the engine's
+/// `fast_ipi::Table`) for [`fast_ipi_request_thunk`] and
+/// [`fast_ipi_status_thunk`]: the table's first entry, its clusters and
+/// CPUs per cluster, this PE's own cluster, number and IPI_SR address, the
+/// PEs a request found halted (bit `pe`), which the engine wakes when
+/// native code returns, and the entry of the request in progress.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FastIpi {
+    pub base: u64,
+    pub clusters: u64,
+    pub cpus: u64,
+    pub cluster: u64,
+    pub pe: u64,
+    pub status: u64,
+    pub wakes: u64,
+    pub target: u64,
+}
+
+/// The bytes of one entry of the table [`FastIpi::base`] names, and the
+/// offsets of its words: the target's IPI_SR (`u64`), deferred-IPI flag
+/// (`u8`), line-change counter (`u64`), interruption epoch (`u64`), halted
+/// flag (`u8`) and PE number, each but the last an address.
+pub const FAST_IPI_TARGET_BYTES: usize = 48;
+pub const FAST_IPI_TARGET_STATUS: usize = 0;
+pub const FAST_IPI_TARGET_ARMED: usize = 8;
+pub const FAST_IPI_TARGET_LINES: usize = 16;
+pub const FAST_IPI_TARGET_INTERRUPT: usize = 24;
+pub const FAST_IPI_TARGET_SLEEPING: usize = 32;
+pub const FAST_IPI_TARGET_PE: usize = 40;
+
+const IPI_BASE: i8 = core::mem::offset_of!(FastIpi, base) as i8;
+const IPI_CLUSTERS: i8 = core::mem::offset_of!(FastIpi, clusters) as i8;
+const IPI_CPUS: i8 = core::mem::offset_of!(FastIpi, cpus) as i8;
+const IPI_CLUSTER: i8 = core::mem::offset_of!(FastIpi, cluster) as i8;
+const IPI_PE: i8 = core::mem::offset_of!(FastIpi, pe) as i8;
+const IPI_STATUS: i8 = core::mem::offset_of!(FastIpi, status) as i8;
+const IPI_WAKES: i8 = core::mem::offset_of!(FastIpi, wakes) as i8;
+const IPI_TARGET: i8 = core::mem::offset_of!(FastIpi, target) as i8;
+
+/// IPI_RR's CPU [7:0], CLUSTER [23:16] and TYPE [29:28].
+const RR_CPU: i32 = 0xff;
+const RR_CLUSTER: u64 = 0xff << 16;
+const RR_TYPE: u64 = 0b11 << 28;
+
+/// Where fast-IPI thunks find their words: the per-state cell open where
+/// the MSR completes plainly, the PE's [`FastIpi`], the control
+/// ([`super::chain::ChainControl`]) and the native ISR_EL1 read's cell
+/// ([`interrupt_status_thunk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FastIpiPlaces {
+    pub cell: Place,
+    pub ipi: Place,
+    pub control: Place,
+    pub interrupt_status: Place,
+}
+
+/// Add 1 to the epoch at `[RCX + offset]` unless it is `u64::MAX`, which
+/// stays, in a LOCK CMPXCHG loop. Clobbers RAX and RDX.
+fn bump_epoch(asm: &mut Asm<'_>, offset: i8) {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
+    let epoch = Mem::base_disp8(Rcx, offset);
+    asm.mov_load(Qword, Rax, epoch);
+    let top = asm.len();
+    asm.alu_imm8(Alu::Cmp, Qword, Rax, -1);
+    let saturated = asm.jcc(Cond::E);
+    asm.lea(Qword, Rdx, Mem::base_disp8(Rax, 1));
+    asm.lock();
+    asm.cmpxchg(Qword, epoch, Rdx);
+    let lost = asm.jcc(Cond::Ne);
+    asm.bind_back(lost, top);
+    asm.bind(saturated);
+}
+
+/// The thunk completing an immediate fast-IPI request, MSR IPI_RR_LOCAL
+/// (or IPI_RR_GLOBAL with `global`) at `pc` with Xt, while the cell is
+/// open, step for step as the engine's reference send (`fast_ipi::Table::
+/// send`) does, else exiting at `pc` having changed nothing: the value
+/// holds only CPU, TYPE 0 and, global, CLUSTER; the target is present and
+/// not this PE; its deferred IPI is not armed. It ORs PENDING into the
+/// target's IPI_SR (LOCK CMPXCHG), and where that was clear adds 1 to its
+/// line-change counter (LOCK ADD), to its interruption epoch unless
+/// saturated, and, finding it halted, sets its bit in [`FastIpi::wakes`]
+/// and moves this PE's own interruption epoch, so its run ends at the next
+/// chained transfer and the engine wakes the target (`Devices::
+/// wake_signalled`) without running the MSR again. It clobbers RAX, RCX
+/// and RDX.
+pub fn fast_ipi_request_thunk(
+    pc: GuestAddress,
+    rt: u8,
+    global: bool,
+    places: FastIpiPlaces,
+) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Byte, Dword, Qword};
+    let ipi = |offset| Mem::base_disp8(Rax, offset);
+    let target = |offset: usize| Mem::base_disp8(Rdx, offset as i8);
+    let (mut code, closed) = open(places.cell);
+    let mut asm = Asm::new(&mut code);
+    if rt == 31 {
+        asm.alu(Alu::Xor, Dword, Rcx, Rcx);
+    } else {
+        asm.mov_load(Qword, Rcx, register(rt));
+    }
+    let fields = RR_CPU as u64 | if global { RR_CLUSTER } else { 0 };
+    asm.mov_imm64(Rdx, !fields | RR_TYPE);
+    asm.test(Qword, Rcx, Rdx);
+    let malformed = asm.jcc(Cond::Ne);
+    asm.place(Rax, places.ipi);
+    if global {
+        asm.mov(Qword, Rdx, Rcx);
+        asm.shift_imm(ShiftOp::Shr, Qword, Rdx, 16);
+    } else {
+        asm.mov_load(Qword, Rdx, ipi(IPI_CLUSTER));
+    }
+    asm.alu_load(Alu::Cmp, Qword, Rdx, ipi(IPI_CLUSTERS));
+    let no_cluster = asm.jcc(Cond::Ae);
+    asm.alu_imm32(Alu::And, Dword, Rcx, RR_CPU);
+    asm.alu_load(Alu::Cmp, Qword, Rcx, ipi(IPI_CPUS));
+    let no_cpu = asm.jcc(Cond::Ae);
+    asm.imul(Qword, Rdx, ipi(IPI_CPUS));
+    asm.alu(Alu::Add, Qword, Rdx, Rcx);
+    asm.imul_imm32(Qword, Rdx, Rdx, FAST_IPI_TARGET_BYTES as i32);
+    asm.alu_load(Alu::Add, Qword, Rdx, ipi(IPI_BASE));
+    asm.alu_imm8(Alu::Cmp, Qword, target(FAST_IPI_TARGET_STATUS), 0);
+    let absent = asm.jcc(Cond::E);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_PE));
+    asm.alu_load(Alu::Cmp, Qword, Rcx, ipi(IPI_PE));
+    let own = asm.jcc(Cond::E);
+    asm.alu_imm8(Alu::Cmp, Qword, Rcx, 64);
+    let unnamed = asm.jcc(Cond::Ae);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_ARMED));
+    asm.movzx(Dword, Rcx, Byte, Mem::base(Rcx, 0));
+    asm.test(Dword, Rcx, Rcx);
+    let armed = asm.jcc(Cond::Ne);
+    // Committed from here on.
+    asm.mov_store(Qword, ipi(IPI_TARGET), Rdx);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_STATUS));
+    asm.mov_load(Qword, Rax, Mem::base(Rcx, 0));
+    let top = asm.len();
+    asm.mov(Qword, Rdx, Rax);
+    asm.alu_imm8(Alu::Or, Qword, Rdx, 1);
+    asm.lock();
+    asm.cmpxchg(Qword, Mem::base(Rcx, 0), Rdx);
+    let lost = asm.jcc(Cond::Ne);
+    asm.bind_back(lost, top);
+    asm.test(Qword, Rax, Rax);
+    let pending = asm.jcc(Cond::Ne);
+    let reload = |asm: &mut Asm<'_>| {
+        asm.place(Rax, places.ipi);
+        asm.mov_load(Qword, Rdx, ipi(IPI_TARGET));
+    };
+    reload(&mut asm);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_LINES));
+    asm.lock();
+    asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, 0), 1);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_INTERRUPT));
+    bump_epoch(&mut asm, 0);
+    reload(&mut asm);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_SLEEPING));
+    asm.movzx(Dword, Rcx, Byte, Mem::base(Rcx, 0));
+    asm.test(Dword, Rcx, Rcx);
+    let running = asm.jcc(Cond::E);
+    asm.mov_load(Qword, Rcx, target(FAST_IPI_TARGET_PE));
+    asm.mov_imm32(Rdx, 1);
+    asm.shift_cl(ShiftOp::Shl, Qword, Rdx);
+    asm.alu(Alu::Or, Qword, ipi(IPI_WAKES), Rdx);
+    asm.place(Rcx, places.control);
+    bump_epoch(&mut asm, INTERRUPT_EPOCH);
+    asm.bind(pending);
+    asm.bind(running);
+    finish_unless(
+        code,
+        [
+            closed, malformed, no_cluster, no_cpu, absent, own, unnamed, armed,
+        ],
+        pc,
+    )
+}
+
+/// The thunk completing MSR IPI_SR at `pc` with Xt while the cell is open:
+/// 1 clears PENDING in this PE's IPI_SR in one exchange, as other PEs set
+/// it, and closes the native ISR_EL1 read, whose waiting FIQ was taken at
+/// entry; 0 changes nothing; any other value, or a PE whose word the
+/// engine has not named, exits. It clobbers RAX, RCX and RDX.
+pub fn fast_ipi_status_thunk(pc: GuestAddress, rt: u8, places: FastIpiPlaces) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Dword, Qword};
+    let (mut code, closed) = open(places.cell);
+    if rt == 31 {
+        return finish(code, closed, pc);
+    }
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Qword, Rcx, register(rt));
+    asm.test(Qword, Rcx, Rcx);
+    let nothing = asm.jcc(Cond::E);
+    asm.alu_imm8(Alu::Cmp, Qword, Rcx, 1);
+    let other = asm.jcc(Cond::Ne);
+    asm.place(Rax, places.ipi);
+    asm.mov_load(Qword, Rcx, Mem::base_disp8(Rax, IPI_STATUS));
+    asm.test(Qword, Rcx, Rcx);
+    let unknown = asm.jcc(Cond::E);
+    asm.alu(Alu::Xor, Dword, Rdx, Rdx);
+    asm.xchg(Qword, Mem::base(Rcx, 0), Rdx);
+    asm.place(Rax, places.interrupt_status);
+    asm.mov_rm_imm32(Qword, Mem::base(Rax, 0), 0);
+    asm.bind(nothing);
+    finish_unless(code, [closed, other, unknown], pc)
+}
+
 /// The thunk completing `write` at `pc` in the frame while the cell at
 /// `cell` is open, else exiting at `pc`.
 pub fn mask_thunk(write: MaskWrite, pc: GuestAddress, cell: Place) -> Thunk {

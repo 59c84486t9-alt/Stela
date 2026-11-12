@@ -1470,6 +1470,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 epoch,
                 count,
             )
+        } else if let Some((register, rt)) = fast_ipi_write(pc, word) {
+            use crate::machine::fast_ipi::Register;
+            self.enter_fast_ipi()?;
+            let pc = GuestAddress(pc);
+            match register {
+                Register::RequestLocal => {
+                    register_read::fast_ipi_request_thunk(pc, rt, false, FAST_IPI)
+                }
+                Register::RequestGlobal => {
+                    register_read::fast_ipi_request_thunk(pc, rt, true, FAST_IPI)
+                }
+                Register::Status => register_read::fast_ipi_status_thunk(pc, rt, FAST_IPI),
+                Register::Countdown => return None,
+            }
         } else if let Some((access, rt)) = timer_word(word) {
             self.clock.native(self.host.tsc_counter()?);
             let access = match access {

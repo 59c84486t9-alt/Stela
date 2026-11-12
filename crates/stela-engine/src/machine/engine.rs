@@ -738,6 +738,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// and writes most and, under step timing, the costliest
     /// ([`Self::device_registers`]).
     device_registers: BTreeMap<u64, DeviceRegister>,
+    /// The board's fast-IPI table while this PE's native IPI writes use it
+    /// (`Mirrors::fast_ipi`), which keeps its words alive.
+    fast_ipi: Option<Arc<crate::machine::fast_ipi::Table>>,
     /// The register the native fault being handled reached, which its
     /// exit's ticks are charged to ([`Self::timing_exit`]).
     timed_device: Option<u64>,
@@ -1304,6 +1307,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             entered_pending: Vec::new(),
             entered_total: 0,
             device_registers: BTreeMap::new(),
+            fast_ipi: None,
             timed_device: None,
             timed_write: None,
             system_words: BTreeMap::new(),

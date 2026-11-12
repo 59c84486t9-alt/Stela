@@ -9442,6 +9442,7 @@ mod arena;
 mod context_id;
 mod cycles_native;
 mod exits;
+mod fast_ipi_native;
 mod floating_point_traps;
 mod instructions_native;
 mod native_exceptions;

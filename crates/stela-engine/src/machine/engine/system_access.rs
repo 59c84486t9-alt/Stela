@@ -914,7 +914,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.device_lines = None;
         // A fast-IPI write moves only device lines, which the step reads
         // again: nothing derived from the PE's registers changes.
-        let fast_ipi = crate::machine::fast_ipi::Register::decode(encoding).is_some();
+        let fast_ipi = crate::machine::fast_ipi::Register::decode(encoding);
+        // A plain fast-IPI write: native code completes the next ones in
+        // this state where the board has a table for it ([`FAST_IPI_WRITES`]).
+        if result.is_ok()
+            && write.is_some()
+            && fast_ipi
+                .is_some_and(|register| register != crate::machine::fast_ipi::Register::Countdown)
+            && self.mirrors.fast_ipi.base != 0
+        {
+            self.mirrors[FAST_IPI_WRITES].readable = 1;
+        }
+        let fast_ipi = fast_ipi.is_some();
         Some(match (result, write) {
             (Ok(value), None) => RegisterOutcome::Read(value),
             (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes {
@@ -924,6 +935,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }),
             (Err(reason), _) => RegisterOutcome::Refused(Refusal::UnsupportedSetting(reason)),
         })
+    }
+
+    /// Name the board's fast-IPI table to native IPI writes
+    /// ([`Mirrors::fast_ipi`]), if not yet: `None` without a table or
+    /// without this PE in it.
+    pub(super) fn enter_fast_ipi(&mut self) -> Option<()> {
+        if self.mirrors.fast_ipi.base != 0 {
+            return Some(());
+        }
+        let table = self.devices.fast_ipi_table()?;
+        let pe = self.current;
+        let cluster = table.cluster_of(pe)?;
+        let own = (0..table.cpus()).find_map(|cpu| {
+            table
+                .target(cluster, cpu as u8)
+                .filter(|target| target.pe == pe as u64)
+        })?;
+        self.mirrors.fast_ipi = register_read::FastIpi {
+            base: table.base(),
+            clusters: u64::from(table.clusters()),
+            cpus: u64::from(table.cpus()),
+            cluster: u64::from(cluster),
+            pe: pe as u64,
+            status: own.status,
+            wakes: 0,
+            target: 0,
+        };
+        self.fast_ipi = Some(table);
+        Some(())
+    }
+
+    /// Wake the PEs native fast-IPI requests found halted
+    /// ([`register_read::FastIpi::wakes`]), as the engine's own send does.
+    pub(super) fn take_fast_ipi_wakes(&mut self) {
+        let mut wakes = core::mem::take(&mut self.mirrors.fast_ipi.wakes);
+        while wakes != 0 {
+            let pe = wakes.trailing_zeros() as usize;
+            wakes &= wakes - 1;
+            self.devices.wake_signalled(pe);
+        }
     }
 
     /// MSR (immediate) after `write_pstate_field` from `before`. A write

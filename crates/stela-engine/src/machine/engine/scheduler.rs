@@ -312,6 +312,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.mirrors.switches.len != 0 {
             self.take_thread_switches();
         }
+        if self.mirrors.fast_ipi.wakes != 0 {
+            self.take_fast_ipi_wakes();
+        }
         if self.mirrors.spin.completed | self.mirrors.spin.missed | self.mirrors.spin.held != 0 {
             self.take_event_spins();
         }

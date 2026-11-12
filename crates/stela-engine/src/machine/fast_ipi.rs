@@ -72,6 +72,19 @@ pub struct Target {
     pub pe: u64,
 }
 
+// Native code finds a target's words where the compiler's thunks read them.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    use stela_compiler::x86_64::register_read as native;
+    assert!(size_of::<Target>() == native::FAST_IPI_TARGET_BYTES);
+    assert!(offset_of!(Target, status) == native::FAST_IPI_TARGET_STATUS);
+    assert!(offset_of!(Target, armed) == native::FAST_IPI_TARGET_ARMED);
+    assert!(offset_of!(Target, lines) == native::FAST_IPI_TARGET_LINES);
+    assert!(offset_of!(Target, interrupt) == native::FAST_IPI_TARGET_INTERRUPT);
+    assert!(offset_of!(Target, sleeping) == native::FAST_IPI_TARGET_SLEEPING);
+    assert!(offset_of!(Target, pe) == native::FAST_IPI_TARGET_PE);
+};
+
 /// What an immediate request ([`Table::send`]) came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sent {
