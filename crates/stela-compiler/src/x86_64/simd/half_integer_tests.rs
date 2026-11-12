@@ -6,7 +6,7 @@ use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         FPCR_AH, FPCR_AHP, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_FZ16,
-        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT, INVALID,
+        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT,
         integer::{IntegerFormat, IntegerRounding, IntegerWidth, from_integer, to_integer},
     },
     block::{BlockProfile, CompilationPlan},
@@ -200,8 +200,9 @@ fn run_forms(
     assert!(inline > 100_000, "{inline}");
 }
 
-/// FCVTZS/FCVTZU and the rounding forms: every finite normal or zero lane
-/// whose result fits completes inline under each rounding the word names.
+/// FCVTZS/FCVTZU and the rounding forms: every lane completes inline under
+/// each rounding the word names, NaNs, infinities, subnormals (flushed
+/// under FZ16) and saturating out-of-range lanes (IOC) included.
 fn half_to_integer_fields(mode: IntegerRounding, signed_base: u32) {
     let reference = move |integer, fpcr, bits| {
         to_integer(Format::Half, integer, 0, mode, fpcr, bits)
@@ -210,19 +211,7 @@ fn half_to_integer_fields(mode: IntegerRounding, signed_base: u32) {
     };
     run_forms(
         [(signed_base, true), (signed_base | 1 << 29, false)],
-        &|signed, bits, fpcr| {
-            let exponent = bits >> 10 & 31;
-            let integer = IntegerFormat {
-                width: IntegerWidth::Bits16,
-                signed,
-            };
-            fpcr & FPCR_EXCEPTION_ENABLE_MASK == 0
-                && exponent != 31
-                && (exponent != 0 || bits & 0x7fff == 0)
-                && (!signed || exponent < 30)
-                && reference(integer, 0, u64::from(bits))
-                    .is_some_and(|(_, flags)| flags & INVALID == 0)
-        },
+        &|_, _, fpcr| fpcr & FPCR_EXCEPTION_ENABLE_MASK == 0,
         &reference,
     );
 }

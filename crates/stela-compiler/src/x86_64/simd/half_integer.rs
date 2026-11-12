@@ -7,7 +7,9 @@
 //! two, both exact. F16C would need the MXCSR environment around VCVTPS2PH
 //! (about 35 TSC ticks) and gains nothing for the truncation, so the same
 //! field recipe serves every tier; AVX512-FP16 hosts keep their native
-//! recipe. Inputs the recipes do not cover take the exact helper.
+//! recipe. Every input to an integer completes (NaN, infinite and
+//! out-of-range lanes saturating with IOC); SCVTF/UCVTF lanes that round to
+//! infinity take the exact helper.
 use super::numerical::{
     Condition, branch, clear_scalar, commit_inexact, jump, resolve, test_control,
 };
@@ -20,7 +22,8 @@ use crate::{
     GuestAddress,
     aarch64::{
         floating::{
-            FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_MASK, FPCR_ROUNDING_SHIFT, Format,
+            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP, FPCR_ROUNDING_MASK,
+            FPCR_ROUNDING_SHIFT, Format, INVALID,
             integer::{IntegerRounding, IntegerWidth},
         },
         simd::{
@@ -30,7 +33,7 @@ use crate::{
     },
     block::ExitKind,
 };
-use Gpr::{Rax, Rcx, Rdx};
+use Gpr::{R8, Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
@@ -128,22 +131,17 @@ fn status_from(code: &mut Code) {
     asm.alu(Alu::Sbb, Size::Dword, Rcx, Rcx);
 }
 
-/// Branch to `fallback` when some word of `mask` is set.
-fn fallback_if_any(code: &mut Code, mask: u8, fallback: &mut Vec<usize>) {
-    Host::ByteSignMask.register(code, 0, mask, TargetCpu::Baseline);
-    code.asm().test(Size::Dword, Rax, Rax);
-    fallback.push(branch(code, Condition::NotZero));
-}
-
 /// FCVT{N,A,P,M,Z}{S,U} from Half to 16-bit lanes. A lane with biased
 /// exponent E and significand M (hidden bit included) has the value
 /// M * 2^(E-25); for E >= 15 its truncation is (M * 2^(E-15)) >> 10, with
 /// the product below 2^26 in a high and low word, and the dropped bits are
 /// the low ten of the low word. E < 15 truncates to zero. The other
-/// roundings then add one to the magnitude (`round_magnitudes`). NaN,
-/// infinite and nonzero subnormal lanes (whose FZ16 flushing decides IXC),
-/// and lanes out of the integer range (IOC), take the helper; -32768 does
-/// too. A lane is inexact exactly when bits were dropped, whatever the
+/// roundings then add one to the magnitude (`round_magnitudes`). FZ16
+/// flushes a subnormal input to zero (without IDC); otherwise it is a
+/// magnitude below one. NaN, infinite and out-of-range lanes saturate as
+/// Arm's FPToFixed does ([`saturate`]): they convert as zeros and take
+/// their saturated value at the end, with IOC (but -32768 itself, exact).
+/// A lane is inexact exactly when bits were dropped, whatever the
 /// rounding.
 fn emit_to(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding, pc: GuestAddress) {
     const MAGNITUDE: u8 = 2;
@@ -160,34 +158,35 @@ fn emit_to(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding, 
     packed(code, Host::MoveAligned, MAGNITUDE, INPUT);
     ShiftOpcode::LeftWord.emit(code, MAGNITUDE, 1);
     ShiftOpcode::RightWord.emit(code, MAGNITUDE, 1);
+    // FZ16: a subnormal input's magnitude becomes zero.
+    test_control(code, FPCR_FZ16);
+    let kept = branch(code, Condition::Zero);
     packed(code, Host::MoveAligned, EXPONENT, MAGNITUDE);
     ShiftOpcode::RightWord.emit(code, EXPONENT, HALF_FRACTION_BITS);
-    // NaN and infinity.
-    word_constant(code, BAD, HALF_EXPONENT_ALL_ONES as u16);
-    packed(code, Host::EqualWord, BAD, EXPONENT);
-    // Nonzero subnormals: exponent zero, magnitude not.
     packed(code, Host::Xor, SCRATCH, SCRATCH);
-    packed(code, Host::EqualWord, SCRATCH, EXPONENT);
-    packed(code, Host::Xor, MULTIPLIER, MULTIPLIER);
-    packed(code, Host::EqualWord, MULTIPLIER, MAGNITUDE);
-    packed(code, Host::AndNot, MULTIPLIER, SCRATCH);
-    packed(code, Host::Or, BAD, MULTIPLIER);
+    packed(code, Host::EqualWord, EXPONENT, SCRATCH);
+    packed(code, Host::AndNot, EXPONENT, MAGNITUDE);
+    packed(code, Host::MoveAligned, MAGNITUDE, EXPONENT);
+    let flushed = code.len();
+    resolve(code, kept, flushed);
+    // R8D: nonzero when a lane raises IOC. Saturating lanes convert as
+    // zeros.
+    saturated_lanes(code, signed, BAD, [SCRATCH, MULTIPLIER, EXPONENT]);
     if signed {
-        // |x| >= 2^15.
-        word_constant(code, SCRATCH, (HALF_EXPONENT_BIAS + 14) as u16);
-        packed(code, Host::MoveAligned, MULTIPLIER, EXPONENT);
-        packed(code, Host::GreaterWord, MULTIPLIER, SCRATCH);
+        // -32768 converts exactly.
+        word_constant(code, SCRATCH, 0xf800);
+        packed(code, Host::EqualWord, SCRATCH, INPUT);
+        packed(code, Host::MoveAligned, MULTIPLIER, SCRATCH);
+        packed(code, Host::AndNot, MULTIPLIER, BAD);
     } else {
-        // Negative with |x| >= 1.
-        word_constant(code, SCRATCH, (HALF_EXPONENT_BIAS - 1) as u16);
-        packed(code, Host::MoveAligned, MULTIPLIER, EXPONENT);
-        packed(code, Host::GreaterWord, MULTIPLIER, SCRATCH);
-        packed(code, Host::MoveAligned, SCRATCH, INPUT);
-        ShiftOpcode::ArithmeticWord.emit(code, SCRATCH, 15);
-        packed(code, Host::And, MULTIPLIER, SCRATCH);
+        packed(code, Host::MoveAligned, MULTIPLIER, BAD);
     }
-    packed(code, Host::Or, BAD, MULTIPLIER);
-    fallback_if_any(code, BAD, &mut fallback);
+    Host::ByteSignMask.register(code, 0, MULTIPLIER, TargetCpu::Baseline);
+    code.asm().mov(Size::Dword, R8, Rax);
+    packed(code, Host::AndNot, BAD, MAGNITUDE);
+    packed(code, Host::MoveAligned, MAGNITUDE, BAD);
+    packed(code, Host::MoveAligned, EXPONENT, MAGNITUDE);
+    ShiftOpcode::RightWord.emit(code, EXPONENT, HALF_FRACTION_BITS);
     // BAD becomes the lanes below one: E < 15.
     word_constant(code, BAD, HALF_EXPONENT_BIAS as u16);
     packed(code, Host::GreaterWord, BAD, EXPONENT);
@@ -227,7 +226,7 @@ fn emit_to(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding, 
     // RESULT = the truncated magnitudes, zero below one.
     packed(code, Host::MoveAligned, RESULT, BAD);
     if mode != IntegerRounding::TowardZero {
-        round_magnitudes(code, mode, signed, &mut fallback);
+        round_magnitudes(code, mode, signed);
     }
     // Inexact lanes: dropped product bits at E >= 15, a nonzero magnitude
     // below one. Reuse BAD's complement: recompute the below-one lanes.
@@ -255,9 +254,82 @@ fn emit_to(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding, 
         packed(code, Host::Xor, RESULT, SCRATCH);
         packed(code, Host::SubWord, RESULT, SCRATCH);
     }
+    saturate(code, signed);
     commit_inexact(code);
     write_halves(code, register, shape, RESULT);
     finish(code, fallback, pc);
+}
+
+/// `lanes` = the words of INPUT that saturate: NaNs and infinities, and
+/// |x| >= 2^15 (signed) or a negative x <= -1 (unsigned). Clobbers the
+/// `scratch` registers and EAX.
+fn saturated_lanes(code: &mut Code, signed: bool, lanes: u8, scratch: [u8; 3]) {
+    let [constant, negative, exponent] = scratch;
+    packed(code, Host::MoveAligned, exponent, INPUT);
+    ShiftOpcode::LeftWord.emit(code, exponent, 1);
+    ShiftOpcode::RightWord.emit(code, exponent, HALF_FRACTION_BITS + 1);
+    if signed {
+        word_constant(code, constant, (HALF_EXPONENT_BIAS + 14) as u16);
+        packed(code, Host::MoveAligned, lanes, exponent);
+        packed(code, Host::GreaterWord, lanes, constant);
+    } else {
+        word_constant(code, constant, (HALF_EXPONENT_BIAS - 1) as u16);
+        packed(code, Host::MoveAligned, lanes, exponent);
+        packed(code, Host::GreaterWord, lanes, constant);
+        packed(code, Host::MoveAligned, negative, INPUT);
+        ShiftOpcode::ArithmeticWord.emit(code, negative, 15);
+        packed(code, Host::And, lanes, negative);
+        word_constant(code, constant, HALF_EXPONENT_ALL_ONES as u16);
+        packed(code, Host::EqualWord, exponent, constant);
+        packed(code, Host::Or, lanes, exponent);
+    }
+}
+
+/// Replace RESULT's saturating lanes ([`saturated_lanes`]) by Arm's
+/// values: a NaN converts to zero, a negative input to the minimum, a
+/// positive one to the maximum; and add IOC when R8D is nonzero. Clobbers
+/// XMM2 to XMM6 and EAX.
+fn saturate(code: &mut Code, signed: bool) {
+    const LANES: u8 = 2;
+    const VALUE: u8 = 3;
+    const NAN: u8 = 4;
+    const SCRATCH: u8 = 5;
+    const EXPONENT: u8 = 6;
+    saturated_lanes(code, signed, LANES, [SCRATCH, NAN, EXPONENT]);
+    // NAN = a magnitude above the infinity's.
+    packed(code, Host::MoveAligned, NAN, INPUT);
+    ShiftOpcode::LeftWord.emit(code, NAN, 1);
+    ShiftOpcode::RightWord.emit(code, NAN, 1);
+    word_constant(code, SCRATCH, 0x7c00);
+    packed(code, Host::GreaterWord, NAN, SCRATCH);
+    packed(code, Host::MoveAligned, VALUE, INPUT);
+    ShiftOpcode::ArithmeticWord.emit(code, VALUE, 15);
+    if signed {
+        // 0x7fff, or 0x8000 for a negative input.
+        word_constant(code, SCRATCH, 0x7fff);
+        packed(code, Host::Xor, VALUE, SCRATCH);
+        packed(code, Host::AndNot, NAN, VALUE);
+        packed(code, Host::MoveAligned, VALUE, NAN);
+    } else {
+        // 0xffff for +infinity, else zero.
+        packed(code, Host::Or, VALUE, NAN);
+        packed(code, Host::EqualWord, SCRATCH, SCRATCH);
+        packed(code, Host::Xor, VALUE, SCRATCH);
+    }
+    packed(code, Host::And, VALUE, LANES);
+    packed(code, Host::AndNot, LANES, RESULT);
+    packed(code, Host::Or, LANES, VALUE);
+    packed(code, Host::MoveAligned, RESULT, LANES);
+    code.asm().test(Size::Dword, R8, R8);
+    let valid = branch(code, Condition::Zero);
+    code.asm().alu_imm8(
+        Alu::Or,
+        Size::Dword,
+        super::numerical::state(core::mem::offset_of!(crate::GuestState, fpsr)),
+        INVALID as i8,
+    );
+    let end = code.len();
+    resolve(code, valid, end);
 }
 
 /// Add one to the truncated magnitudes in RESULT where `mode` rounds them
@@ -272,13 +344,9 @@ fn emit_to(code: &mut Code, operand: &IntegerConversion, mode: IntegerRounding, 
 /// (0x3800) meets the same thresholds, and on the plain magnitude for the
 /// directed roundings. No rounded magnitude leaves the integer: fractions
 /// exist only below 2^10. An unsigned lane that is negative with a nonzero
-/// rounded magnitude (IOC) takes the helper.
-fn round_magnitudes(
-    code: &mut Code,
-    mode: IntegerRounding,
-    signed: bool,
-    fallback: &mut Vec<usize>,
-) {
+/// rounded magnitude converts to zero with IOC (R8D), and no IXC: its
+/// magnitude in XMM2 becomes zero.
+fn round_magnitudes(code: &mut Code, mode: IntegerRounding, signed: bool) {
     const MAGNITUDE: u8 = 2;
     const EXPONENT: u8 = 3;
     const UP: u8 = 4;
@@ -342,7 +410,13 @@ fn round_magnitudes(
         packed(code, Host::Xor, EXPONENT, EXPONENT);
         packed(code, Host::EqualWord, EXPONENT, RESULT);
         packed(code, Host::AndNot, EXPONENT, SCRATCH);
-        fallback_if_any(code, EXPONENT, fallback);
+        Host::ByteSignMask.register(code, 0, EXPONENT, TargetCpu::Baseline);
+        code.asm().alu(Alu::Or, Size::Dword, R8, Rax);
+        packed(code, Host::MoveAligned, SCRATCH, EXPONENT);
+        packed(code, Host::AndNot, SCRATCH, RESULT);
+        packed(code, Host::MoveAligned, RESULT, SCRATCH);
+        packed(code, Host::AndNot, EXPONENT, MAGNITUDE);
+        packed(code, Host::MoveAligned, MAGNITUDE, EXPONENT);
     }
 }
 
