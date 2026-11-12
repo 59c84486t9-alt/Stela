@@ -680,8 +680,9 @@ fn fused_nan_operands_keep_arm_negation_signs() {
 
 /// FZ (with IDC) and FIZ (without) flush subnormal inputs inline, ahead of
 /// NaN and division-by-zero handling; under FIZ an inexact subnormal result stays
-/// inline with UFC, while under FZ a result Arm flushes takes the helper,
-/// leaving the state unchanged.
+/// inline with UFC, and under FZ a product Arm flushes completes inline as
+/// the signed zero with UFC, while a fused one takes the helper, leaving
+/// the state unchanged.
 #[test]
 fn flushed_inputs_complete_inline_and_flushed_results_exit() {
     const SUBNORMAL: u64 = 0x0000_0003;
@@ -720,7 +721,7 @@ fn flushed_inputs_complete_inline_and_flushed_results_exit() {
         (add, FPCR_FZ, [QUIET_NAN, SUBNORMAL, 0], true),
         // An inexact subnormal product: UFC under FIZ, flushed under FZ.
         (multiply, FPCR_FIZ, [MINIMUM_ODD, HALF, 0], true),
-        (multiply, FPCR_FZ, [MINIMUM_ODD, HALF, 0], false),
+        (multiply, FPCR_FZ, [MINIMUM_ODD, HALF, 0], true),
         // A flushed addend beside a normal product.
         (fmla, FPCR_FZ, [ONE, HALF, SUBNORMAL], true),
         // A product Arm flushes to zero.

@@ -17,7 +17,6 @@ mod half_tests;
 ))]
 mod tiny_tests;
 use super::super::isa::ShiftOpcode;
-use super::numerical::reject_flushed_underflow;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, FPSR_UNDERFLOW,
     INPUT_MINIMUM_EXPONENT, Input, LEFT_VECTOR, NanRegisters, RESULT_MINIMUM_EXPONENT,
@@ -32,6 +31,7 @@ use super::numerical::{
     small_lanes, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
     vector_normal_or_zero_range, vector_ordered_range, zero_product_check,
 };
+use super::numerical::{clear_environment_status, float_lanes, reject_flushed_underflow};
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
     GuestAddress, TargetCpu,
@@ -455,8 +455,8 @@ fn tiny_product_status(
 /// input, which Arm's NaN selection needs) and invalid status take the
 /// helper. Returns the jump to the common result tail. Otherwise FZ or FIZ
 /// (AH clear) flush subnormal inputs to their signed zeros, FZ adding IDC
-/// to R11D, which the caller commits with the result, and the caller's
-/// checks follow.
+/// to R11D, which the caller commits with the result; under FZ tiny sums
+/// and products flush ([`flush_tiny_results`]).
 fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<usize>) -> usize {
     code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
     test_control(code, FPCR_AH);
@@ -468,6 +468,16 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
     }
     let flushed = code.len();
     resolve(code, unflushed, flushed);
+    // The flushed left input, for the tiny results' checks.
+    let saved = if right == RIGHT_VECTOR {
+        PAIRED_RIGHT
+    } else {
+        RIGHT_VECTOR
+    };
+    let divide = operand.operation == BinaryOperation::Divide;
+    if !divide {
+        packed(code, Host::MoveAligned, saved, LEFT_VECTOR);
+    }
     environment(code);
     select_input_nans(
         code,
@@ -503,12 +513,16 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
         minimum_normal_lanes(code, operand.format, LEFT_VECTOR, MINIMUM_SCRATCH);
         packed(code, Host::Or, checked, MINIMUM_SCRATCH[0]);
     }
-    test_control(code, FPCR_FZ);
-    let unflushing = branch(code, Condition::Zero);
-    small_lanes(code, operand.format, LEFT_VECTOR, SMALL_SCRATCH);
-    packed(code, Host::Or, checked, SMALL_SCRATCH[0]);
-    let classified = code.len();
-    resolve(code, unflushing, classified);
+    if divide {
+        test_control(code, FPCR_FZ);
+        let unflushing = branch(code, Condition::Zero);
+        small_lanes(code, operand.format, LEFT_VECTOR, SMALL_SCRATCH);
+        packed(code, Host::Or, checked, SMALL_SCRATCH[0]);
+        let classified = code.len();
+        resolve(code, unflushing, classified);
+    } else {
+        flush_tiny_results(code, operand, saved, right);
+    }
     Host::DwordSignMask.register(code, Gpr::Rax as u8, checked, TargetCpu::Baseline);
     restore_environment(code);
     helper.push(reject_exceptional_lanes(
@@ -524,6 +538,107 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
     let strict_start = code.len();
     resolve(code, strict, strict_start);
     done
+}
+
+/// Under FPCR.FZ (AH clear) Arm flushes a sum or product tiny before
+/// rounding to the zero of its sign, with UFC alone. In the private
+/// environment, after the operation: a nonzero result below the minimum
+/// normal is tiny, and so is a zero product of nonzero inputs (`saved`
+/// holds the flushed left input), which the host rounded to zero. A product
+/// rounded to the minimum normal is tiny exactly when inexact, which only
+/// the host's underflow status tells: [`reject_flushed_underflow`] sends
+/// it to the helper. A sum tiny before rounding is exact. The flushed lanes
+/// add UFC to R11D and give up their host status: a scalar has none left,
+/// and a vector reruns the operation with those lanes' inputs zero for the
+/// other lanes' status. Clobbers XMM2, XMM5, XMM7, `saved`, `right` and
+/// EAX.
+fn flush_tiny_results(code: &mut Code, operand: &Operand, saved: u8, right: u8) {
+    const TINY: u8 = 2;
+    const SCRATCH: u8 = 5;
+    const ZERO: u8 = 7;
+    const EQUAL: u8 = 0;
+    const LESS: u8 = 1;
+    const NOT_EQUAL: u8 = 4;
+    let format = operand.format;
+    let lanes = float_lanes(format, Shape::Vector128);
+    let (shift_right, shift_left) = if format == Format::Double {
+        (ShiftOpcode::RightQword, ShiftOpcode::LeftQword)
+    } else {
+        (ShiftOpcode::RightDword, ShiftOpcode::LeftDword)
+    };
+    test_control(code, FPCR_FZ);
+    let unflushing = branch(code, Condition::Zero);
+    // TINY: the result's magnitude; SCRATCH: the minimum normal.
+    packed(code, Host::EqualDword, TINY, TINY);
+    packed(code, Host::MoveAligned, SCRATCH, TINY);
+    shift_right.emit(code, TINY, SIGN_BITS);
+    packed(code, Host::And, TINY, LEFT_VECTOR);
+    shift_right.emit(code, SCRATCH, format.bits() as u8 - SIGN_BITS);
+    shift_left.emit(code, SCRATCH, format.fraction_bits() as u8);
+    packed(code, Host::Xor, ZERO, ZERO);
+    code.asm()
+        .float_compare(lanes, ZERO, Rm::Xmm(TINY), NOT_EQUAL);
+    code.asm()
+        .float_compare(lanes, TINY, Rm::Xmm(SCRATCH), LESS);
+    packed(code, Host::And, TINY, ZERO);
+    if matches!(
+        operand.operation,
+        BinaryOperation::Multiply
+            | BinaryOperation::NegatedMultiply
+            | BinaryOperation::MultiplyExtended
+    ) {
+        // Zero products of nonzero inputs.
+        packed(code, Host::Xor, ZERO, ZERO);
+        packed(code, Host::MoveAligned, SCRATCH, ZERO);
+        code.asm()
+            .float_compare(lanes, SCRATCH, Rm::Xmm(saved), NOT_EQUAL);
+        code.asm()
+            .float_compare(lanes, ZERO, Rm::Xmm(right), NOT_EQUAL);
+        packed(code, Host::And, SCRATCH, ZERO);
+        packed(code, Host::Xor, ZERO, ZERO);
+        code.asm()
+            .float_compare(lanes, ZERO, Rm::Xmm(LEFT_VECTOR), EQUAL);
+        packed(code, Host::And, SCRATCH, ZERO);
+        packed(code, Host::Or, TINY, SCRATCH);
+    }
+    if operand.shape == Shape::Scalar {
+        // The upper lanes are not results.
+        let upper = (u128::BITS - format.bits()) as u8 / u8::BITS as u8;
+        ShiftOpcode::LeftBytes.emit(code, TINY, upper);
+        ShiftOpcode::RightBytes.emit(code, TINY, upper);
+    }
+    Host::DwordSignMask.register(code, Gpr::Rax as u8, TINY, TargetCpu::Baseline);
+    code.asm().test(Size::Dword, Gpr::Rax, Gpr::Rax);
+    let none = branch(code, Condition::Zero);
+    // The flushed lanes keep their sign alone.
+    packed(code, Host::EqualDword, SCRATCH, SCRATCH);
+    shift_right.emit(code, SCRATCH, SIGN_BITS);
+    packed(code, Host::And, SCRATCH, TINY);
+    packed(code, Host::AndNot, SCRATCH, LEFT_VECTOR);
+    packed(code, Host::MoveAligned, LEFT_VECTOR, SCRATCH);
+    code.asm()
+        .alu_imm32(Alu::Or, Size::Dword, Gpr::R11, i32::from(FPSR_UNDERFLOW));
+    if operand.shape != Shape::Scalar {
+        packed(code, Host::MoveAligned, ZERO, TINY);
+        packed(code, Host::AndNot, ZERO, saved);
+        packed(code, Host::MoveAligned, LEFT_VECTOR, ZERO);
+        packed(code, Host::AndNot, TINY, right);
+        packed(code, Host::MoveAligned, right, TINY);
+        clear_environment_status(code);
+        emit_opcode(
+            code,
+            format,
+            operand.shape,
+            arithmetic_opcode(operand.operation),
+            right,
+        );
+        packed(code, Host::MoveAligned, LEFT_VECTOR, SCRATCH);
+    } else {
+        clear_environment_status(code);
+    }
+    let end = code.len();
+    resolve(code, none, end);
+    resolve(code, unflushing, end);
 }
 
 /// A sticky path's open branches ([`sticky_path`]).

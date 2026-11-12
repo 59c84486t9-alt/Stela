@@ -195,8 +195,10 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     // operations included, but FMULX's infinity times zero (an exact two,
     // for which the host raises invalid) and a minimum normal quotient
     // (the host may find its tininess after rounding).
-    // FZ and FIZ flush the inputs first; under FZ a result Arm flushes
-    // (UFC) or the host's minimum normal exits too.
+    // FZ and FIZ flush the inputs first. Under FZ a tiny sum or product
+    // flushes inline; a product rounded to the minimum normal from below
+    // exits, and a quotient Arm flushes (UFC) or the host's minimum normal
+    // quotient.
     if state.fpcr & FPCR_AH == 0 {
         let flush_inputs = if state.fpcr & FPCR_FZ != 0 {
             state.fpcr & !FPCR_FZ | FPCR_FIZ
@@ -222,7 +224,11 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
                 && (operand.operation != BinaryOperation::Divide
                     || outcome.bits & !sign_mask(format) != minimum)
                 && !(state.fpcr & FPCR_FZ != 0
-                    && (outcome.exceptions & UNDERFLOW != 0 || small == minimum))
+                    && if operand.operation == BinaryOperation::Divide {
+                        outcome.exceptions & UNDERFLOW != 0 || small == minimum
+                    } else {
+                        small == minimum && unflushed.exceptions & UNDERFLOW != 0
+                    })
         });
     }
     // FZ or FIZ with AH clear flush subnormal inputs (FZ raising IDC)

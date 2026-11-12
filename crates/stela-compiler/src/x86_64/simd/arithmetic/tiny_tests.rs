@@ -2,7 +2,9 @@
 //! path's known-underflow check) against the reference arithmetic, on every
 //! target the host runs: every inline completion matches the reference in
 //! its lanes and FPSR, every exit leaves the state unchanged, and covered
-//! products must complete inline.
+//! products must complete inline: under FZ too, unless a lane rounds to
+//! the minimum normal from below (tiny exactly when inexact, which the
+//! host's status does not tell per lane).
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -187,7 +189,17 @@ fn tiny_products_match_the_reference() {
                             .iter()
                             .map(|&(left, right)| evaluate(format, operation, fpcr, left, right))
                             .collect();
-                        let covered = fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_FZ | FPCR_AH) == 0
+                        let minimum_normal = 1u64 << format.fraction_bits();
+                        let rounds_to_minimum = inputs.iter().any(|&(left, right)| {
+                            let unflushed =
+                                evaluate(format, operation, fpcr & !FPCR_FZ, left, right);
+                            unflushed.is_ok_and(|outcome| {
+                                outcome.bits & !(1 << (format.bits() - 1)) == minimum_normal
+                                    && outcome.exceptions & UNDERFLOW != 0
+                            })
+                        });
+                        let covered = fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0
+                            && (fpcr & FPCR_FZ == 0 || !rounds_to_minimum)
                             && inputs
                                 .iter()
                                 .zip(&outcomes)
@@ -240,4 +252,88 @@ fn tiny_products_match_the_reference() {
     }
     assert!(inline > 50_000, "{inline}");
     assert!(tiny_inline > 10_000, "{tiny_inline}");
+}
+
+/// Sums and differences of values near the minimum normal under FZ: tiny
+/// results (exact on the host) flush to signed zeros with UFC alone, inline
+/// on every target, with the other lanes' inexact status kept.
+#[test]
+fn tiny_sums_flush_inline_under_fz() {
+    const SUMS: &[(u32, BinaryOperation, Format, usize)] = &[
+        (0x4e20_d400, BinaryOperation::Add, Format::Single, 4),
+        (0x4ea0_d400, BinaryOperation::Subtract, Format::Single, 4),
+        (0x4e60_d400, BinaryOperation::Add, Format::Double, 2),
+        (0x1e20_2800, BinaryOperation::Add, Format::Single, 1),
+        (0x1e60_3800, BinaryOperation::Subtract, Format::Double, 1),
+    ];
+    let mut random = Random(0x0dd5_eed5_1234_5678);
+    let mut flushed = 0usize;
+    for target in targets() {
+        for &(base, operation, format, lanes) in SUMS {
+            let word = base | M << 16 | N << 5 | D;
+            let code = compile(word, target);
+            let width = format.bits() as usize;
+            let minimum = 1 - format.exponent_bias() as i32;
+            for _ in 0..2000 {
+                let inputs: Vec<(u64, u64)> = (0..lanes)
+                    .map(|_| {
+                        let left =
+                            normal(format, minimum + (random.next() % 3) as i32, &mut random);
+                        let right = match random.next() % 4 {
+                            // Near cancellation: a tiny or zero result.
+                            0 | 1 => {
+                                let flip = if operation == BinaryOperation::Add {
+                                    1 << (format.bits() - 1)
+                                } else {
+                                    0
+                                };
+                                (left ^ flip)
+                                    .wrapping_add(random.next() % 8)
+                                    .wrapping_sub(4)
+                            }
+                            2 => normal(format, (random.next() % 40) as i32 - 20, &mut random),
+                            _ => normal(format, minimum + (random.next() % 30) as i32, &mut random),
+                        };
+                        (left, right)
+                    })
+                    .collect();
+                let pack = |pick: &dyn Fn(&(u64, u64)) -> u64| {
+                    let mut limbs = [0u64; 2];
+                    for (lane, pair) in inputs.iter().enumerate() {
+                        let bit = lane * width;
+                        limbs[bit / 64] |= pick(pair) << (bit % 64);
+                    }
+                    limbs
+                };
+                for fpcr in [FPCR_FZ, FPCR_FZ | 2 << FPCR_ROUNDING_SHIFT] {
+                    let mut initial = GuestState {
+                        fpcr,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    initial.v[N as usize] = pack(&|pair| pair.0);
+                    initial.v[M as usize] = pack(&|pair| pair.1);
+                    initial.v[D as usize] = [u64::MAX, u64::MAX];
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    assert_eq!(exit, RETURN, "{word:08x} {inputs:x?} {fpcr:#x} {target:?}");
+                    let mut expected = initial.clone();
+                    let mut limbs = [0u64; 2];
+                    for (lane, &(left, right)) in inputs.iter().enumerate() {
+                        let outcome = evaluate(format, operation, fpcr, left, right).unwrap();
+                        expected.fpsr |= outcome.exceptions;
+                        flushed += usize::from(outcome.exceptions & UNDERFLOW != 0);
+                        let bit = lane * width;
+                        limbs[bit / 64] |= outcome.bits << (bit % 64);
+                    }
+                    expected.v[D as usize] = limbs;
+                    assert_eq!(
+                        actual, expected,
+                        "{word:08x} {inputs:x?} {fpcr:#x} {target:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(flushed > 1000, "{flushed}");
 }
