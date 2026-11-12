@@ -6,6 +6,7 @@
 //! translation's) is installed as it is. A block compiled anew is offered
 //! back; its stored form is its code with the relocations its compiler
 //! recorded made relative to its page ([`stored_entry`]).
+use super::known_keys::Known;
 use super::recovery::StoredOrigin;
 use super::{Devices, FETCH_PAGE, Host, Machine, Preparation, Variant};
 use crate::translations::{Digest, Entry, PAGE_BYTES, Record};
@@ -213,6 +214,11 @@ pub trait Translations {
     fn kept_pages(&mut self) -> Option<usize> {
         None
     }
+    /// The page keys the board's PEs keep in all, when the store sizes them
+    /// ([`super::known_keys::MAX_SLOTS`] at most).
+    fn known_pages(&mut self) -> Option<usize> {
+        None
+    }
 }
 
 /// A machine's use of its store, reported to it ([`Translations::note`]).
@@ -351,23 +357,6 @@ pub(super) const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
 pub(super) const KEPT_PAGES: usize = 4;
 
-/// Known page keys per kept page: a page let go keeps its key this much
-/// longer, at a few dozen bytes instead of its 4 KiB.
-const KNOWN_PER_KEPT: usize = 8;
-
-/// The page key of a fetch page read before, and a check of the bytes it
-/// was the hash of ([`page_check`]): a page read again whose bytes give the
-/// same check takes this key instead of hashing them. A key the store held
-/// no record for is not looked up again: the store's records are the pack
-/// the boot read, which a boot does not change.
-#[derive(Clone, Copy)]
-pub(super) struct KnownKey {
-    frame: u64,
-    check: u64,
-    key: Digest,
-    absent: bool,
-}
-
 /// A 64-bit check of a fetch page: four lanes, each step of which is a
 /// bijection of the lane, so a page that differs in one word always
 /// checks differently; other changes collide with a chance of 2^-64. A
@@ -448,7 +437,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.spare_pages.push(bytes);
             return None;
         }
-        let (key, absent) = self.page_key(frame, &bytes);
+        let (key, check, absent) = self.page_key(frame, &bytes);
         let record = match absent {
             true => {
                 self.statistics.known_absent += 1;
@@ -456,8 +445,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             false => self.host.translations()?.record(&key),
         };
-        if record.is_none() {
-            self.note_absent(frame, &key);
+        if record.is_none() && !absent {
+            self.note_absent(frame, check, key);
         }
         let ticks = self.host.counter().wrapping_sub(reading);
         if let Some(translations) = self.host.translations() {
@@ -483,57 +472,39 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Some((key, record))
     }
 
-    /// The page key of `bytes`, the fetch page at `frame`: the key it had
-    /// when read last, while its bytes give the same check, else their
-    /// SHA-256, which is kept for the next read; and whether the store held
-    /// no record for the key it had.
-    fn page_key(&mut self, frame: u64, bytes: &[u8; PAGE_BYTES]) -> (Digest, bool) {
+    /// The page key of `bytes`, the fetch page at `frame`, and their check:
+    /// the key the board's PEs knew for the page while its bytes give the
+    /// same check ([`super::known_keys`]), else their SHA-256, which is kept
+    /// for the next read; and whether the store held no record for it. A
+    /// key the store held no record for is not looked up again: the store's
+    /// records are the pack the boot read, which a boot does not change.
+    fn page_key(&mut self, frame: u64, bytes: &[u8; PAGE_BYTES]) -> (Digest, u64, bool) {
         let check = page_check(bytes);
-        let known = (self.kept_pages * KNOWN_PER_KEPT).next_power_of_two();
-        if self.known_keys.len() != known {
-            self.known_keys = alloc::vec![None; known];
-        }
-        let slot = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known];
-        if let Some(held) = slot
-            && held.frame == frame
-            && held.check == check
-        {
+        if let Some(known) = self.code.known_keys.get(self.known_slots, frame, check) {
             self.statistics.known_keys += 1;
-            return (held.key, held.absent);
+            return (known.key, check, known.absent);
         }
         let key = Digest::of(bytes.as_slice());
-        *slot = Some(KnownKey {
-            frame,
-            check,
-            key,
-            absent: false,
-        });
-        (key, false)
+        let known = Known { key, absent: false };
+        self.code
+            .known_keys
+            .put(self.known_slots, frame, check, known);
+        (key, check, false)
     }
 
-    /// Note that the store holds no record for `key`, the known key of the
-    /// page at `frame`.
-    fn note_absent(&mut self, frame: u64, key: &Digest) {
-        let known = self.known_keys.len();
-        if known != 0
-            && let Some(held) = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known]
-            && held.frame == frame
-            && held.key == *key
-        {
-            held.absent = true;
-        }
+    /// Note that the store holds no record for `key`, the key of the page
+    /// at `frame` whose bytes check `check`.
+    fn note_absent(&mut self, frame: u64, check: u64, key: Digest) {
+        let known = Known { key, absent: true };
+        self.code
+            .known_keys
+            .put(self.known_slots, frame, check, known);
     }
 
     /// Forget the known key of the page at `frame`, whose code an IC IVAU
     /// made stale.
     pub(super) fn forget_known_key(&mut self, frame: u64) {
-        let known = self.known_keys.len();
-        if known != 0 {
-            let slot = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known];
-            if slot.is_some_and(|held| held.frame == frame) {
-                *slot = None;
-            }
-        }
+        self.code.known_keys.forget(frame);
     }
 
     /// What a block of the record `key`, in the fetch page at `physical`
@@ -606,6 +577,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .and_then(|translations| translations.kept_pages())
             .unwrap_or(KEPT_PAGES);
         self.kept_pages = (total / machines.max(1)).max(KEPT_PAGES.div_ceil(16));
+        self.known_slots = self
+            .host
+            .translations()
+            .and_then(|translations| translations.known_pages())
+            .unwrap_or(super::known_keys::DEFAULT_SLOTS);
     }
 
     /// Let the least recently used quarter of the kept pages go, at least

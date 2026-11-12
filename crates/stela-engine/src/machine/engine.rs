@@ -44,6 +44,7 @@ mod guarded;
 mod install_census;
 pub mod installed_code;
 mod interrupts;
+mod known_keys;
 #[cfg(all(feature = "std", feature = "native-profile"))]
 pub mod metrics;
 mod monitor;
@@ -801,9 +802,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// of as many successors take ([`Machine::successor_box`]).
     successor_scratch: Vec<Successor>,
     successor_boxes: [Vec<Box<[Successor]>>; SUCCESSOR_BOXES],
-    /// The page keys of fetch pages read before, kept after their bytes
-    /// ([`stored::KnownKey`]), allocated at the first.
-    known_keys: Vec<Option<stored::KnownKey>>,
+    /// The slots of the board's known page keys ([`known_keys`]), sized
+    /// by the store.
+    known_slots: usize,
     /// Why blocks were installed ([`install_census`]); the census exists
     /// while step timing is on.
     install_causes: InstallCauses,
@@ -1329,7 +1330,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             relocated: Default::default(),
             successor_scratch: Vec::new(),
             successor_boxes: Default::default(),
-            known_keys: Vec::new(),
+            known_slots: known_keys::DEFAULT_SLOTS,
             install_causes: InstallCauses::default(),
             install_stream: board::YOUNG,
             held_places: Vec::new(),

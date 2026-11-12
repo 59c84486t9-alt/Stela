@@ -811,6 +811,13 @@ impl Translations for Shared {
             pages => Some(pages),
         }
     }
+
+    /// A 128th of the heap in page keys of 56 bytes: 2^18 keys (14.7 MB,
+    /// the engine's most) from a 1.9 GB heap, enough for twice the distinct
+    /// code pages a desktop boot reads.
+    fn known_pages(&mut self) -> Option<usize> {
+        Some(crate::ALLOCATOR.usage().total / 128 / 56)
+    }
 }
 
 /// The store the engine uses, if the loader read one or the PEs share one.

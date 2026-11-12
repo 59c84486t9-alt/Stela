@@ -195,6 +195,8 @@ pub(super) struct Code {
     /// Proven entries of blocks compiled at more than one address
     /// ([`super::rebase`]).
     pub(super) rebases: super::rebase::Rebases,
+    /// The page keys of fetch pages its PEs read ([`super::known_keys`]).
+    pub(super) known_keys: super::known_keys::KnownKeys,
 }
 
 /// A part's blocks being taken away page by page, in steps of bounded
@@ -654,6 +656,7 @@ impl Code {
             tagged: Default::default(),
             two_sided: Default::default(),
             rebases: super::rebase::Rebases::new(super::rebase::BOUND),
+            known_keys: Default::default(),
         }
     }
 

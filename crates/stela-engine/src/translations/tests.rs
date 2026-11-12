@@ -652,6 +652,12 @@ fn the_translator_id_covers_every_engine_item_its_inputs_name() {
                 "super::Machine",
                 "super::Variant",
                 "super::recovery::StoredOrigin",
+                // Consumers: the page keys the board's PEs memoized, each
+                // the SHA-256 of a page's bytes, which a compile never reads.
+                "super::known_keys",
+                "super::known_keys::DEFAULT_SLOTS",
+                "super::known_keys::Known",
+                "super::known_keys::MAX_SLOTS",
                 "crate::translations",
                 "crate::translations::Digest",
                 "crate::translations::PAGE_BYTES",

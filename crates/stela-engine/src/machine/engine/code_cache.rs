@@ -1590,7 +1590,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // and goes as the ring reaches it.
             self.forget_shared_code();
             self.pages.clear();
-            self.known_keys.fill(None);
+            self.code.known_keys.forget_all();
             self.scalable_leaves.clear();
             self.code_generation += 1;
             self.statistics.code_discards[cause as usize] += 1;
@@ -1608,7 +1608,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.spare_pages = Vec::new();
         }
         self.pages.clear();
-        self.known_keys.fill(None);
+        self.code.known_keys.forget_all();
         self.scalable_leaves.clear();
         self.code_generation += 1;
         self.statistics.code_discards[cause as usize] += 1;

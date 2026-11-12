@@ -439,6 +439,52 @@ fn a_page_let_go_and_read_again_takes_its_known_key_unless_it_changed() {
 }
 
 #[test]
+#[ignore = "manual: opt-in"]
+fn page_hash_costs() {
+    // What a fetch page read again costs: its check, and the SHA-256 a key
+    // not known takes.
+    let mut page = Box::new([0u8; PAGE_BYTES]);
+    for (at, byte) in page.iter_mut().enumerate() {
+        *byte = (at as u32).wrapping_mul(2_654_435_761).to_le_bytes()[3];
+    }
+    const ROUNDS: u32 = 100_000;
+    let started = std::time::Instant::now();
+    let mut checks = 0u64;
+    for round in 0..ROUNDS {
+        page[0] = round as u8;
+        checks ^= super::page_check(&page);
+    }
+    let check = started.elapsed().as_nanos() / u128::from(ROUNDS);
+    let started = std::time::Instant::now();
+    let mut keys = 0u8;
+    for round in 0..ROUNDS {
+        page[0] = round as u8;
+        keys ^= Digest::of(page.as_slice()).0[0];
+    }
+    let hash = started.elapsed().as_nanos() / u128::from(ROUNDS);
+    let keys_table = crate::machine::engine::known_keys::KnownKeys::default();
+    let started = std::time::Instant::now();
+    for round in 0..u64::from(ROUNDS) {
+        let frame = (round % 200_000) << 12;
+        if keys_table.get(1 << 18, frame, round).is_none() {
+            keys_table.put(
+                1 << 18,
+                frame,
+                round,
+                crate::machine::engine::known_keys::Known {
+                    key: Digest([round as u8; 32]),
+                    absent: false,
+                },
+            );
+        }
+    }
+    let table = started.elapsed().as_nanos() / u128::from(ROUNDS);
+    std::println!(
+        "4 KiB page: check {check} ns, SHA-256 {hash} ns, known-key table {table} ns ({checks:x} {keys})"
+    );
+}
+
+#[test]
 fn a_page_read_again_whose_record_was_absent_is_not_looked_up_again() {
     // A block in each of five pages: add x0, x0, #1; svc #0.
     const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
