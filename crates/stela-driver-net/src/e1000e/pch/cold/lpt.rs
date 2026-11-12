@@ -4,8 +4,9 @@
 //! Unmanaged LPT I217 LM/V (153a/153b) and I218 LM2/V2 (15a0/15a1).
 //! These exact IDs are exempted by the donor's ULP entry/exit helpers and do
 //! not select the LPT-LP/I218-3 K1 hang sequence. No I219/SPT or other I218 is
-//! admitted by similarity of PHY IDs. Initial MAC/PHY PCIe mode is required;
-//! SMBus switching, LANPHYPC recovery and managed firmware remain separate.
+//! admitted by similarity of PHY IDs. A PHY left in SMBus mode is woken as
+//! `e1000_init_phy_workarounds_pchlan` wakes it, with the Intel ME's PHY
+//! reset block honoured.
 use super::{
     Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, nvm, spt,
 };
@@ -168,24 +169,25 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
 
 impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     fn initialize_lpt(&mut self) -> Result<(), Error> {
-        self.qualify()?;
-        if self.read(CTRL_EXT)? & FORCE_SMBUS != 0 {
-            return Err(Error::SmbusMode);
-        }
-        self.identity = self.phy.identify()?;
-        if self.phy.read(Register::new(769, 23)?)? & 1 != 0 {
-            return Err(Error::SmbusMode);
-        }
         self.nvm.validate()?;
         self.station = self.nvm.station()?;
+        // These IDs need no ULP exit (`e1000_disable_ulp_lpt_lp` returns
+        // before it); the rest of `e1000_init_phy_workarounds_pchlan` holds.
+        let managed = self.managed()?;
         self.gate(true)?;
-        self.phy_reset()?;
-        self.configuration_done()?;
-        self.qualify()?;
+        self.recover_phy_access(managed)?;
+        self.identity = self.phy.identify()?;
+        if !managed
+            && (self.read(CTRL_EXT)? & FORCE_SMBUS != 0
+                || self.phy.read(Register::new(769, 23)?)? & 1 != 0)
+        {
+            return Err(Error::SmbusMode);
+        }
+        self.reset_phy_after_workarounds()?;
         self.identity = self.phy.identify()?;
         self.write(super::PBA, super::RX_ALLOCATION_KIB)?;
-        self.global_reset()?;
-        self.configuration_done()?;
+        let reset = self.global_reset()?;
+        self.configuration_done(reset)?;
         self.post_reset()?;
         self.write(super::IMC, u32::MAX)?;
         self.read(super::ICR)?;

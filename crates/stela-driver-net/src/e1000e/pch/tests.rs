@@ -261,27 +261,21 @@ fn wakeup_preserves_enable_and_unrelated_bits_with_extended_index() {
 }
 
 #[test]
-fn me_reset_and_occupied_semaphore_refuse_before_mutating_shared_registers() {
-    for (fw, ext, expected) in [
-        (RESET_PERMITTED | FW_VALID, 0, Fault::FirmwareOwned),
-        (0, 0, Fault::ResetBlocked),
-        (RESET_PERMITTED, SWFLAG, Fault::SemaphoreBusy),
-    ] {
-        let (mut phy, state, _) = fixture(Kind::I217);
-        state.borrow_mut().fw = fw;
-        state.borrow_mut().ext = ext;
-        assert_eq!(
-            phy.read(Register::new(0, 2).unwrap()).unwrap_err().primary,
-            expected
-        );
-        assert!(!state.borrow().operations.iter().any(|op| op[0] == 1));
-        let accesses = state.borrow().accesses;
-        assert_eq!(
-            phy.read(Register::new(0, 2).unwrap()).unwrap_err().primary,
-            Fault::Poisoned
-        );
-        assert_eq!(state.borrow().accesses, accesses);
-    }
+fn an_occupied_semaphore_refuses_before_mutating_shared_registers() {
+    let (mut phy, state, _) = fixture(Kind::I217);
+    state.borrow_mut().fw = RESET_PERMITTED;
+    state.borrow_mut().ext = SWFLAG;
+    assert_eq!(
+        phy.read(Register::new(0, 2).unwrap()).unwrap_err().primary,
+        Fault::SemaphoreBusy
+    );
+    assert!(!state.borrow().operations.iter().any(|op| op[0] == 1));
+    let accesses = state.borrow().accesses;
+    assert_eq!(
+        phy.read(Register::new(0, 2).unwrap()).unwrap_err().primary,
+        Fault::Poisoned
+    );
+    assert_eq!(state.borrow().accesses, accesses);
 }
 
 #[test]
@@ -344,9 +338,10 @@ fn bounded_mdic_failure_releases_semaphore_and_never_reuses_epoch() {
 
 #[test]
 fn exhausted_claim_keeps_timeout_and_separate_cleanup_error() {
-    // FWSM read, initial SWFLAG read, claim write, then 1000 claim polls.
+    // Initial SWFLAG read, claim write, then 1000 claim polls: the flag is
+    // shared with the ME without reading FWSM, as Linux shares it.
     // Failure at either final cleanup access must not replace that timeout.
-    for fail_at in [1003, 1004] {
+    for fail_at in [1002, 1003] {
         for failure in [Fault::Access, Fault::Removed] {
             let (mut phy, state, released) = fixture(Kind::I217);
             {
@@ -414,7 +409,7 @@ fn every_wakeup_access_failure_is_terminal_and_keeps_owner() {
 
 #[test]
 fn all_ones_is_removed_and_invalid_pages_never_alias_another_register() {
-    for at in [FWSM, EXTCNF_CTRL, MDIC] {
+    for at in [EXTCNF_CTRL, MDIC] {
         let (mut phy, state, _) = fixture(Kind::I217);
         state.borrow_mut().removed = Some(at);
         assert_eq!(

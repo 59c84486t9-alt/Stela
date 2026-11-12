@@ -49,7 +49,6 @@ pub enum Error {
     Minimum(crate::bus::pci::power::Error),
     Access,
     Removed,
-    FirmwareOwned,
     InvalidGeometry,
     InvalidDescriptor,
     Bounds,
@@ -78,7 +77,34 @@ impl Error {
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "PCH NVM: {self:?}")
+        match self {
+            Self::Minimum(error) => write!(f, "the delay clock failed ({error})"),
+            Self::Access => f.write_str("a flash register access was refused"),
+            Self::Removed => f.write_str("the adapter stopped answering (reads all ones)"),
+            Self::InvalidGeometry => f.write_str("its flash layout is invalid"),
+            Self::InvalidDescriptor => f.write_str("its flash descriptor is invalid"),
+            Self::Bounds => f.write_str("a flash read lies outside its NVM"),
+            Self::Allocation => f.write_str("memory for its NVM ran out"),
+            Self::Busy => f.write_str("its flash stays busy"),
+            Self::Timeout => f.write_str("a flash cycle did not finish"),
+            Self::Cycle(status) => write!(f, "a flash cycle failed (status {status:#06x})"),
+            Self::Followup {
+                primary: CycleFailure::Timeout,
+                observation,
+            } => write!(f, "a flash cycle did not finish, then {observation}"),
+            Self::Followup {
+                primary: CycleFailure::Status(status),
+                observation,
+            } => write!(
+                f,
+                "a flash cycle failed (status {status:#06x}), then {observation}"
+            ),
+            Self::NoValidBank => f.write_str("neither NVM bank is valid"),
+            Self::Checksum(sum) => write!(f, "its NVM checksum is wrong ({sum:#06x})"),
+            Self::RepairRequired => f.write_str("its NVM needs a repair Linux would write"),
+            Self::InvalidStation => f.write_str("its NVM holds no valid MAC address"),
+            Self::Poisoned => f.write_str("an earlier flash failure left it unusable"),
+        }
     }
 }
 impl core::error::Error for Error {}
@@ -163,9 +189,6 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
             let fw = this.io()?.read_mac32(FWSM)?;
             if fw == u32::MAX {
                 return Err(Error::Removed);
-            }
-            if fw & (1 << 15) != 0 {
-                return Err(Error::FirmwareOwned);
             }
             let value = if layout == Layout::Spt {
                 this.io()?.read_mac32(STRAP)?

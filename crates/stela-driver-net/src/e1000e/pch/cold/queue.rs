@@ -214,7 +214,6 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         Ok(())
     }
     fn configure(&mut self) -> Result<(), Error> {
-        self.controller.qualify()?;
         self.controller.write(0x5800, 0)?; // WUC: no wake ownership/profile
         self.controller.write(0x38, 0x8100)?; // VET: ordinary 802.1Q recognition
         // Real FIFO allocation must fit an ordinary frame (including metadata

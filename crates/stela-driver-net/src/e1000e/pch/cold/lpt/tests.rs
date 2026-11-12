@@ -356,18 +356,26 @@ fn config_access_failures_and_reserved_limits_refuse_before_mutation() {
     }
 }
 #[test]
-fn forced_smbus_wrong_phy_and_invalid_smbus_frequency_are_not_recovery_success() {
-    for failure in 0..4 {
+fn forced_smbus_is_left_as_linux_leaves_it_and_a_wrong_phy_or_smbus_frequency_is_refused() {
+    // `e1000_phy_is_accessible_pchlan` takes an answering PHY of an adapter
+    // the ME does not manage out of forced SMBus mode, in the MAC and PHY.
+    for forced in 0..2 {
+        let (state, _, io, timer) = fixture_lpt();
+        if forced == 0 {
+            state.borrow_mut().mac.insert(CTRL_EXT, FORCE_SMBUS);
+        } else {
+            state.borrow_mut().phy.insert((1, 769, 23), 1);
+        }
+        let controller = start_lpt(0x153b, io, timer).unwrap();
+        assert_eq!(state.borrow().mac[&CTRL_EXT] & FORCE_SMBUS, 0);
+        assert_eq!(state.borrow().phy[&(1, 769, 23)] & 1, 0);
+        drop(controller);
+    }
+    for failure in 2..4 {
         let (state, released, io, timer) = fixture_lpt();
         {
             let mut m = state.borrow_mut();
             match failure {
-                0 => {
-                    m.mac.insert(CTRL_EXT, FORCE_SMBUS);
-                }
-                1 => {
-                    m.phy.insert((1, 769, 23), 1);
-                }
                 2 => {
                     m.phy.insert((2, 0, 3), 0x93);
                 }

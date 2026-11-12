@@ -2456,6 +2456,52 @@ fn attach_platform(
 mod tests {
     use super::*;
 
+    /// The boot of issue 18: an audio controller's failure stays out of the
+    /// network account, and each adapter's line reads as plain words.
+    #[test]
+    fn the_network_account_leaves_audio_out_and_reads_plainly() {
+        use crate::bus::pci::requester::{ClaimError, FunctionRole};
+        let audio = identity(0, 3, 0x8086, 0xa2f0, 0x04_03_00);
+        let ethernet = identity(0, 6, 0x8086, 0x15b8, 0x02_00_00);
+        let wifi = identity(4, 0, 0x8086, 0x2725, 0x02_80_00);
+        let mut devices = Devices {
+            network_functions: alloc::vec![ethernet, wifi],
+            ..Devices::default()
+        };
+        let phy = crate::net::e1000e::pch::Error::from(crate::net::e1000e::pch::Fault::MdicTimeout);
+        devices.failures = alloc::vec![
+            (
+                audio.address,
+                Error::Native(ServiceError::Claim(ClaimError::UnsupportedRole(
+                    FunctionRole::Unverified
+                )))
+            ),
+            (
+                ethernet.address,
+                Error::Pch(pch::AttachError::Controller(
+                    crate::net::e1000e::pch::cold::Error::Phy(phy)
+                ))
+            ),
+            (
+                wifi.address,
+                Error::IntelWifi(net::wifi::intel::attach::AttachError::NoPinnedFirmware {
+                    family: net::wifi::intel::firmware::Family::Ax210,
+                    name: "iwlwifi-ty-a0-gf-a0-89.ucode",
+                })
+            ),
+        ];
+        let lines = devices.network_account();
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(lines[0].starts_with("0000:00:00.6 8086:15b8 Ethernet: e1000e: "));
+        assert!(lines[1].starts_with("0000:04:00.0 8086:2725 Wi-Fi: iwlwifi: "));
+        for line in &lines {
+            assert!(
+                !line.contains('{') && !line.contains("Unverified") && !line.contains("Error"),
+                "{line}"
+            );
+        }
+    }
+
     /// A function whose device never answers spends its whole budget and
     /// is recorded abandoned, with the wait it stopped at; the next
     /// function then starts with a fresh budget and answers normally.

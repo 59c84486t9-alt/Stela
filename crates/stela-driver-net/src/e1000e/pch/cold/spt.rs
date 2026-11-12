@@ -2,10 +2,11 @@
 // Copyright(c) 1999 - 2018 Intel Corporation.
 // Copyright (c) 2026 Stela contributors
 //! Initial SPT I219 LM/V (156f/1570), with the integrated flash window,
-//! unmanaged force-ULP exit and descriptor-flush status. Later I219 generations
-//! are not selected by their common I217 PHY ID. The PHY is first read after
-//! the forced ULP exit's LANPHYPC toggle, which brings it back from ULP or
-//! SMBus mode; firmware/SMM, ME ownership and other users remain excluded.
+//! forced ULP exit and descriptor-flush status. Later I219 generations are not
+//! selected by their common I217 PHY ID. The PHY is first read after the
+//! forced ULP exit, which the Intel ME performs when it manages the adapter
+//! and a LANPHYPC toggle otherwise; firmware/SMM and other users remain
+//! excluded.
 use super::{
     Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, i219, lpt,
     nvm,
@@ -152,46 +153,57 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         Ok(())
     }
     pub(super) fn initialize_i219(&mut self) -> Result<(), Error> {
-        self.qualify()?;
         self.inherited_ring_check()?;
         self.validate_nvm()?;
         self.station = self.nvm.station()?;
+        let managed = self.managed()?;
         self.gate(true)?;
         // As `e1000_init_phy_workarounds_pchlan`, force ULP off before the
         // first PHY read: a PHY the last OS left in ULP, as it does with no
-        // cable at shutdown, or behind SMBus answers no MDIO cycle until the
-        // LANPHYPC toggle. The PHY's identity is checked right after, before
-        // any reset or PHY configuration.
-        self.spt_ulp_exit()?;
+        // cable at shutdown, or behind SMBus answers no MDIO cycle until
+        // then. The ME does it on request when it manages the adapter, a
+        // LANPHYPC toggle otherwise. A PHY that still does not answer is
+        // woken as Linux does; its identity is checked right after.
+        if managed {
+            self.me_ulp_exit()?;
+        } else {
+            self.spt_ulp_exit()?;
+        }
+        self.recover_phy_access(managed)?;
         self.identity = self.phy.identify()?;
         // The donor releases SWFLAG before this hardware PHY reset. No PHY
         // transaction wrapper may span it, or the later full-chip reset.
-        self.phy_reset()?;
-        self.configuration_done()?;
+        let reset = self.reset_phy()?;
+        self.configuration_done(reset)?;
         self.post_reset()?;
         self.phy.wait_minimum(50_000)?;
-        self.qualify()?;
         self.identity = self.phy.identify()?;
-        if self.phy.read(ULP_CONFIG)? & ULP_CLEAR != 0 {
+        // The ME keeps the ULP configuration and the interconnect of an
+        // adapter it manages as it chose; Linux reads neither back then.
+        if !managed && self.phy.read(ULP_CONFIG)? & ULP_CLEAR != 0 {
             return Err(Error::UlpState);
         }
-        if self.phy.read(SMB_CONTROL)? & 1 != 0 || self.read(CTRL_EXT)? & FORCE_SMBUS != 0 {
+        if !managed
+            && (self.phy.read(SMB_CONTROL)? & 1 != 0 || self.read(CTRL_EXT)? & FORCE_SMBUS != 0)
+        {
             return Err(Error::SmbusMode);
         }
         self.mtp_initial_k1(true)?;
         // The source initialization flow follows forced ULP exit with another
         // generic PHY reset before normal MAC reset/PHY post-configuration.
-        self.phy_reset()?;
-        self.configuration_done()?;
+        let reset = self.reset_phy()?;
+        self.configuration_done(reset)?;
         self.mtp_initial_k1(false)?;
-        self.qualify()?;
+        if self.reset_blocked()? && reset {
+            return Err(Error::BlockedAfterReset);
+        }
         self.identity = self.phy.identify()?;
         self.write(super::PBA, super::RX_ALLOCATION_KIB)?;
         self.inherited_ring_check()?;
         let value = self.read(FEXTNVM11)?;
         self.write(FEXTNVM11, value | DISABLE_MULR_FIX)?;
-        self.global_reset()?;
-        self.configuration_done()?;
+        let reset = self.global_reset()?;
+        self.configuration_done(reset)?;
         self.post_reset()?;
         self.write(super::IMC, u32::MAX)?;
         self.read(super::ICR)?;

@@ -48,8 +48,8 @@ pub enum Fault {
     OutsideBar,
     Misaligned,
     Removed,
+    /// The Intel ME took a shared receive address slot this driver needs.
     FirmwareOwned,
-    ResetBlocked,
     SemaphoreBusy,
     SemaphoreTimeout,
     SemaphoreLost,
@@ -73,11 +73,35 @@ impl From<Fault> for Error {
         }
     }
 }
+impl core::fmt::Display for Fault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Minimum(error) => write!(f, "the delay clock failed ({error})"),
+            Self::Access => f.write_str("a register access was refused"),
+            Self::OutsideBar => f.write_str("a register lies outside the adapter's BAR"),
+            Self::Misaligned => f.write_str("a register access is misaligned"),
+            Self::Removed => f.write_str("the adapter stopped answering (reads all ones)"),
+            Self::FirmwareOwned => f.write_str("the Intel ME holds a shared receive address slot"),
+            Self::SemaphoreBusy => f.write_str("the PHY semaphore stays taken by firmware"),
+            Self::SemaphoreTimeout => f.write_str("the PHY semaphore was not granted"),
+            Self::SemaphoreLost => f.write_str("the PHY semaphore was lost"),
+            Self::MdicTimeout => {
+                f.write_str("the PHY does not answer on its management bus (MDIO timeout)")
+            }
+            Self::MdicResponse(response) => {
+                write!(f, "the PHY answered with an error (MDIC {response:#010x})")
+            }
+            Self::WrongPhy(id) => write!(f, "the PHY is not the expected one (ID {id:#010x})"),
+            Self::InvalidRegister => f.write_str("an invalid PHY register was named"),
+            Self::Poisoned => f.write_str("an earlier PHY failure left it unusable"),
+        }
+    }
+}
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "PCH PHY: {:?}", self.primary)?;
+        self.primary.fmt(f)?;
         if let Some(cleanup) = self.cleanup {
-            write!(f, "; cleanup: {cleanup:?}")?;
+            write!(f, ", then {cleanup}")?;
         }
         Ok(())
     }
@@ -219,16 +243,9 @@ impl<R: Registers, D: Delay> Phy<R, D> {
             .write32(at, value)
     }
 
+    /// `e1000_acquire_swflag_ich8lan`: the software flag the Intel ME
+    /// honours as well, so a managed adapter's PHY is shared through it.
     fn acquire(&mut self) -> Result<(), Error> {
-        // This first boot profile refuses ME-owned/reset-blocked
-        // hardware before any write; it does not claim coexistence with ME.
-        let fw = self.read_mac(FWSM)?;
-        if fw & FW_VALID != 0 {
-            return Err(Fault::FirmwareOwned.into());
-        }
-        if fw & RESET_PERMITTED == 0 {
-            return Err(Fault::ResetBlocked.into());
-        }
         let mut value = 0;
         let mut available = false;
         for _ in 0..100 {
@@ -392,16 +409,68 @@ impl<R: Registers, D: Delay> Phy<R, D> {
     pub fn write(&mut self, register: Register, value: u16) -> Result<(), Error> {
         self.transaction(|this| this.access(register, Some(value)).map(|_| ()))
     }
+    /// Change `register` of a PHY that may not answer: a PHY that does not
+    /// answer is an answer (`false`), not a failure of the transport.
+    pub fn modify_if_answering(
+        &mut self,
+        register: Register,
+        clear: u16,
+        set: u16,
+    ) -> Result<bool, Error> {
+        self.transaction(|this| {
+            let changed = (|| {
+                let value = this.access(register, None)?;
+                this.access(register, Some((value & !clear) | set))
+            })();
+            match changed {
+                Ok(_) => Ok(true),
+                Err(Fault::MdicTimeout | Fault::MdicResponse(_)) => Ok(false),
+                Err(error) => Err(error),
+            }
+        })
+    }
+    /// `e1000_phy_is_accessible_pchlan`'s identity read: whether the PHY
+    /// answers with its ID, tried twice with MDIC retries off. A PHY that
+    /// does not answer is an answer, not a failure of the transport.
+    pub fn accessible(&mut self) -> Result<bool, Error> {
+        self.transaction(|this| {
+            let retry = core::mem::replace(&mut this.retry_enabled, false);
+            let mut found = false;
+            let mut outcome = Ok(());
+            for _ in 0..2 {
+                let read = (|| {
+                    let high = this.access(Register { page: 0, index: 2 }, None)?;
+                    let low = this.access(Register { page: 0, index: 3 }, None)?;
+                    Ok((u32::from(high) << 16) | u32::from(low))
+                })();
+                match read {
+                    Ok(raw) if raw >> 16 != 0xffff && raw & 0xffff != 0xffff => {
+                        found = raw & !0xf == this.expected_id();
+                        break;
+                    }
+                    Ok(_) | Err(Fault::MdicTimeout | Fault::MdicResponse(_)) => {}
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                }
+            }
+            this.retry_enabled = retry;
+            outcome.map(|()| found)
+        })
+    }
+    fn expected_id(&self) -> u32 {
+        match self.kind {
+            Kind::I82579 => 0x0154_0090,
+            Kind::I217 => 0x0154_00a0,
+        }
+    }
     pub fn identify(&mut self) -> Result<Identity, Error> {
         self.transaction(|this| {
             let high = this.access(Register { page: 0, index: 2 }, None)?;
             let low = this.access(Register { page: 0, index: 3 }, None)?;
             let raw = (u32::from(high) << 16) | u32::from(low);
-            let expected = match this.kind {
-                Kind::I82579 => 0x0154_0090,
-                Kind::I217 => 0x0154_00a0,
-            };
-            if raw & !0xf != expected {
+            if raw & !0xf != this.expected_id() {
                 return Err(Fault::WrongPhy(raw));
             }
             Ok(Identity {

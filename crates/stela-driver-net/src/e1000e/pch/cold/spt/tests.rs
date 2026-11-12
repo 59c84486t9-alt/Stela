@@ -280,12 +280,7 @@ fn ulp_mode_switch_recovers_only_the_specific_mdi_transition_and_verifies_state(
     ] {
         assert!(!smbus_response_error(Fault::MdicResponse(bad)));
     }
-    for bad in [
-        Fault::Access,
-        Fault::Removed,
-        Fault::OutsideBar,
-        Fault::ResetBlocked,
-    ] {
+    for bad in [Fault::Access, Fault::Removed, Fault::OutsideBar] {
         assert!(!smbus_read_unavailable(bad));
     }
 }
@@ -329,30 +324,23 @@ fn every_spt_cold_access_failure_keeps_owner_and_prevents_packet_dma() {
     }
 }
 #[test]
-fn spt_firmware_reset_phy_nvm_and_readiness_failures_never_enable_packet_dma() {
-    for failure in 0..7 {
+fn spt_phy_nvm_and_readiness_failures_never_enable_packet_dma() {
+    // An adapter the Intel ME manages, or whose PHY reset it blocks, starts
+    // as Linux starts it: see `an_i219_the_me_manages_leaves_ulp_through_the_me`.
+    for failure in 0..5 {
         let (state, released, io, timer) = fixture_spt();
         {
             let mut m = state.borrow_mut();
             match failure {
                 0 => {
-                    m.mac.insert(
-                        super::super::super::FWSM,
-                        super::super::super::FW_VALID | super::super::super::RESET_PERMITTED,
-                    );
-                }
-                1 => {
-                    m.mac.insert(super::super::super::FWSM, 0);
-                }
-                2 => {
                     m.phy.insert((2, 0, 3), 0x93);
                 }
-                3 => {
+                1 => {
                     m.words[63] ^= 1;
                 }
-                4 => m.init_missing = true,
-                5 => m.reset_missing = true,
-                6 => m.reset_stuck = true,
+                2 => m.init_missing = true,
+                3 => m.reset_missing = true,
+                4 => m.reset_stuck = true,
                 _ => unreachable!(),
             }
         }
@@ -394,4 +382,55 @@ fn a_phy_left_in_ulp_answers_after_the_lanphypc_toggle() {
         drop(controller);
         assert_eq!(released.load(Ordering::SeqCst), 1);
     }
+}
+
+/// An I219 the Intel ME manages: the ME takes its PHY out of ULP on the
+/// host's H2ME request, so no LANPHYPC toggle runs, and the adapter starts.
+#[test]
+fn an_i219_the_me_manages_leaves_ulp_through_the_me() {
+    let (state, released, io, timer) = fixture_spt();
+    {
+        let mut m = state.borrow_mut();
+        m.phy_asleep = true;
+        m.mac.insert(
+            super::super::super::FWSM,
+            super::super::super::FW_VALID
+                | super::super::super::RESET_PERMITTED
+                | super::super::ULP_CONFIG_DONE,
+        );
+    }
+    // SAFETY: one synchronous modeled Function/config/PHY/flash.
+    let controller = unsafe { Controller::new_i219(0x15b8, io, timer) }.unwrap();
+    {
+        let m = state.borrow();
+        assert!(
+            !m.operations
+                .iter()
+                .any(|o| o[0] == 1 && o[1] == super::super::CTRL && o[2] & LANPHYPC_OVERRIDE != 0),
+            "the host toggled LANPHYPC under a managing ME"
+        );
+        assert_eq!(
+            m.mac[&super::super::H2ME] & super::super::H2ME_ENFORCE_SETTINGS,
+            0
+        );
+    }
+    assert!(!controller.is_poisoned());
+    drop(controller);
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+
+    let (state, released, io, timer) = fixture_spt();
+    {
+        let mut m = state.borrow_mut();
+        m.me_stuck = true;
+        m.mac.insert(
+            super::super::super::FWSM,
+            super::super::super::FW_VALID
+                | super::super::super::RESET_PERMITTED
+                | super::super::ULP_CONFIG_DONE,
+        );
+    }
+    // SAFETY: as above.
+    let error = unsafe { Controller::new_i219(0x15b8, io, timer) }.err();
+    assert!(matches!(error, Some(Error::MeUlpTimeout)));
+    assert_eq!(released.load(Ordering::SeqCst), 0);
 }

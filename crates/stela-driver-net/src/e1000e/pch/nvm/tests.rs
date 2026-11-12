@@ -421,7 +421,7 @@ fn a_failed_post_cycle_observation_keeps_the_timeout() {
 }
 
 #[test]
-fn geometry_and_me_qualification_refuse_without_sequencer_writes() {
+fn geometry_refuses_and_a_managed_adapter_is_read_without_sequencer_writes() {
     assert_eq!(
         Geometry::from_register(Layout::Pch2, 0x0001_0003),
         Err(Error::InvalidGeometry)
@@ -438,13 +438,13 @@ fn geometry_and_me_qualification_refuse_without_sequencer_writes() {
             state: state.clone(),
             released: released.clone(),
         };
-        assert!(matches!(
-            // SAFETY: sole model reservation, with the chosen layout.
-            unsafe { Nvm::new(layout, io, Timer::new(state.clone())) },
-            Err(Error::FirmwareOwned)
-        ));
+        // The ME shares the flash through the hardware sequencer; Linux
+        // reads a managed adapter's NVM as any other.
+        // SAFETY: sole model reservation, with the chosen layout.
+        let nvm = unsafe { Nvm::new(layout, io, Timer::new(state.clone())) };
+        assert!(nvm.is_ok(), "{layout:?}");
         assert!(!state.borrow().ops.iter().any(|op| matches!(op[0], 2 | 3)));
-        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(nvm);
     }
 }
 #[test]

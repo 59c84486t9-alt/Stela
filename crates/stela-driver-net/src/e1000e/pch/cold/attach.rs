@@ -96,8 +96,8 @@ pub enum AttachError {
 impl core::fmt::Display for AttachError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Device(error) => write!(f, "e1000e PCH: {error}"),
-            Self::Controller(error) => write!(f, "e1000e PCH: {error}"),
+            Self::Device(error) => error.fmt(f),
+            Self::Controller(error) => error.fmt(f),
         }
     }
 }

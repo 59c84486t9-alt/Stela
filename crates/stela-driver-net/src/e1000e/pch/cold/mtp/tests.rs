@@ -298,17 +298,24 @@ fn retries_never_swallow_access_removal_or_uncertain_owner_cleanup() {
 #[test]
 fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
     for device in [0x550a, 0x57b3] {
-        // The forced ULP exit runs its MDIO cycles without retries before
-        // the first PHY ID read, which the retried failures then meet.
+        // The forced ULP exit runs its MDIO cycles without retries, and so
+        // does `e1000_phy_is_accessible_pchlan`'s ID read after it; the
+        // retried failures then meet the PHY identification's ID read.
         let identity_read = {
             let (state, _, io, timer) = spt::tests::fixture_spt();
             let c = start_any(device, io, timer).unwrap();
             let m = state.borrow();
+            let mut id_reads = 0;
             let cycles = m
                 .operations
                 .iter()
                 .filter(|o| o[0] == 1 && o[1] == 0x20)
-                .take_while(|o| (o[2] >> 16) & 31 != 2 || (o[2] >> 21) & 31 != 2)
+                .take_while(|o| {
+                    if (o[2] >> 16) & 31 == 2 && (o[2] >> 21) & 31 == 2 {
+                        id_reads += 1;
+                    }
+                    id_reads < 2
+                })
                 .count();
             drop(m);
             drop(c);
@@ -325,17 +332,22 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
             let c = start_any(device, io, timer).unwrap();
             {
                 let m = state.borrow();
+                // The accessibility probe's ID read completes first, the
+                // identification's, after its two retries, second.
                 let completed = m
                     .operations
                     .iter()
-                    .position(|o| {
+                    .enumerate()
+                    .filter(|(_, o)| {
                         o[0] == 0
                             && o[1] == 0x20
                             && o[2] & (1 << 28) != 0
                             && o[2] & (1 << 30) == 0
                             && (o[2] >> 16) & 31 == 2
                     })
-                    .unwrap();
+                    .nth(1)
+                    .unwrap()
+                    .0;
                 assert_eq!(
                     m.operations[..completed]
                         .iter()
@@ -354,7 +366,9 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
             drop(c);
             assert_eq!(released.load(Ordering::SeqCst), 1);
         }
-        for failure in 0..9 {
+        // An adapter the Intel ME manages starts: see
+        // `spt::tests::an_i219_the_me_manages_leaves_ulp_through_the_me`.
+        for failure in 0..8 {
             let (state, released, io, timer) = spt::tests::fixture_spt();
             {
                 let mut m = state.borrow_mut();
@@ -371,23 +385,17 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
                     2 => {
                         m.phy.insert((2, 0, 3), 0x93);
                     }
-                    3 => {
-                        m.mac.insert(
-                            super::super::super::FWSM,
-                            super::super::super::FW_VALID | super::super::super::RESET_PERMITTED,
-                        );
-                    }
-                    4 => m.power_stuck = true,
-                    5 => {
+                    3 => m.power_stuck = true,
+                    4 => {
                         m.smb_stuck = true;
                         m.phy.insert((1, 769, 23), 0x7f01);
                     }
-                    6 => m.ulp_stuck = true,
-                    7 => {
+                    5 => m.ulp_stuck = true,
+                    6 => {
                         m.mac.insert(0x3808, 512);
                         m.config.insert(0xe4, 0x100);
                     }
-                    8 => m.reset_stuck = true,
+                    7 => m.reset_stuck = true,
                     _ => unreachable!(),
                 }
             }
@@ -405,11 +413,34 @@ fn cold_retry_success_and_firmware_phy_nvm_power_refusals_are_distinct() {
             );
         }
     }
-    // Existing constructor cohorts never gain MTP's retry policy by PHY ID.
+    // Existing constructor cohorts never gain MTP's retry policy by PHY ID:
+    // a failure at the identification's ID read, past the accessibility
+    // probe that runs without retries on every cohort, is final.
+    let identity_read = {
+        let (state, _, io, timer) = spt::tests::fixture_spt();
+        let c = super::super::i219::tests::start(0x156f, io, timer).unwrap();
+        let m = state.borrow();
+        let mut id_reads = 0;
+        let cycles = m
+            .operations
+            .iter()
+            .filter(|o| o[0] == 1 && o[1] == 0x20)
+            .take_while(|o| {
+                if (o[2] >> 16) & 31 == 2 && (o[2] >> 21) & 31 == 2 {
+                    id_reads += 1;
+                }
+                id_reads < 2
+            })
+            .count();
+        drop(m);
+        drop(c);
+        cycles
+    };
     let (state, released, io, timer) = spt::tests::fixture_spt();
     state.borrow_mut().mdic_failures = 1;
+    state.borrow_mut().mdic_fail_after = identity_read;
     assert!(super::super::i219::tests::start(0x156f, io, timer).is_err());
-    assert_eq!(state.borrow().mdic_attempts, 1);
+    assert_eq!(state.borrow().mdic_attempts, identity_read + 1);
     assert_eq!(released.load(Ordering::SeqCst), 0);
 }
 #[test]
