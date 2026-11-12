@@ -1,7 +1,7 @@
 use super::{
     pipelines::{
         ComputePipelineRequest, ConstantKey, ConstantValue, FunctionHandle, LinkedFunctions,
-        MeshPipelineRequest, PipelineArchives, RenderPipelineRequest,
+        MeshPipelineRequest, PipelineArchives, RenderPipelineRequest, library_digest,
     },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
     resources::{CPU_BAND_BYTES, CpuBand, HeapRefusals, Strides},
@@ -2111,17 +2111,19 @@ fn libraries_of_held_bytes_share_them() {
     let mut device = device();
     let data = fixture(false);
     let length = data.len() as u64;
-    let unmatched = device.share_library(length, |_| Ok::<_, Error>(false));
-    assert_eq!(unmatched, Ok(None));
+    let digest = library_digest(&data);
+    let mut other = data.clone();
+    other[0] ^= 1;
     assert_eq!(
-        device.share_library(length + 1, |_| -> Result<bool> { unreachable!() }),
-        Ok(None),
-        "only bytes of the same length compare"
+        device.share_library(length, &library_digest(&other)),
+        Ok(None)
     );
-    let shared = device
-        .share_library(length, |held| Ok::<_, Error>(held == data))
-        .unwrap()
-        .unwrap();
+    assert_eq!(
+        device.share_library(length + 1, &digest),
+        Ok(None),
+        "only bytes of the same length share"
+    );
+    let shared = device.share_library(length, &digest).unwrap().unwrap();
     assert_ne!(shared, LIBRARY);
     assert_eq!(
         device.library_function_names(shared),
@@ -2144,7 +2146,7 @@ fn libraries_name_the_dynamic_libraries_they_link() {
     );
     // A library of the same bytes links the same.
     let shared = device
-        .share_library::<Error>(data.len() as u64, |held| Ok(held == data.as_slice()))
+        .share_library(data.len() as u64, &library_digest(&data))
         .unwrap()
         .unwrap();
     assert_eq!(

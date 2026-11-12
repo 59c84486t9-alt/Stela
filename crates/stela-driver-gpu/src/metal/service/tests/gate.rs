@@ -1086,3 +1086,72 @@ fn the_completion_marker_publishes_without_the_driver_or_an_interrupt() {
     drop(shared.try_turn());
     assert!(shared.marker_value().is_none());
 }
+
+/// A `NewLibrary` call for the library at `data`.
+fn library_call(memory: &mut Memory, data: Span) -> u64 {
+    let request = wire::NewLibraryRequest { data };
+    gate_call(
+        memory,
+        Operation::NewLibrary,
+        wire::bytes(&request),
+        size_of::<wire::Handle>(),
+    )
+}
+
+#[test]
+fn a_library_is_read_a_piece_at_each_run_and_its_turn_reads_none() {
+    const PIECE: usize = 64;
+    let shared = SharedService::new(service(), HOST);
+    shared.set_library_piece(PIECE);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let bytes = crate::metal::library::tests::fixture(false);
+    let data = memory.put(&bytes);
+    let record = library_call(&mut memory, data);
+    memory.longest = 0;
+    // `HOST.relax` panics: a run that waited for this holder would fail.
+    let held = shared.try_turn().unwrap();
+    for _ in 1..bytes.len().div_ceil(PIECE) {
+        GateService::serve(&shared, connection, record, &mut memory).unwrap();
+        let call = completed(&mut memory, record);
+        assert_eq!(
+            (call.status, call.reason_length),
+            (Status::Pending.raw(), 0)
+        );
+    }
+    drop(held);
+    GateService::serve(&shared, connection, record, &mut memory).unwrap();
+    let call = completed(&mut memory, record);
+    assert_eq!(call.status, Status::Ok.raw());
+    let handle: wire::Handle =
+        wire::read(&GuestMemory::read(&mut memory, call.response).unwrap()).unwrap();
+    assert_ne!(handle.handle, 0);
+    assert!(
+        memory.longest <= PIECE as u64,
+        "no read took more than a piece: {}",
+        memory.longest
+    );
+
+    // A connection's library of bytes the device holds shares them.
+    let other = connect(&mut shared.try_turn().unwrap());
+    let data = memory.put(&bytes);
+    let again = library_call(&mut memory, data);
+    shared.set_library_piece(bytes.len());
+    GateService::serve(&shared, other, again, &mut memory).unwrap();
+    assert_eq!(completed(&mut memory, again).status, Status::Ok.raw());
+
+    // A span out of the caller's reach asks it to map the span.
+    let lost = library_call(
+        &mut memory,
+        Span {
+            address: 0x7000_0000_0000,
+            length: bytes.len() as u64,
+        },
+    );
+    GateService::serve(&shared, connection, lost, &mut memory).unwrap();
+    let call = completed(&mut memory, lost);
+    assert_eq!(
+        (call.status, call.reason_length),
+        (Status::Unmapped.raw(), 0)
+    );
+}

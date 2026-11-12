@@ -64,8 +64,8 @@
 //! pipeline caches, which are internally synchronized; the device's queue
 //! and command pools stay the turn's.
 use super::{
-    Service,
-    wire::{self, GateCall, Operation, Status},
+    Service, StagedLibrary,
+    wire::{self, GateCall, NewLibraryRequest, Operation, Span, Status},
 };
 use crate::metal::{
     compiler::{self, AirCompiler, CompileLock},
@@ -84,9 +84,10 @@ use core::{
     mem::size_of,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use stela_contracts::gate::{BundleReport, CallerFault, CallerMemory, GateService, MemoryRange};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub struct SharedService<B: Backend, C: Compiler> {
     service: UnsafeCell<Service<B, C>>,
@@ -131,6 +132,13 @@ pub struct SharedService<B: Backend, C: Compiler> {
     wait_bound: AtomicU64,
     job_lock: JobLock,
     jobs: Spin<Jobs>,
+    /// `NewLibrary` calls' bytes read so far, before their turns.
+    staging: Spin<Vec<Staging>>,
+    /// How long a `NewLibrary` call reads its library at one run, before
+    /// its turn, in ticks; 0 reads one piece.
+    library_budget: AtomicU64,
+    /// The bytes it reads and digests at once ([`LIBRARY_PIECE_BYTES`]).
+    library_piece: AtomicUsize,
     /// The guest RAM the latest imports named, by a hash of their ranges.
     imported: Spin<RecentImports>,
     /// The stack driver work outside the turn runs on, zero for none (it
@@ -241,6 +249,38 @@ impl RecentImports {
         self.next = (self.next + 1) % RECENT_IMPORTS;
         again
     }
+}
+
+/// The bytes of a library a `NewLibrary` call reads and digests at once,
+/// before its turn; a run reads pieces until its budget
+/// ([`SharedService::set_library_budget`]) is spent, at least one.
+const LIBRARY_PIECE_BYTES: usize = 1 << 20;
+
+/// Libraries read in part at once; past this the oldest is dropped, and its
+/// call, made again, starts over.
+const STAGED: usize = 4;
+
+/// A `NewLibrary` call's bytes read so far ([`SharedService::stage_library`]).
+struct Staging {
+    connection: u64,
+    record: u64,
+    span: Span,
+    bytes: Vec<u8>,
+    digest: Sha256,
+}
+
+/// What reading the next piece of a call's library found.
+enum Staged {
+    /// The call reads no library, or reading it failed without a fault the
+    /// frontend can repair: its turn serves it as it is.
+    Not,
+    /// More bytes remain: the call is answered `Pending`.
+    Pending,
+    /// Part of the span is not mapped: the call is answered `Unmapped`,
+    /// and the frontend maps it and calls again, keeping what was read.
+    Unmapped,
+    /// Every byte was read: the turn takes them.
+    Ready,
 }
 
 /// A lock for short bookkeeping, which spins.
@@ -643,6 +683,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                 relax: host.relax,
             },
             jobs: Spin::new(Jobs::default()),
+            staging: Spin::new(Vec::new()),
+            library_budget: AtomicU64::new(0),
+            library_piece: AtomicUsize::new(LIBRARY_PIECE_BYTES),
             imported: Spin::new(RecentImports::default()),
             outside_stack: AtomicU64::new(0),
             outside_locked: AtomicBool::new(false),
@@ -904,6 +947,116 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             return false;
         }
         answer_pending(record, call, caller).is_ok()
+    }
+
+    /// Bounds how long a `NewLibrary` call reads and digests its library at
+    /// one run to about `ticks`, before its turn and holding none: a library
+    /// of hundreds of megabytes is read over many runs answered `Pending`,
+    /// rather than in one exit holding every other call's turn.
+    pub fn set_library_budget(&self, ticks: u64) {
+        self.library_budget.store(ticks, Ordering::Release);
+    }
+
+    /// Reads libraries `bytes` at a time, so small ones take several runs.
+    #[cfg(test)]
+    pub(crate) fn set_library_piece(&self, bytes: usize) {
+        self.library_piece.store(bytes.max(1), Ordering::Release);
+    }
+
+    /// Reads the next piece of the library of the `NewLibrary` call at
+    /// `record`, before its turn and outside every lock, and digests it.
+    fn stage_library(
+        &self,
+        connection: NonZeroU64,
+        record: u64,
+        caller: &mut dyn CallerMemory,
+    ) -> Staged {
+        let Some(call) = read_call(record, caller) else {
+            return Staged::Not;
+        };
+        let mut raw = [0; size_of::<NewLibraryRequest>()];
+        if call.operation != Operation::NewLibrary.raw()
+            || call.request.length != raw.len() as u64
+            || caller.read(call.request.address, &mut raw).is_err()
+        {
+            return Staged::Not;
+        }
+        let Ok(NewLibraryRequest { data: span }) = wire::read(&raw) else {
+            return Staged::Not;
+        };
+        let Ok(length) = usize::try_from(span.length) else {
+            return Staged::Not;
+        };
+        let at = (connection.get(), record, span);
+        let kept = self.staging.with(|staging| {
+            let found = staging
+                .iter()
+                .position(|staged| (staged.connection, staged.record, staged.span) == at)?;
+            Some(staging.remove(found))
+        });
+        let mut staged = match kept {
+            Some(staged) => staged,
+            None => {
+                let mut bytes = Vec::new();
+                // Without room the turn reports the failure.
+                if bytes.try_reserve_exact(length).is_err() {
+                    return Staged::Not;
+                }
+                Staging {
+                    connection: connection.get(),
+                    record,
+                    span,
+                    bytes,
+                    digest: Sha256::new(),
+                }
+            }
+        };
+        let budget = self.library_budget.load(Ordering::Acquire);
+        let piece = self.library_piece.load(Ordering::Acquire);
+        let began = (self.host.ticks)();
+        let found = loop {
+            let start = staged.bytes.len();
+            if start == length {
+                break Staged::Ready;
+            }
+            let end = start.saturating_add(piece).min(length);
+            staged.bytes.resize(end, 0);
+            if let Err(error) = caller.read(span.address + start as u64, &mut staged.bytes[start..])
+            {
+                staged.bytes.truncate(start);
+                match error {
+                    CallerFault::Denied { .. } => break Staged::Unmapped,
+                    _ => return Staged::Not,
+                }
+            }
+            staged.digest.update(&staged.bytes[start..]);
+            if end < length && (self.host.ticks)().wrapping_sub(began) >= budget {
+                break Staged::Pending;
+            }
+        };
+        self.staging.with(|staging| {
+            if staging.len() == STAGED {
+                staging.remove(0);
+            }
+            staging.push(staged);
+        });
+        found
+    }
+
+    /// The library the call at `record` read whole before this turn.
+    fn staged_library(&self, connection: NonZeroU64, record: u64) -> Option<StagedLibrary> {
+        let staged = self.staging.with(|staging| {
+            let found = staging.iter().position(|staged| {
+                (staged.connection, staged.record) == (connection.get(), record)
+                    && staged.bytes.len() as u64 == staged.span.length
+            })?;
+            Some(staging.remove(found))
+        })?;
+        Some(StagedLibrary {
+            span: staged.span,
+            bytes: staged.bytes,
+            digest: staged.digest.finalize().into(),
+        })
     }
 
     /// Queues each of `jobs` unless one of its key is queued, running or
@@ -1248,6 +1401,8 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             jobs.parked
                 .retain(|parked| parked.connection != connection.get());
         });
+        self.staging
+            .with(|staging| staging.retain(|staged| staged.connection != connection.get()));
         // The gate closes only connections it opened and holds.
         let closed = self.call(|service| {
             for slot in &self.polling {
@@ -1295,6 +1450,20 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             served_at_once(Operation::Poll.raw(), Status::Ok);
             return Ok(());
         }
+        // A library's bytes are read a piece at each run, before any turn.
+        let staged = match self.stage_library(connection, record, caller) {
+            Staged::Not => false,
+            Staged::Ready => true,
+            staged @ (Staged::Pending | Staged::Unmapped) => {
+                let status = match staged {
+                    Staged::Pending => Status::Pending,
+                    _ => Status::Unmapped,
+                };
+                answer(record, read_record(record, caller)?, status, caller)?;
+                served_at_once(Operation::NewLibrary.raw(), status);
+                return Ok(());
+            }
+        };
         let Some(mut turn) = self.turn_within(rang) else {
             // Nothing of the call ran: it is made again once the frontend
             // has had its processor back.
@@ -1331,7 +1500,11 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 caller: &mut *caller,
                 lock: job_lock.map(|jobs| &*jobs.lock),
             };
+            if staged {
+                turn.staged_library = self.staged_library(connection, record);
+            }
             let served = turn.serve(connection, record, &mut deferrable);
+            turn.staged_library = None;
             let device = turn.device();
             // A call that went on past a deferral may have left both.
             let jobs: Vec<Job> = [
@@ -1567,10 +1740,21 @@ fn read_record(record: u64, caller: &mut dyn CallerMemory) -> Result<GateCall, C
 /// record took it.
 fn answer_pending(
     record: u64,
-    mut call: GateCall,
+    call: GateCall,
     caller: &mut dyn CallerMemory,
 ) -> Result<(), CallerFault> {
-    call.status = Status::Pending.raw();
+    answer(record, call, Status::Pending, caller)
+}
+
+/// Completes `call` at `record` with `status` and no reason: whether the
+/// record took it.
+fn answer(
+    record: u64,
+    mut call: GateCall,
+    status: Status,
+    caller: &mut dyn CallerMemory,
+) -> Result<(), CallerFault> {
+    call.status = status.raw();
     call.reason_length = 0;
     let mut raw = [0; size_of::<GateCall>()];
     wire::write(&call, &mut raw).expect("a record of its own size");

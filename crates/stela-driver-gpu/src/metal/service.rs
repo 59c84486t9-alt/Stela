@@ -121,12 +121,17 @@ const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 /// cannot change what the service validated.
 pub trait GuestMemory {
     fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault>;
-
-    /// Whether `span` holds `bytes`.
-    fn matches(&mut self, span: Span, bytes: &[u8]) -> Result<bool, Fault> {
-        Ok(span.length == bytes.len() as u64 && self.read(span)? == bytes)
-    }
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
+}
+
+/// A `NewLibrary` call's bytes, read from its span and digested
+/// ([`crate::metal::device::pipelines::library_digest`]) a piece at each of its runs
+/// before its turn (`shared.rs`): no turn reads a library of hundreds of
+/// megabytes, and a library of held bytes is shared by its digest.
+pub struct StagedLibrary {
+    pub span: Span,
+    pub bytes: Vec<u8>,
+    pub digest: [u8; 32],
 }
 
 /// A device object a connection holds.
@@ -337,6 +342,9 @@ pub struct Service<B: Backend, C: Compiler> {
     loss_described: bool,
     /// Whether a close reported what held work keeps.
     pins_reported: bool,
+    /// The bytes of the call served now's library, read before its turn
+    /// ([`StagedLibrary`]).
+    staged_library: Option<StagedLibrary>,
     reopen: Option<Reopen<B, C>>,
     prepare: Option<Prepare<B, C>>,
 }
@@ -357,6 +365,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             served: (0, Status::Ok),
             loss_described: false,
             pins_reported: false,
+            staged_library: None,
             reopen: None,
             prepare: None,
         }

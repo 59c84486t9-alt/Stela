@@ -16,9 +16,6 @@ use stela_contracts::gate::{CallerFault, CallerMemory};
 /// largest; variable data travels in spans the operation names.
 const MAX_RECORD_BYTES: u64 = size_of::<Block>() as u64;
 
-/// The bytes [`Caller::matches`] reads at once.
-const COMPARED_BYTES: usize = 1 << 16;
-
 /// The calling thread's memory, as the service reads and writes spans.
 struct Caller<'a>(&'a mut dyn CallerMemory);
 
@@ -33,26 +30,6 @@ impl GuestMemory for Caller<'_> {
         bytes.resize(length, 0);
         self.0.read(span.address, &mut bytes).map_err(fault)?;
         Ok(bytes)
-    }
-
-    /// Compares a chunk at a time, never holding the span whole.
-    fn matches(&mut self, span: Span, bytes: &[u8]) -> Result<bool, Fault> {
-        if span.length != bytes.len() as u64 {
-            return Ok(false);
-        }
-        let mut chunk = vec![0; COMPARED_BYTES.min(bytes.len())];
-        for (index, expected) in bytes.chunks(COMPARED_BYTES).enumerate() {
-            let address = span
-                .address
-                .checked_add((index * COMPARED_BYTES) as u64)
-                .ok_or(Fault::malformed("span address").bits(span.address))?;
-            let chunk = &mut chunk[..expected.len()];
-            self.0.read(address, chunk).map_err(fault)?;
-            if chunk != expected {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {

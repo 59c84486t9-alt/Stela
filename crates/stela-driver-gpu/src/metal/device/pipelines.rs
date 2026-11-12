@@ -77,6 +77,9 @@ impl Users {
 #[derive(Debug)]
 struct LibraryObject {
     library: u64,
+    /// The length and [`library_digest`] of its bytes, which a library of
+    /// the same bytes shares ([`Device::share_library`]).
+    bytes: (u64, [u8; 32]),
     names: Vec<String>,
     /// Its extern functions' names, which name no function of its own.
     extern_names: Vec<String>,
@@ -98,6 +101,13 @@ struct LibraryObject {
     /// Its functions' narrowing floating-point conversions round toward zero.
     round_toward_zero: bool,
     users: Users,
+}
+
+/// The SHA-256 of a library's bytes, by which libraries of the same bytes
+/// share them.
+pub fn library_digest(data: &[u8]) -> [u8; 32] {
+    use stela_crypto::{Sha256, digest::Digest};
+    Sha256::digest(data).into()
 }
 
 /// `MTLBinaryArchive`: the driver's pipeline cache, which holds what its
@@ -590,6 +600,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
+        let digest = library_digest(&data);
+        self.new_library_digested(data, digest)
+    }
+
+    /// [`Self::new_library`] of bytes whose [`library_digest`] the caller
+    /// took, as it read them a piece at a time.
+    pub fn new_library_digested(&mut self, data: Vec<u8>, digest: [u8; 32]) -> Result<LibraryId> {
         let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
         let (externs, functions): (Vec<_>, Vec<_>) = parsed
             .functions()
@@ -605,9 +622,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let dynamic = parsed.header.kind == Header::DYNAMIC;
         let install_name = parsed.install_name.map(String::from);
         let linked = parsed.linked.iter().copied().map(String::from).collect();
+        let length = data.len() as u64;
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
+            bytes: (length, digest),
             names,
             extern_names,
             dynamic,
@@ -622,28 +641,22 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(LibraryId(index))
     }
 
-    /// `newLibraryWithData:` of a library's bytes another library already
-    /// keeps, which the two then share: `matches` compares `length` bytes
-    /// with each candidate's. System libraries run to hundreds of megabytes
-    /// and every process loads them.
-    pub fn share_library<E: From<Error>>(
-        &mut self,
-        length: u64,
-        mut matches: impl FnMut(&[u8]) -> core::result::Result<bool, E>,
-    ) -> core::result::Result<Option<LibraryId>, E> {
-        let mut found = None;
-        for held in self.pipelines.libraries.iter() {
-            let data = self.compiler.library_data(held.library)?;
-            if data.len() as u64 == length && matches(data)? {
-                found = Some(held);
-                break;
-            }
-        }
+    /// `newLibraryWithData:` of `length` bytes of [`library_digest`]
+    /// `digest`, which another library already keeps: the two then share
+    /// them. System libraries run to hundreds of megabytes and every process
+    /// loads them; the digest compares them with no byte read again.
+    pub fn share_library(&mut self, length: u64, digest: &[u8; 32]) -> Result<Option<LibraryId>> {
+        let found = self
+            .pipelines
+            .libraries
+            .iter()
+            .find(|held| held.bytes == (length, *digest));
         let Some(held) = found else {
             return Ok(None);
         };
         let object = LibraryObject {
             library: self.compiler.share_library(held.library)?,
+            bytes: held.bytes,
             names: held.names.clone(),
             extern_names: held.extern_names.clone(),
             dynamic: held.dynamic,

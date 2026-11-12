@@ -183,6 +183,12 @@ const WAIT_BOUND_MILLIS: u64 = 2;
 /// meanwhile; one look destroying a burst of releases stalled it 99-300 ms.
 const LOOK_MICROS: u64 = 1000;
 
+/// About how long one `NewLibrary` run reads and digests its library before
+/// its turn (`SharedService::set_library_budget`): libraries of 100 MB and
+/// more held one exit and every other call's turn for up to 81 ms while
+/// they were copied and compared whole.
+const LIBRARY_MICROS: u64 = 2000;
+
 /// A single gate exit this long or longer is reported once a boot
 /// (`GPU LONG EXIT`): 100 ms.
 const LONG_EXIT_MILLIS: u64 = 100;
@@ -1105,6 +1111,7 @@ fn open_gpu(
             // Without a second stack, every compilation stays in its turn.
             service.set_wait_bound(gpu.tsc_hz / 1000 * WAIT_BOUND_MILLIS);
             service.set_look_budget(gpu.tsc_hz / 1_000_000 * LOOK_MICROS);
+            service.set_library_budget(gpu.tsc_hz / 1_000_000 * LIBRARY_MICROS);
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
                 if let Some(free) = COMPILE_STACKS
                     .iter()

@@ -1,6 +1,6 @@
 //! Libraries and their functions.
 use super::{
-    Call, Object, Service, decode,
+    Call, Object, Service, StagedLibrary, decode,
     wire::{
         self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
@@ -13,7 +13,7 @@ use crate::metal::{
     abi::{ConversionRounding, DataType},
     device::{
         ArchiveId, FunctionId, LibraryId,
-        pipelines::{ARCHIVE_HEADER_BYTES, ConstantKey, ConstantValue},
+        pipelines::{ARCHIVE_HEADER_BYTES, ConstantKey, ConstantValue, library_digest},
     },
     error::NO_FUNCTION,
     shader::{Compiler, PatchDomain, Reflection},
@@ -35,13 +35,26 @@ pub(super) enum LibraryNames {
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_library(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewLibraryRequest = call.request()?;
-        let memory = &mut *call.memory;
-        let shared = self.device.share_library(request.data.length, |held| {
-            memory.matches(request.data, held)
-        })?;
-        let library = match shared {
+        // Read before the turn when the shared service serves the call;
+        // otherwise here, whole.
+        let staged = match self.staged_library.take() {
+            Some(staged) if staged.span == request.data => staged,
+            _ => {
+                let bytes = call.memory.read(request.data)?;
+                let digest = library_digest(&bytes);
+                StagedLibrary {
+                    span: request.data,
+                    bytes,
+                    digest,
+                }
+            }
+        };
+        let length = staged.bytes.len() as u64;
+        let library = match self.device.share_library(length, &staged.digest)? {
             Some(library) => library,
-            None => self.device.new_library(memory.read(request.data)?)?,
+            None => self
+                .device
+                .new_library_digested(staged.bytes, staged.digest)?,
         };
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
