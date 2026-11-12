@@ -622,6 +622,10 @@ pub struct Statistics {
     pub known_absent: u64,
     /// Blocks offered to the store while memory was low.
     pub offered_low: u64,
+    /// Fetches whose page the store held a record for that gave no block:
+    /// it held no entry at the block's offset and context, or one that did
+    /// not relocate to this page.
+    pub record_misses: [u64; 2],
     /// Device transfers run because their deadline came, and the devices'
     /// interrupt lines and deadline asked anew because a cached answer
     /// expired, with the profile clock ticks each took under step timing.
@@ -772,6 +776,7 @@ impl core::ops::AddAssign for Statistics {
             known_keys,
             known_absent,
             offered_low,
+            record_misses,
             shared_ticks,
             install_ticks,
             due_transfers,
@@ -898,6 +903,9 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.itlb_sources.iter_mut().zip(itlb_sources) {
+            *total += count;
+        }
+        for (total, count) in self.record_misses.iter_mut().zip(record_misses) {
             *total += count;
         }
         self.stamped_in_use = self.stamped_in_use.max(stamped_in_use);

@@ -622,10 +622,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // The machine's buffers take the entry's relocated code: an
             // install from the store allocates nothing.
             let mut relocated = core::mem::take(&mut self.relocated);
-            let found = record
+            let entry = record
                 .as_ref()
-                .and_then(|record| record.find(offset as u16, context))
-                .filter(|entry| entry.relocate(page, source, &mut relocated));
+                .and_then(|record| record.find(offset as u16, context));
+            let found = entry.filter(|entry| entry.relocate(page, source, &mut relocated));
+            if record.is_some() && found.is_none() {
+                self.statistics.record_misses[usize::from(entry.is_some())] += 1;
+            }
             if let Some(entry) = found {
                 if usize::from(entry.source_bytes) > available {
                     self.relocated = relocated;

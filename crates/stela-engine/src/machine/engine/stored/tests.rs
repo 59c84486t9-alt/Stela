@@ -291,6 +291,8 @@ fn a_stored_block_of_the_same_page_bytes_is_installed_without_compiling() {
         Ok(Fetched::Block(_))
     ));
     assert_eq!(second.statistics.compiled, 1);
+    // The page's record held no entry there.
+    assert_eq!(second.statistics.record_misses, [1, 0]);
     let mut changed = machine(&[0x1000_0040, 0x9100_0800, 0xd400_0001]);
     changed.host.store = second.host.store.take();
     assert!(matches!(
