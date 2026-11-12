@@ -1048,11 +1048,14 @@ fn report(counters: &pack::Counters) {
     }
     let checks = stela_engine::machine::entry_checks();
     output::arguments(format_args!(
-        "TRANSLATIONS added={} unstorable={} unkept={} checked={} differed={} loaded={} \
-         absent={} invalid={} locks acquired={acquired} contended={contended} spin_ms={}\n",
+        "TRANSLATIONS added={} unstorable={} unkept={} unkept_entries={} retaken={} checked={} \
+         differed={} loaded={} absent={} invalid={} locks acquired={acquired} \
+         contended={contended} spin_ms={}\n",
         counters.added,
         counters.unstorable,
         counters.unkept,
+        counters.unkept_entries,
+        counters.retaken,
         checks.checked,
         checks.differed,
         counters.loaded,

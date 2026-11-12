@@ -1144,6 +1144,11 @@ pub struct Counters {
     pub added: u64,
     pub unstorable: u64,
     pub unkept: u64,
+    /// Of those left out, the distinct entries (each counted at its first
+    /// refusal, [`SeenFilter`]); and offers of an entry a new segment took
+    /// this boot, not added again.
+    pub unkept_entries: u64,
+    pub retaken: u64,
     /// Shared lookups that found a block, and why the others missed: no
     /// offer of it, an offer of its PC and page in another context, its
     /// offer evicted, or another machine compiling it at that moment.
@@ -1167,6 +1172,8 @@ impl Counters {
             added,
             unstorable,
             unkept,
+            unkept_entries,
+            retaken,
             shared_hits,
             shared_absent,
             shared_other_context,
@@ -1182,11 +1189,73 @@ impl Counters {
         self.added += added;
         self.unstorable += unstorable;
         self.unkept += unkept;
+        self.unkept_entries += unkept_entries;
+        self.retaken += retaken;
         self.shared_hits += shared_hits;
         self.shared_absent += shared_absent;
         self.shared_other_context += shared_other_context;
         self.shared_evicted += shared_evicted;
         self.shared_in_flight += shared_in_flight;
+    }
+}
+
+/// A set of entries by page key, offset and context that answers whether
+/// it holds one with false positives only: two bits of a bit array each,
+/// allocated at the first insert. Its 2^21 bits (256 KiB) give each of a
+/// 16-part store's share of 2 million entries 16 bits: under 2% wrong.
+#[derive(Debug, Default)]
+struct SeenFilter {
+    bits: Vec<u64>,
+}
+
+impl SeenFilter {
+    /// The words of a filter.
+    const WORDS: usize = 1 << 15;
+
+    fn bits(key: &Digest, offset: u16, context: &Digest) -> [usize; 2] {
+        let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("a word"));
+        let mut mixed = word(&key.0[8..16])
+            ^ u64::from(offset).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ word(&context.0[..8]).rotate_left(17);
+        mixed = (mixed ^ mixed >> 31).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed ^= mixed >> 29;
+        let total = Self::WORDS * 64;
+        [
+            (mixed as u32) as usize % total,
+            ((mixed >> 32) as u32) as usize % total,
+        ]
+    }
+
+    /// Insert the entry: whether it may have been in already.
+    fn insert(&mut self, key: &Digest, offset: u16, context: &Digest) -> bool {
+        if self.bits.is_empty() {
+            self.bits = alloc::vec![0; Self::WORDS];
+        }
+        let mut held = true;
+        for bit in Self::bits(key, offset, context) {
+            let (word, mask) = (bit / 64, 1u64 << (bit % 64));
+            held &= self.bits[word] & mask != 0;
+            self.bits[word] |= mask;
+        }
+        held
+    }
+
+    /// Hold what `other` held too.
+    fn absorb(&mut self, other: Self) {
+        if self.bits.is_empty() {
+            self.bits = other.bits;
+        } else {
+            for (word, other) in self.bits.iter_mut().zip(other.bits) {
+                *word |= other;
+            }
+        }
+    }
+
+    fn contains(&self, key: &Digest, offset: u16, context: &Digest) -> bool {
+        !self.bits.is_empty()
+            && Self::bits(key, offset, context)
+                .into_iter()
+                .all(|bit| self.bits[bit / 64] & (1 << (bit % 64)) != 0)
     }
 }
 
@@ -1473,6 +1542,10 @@ pub struct Store<'a> {
     added: BTreeMap<Digest, Record>,
     added_bytes: usize,
     added_bound: usize,
+    /// The entries new segments took this boot, which offers again do not
+    /// add, and those the bound left out, counted once each.
+    taken: SeenFilter,
+    refused: SeenFilter,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
@@ -1560,6 +1633,8 @@ impl<'a> Store<'a> {
             shared_bytes: 0,
             shared_bound: 0,
             misses: MissTables::default(),
+            taken: SeenFilter::default(),
+            refused: SeenFilter::default(),
             counters: Counters::default(),
         }
     }
@@ -1589,6 +1664,8 @@ impl<'a> Store<'a> {
             }
         }
         self.added_bytes += other.added_bytes;
+        self.taken.absorb(other.taken);
+        self.refused.absorb(other.refused);
         self.counters.add(&other.counters);
     }
 
@@ -1689,9 +1766,16 @@ impl<'a> Store<'a> {
         {
             return;
         }
+        if self.taken.contains(&key, entry.offset, &entry.context) {
+            self.counters.retaken += 1;
+            return;
+        }
         let bytes = entry.retained_bytes();
         if self.added_bytes + bytes > self.added_bound {
             self.counters.unkept += 1;
+            if !self.refused.insert(&key, entry.offset, &entry.context) {
+                self.counters.unkept_entries += 1;
+            }
             return;
         }
         self.added_bytes += bytes;
@@ -1808,6 +1892,11 @@ impl<'a> Store<'a> {
     /// ([`Delta`]): the added bound is free again.
     pub fn take_added(&mut self) -> BTreeMap<Digest, Record> {
         self.added_bytes = 0;
+        for (key, record) in &self.added {
+            for entry in record.entries() {
+                self.taken.insert(key, entry.offset, &entry.context);
+            }
+        }
         core::mem::take(&mut self.added)
     }
 
@@ -2720,6 +2809,43 @@ mod tests {
         assert_eq!(small.added_bytes(), 0);
         small.keep(&offers[63], offers[63].entry());
         assert_eq!(small.counters.added, 5);
+    }
+
+    #[test]
+    fn an_entry_a_segment_took_is_not_added_again_and_refusals_count_each_entry_once() {
+        let translator = translator_id();
+        let key = Digest::of(b"page");
+        let offers: Vec<Offer> = (0..8)
+            .map(|index| offer(0x1_0000_4000 + 8 * index, key))
+            .collect();
+        let one = offers[0].entry().unwrap().retained_bytes();
+        let mut store = Store::new(translator, None).0;
+        drop(store.set_bounds(Bounds {
+            added: 2 * one,
+            ..Bounds::default()
+        }));
+        // Offered twice each while the bound holds two: six refused twice.
+        for _ in 0..2 {
+            for offer in &offers {
+                store.keep(offer, offer.entry());
+            }
+        }
+        assert_eq!(store.counters.added, 2);
+        assert_eq!(store.counters.unkept, 12);
+        assert_eq!(store.counters.unkept_entries, 6);
+        // A segment takes the two; compiled again, they are not added again,
+        // and the bound takes two of the others.
+        assert_eq!(store.take_added().len(), 1);
+        for offer in &offers {
+            store.keep(offer, offer.entry());
+        }
+        assert_eq!(store.counters.retaken, 2);
+        assert_eq!(store.counters.added, 4);
+        assert_eq!(store.counters.unkept_entries, 6);
+        let kept = store.take_added();
+        let entries: Vec<u16> = kept[&key].entries().iter().map(|e| e.offset).collect();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries.contains(&offers[0].entry().unwrap().offset));
     }
 
     #[test]
