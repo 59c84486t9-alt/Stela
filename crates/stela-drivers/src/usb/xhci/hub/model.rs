@@ -338,6 +338,8 @@ pub(in super::super) struct Hardware {
     pub silent_configuration: Option<u8>,
     pub failed_configuration: Option<u8>,
     pub root_status: Option<u32>,
+    /// A warm reset of the root port leaves its link untrained.
+    pub root_untrainable: bool,
     pub notification_override: Option<u32>,
     pending_interrupts: BTreeMap<(u8, u8), (u64, u64, usize)>,
     pub mmio_reads: usize,
@@ -376,6 +378,7 @@ impl Hardware {
             silent_configuration: None,
             failed_configuration: None,
             root_status: None,
+            root_untrainable: false,
             notification_override: None,
             pending_interrupts: BTreeMap::new(),
             mmio_reads: 0,
@@ -1016,6 +1019,7 @@ impl Registers for RegistersModel {
         }
         if at == 0x440 {
             let actual_speed = state.nodes[&0].speed;
+            let untrainable = state.root_untrainable;
             if let Some(status) = state.root_status.as_mut() {
                 *status &= !(value & PORT_CHANGES);
                 if value & PR != 0 {
@@ -1026,8 +1030,22 @@ impl Registers for RegistersModel {
                         | PRC
                         | u32::from(actual_speed) << PORT_SPEED_SHIFT;
                 }
+                if value & WPR != 0 {
+                    // A warm reset clears Cold Attach Status and retrains
+                    // the link to U0 (xHCI 1.2 4.19.5.1).
+                    let trained = if untrainable {
+                        0
+                    } else {
+                        CCS | PED | u32::from(actual_speed) << PORT_SPEED_SHIFT
+                    };
+                    *status = *status
+                        & !(CAS | CCS | PED | PLS | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT))
+                        | WRC
+                        | PRC
+                        | trained;
+                }
             }
-            if value & PR != 0 {
+            if value & (PR | WPR) != 0 {
                 state.event(1 << 24, SUCCESS, reset::PORT_STATUS_CHANGE, 0, 0, 0);
             }
         }

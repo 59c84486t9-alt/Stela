@@ -426,7 +426,22 @@ impl Controller {
         if portsc & CSC != 0 {
             self.write_port(port, CSC);
         }
-        (portsc & CCS != 0, portsc & CSC != 0)
+        (
+            portsc & CCS != 0 || self.warm_reset_required(port, portsc),
+            portsc & CSC != 0,
+        )
+    }
+
+    /// Linux `hub_port_warm_reset_required`, with Cold Attach Status read as
+    /// `xhci_hub_report_usb3_link_state` reads it: a powered USB 3 root port
+    /// whose link is in SS.Inactive or Compliance Mode, or that saw a device
+    /// it could not train (CAS, xHCI 1.2 4.19.8), holds a device only a warm
+    /// reset brings up, whether or not it shows a connection.
+    pub(super) fn warm_reset_required(&self, port: u8, portsc: u32) -> bool {
+        let link = portsc >> PLS_SHIFT & PLS_FIELD;
+        self.port_major.get(usize::from(port.wrapping_sub(1))) == Some(&3)
+            && portsc & PP != 0
+            && (portsc & CAS != 0 || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE))
     }
 
     /// Linux `hub_port_connect`: reset a port and enumerate its device, up
@@ -501,18 +516,17 @@ impl Controller {
         self.validate_current_graph(port)?;
         let at = self.port_offset(port);
         let clock = self.clock;
-        if self.registers.read32(at) & CCS == 0 {
+        let portsc = self.registers.read32(at);
+        let warm = self.warm_reset_required(port, portsc);
+        if portsc & CCS == 0 && !warm {
             return Ok(None);
         }
         // Clear the remaining changes, so later changes are this driver's.
-        let portsc = self.registers.read32(at);
         self.write_port(port, portsc & PORT_CHANGES);
-        let link = portsc >> PLS_SHIFT & PLS_FIELD;
-        if self.port_major[usize::from(port - 1)] == 3
-            && matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
-        {
+        let usb3 = self.port_major[usize::from(port - 1)] == 3;
+        if warm {
             // Linux `hub_port_reset` warm-resets a SuperSpeed link stuck in
-            // SS.Inactive or Compliance Mode.
+            // SS.Inactive or Compliance Mode, or one that never trained.
             self.write_port(port, WPR);
             if !wait(&mut *self.registers, clock, PORT_RESET_US, |r| {
                 r.read32(at) & (WRC | PRC) == WRC | PRC
@@ -521,7 +535,7 @@ impl Controller {
             }
             self.write_port(port, WRC | PRC);
             self.minimum_wait(RESET_RECOVERY_US)?;
-        } else if self.port_major[usize::from(port - 1)] != 3 {
+        } else if !usb3 {
             self.write_port(port, PR);
             let clock = self.clock;
             if !wait(&mut *self.registers, clock, PORT_RESET_US, |r| {
@@ -540,12 +554,15 @@ impl Controller {
             }
         }
         let portsc = self.registers.read32(at);
+        if warm && portsc & CCS == 0 {
+            return Err(BlockError::Unsupported(
+                "USB 3 link did not train after a warm reset",
+            ));
+        }
         if portsc & PED == 0 {
             return Err(BlockError::Unsupported("root port did not enable"));
         }
-        if self.port_major[usize::from(port - 1)] != 3
-            || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
-        {
+        if !usb3 || warm {
             self.current_port_reset(None, port)?;
         }
         Ok(Some((portsc >> PORT_SPEED_SHIFT & PORT_SPEED_FIELD) as u8))

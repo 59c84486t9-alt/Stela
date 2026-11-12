@@ -164,6 +164,10 @@ const CSC: u32 = 1 << 17;
 const WRC: u32 = 1 << 19;
 const PRC: u32 = 1 << 21;
 const WPR: u32 = 1 << 31;
+/// PORTSC Cold Attach Status (xHCI 1.2 5.4.8, 4.19.8): a USB 3 port saw a
+/// device's receiver terminations but could not train the link to it, as
+/// after a controller reset; only a warm reset clears it.
+const CAS: u32 = 1 << 24;
 /// PORTSC Port Link State and Port Speed fields (xHCI 5.4.8).
 const PLS_SHIFT: u32 = 5;
 const PLS_FIELD: u32 = 0xf;

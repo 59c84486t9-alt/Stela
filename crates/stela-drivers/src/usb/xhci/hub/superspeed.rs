@@ -294,7 +294,10 @@ impl Controller {
             let changed = state.change & CHANGE_CONNECTION != 0;
             self.clear_superspeed_changes(slot, port, state.change)?;
             stable_state = Some(state);
-            Ok((state.status & CONNECTION != 0, changed))
+            // Linux `hub_port_warm_reset_required`: a link in SS.Inactive or
+            // Compliance Mode holds a device only a warm reset brings up,
+            // whether or not the port shows a connection.
+            Ok((state.status & CONNECTION != 0 || state.warm(), changed))
         });
         let connected = self.minimum_status(connected)?;
         if !connected {

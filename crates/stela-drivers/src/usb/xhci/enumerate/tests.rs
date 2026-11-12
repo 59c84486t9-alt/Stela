@@ -1,6 +1,7 @@
 use super::*;
 use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
+use alloc::collections::BTreeMap;
 
 #[test]
 fn multi_tt_hubs_use_the_status_endpoint_of_alternate_setting_one() {
@@ -424,4 +425,63 @@ fn configuration_inventory_has_an_explicit_aggregate_resource_limit() {
     assert_eq!(model.borrow().setup.len(), 34);
     assert_eq!(controller.current_configuration(1), Ok(Some(0)));
     assert!(model.borrow().seen.is_empty());
+}
+
+/// xHCI 1.2 4.19.8: a USB 3 device attached across the controller's reset
+/// can be left with its link untrained, which its root port shows only as
+/// Cold Attach Status, SS.Inactive or Compliance Mode without a connection.
+/// Linux warm-resets such a port, and the device is then enumerated.
+#[test]
+fn a_usb3_root_port_the_reset_left_untrained_is_warm_reset_and_enumerated() {
+    const RX_DETECT: u32 = 5;
+    for status in [
+        PP | CAS | RX_DETECT << PLS_SHIFT,
+        PP | CAS | LINK_COMPLIANCE << PLS_SHIFT,
+        PP | LINK_INACTIVE << PLS_SHIFT,
+        PP | LINK_COMPLIANCE << PLS_SHIFT,
+    ] {
+        let nodes = BTreeMap::from([(0, hub::model::Node::leaf(SUPER_SPEED))]);
+        let mut dma = TestRegion::new(256 * 1024 * 8);
+        let (mut controller, model) = hub::tests::controller(&mut dma, 32, nodes);
+        model.borrow_mut().root_status = Some(status);
+        let (mut failures, mut probes) = (Vec::new(), Vec::new());
+        let devices = controller.enumerate_timed(&mut dma, &mut failures, &mut probes);
+        assert!(failures.is_empty(), "{status:#x}: {failures:?}");
+        assert_eq!(devices.len(), 1, "{status:#x}");
+        assert_eq!(devices[0].speed, SUPER_SPEED);
+        assert!(probes[0].connected);
+        let after = model.borrow().root_status.unwrap();
+        assert_eq!(after & (CAS | CCS | PED | WRC | PRC), CCS | PED);
+    }
+}
+
+/// A warm reset that leaves the link untrained is reported as such; Cold
+/// Attach Status means nothing on a USB 2 port, which stays empty.
+#[test]
+fn an_untrainable_usb3_link_is_reported_and_a_usb2_port_ignores_cold_attach() {
+    let nodes = BTreeMap::from([(0, hub::model::Node::leaf(SUPER_SPEED))]);
+    let mut dma = TestRegion::new(256 * 1024 * 8);
+    let (mut controller, model) = hub::tests::controller(&mut dma, 32, nodes);
+    model.borrow_mut().root_status = Some(PP | CAS);
+    model.borrow_mut().root_untrainable = true;
+    let mut failures = Vec::new();
+    assert!(controller.enumerate(&mut dma, &mut failures).is_empty());
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(
+        failures[0].1,
+        BlockError::Unsupported("USB 3 link did not train after a warm reset")
+    );
+
+    let nodes = BTreeMap::from([(0, hub::model::Node::leaf(HIGH_SPEED))]);
+    let mut dma = TestRegion::new(256 * 1024 * 8);
+    let (mut controller, model) = hub::tests::controller(&mut dma, 32, nodes);
+    model.borrow_mut().root_status = Some(PP | CAS);
+    let (mut failures, mut probes) = (Vec::new(), Vec::new());
+    assert!(
+        controller
+            .enumerate_timed(&mut dma, &mut failures, &mut probes)
+            .is_empty()
+    );
+    assert!(failures.is_empty() && !probes[0].connected);
+    assert_eq!(model.borrow().root_status, Some(PP | CAS));
 }

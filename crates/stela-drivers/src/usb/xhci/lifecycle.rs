@@ -413,7 +413,8 @@ impl Host {
             status
         };
         let previous = self.roots[usize::from(port - 1)];
-        let authority = CCS | PED | PP | OVER_CURRENT | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT);
+        let authority =
+            CCS | CAS | PED | PP | OVER_CURRENT | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT);
         let old_link = previous >> PLS_SHIFT & PLS_FIELD;
         let new_link = status >> PLS_SHIFT & PLS_FIELD;
         let link_recovery = old_link != new_link
@@ -435,7 +436,10 @@ impl Host {
                     .current_port_reset(None, port)?;
             }
         }
-        if status & (PP | CCS) != PP | CCS || status & OVER_CURRENT != 0 {
+        // A USB 3 device whose link a warm reset must bring up shows no
+        // connection until then (`hub_port_warm_reset_required`).
+        let warm = self.controller.borrow().warm_reset_required(port, status);
+        if status & PP == 0 || (status & CCS == 0 && !warm) || status & OVER_CURRENT != 0 {
             let mut c = self.controller.borrow_mut();
             c.write_port(port, status & PORT_CHANGES);
             // Linux reports an over-current condition that persists.
@@ -454,7 +458,8 @@ impl Host {
         // A disabled USB2 port has not completed its speed handshake yet.
         // Its Supported Protocol permits reset; reserve_current still
         // requires the enabled port's speed before Address Device.
-        if c.port_major[usize::from(port - 1)] != 2 || status & PED != 0 {
+        // An untrained USB 3 link has no speed until its warm reset.
+        if !warm && (c.port_major[usize::from(port - 1)] != 2 || status & PED != 0) {
             c.root_current(
                 port,
                 ((status >> PORT_SPEED_SHIFT) & PORT_SPEED_FIELD) as u8,
@@ -491,12 +496,13 @@ impl Host {
             &mut changes.added.failures,
         );
         if let Some(speed) = acknowledged_speed {
-            // Baseline only effects proved by our reset/training ACK. Preserve
-            // prior connection/power permission so a late physical change is
-            // observed on the next poll; late CSC is never consumed here.
-            let controlled = PED | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT) | PLS;
+            // Baseline only effects proved by our reset/training ACK: the
+            // connection it found, and CAS a warm reset cleared. Preserve
+            // prior power permission so a late physical change is observed
+            // on the next poll; late CSC is never consumed here.
+            let controlled = CCS | CAS | PED | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT) | PLS;
             self.roots[usize::from(port - 1)] =
-                status & !controlled | PED | u32::from(speed) << PORT_SPEED_SHIFT;
+                status & !controlled | CCS | PED | u32::from(speed) << PORT_SPEED_SHIFT;
         }
         Ok(())
     }

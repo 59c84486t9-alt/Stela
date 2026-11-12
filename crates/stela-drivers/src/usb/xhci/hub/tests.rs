@@ -354,6 +354,32 @@ fn port_admission_refuses_power_lifecycle_reset_and_status_failures() {
     }
 }
 
+/// Linux `hub_port_warm_reset_required` warm-resets a SuperSpeed hub port
+/// whose link sits in SS.Inactive even when it shows no connection; the
+/// device behind it is then found.
+#[test]
+fn an_inactive_hub_port_without_a_connection_is_warm_reset_and_enumerated() {
+    let mut nodes = nodes();
+    let mut hub = fault_node(Fault::Inactive);
+    let port = &mut hub.ports.as_mut().unwrap()[0];
+    port.status &= !1;
+    port.change = 0;
+    nodes.insert(0, hub);
+    let mut dma = TestRegion::new(256 * 1024 * 8);
+    let (mut controller, model) = controller(&mut dma, 32, nodes);
+    let mut failures = Vec::new();
+    let devices = controller.enumerate(&mut dma, &mut failures);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(devices.len(), 2);
+    assert!(
+        model
+            .borrow()
+            .requests
+            .iter()
+            .any(|(_, _, q)| q[0] == 0x23 && q[1] == SET_FEATURE && q[2] == 28)
+    );
+}
+
 #[test]
 fn inactive_and_failed_hot_reset_require_real_bounded_warm_reset() {
     for fault in [Fault::Inactive, Fault::HotThenWarm] {
