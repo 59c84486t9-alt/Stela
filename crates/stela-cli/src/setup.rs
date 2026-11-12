@@ -495,6 +495,8 @@ type ImageSizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
 /// directory: the boot files (`prepare::fetch_recovery`), or the boot files
 /// of a whole image that is written onto the USB as it downloads
 /// (`medium::download::Download`).
+/// Ask the user a yes-or-no question on the terminal; None without one.
+type AskOf<'a> = dyn Fn(&str) -> Option<bool> + 'a;
 type FetchImageOf<'a> = dyn Fn(&Path, &str, &str, sources::Need) -> Result<sources::Fetched> + 'a;
 
 /// Inputs that the command line fixes and tests replace.
@@ -524,6 +526,7 @@ struct Environment<'a> {
     image_caches: &'a [PathBuf],
     image_size: &'a ImageSizeOf<'a>,
     fetch_image: &'a FetchImageOf<'a>,
+    ask: &'a AskOf<'a>,
     /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
@@ -735,6 +738,16 @@ impl Request {
         let environment = Environment {
             host: &host::System,
             image_caches: &image_caches,
+            ask: &|question| {
+                use std::io::IsTerminal;
+                if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+                    return None;
+                }
+                eprint!("{question} [y/N] ");
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).ok()?;
+                Some(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
+            },
             image_size: &|build, model| {
                 let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
                 restore::recovery_size(&image, model)

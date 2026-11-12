@@ -67,6 +67,17 @@ impl Medium {
         directory(&self.volume, &self.build)
     }
 
+    /// The bytes its files take on its volume, which removing it frees.
+    pub(super) fn bytes_on_volume(&self) -> u64 {
+        fs::read_dir(self.directory())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .filter(fs::Metadata::is_file)
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
     /// Its directory, checked to be an install medium's on its volume
     /// before setup removes it.
     pub(super) fn removable_directory(&self) -> Result<PathBuf> {

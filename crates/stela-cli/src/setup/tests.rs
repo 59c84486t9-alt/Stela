@@ -72,6 +72,9 @@ pub(super) struct FakeHost {
     /// Where `mount` mounts a partition; others refuse.
     pub(super) mountable: BTreeMap<String, PathBuf>,
     pub(super) nvidia_gpus: std::cell::RefCell<Vec<u16>>,
+    /// Bytes every volume has free beyond its declared free space, as
+    /// removing files frees them.
+    pub(super) freed: std::cell::Cell<u64>,
 }
 
 impl FakeHost {
@@ -88,6 +91,7 @@ impl FakeHost {
             unmounted: Default::default(),
             mountable: BTreeMap::new(),
             nvidia_gpus: Default::default(),
+            freed: Default::default(),
         }
     }
 
@@ -175,7 +179,7 @@ impl Host for FakeHost {
             .context("no such volume")?;
         Ok(Volume {
             filesystem,
-            free_bytes,
+            free_bytes: free_bytes + self.freed.get(),
             disk: disk.map(str::to_owned),
         })
     }
@@ -398,6 +402,7 @@ fn environment(host: &FakeHost) -> Environment<'_> {
         image_caches: &*TEST_CACHES,
         image_size: &offline_image_size,
         fetch_image: &offline_fetch_image,
+        ask: &|_| None,
         prepare_restore: &fake_prepare_restore,
         prepare_update: &fake_prepare_update,
         inventory: &fake_inventory,
@@ -2570,8 +2575,144 @@ fn os_update_checks_everything_before_any_download() {
     };
     let error = format!("{:#}", os("STELA2", &environment).unwrap_err());
     assert!(error.contains("GB free"), "{error}");
-    assert!(error.contains("keeps macOS"), "{error}");
+    assert!(error.contains("would not make enough room"), "{error}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+}
+
+/// A full-installer setup whose USB has room for one copy of macOS only,
+/// and the newer build's image.
+fn one_copy_setup() -> (Fixture, PathBuf, u64) {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let newer = f._dir.path().join("Newer.ipsw");
+    restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
+    f.host.volumes.get_mut(&stela_volume(&f)).unwrap().1 = MARGIN + 16 * 1024;
+    let old = record(&f).active_medium().unwrap().bytes_on_volume();
+    (f, newer, old)
+}
+
+fn os_update(f: &Fixture, ipsw: &Path) -> Request {
+    let mut request = update_request(f, &f._dir.path().join("cache"));
+    request.action = Action::UpdateOs;
+    request.ipsw = Some(ipsw.to_path_buf());
+    request
+}
+
+#[test]
+fn os_update_with_room_for_one_copy_replaces_it_only_after_asking() {
+    let (f, newer, old_bytes) = one_copy_setup();
+    let old = record(&f).active_medium().unwrap().directory();
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    // Without a terminal: refused before anything changes, saying why.
+    let error = format!(
+        "{:#}",
+        os_update(&f, &newer)
+            .dispatch(&environment(&f.host))
+            .unwrap_err()
+    );
+    assert!(error.contains("on a terminal"), "{error}");
+    assert!(error.contains("free"), "{error}");
+    // A dry run says it would ask, and asks nothing.
+    let never = |_: &str| -> Option<bool> { panic!("a dry run asks nothing") };
+    let mut dry = os_update(&f, &newer);
+    dry.dry_run = true;
+    let plan = dry
+        .dispatch(&Environment {
+            ask: &never,
+            ..environment(&f.host)
+        })
+        .unwrap();
+    assert!(plan.contains("remove first"), "{plan}");
+    assert!(plan.contains(&old.display().to_string()), "{plan}");
+    // A no keeps everything.
+    let asked = std::cell::RefCell::new(String::new());
+    let answer = |yes: bool| {
+        let asked = &asked;
+        let host = &f.host;
+        move |question: &str| {
+            *asked.borrow_mut() = question.to_owned();
+            if yes {
+                host.freed.set(old_bytes);
+            }
+            Some(yes)
+        }
+    };
+    let no = answer(false);
+    let error = os_update(&f, &newer)
+        .dispatch(&Environment {
+            ask: &no,
+            ..environment(&f.host)
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("was kept"), "{error}");
+    assert!(
+        asked.borrow().contains("cannot install macOS"),
+        "{}",
+        asked.borrow()
+    );
+    assert!(
+        asked.borrow().contains("keeps starting"),
+        "{}",
+        asked.borrow()
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    // A yes replaces the copy.
+    let yes = answer(true);
+    os_update(&f, &newer)
+        .dispatch(&Environment {
+            ask: &yes,
+            ..environment(&f.host)
+        })
+        .unwrap();
+    let updated = record(&f);
+    assert_eq!(
+        (updated.build.as_str(), updated.replacing.as_deref()),
+        ("STELA2", None)
+    );
+    assert!(!old.exists());
+    assert!(updated.active_medium().unwrap().problems().is_empty());
+}
+
+#[test]
+fn an_interrupted_copy_replacement_is_named_and_finished_by_the_same_update() {
+    let (f, newer, old_bytes) = one_copy_setup();
+    // Stopped after the old copy went and before the new one was complete.
+    let mut stopped = record(&f);
+    let old = stopped.active_medium().unwrap().clone();
+    stopped.replacing = Some("STELA2".into());
+    stopped.media.clear();
+    publish(&mut stopped).unwrap();
+    write_record(&f.esp, &stopped).unwrap();
+    fs::remove_dir_all(old.directory()).unwrap();
+    f.host.freed.set(old_bytes);
+    let status = rerun(&f, |c| c.action = Action::Status)
+        .unwrap_err()
+        .to_string();
+    assert!(status.contains("cannot install macOS"), "{status}");
+    assert!(
+        status.contains("update os --build STELA2 --usb"),
+        "{status}"
+    );
+    assert!(!status.contains("repair --usb"), "{status}");
+    let repair = rerun(&f, |c| c.action = Action::Repair)
+        .unwrap_err()
+        .to_string();
+    assert!(repair.contains("update os --build STELA2"), "{repair}");
+    os_update(&f, &newer)
+        .dispatch(&environment(&f.host))
+        .unwrap();
+    let finished = record(&f);
+    assert_eq!(
+        (finished.build.as_str(), finished.replacing.as_deref()),
+        ("STELA2", None)
+    );
+    assert!(
+        rerun(&f, |c| c.action = Action::Status)
+            .unwrap()
+            .contains("No problems found.")
+    );
 }
 
 #[test]

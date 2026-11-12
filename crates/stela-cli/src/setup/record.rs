@@ -84,6 +84,11 @@ pub(super) struct Record {
     /// Where installs read the restore image; streamed when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) install_image: Option<InstallImage>,
+    /// The build an `update os` is writing after it removed the active
+    /// build's copy for room: until it is active, the USB cannot install
+    /// macOS, and running that update again finishes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) replacing: Option<String>,
     /// The translation store `stela.efi` keeps its packs in, if the USB
     /// has room for one (`setup::translations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

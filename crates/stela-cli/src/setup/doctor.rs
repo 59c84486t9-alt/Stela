@@ -355,7 +355,13 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
             super::restore_choice_name(kind)
         ));
     }
-    if record.installs_media() && record.active_medium().is_none() {
+    if let Some(next) = &record.replacing {
+        report.problem(format!(
+            "the update to macOS {next} stopped before its copy was complete, so this USB cannot \
+             install macOS until it is: {} finishes it",
+            report.fix(&format!("update os --build {next}"))
+        ));
+    } else if record.installs_media() && record.active_medium().is_none() {
         report.problem(format!(
             "the active build {} has no install medium, so its Install macOS choice is \
              missing: {image}",
@@ -702,6 +708,14 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     let usb = &command.usb;
     let mut record = read_record(environment, usb)?;
     update::ready(&record, usb)?;
+    // Its copy of the active build is gone for the new one's room: the
+    // update finishes it, and repair would download the old one again.
+    if let Some(next) = &record.replacing {
+        bail!(
+            "the update to macOS {next} stopped before its copy was complete: {} finishes it",
+            fix(usb, &format!("update os --build {next}"))
+        );
+    }
     let esp = record.esp.clone();
     let mut text = format!("Stela repair on {}:\n", esp.display());
     let Ok(tool) = fs::read(esp.join(LOADER_PATH)) else {

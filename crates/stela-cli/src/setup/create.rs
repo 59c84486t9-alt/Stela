@@ -741,6 +741,7 @@ pub(super) fn plan(
         verify_on_read: command.verify_on_read,
         profile: command.profile,
         install_image: command.install_image,
+        replacing: None,
         translations: None,
         wifi: command.wifi.clone().map(|ssid| wifi::Network {
             ssid,

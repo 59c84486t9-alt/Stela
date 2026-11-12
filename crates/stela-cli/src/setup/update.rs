@@ -32,7 +32,7 @@ use super::{
     restore_bundles, write_record,
 };
 use crate::efi;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, fs, path::Path};
 
@@ -54,6 +54,7 @@ pub(super) fn check_firmware_support(esp: &Path, image: &[u8]) -> Result<()> {
 /// restore bundles and medium are the startup choices' from now on.
 fn activate_build(record: &mut Record, build: &str) -> Result<()> {
     record.build = build.into();
+    record.replacing = None;
     record.bundle_directory = bundle::build_directory(&record.volume, build);
     publish(record)
 }
@@ -393,6 +394,66 @@ fn activate(record: &mut Record, to: String) -> Result<()> {
     write_record(&record.esp.clone(), record)
 }
 
+/// Whether the USB has room for `build`'s whole image from `source` beside
+/// what it keeps. When it has room only once the active build's copy is
+/// gone, the user is asked on a terminal (a dry run says it would ask)
+/// and the copy to remove first is returned; without a terminal, or with
+/// a no, the update is refused before anything is downloaded.
+fn room_for_new_copy(
+    environment: &Environment<'_>,
+    record: &Record,
+    build: &str,
+    source: &super::sources::Source,
+    dry_run: bool,
+    text: &mut String,
+) -> Result<Option<super::medium::Medium>> {
+    let Err(error) = super::sources::check_room(environment, record, build, source) else {
+        return Ok(None);
+    };
+    let from = &record.build;
+    let needed = super::medium::needed_bytes(
+        &record.volume,
+        build,
+        source.image_bytes()?,
+        environment.piece_bytes,
+    );
+    let free = environment.host.volume(&record.volume)?.free_bytes;
+    let Some((old, old_bytes)) = record
+        .active_medium()
+        .filter(|medium| !medium.remote)
+        .map(|medium| (medium.clone(), medium.bytes_on_volume()))
+        .filter(|&(_, bytes)| free.saturating_add(bytes) >= needed)
+    else {
+        bail!("{error:#} Removing macOS {from}'s copy would not make enough room either.");
+    };
+    let directory = old.directory();
+    let size = super::host::bytes_text(old_bytes);
+    if dry_run {
+        writeln!(
+            text,
+            "  remove first   {} ({size}), after asking: the USB has room for one copy of \
+             macOS, and cannot install macOS until the new one is complete",
+            directory.display()
+        )?;
+        return Ok(Some(old));
+    }
+    let question = format!(
+        "This USB has room for one copy of macOS only. Updating to macOS {build} first removes \
+         macOS {from}'s copy ({}, {size}). Until the new copy is complete, this USB cannot \
+         install macOS; a macOS already installed keeps starting, and running this update again \
+         continues it. Remove macOS {from}'s copy and continue?",
+        directory.display()
+    );
+    match (environment.ask)(&question) {
+        Some(true) => Ok(Some(old)),
+        Some(false) => bail!("macOS {from}'s copy was kept, and nothing was changed"),
+        None => bail!(
+            "{error:#} Or run this on a terminal: it offers to remove macOS {from}'s copy ({size}) \
+             first, which makes room."
+        ),
+    }
+}
+
 /// Image source and write policy for a macOS update.
 pub(super) struct OsOptions<'a> {
     pub(super) usb: &'a Path,
@@ -476,14 +537,6 @@ pub(super) fn update_os(
     let source = super::sources::locate(environment, &lookup).map_err(|error| {
         anyhow::anyhow!("updating to macOS {build} needs its restore image; but {error:#}")
     })?;
-    if need == super::sources::Need::WholeImage {
-        super::sources::check_room(environment, &record, &build, &source).map_err(|error| {
-            anyhow::anyhow!(
-                "{error:#} The USB keeps macOS {from}'s copy until the new one is complete, so \
-                 an interrupted update leaves it able to install"
-            )
-        })?;
-    }
     let mut text = String::new();
     writeln!(text, "macOS {build} install files:")?;
     writeln!(
@@ -491,11 +544,31 @@ pub(super) fn update_os(
         "  restore image  {}",
         super::sources::describe(&source, &lookup)
     )?;
-    // A dry run reads and downloads nothing to prepare its plan.
-    let obtained = match dry_run && !source.is_local() {
+    // A USB with room for one whole image only replaces the old copy, once
+    // the user agrees: it cannot install macOS until the new copy is
+    // complete.
+    let replace = match need {
+        super::sources::Need::WholeImage => {
+            room_for_new_copy(environment, &record, &build, &source, dry_run, &mut text)?
+        }
+        super::sources::Need::BootFiles => None,
+    };
+    // A dry run reads and downloads nothing to prepare its plan, and plans
+    // no copy that needs the old one's room.
+    let obtained = match dry_run && (!source.is_local() || replace.is_some()) {
         true => None,
         false => Some(super::sources::obtain(environment, &source, &lookup)?),
     };
+    if let (Some(old), false) = (&replace, dry_run) {
+        // The record stops naming the old copy before its files go, and
+        // names the build that replaces it until that one is active, so
+        // `status` says how an interrupted update is finished.
+        record.replacing = Some(build.clone());
+        record.media.retain(|medium| medium.build != old.build);
+        write_record(&record.esp.clone(), &record)?;
+        publish(&mut record)?;
+        remove_medium(old)?;
+    }
     let install = match &obtained {
         Some(obtained) => {
             let environment = Environment {
