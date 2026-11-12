@@ -997,7 +997,7 @@ pub unsafe fn open(
     root: u64,
     services: Option<&dyn NativeServices>,
     selection: &Selection<'_>,
-) -> Result<Opened> {
+) -> Result<Opened, Refused> {
     let Selection {
         targets,
         medium,
@@ -1017,7 +1017,8 @@ pub unsafe fn open(
         return Err(refuse!(
             "host disk {serial} is both a USB storage disk and a partition target",
             serial
-        ));
+        )
+        .into());
     }
     // The drivers reach their DMA memory through the physmap, which every
     // engine root keeps in its window, never through the identity map only
@@ -1146,10 +1147,6 @@ pub unsafe fn open(
         output::arguments(format_args!(
             "HOST DISK no disk reports serial {named:?}; its partition GUID is on the disk reporting {reported:?}, which is taken\n"
         ));
-    }
-    if let Some((at, _)) = &waited.missing {
-        let role = role_of(*at, targets.len(), medium.is_some(), preboot.is_some());
-        account(&devices, role, waited.waited_us, boot_disk);
     }
     for host in &devices.usb4_hosts {
         let usb4::Connection::Firmware { icm, ready, early } = host.connection() else {
@@ -1293,29 +1290,6 @@ pub unsafe fn open(
             refuse!("partition {guid}: {error}", %guid, %error)
         }
     };
-    let mut opened = loop {
-        named.truncate(required);
-        named.extend(optional.iter().map(|(named, _)| named.clone()));
-        match storage::open_shared(&mut devices.disks, &named) {
-            Ok(opened) => break opened,
-            Err((at, error)) if at >= required => {
-                let (named, which) = optional.remove(at - required);
-                output::arguments(format_args!(
-                    "HOST PARTITION {} left out: {}\n",
-                    which.role(),
-                    describe(&named, error)
-                ));
-            }
-            Err((at, error)) => return Err(describe(&named[at], error)),
-        }
-    };
-    let mut host_disks = HostDisks {
-        disks: Vec::new(),
-        root,
-    };
-    for partition in &opened {
-        host_disks.add(partition.device().shared());
-    }
     let service = |partition: PartitionDevice<Window>, role: &str| -> Box<dyn BlockDevice> {
         output::arguments(format_args!(
             "HOST PARTITION serial={} partition={} blocks={} block_size={}{role}\n",
@@ -1333,6 +1307,52 @@ pub unsafe fn open(
             failures: 0,
         })
     };
+    let mut opened = loop {
+        named.truncate(required);
+        named.extend(optional.iter().map(|(named, _)| named.clone()));
+        match storage::open_shared(&mut devices.disks, &named) {
+            Ok(opened) => break opened,
+            Err((at, error)) if at >= required => {
+                let (named, which) = optional.remove(at - required);
+                output::arguments(format_args!(
+                    "HOST PARTITION {} left out: {}\n",
+                    which.role(),
+                    describe(&named, error)
+                ));
+            }
+            Err((at, error)) => {
+                let role = role_of(at, targets.len(), medium.is_some(), preboot.is_some());
+                let refusal = describe(&named[at], error);
+                // The USB's log, when its disk is here though a required
+                // partition is not, keeps this step's lines and the account.
+                let log = log
+                    .and_then(|guid| {
+                        storage::open_shared(&mut devices.disks, &[Named::Host(guid)]).ok()
+                    })
+                    .and_then(|mut opened| opened.pop())
+                    .map(|partition| service(partition, " (boot log)"));
+                account(
+                    &mut devices,
+                    role,
+                    waited.waited_us,
+                    boot_disk,
+                    targets.first().copied(),
+                    log.is_some(),
+                );
+                return Err(Refused {
+                    refusal: refuse!("{role}: {refusal}", role, %refusal),
+                    log,
+                });
+            }
+        }
+    };
+    let mut host_disks = HostDisks {
+        disks: Vec::new(),
+        root,
+    };
+    for partition in &opened {
+        host_disks.add(partition.device().shared());
+    }
     let (mut store_partition, mut log_partition) = (None, None);
     for (_, which) in optional.iter().rev() {
         let role = format!(" ({})", which.role());
@@ -1437,19 +1457,23 @@ fn role_of(at: usize, targets: usize, medium: bool, preboot: bool) -> &'static s
 }
 
 /// The few lines a failed disk search leaves on the screen, its only
-/// record then: what is missing, where the firmware had found the stick,
-/// each controller and disk Stela's drivers found. No serial numbers.
+/// record when the USB's log is not reached (`logged`): what is missing,
+/// where the firmware had found the stick, each controller Stela's drivers
+/// found, and each disk with the partitions its GPT holds
+/// ([`storage::disk_account`]). No whole serial numbers.
 fn account(
-    devices: &stela_drivers::probe::Devices,
+    devices: &mut stela_drivers::probe::Devices,
     role: &str,
     waited_us: u64,
     boot_disk: Option<&str>,
+    chosen: Option<&Target>,
+    logged: bool,
 ) {
     let mut lines = Vec::new();
-    lines.push(format!(
-        "Not found after {} s: {role}.",
-        waited_us.div_ceil(1_000_000)
-    ));
+    lines.push(match waited_us {
+        0 => format!("Not usable: {role}."),
+        us => format!("Not usable after {} s: {role}.", us.div_ceil(1_000_000)),
+    });
     match boot_disk {
         Some(at) => lines.push(format!("The firmware started Stela from {at}.")),
         None => lines.push(String::from(
@@ -1495,23 +1519,6 @@ fn account(
             stela_drivers::usb::xhci::explain(error)
         ));
     }
-    let disks: Vec<String> = devices
-        .disks
-        .iter()
-        .map(|disk| {
-            let identity = disk.identity();
-            let bytes = identity
-                .blocks
-                .saturating_mul(u64::from(identity.block_size));
-            format!(
-                "{:?} {} {} GB {}-byte blocks",
-                identity.transport,
-                identity.model.trim(),
-                bytes / 1_000_000_000,
-                identity.block_size
-            )
-        })
-        .collect();
     let firmware_block = boot_disk
         .and_then(|at| at.rsplit_once(" block="))
         .and_then(|(_, block)| block.parse::<u32>().ok());
@@ -1530,17 +1537,32 @@ fn account(
             "The firmware read the stick with {block}-byte blocks; no USB disk found here uses them."
         ));
     }
+    let disks = storage::disk_account(&mut devices.disks, chosen);
     if disks.is_empty() {
         lines.push(String::from("Disks found: none."));
-    } else {
-        lines.push(format!("Disks found: {}.", disks.join("; ")));
     }
-    lines.push(String::from(
-        "The boot log on the USB stick does not have this part; this screen is its only record.",
-    ));
+    lines.extend(disks.into_iter().map(|disk| format!("Disk {disk}.")));
+    lines.push(String::from(if logged {
+        "The boot log on the USB stick keeps these lines."
+    } else {
+        "The boot log on the USB stick is out of reach; this screen is this part's only record."
+    }));
     for line in &lines {
         output::arguments(format_args!("HOST DISKS {line}\n"));
         crate::status::info(line);
+    }
+}
+
+/// Why [`open`] stopped, and the USB's boot log when its disk was found, so
+/// the caller keeps the step's lines before it stops.
+pub struct Refused {
+    pub refusal: crate::Refusal,
+    pub log: Option<Box<dyn BlockDevice>>,
+}
+
+impl From<crate::Refusal> for Refused {
+    fn from(refusal: crate::Refusal) -> Self {
+        Self { refusal, log: None }
     }
 }
 

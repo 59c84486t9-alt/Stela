@@ -2786,8 +2786,14 @@ fn start_devices(
                 power,
             } = opened
                 .unwrap_or_else(|error| output::fatal(error))
-                .unwrap_or_else(|error| {
+                .unwrap_or_else(|refused| {
+                    let error = refused.refusal;
                     output::arguments(format_args!("host storage refusal: {error}\n"));
+                    // The USB's log, when its disk was found, keeps the
+                    // step's lines before the stop.
+                    if let Some(log) = refused.log {
+                        crate::log_file::resume(log);
+                    }
                     output::fatal(format_args!("host storage could not be opened: {error}"))
                 });
             if let Some(acpi) = host_acpi {
