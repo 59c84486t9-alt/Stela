@@ -1,16 +1,16 @@
-//! S/D FADD, FSUB, FMUL, FDIV, FABD, FMULX and FNMUL over subnormal,
-//! tiny, overflowing and special inputs
+//! S/D FADD, FSUB, FMUL, FDIV, FABD, FMULX, FNMUL and (with FMA3) FMLA,
+//! FMLS and FMADD over subnormal, tiny, overflowing and special inputs
 //! against the Arm reference, compiled as blocks for every tier this host
 //! has: every inline completion matches the reference in every V register
 //! and FPSR, every exit leaves the state unchanged, and with FZ, FIZ, AH
 //! and the trap enables clear, every lane set without a NaN input or an
-//! invalid operation (or a minimum normal quotient) completes
+//! invalid operation (or a minimum normal quotient or FMA result) completes
 //! inline, its subnormal inputs and results, UFC, OFC and DZC included.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         self, BinaryOperation, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ,
-        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INVALID,
+        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INVALID, fused::FusedOperation,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::native::run,
@@ -22,6 +22,7 @@ const RETURN: u64 = 0x4000;
 const D: u32 = 3;
 const N: u32 = 4;
 const M: u32 = 17;
+const A: u32 = 12;
 
 fn targets() -> Vec<TargetCpu> {
     let host = TargetCpu::detect();
@@ -280,4 +281,168 @@ fn binary_operations_complete_subnormal_and_tiny_lanes_inline() {
         }
     }
     assert!(inline > runs / 3, "{inline} of {runs} inline");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Form {
+    /// FMLA (false) or FMLS (true) by vector, lanes.
+    Vector(bool, u32),
+    /// FMLA by element 1 of Vm, lanes.
+    Element(u32),
+    /// FMADD.
+    Scalar,
+}
+
+fn fused_word(form: Form, format: Format) -> u32 {
+    let double = u32::from(format == Format::Double);
+    let q = |lanes: u32| u32::from(lanes * format.bits() == 128);
+    match form {
+        Form::Vector(subtract, lanes) => {
+            0x0e20_cc00
+                | q(lanes) << 30
+                | u32::from(subtract) << 23
+                | double << 22
+                | M << 16
+                | N << 5
+                | D
+        }
+        Form::Element(lanes) => {
+            // Element 1: H:L = 0:1 for S, H = 1 for D.
+            let index = if double == 1 { 1 << 11 } else { 1 << 21 };
+            0x0f80_1000 | q(lanes) << 30 | double << 22 | index | M << 16 | N << 5 | D
+        }
+        Form::Scalar => 0x1f00_0000 | double << 22 | M << 16 | A << 10 | N << 5 | D,
+    }
+}
+
+/// The lanes of `form` as (operation, addend, left, right) per lane.
+fn fused_lanes(
+    form: Form,
+    format: Format,
+    state: &GuestState,
+) -> Vec<(FusedOperation, u64, u64, u64)> {
+    let (operation, lanes) = match form {
+        Form::Vector(true, lanes) => (FusedOperation::Subtract, lanes),
+        Form::Vector(false, lanes) | Form::Element(lanes) => (FusedOperation::Add, lanes),
+        Form::Scalar => (FusedOperation::Add, 1),
+    };
+    let addend = match form {
+        Form::Scalar => state.v[A as usize],
+        _ => state.v[D as usize],
+    };
+    (0..lanes as usize)
+        .map(|index| {
+            let right = match form {
+                Form::Element(_) => lane(state.v[M as usize], format, 1),
+                _ => lane(state.v[M as usize], format, index),
+            };
+            (
+                operation,
+                lane(addend, format, index),
+                lane(state.v[N as usize], format, index),
+                right,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn fused_operations_complete_subnormal_and_tiny_lanes_inline() {
+    let mut runs = 0;
+    let mut inline = 0;
+    for target in targets() {
+        let fma = target.supports(TargetCpu::Fma) && !target.data_independent_timing();
+        for format in [Format::Single, Format::Double] {
+            let all = floats(format);
+            let lanes = if format == Format::Double { 2 } else { 4 };
+            let forms = [
+                Form::Vector(false, lanes),
+                Form::Vector(true, lanes),
+                Form::Vector(false, 2),
+                Form::Element(lanes),
+                Form::Scalar,
+            ];
+            for form in forms {
+                let code = compile(fused_word(form, format), target);
+                for start in 0..all.len() {
+                    let mut vectors = [[0u64; 2]; 3];
+                    let count = match form {
+                        Form::Vector(_, count) | Form::Element(count) => count,
+                        Form::Scalar => 1,
+                    };
+                    for index in 0..count as usize {
+                        for (which, vector) in vectors.iter_mut().enumerate() {
+                            let position =
+                                start * (which + 1) + index * (2 * which + 1) + which * 4;
+                            set_lane(vector, format, index, all[position % all.len()]);
+                        }
+                    }
+                    if matches!(form, Form::Element(_)) {
+                        // Element 1 of Vm takes every class in turn.
+                        set_lane(&mut vectors[2], format, 1, all[(start * 3 + 1) % all.len()]);
+                    }
+                    for fpcr in controls() {
+                        let mut initial = GuestState {
+                            fpcr,
+                            fpsr: 0x0800_0000,
+                            ..GuestState::default()
+                        };
+                        initial.x[30] = RETURN;
+                        initial.v[D as usize] = vectors[0];
+                        initial.v[A as usize] = vectors[0];
+                        initial.v[N as usize] = vectors[1];
+                        initial.v[M as usize] = vectors[2];
+                        let label =
+                            alloc::format!("{form:?} {format:?} {vectors:x?} {fpcr:#x} {target:?}");
+                        let lanes = fused_lanes(form, format, &initial);
+                        let must_inline = fma
+                            && rounded(fpcr)
+                            && lanes.iter().all(|&(operation, addend, left, right)| {
+                                !is_nan(format, addend)
+                                    && !is_nan(format, left)
+                                    && !is_nan(format, right)
+                                    && floating::fused::evaluate(
+                                        format, operation, fpcr, addend, left, right,
+                                    )
+                                    .is_ok_and(|outcome| {
+                                        // The host may find tininess after
+                                        // rounding: a minimum normal result
+                                        // takes the helper.
+                                        outcome.exceptions & INVALID == 0
+                                            && outcome.bits & !format.sign_mask()
+                                                != 1 << format.fraction_bits()
+                                    })
+                            });
+                        let mut actual = initial.clone();
+                        let exit = run(&code, &mut actual);
+                        runs += 1;
+                        if exit == PC.0 {
+                            assert_eq!(actual, initial, "{label}");
+                            assert!(!must_inline, "exited: {label}");
+                            continue;
+                        }
+                        assert_eq!(exit, RETURN, "{label}");
+                        inline += 1;
+                        let mut expected = initial.clone();
+                        let mut result = if matches!(form, Form::Scalar) && fpcr & FPCR_NEP != 0 {
+                            initial.v[A as usize]
+                        } else {
+                            [0; 2]
+                        };
+                        for (index, &(operation, addend, left, right)) in lanes.iter().enumerate() {
+                            let outcome = floating::fused::evaluate(
+                                format, operation, fpcr, addend, left, right,
+                            )
+                            .expect("completed with traps");
+                            expected.fpsr |= outcome.exceptions;
+                            set_lane(&mut result, format, index, outcome.bits);
+                        }
+                        expected.v[D as usize] = result;
+                        assert_eq!(actual, expected, "{label}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(inline > runs / 8, "{inline} of {runs} inline");
 }

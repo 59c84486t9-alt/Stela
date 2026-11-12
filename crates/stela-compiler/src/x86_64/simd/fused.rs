@@ -3,9 +3,10 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
     RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_flush_status,
-    commit_inexact, emit_fma, emit_opcode, environment, flush_subnormal_lanes, jump,
-    prepare_vector_input_range, prepare_vector_result_range, read_inputs, read_numerical_right,
-    read_numerical_vector, reject_other_status, reject_product_status, resolve,
+    commit_inexact, commit_rounded_status, emit_fma, emit_opcode, environment,
+    exceptional_lane_mask, flush_subnormal_lanes, jump, prepare_vector_input_range,
+    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
+    reject_exceptional_lanes, reject_invalid, reject_other_status, reject_product_status, resolve,
     restore_environment, restore_environment_with_product, save_product_status,
     scalar_ordered_range, sticky_inexact, sticky_result_check, test_control, vector_ordered_range,
     zero_product_check,
@@ -40,6 +41,8 @@ const ORIGINAL_ADDEND: u8 = 7;
 const ZERO_RANGE_SCRATCH: u8 = ORIGINAL_ADDEND;
 /// [`flush_subnormal_lanes`]' scratch, free before the input guards.
 const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+/// [`exceptional_lane_mask`]'s scratch, which aliases no source.
+const EXCEPTIONAL_SCRATCH: [u8; 3] = [3, 4, 5];
 
 fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
@@ -130,6 +133,37 @@ pub(in crate::x86_64) fn emit(
     // FZ or FIZ with AH clear flush subnormal inputs to their signed zeros
     // (FZ raising IDC, committed with the result); AH=1 keeps the helper.
     code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    // With FMA3 and FZ, FIZ and AH clear, subnormal inputs and tiny,
+    // overflowing and infinite results are exact: the host's single
+    // unflushed rounding in Arm's mode is FPMulAdd's, and its status FPSR's
+    // ([`commit_rounded_status`]). A NaN result lane (from a NaN input,
+    // which Arm's NaN selection needs) and invalid status take the helper.
+    let rounded = native_fma.then(|| {
+        test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+        let strict = branch(code, Condition::NotZero);
+        environment(code);
+        emit_checked_fma(code, operand, target);
+        exceptional_lane_mask(
+            code,
+            operand.format,
+            operand.shape,
+            LEFT,
+            EXCEPTIONAL_SCRATCH,
+            true,
+        );
+        restore_environment(code);
+        helper.push(reject_exceptional_lanes(
+            code,
+            operand.format,
+            operand.shape,
+        ));
+        helper.push(reject_invalid(code));
+        commit_rounded_status(code);
+        let done = jump(code);
+        let strict_start = code.len();
+        resolve(code, strict, strict_start);
+        done
+    });
     test_control(code, FPCR_AH);
     let alternative = branch(code, Condition::NotZero);
     test_control(code, FPCR_FZ | FPCR_FIZ);
@@ -235,6 +269,10 @@ pub(in crate::x86_64) fn emit(
     resolve(code, success, success_start);
     commit_inexact(code);
     commit_flush_status(code);
+    if let Some(rounded) = rounded {
+        let tail = code.len();
+        resolve(code, rounded, tail);
+    }
     if operand.shape == Shape::Scalar {
         // Register MOVSS/MOVSD replaces only the result lane of A.
         if operand.format == Format::Single {
