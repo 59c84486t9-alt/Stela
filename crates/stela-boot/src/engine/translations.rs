@@ -1170,6 +1170,13 @@ impl Entries for Parts {
         })
     }
 
+    fn added_bytes(&mut self) -> u64 {
+        STORES
+            .iter()
+            .map(|lock| lock.with(|store| store.as_ref().map_or(0, |store| store.added_bytes())))
+            .sum::<usize>() as u64
+    }
+
     fn shed(&mut self, shed: bool) {
         AVAILABLE.shed.store(shed, Ordering::Relaxed);
         for lock in &STORES {
@@ -1213,11 +1220,22 @@ fn report_event(event: &Event) {
         Event::Lost { records } => output::arguments(format_args!(
             "TRANSLATIONS segment of {records} records left out: larger than the file holds\n"
         )),
-        Event::Shed { room, resident } => output::arguments(format_args!(
-            "TRANSLATIONS shed room={}M resident={}M: new translations are not kept while \
-             the heap is short\n",
-            room >> 20,
-            resident >> 20
+        Event::Shed {
+            reason,
+            room,
+            pack,
+            resident,
+        } => output::arguments(format_args!(
+            "TRANSLATIONS shed reason={reason:?} room={}M pack={}M resident={}M: new \
+             translations are not kept {}\n",
+            room.map_or(0, |room| room >> 20),
+            pack >> 20,
+            resident >> 20,
+            match reason {
+                writer::ShedReason::Heap => "while the heap is short",
+                writer::ShedReason::Pack => "past the share of the pack a boot leaves",
+                writer::ShedReason::Arena => "with the arena full",
+            }
         )),
         Event::Released { room, bytes, lost } => output::arguments(format_args!(
             "TRANSLATIONS released room={}M bytes={}M lost={lost}: the heap is nearly full; \

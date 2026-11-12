@@ -913,19 +913,23 @@ pub struct Merge<'a> {
     translator: Digest,
     segments: Vec<Segment<'a>>,
     used: Vec<UsedKeys>,
-    /// Keys the running boot used so far: their records stay, whatever
-    /// their age, and its own list counts the boot at the next merge.
+    /// Keys the running boot used so far: their records are of age 0, kept
+    /// first whatever their age, and its own list counts the boot at the
+    /// next merge.
     protect: Option<UsedKeys>,
     bound: u64,
     /// Each segment's next index entry.
     cursors: Vec<usize>,
     format: PackFormat,
     scratch: DecodeScratch,
-    /// The records taken, in key order, and their ages ([`DROPPED`] for
+    /// The records taken, in key order, and their ranks ([`DROPPED`] for
     /// those left out to stay within the bound).
     records: Vec<(Digest, Piece<'a>, u8)>,
     /// The bytes and records of each age.
-    by_age: [(u64, usize); MAX_UNUSED_BOOTS as usize + 1],
+    /// The bytes and records of each rank: a record's age, one more for
+    /// those the running boot did not use when it names those it did
+    /// ([`Merge::protect`]), so they are kept first.
+    by_age: [(u64, usize); RANKS],
     phase: Phase<'a>,
     evicted: u64,
     expired: u64,
@@ -934,6 +938,8 @@ pub struct Merge<'a> {
 
 /// The age of a record a merge leaves out to stay within its bound.
 const DROPPED: u8 = u8::MAX;
+/// The ranks a merge keeps records by ([`Merge::rank`]).
+const RANKS: usize = MAX_UNUSED_BOOTS as usize + 2;
 
 /// Where a [`Merge`] is.
 enum Phase<'a> {
@@ -1001,7 +1007,7 @@ impl<'a> Merge<'a> {
             format,
             scratch: DecodeScratch::default(),
             records: Vec::new(),
-            by_age: [(0, 0); MAX_UNUSED_BOOTS as usize + 1],
+            by_age: [(0, 0); RANKS],
             phase: Phase::Taking,
             evicted: 0,
             expired: 0,
@@ -1029,6 +1035,16 @@ impl<'a> Merge<'a> {
         self.records.push((key, piece, 0));
     }
 
+    /// The rank a record of `age` is kept by: its age, one more when the
+    /// running boot names the keys it used and not this one.
+    fn rank(&self, key: &Digest, age: u8) -> u8 {
+        age + u8::from(
+            self.protect
+                .as_ref()
+                .is_some_and(|keys| !keys.contains(key)),
+        )
+    }
+
     /// The age of a record whose segments gave it `age`.
     fn age(&self, key: &Digest, age: u8) -> u8 {
         let boots = self.used.len();
@@ -1037,7 +1053,7 @@ impl<'a> Merge<'a> {
             None => age.saturating_add(boots as u8),
         };
         match &self.protect {
-            Some(protect) if protect.contains(key) => age.min(MAX_UNUSED_BOOTS),
+            Some(protect) if protect.contains(key) => 0,
             _ => age,
         }
     }
@@ -1091,10 +1107,11 @@ impl<'a> Merge<'a> {
                 None => return true,
             }
         };
-        let slot = &mut self.by_age[usize::from(age)];
+        let rank = self.rank(&key, age);
+        let slot = &mut self.by_age[usize::from(rank)];
         slot.0 += piece.bytes().len() as u64;
         slot.1 += 1;
-        self.records.push((key, piece, age));
+        self.records.push((key, piece, rank));
         true
     }
 
@@ -1198,9 +1215,16 @@ impl<'a> Merge<'a> {
                         continue;
                     }
                     let length = piece.bytes().len() as u64;
+                    // The rank less the step for records the running boot
+                    // did not use ([`Merge::rank`]).
+                    let unused = self
+                        .protect
+                        .as_ref()
+                        .is_some_and(|keys| !keys.contains(key));
+                    let age = *age - u8::from(unused);
                     prefix.extend(key.0);
                     prefix.extend(offset.to_le_bytes());
-                    prefix.extend((length | u64::from(*age) << AGE_SHIFT).to_le_bytes());
+                    prefix.extend((length | u64::from(age) << AGE_SHIFT).to_le_bytes());
                     // Hash the index in pieces, so the checksum costs no
                     // step more than its share.
                     if prefix.len() - *hashed >= INDEX_HASH_BYTES {
@@ -2753,7 +2777,7 @@ mod tests {
         let kept = kept.layout.to_vec();
         let pack = Pack::parse(&kept, &translator).unwrap();
         assert_eq!(pack.records(), 1);
-        assert_eq!(pack.age(&used), Some(MAX_UNUSED_BOOTS));
+        assert_eq!(pack.age(&used), Some(0));
     }
 
     /// The time a store's lookup of a page key takes over one segment and
