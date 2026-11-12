@@ -917,12 +917,18 @@ impl Cpu {
     /// Where the PE runs, for its performance monitor: the PMCR1 that
     /// filters there (`pmu::Filter`) and whether it waits.
     pub fn pmu_context(&self, waiting: bool) -> super::pmu::Context {
+        self.pmu_context_at(self.pstate.el, self.pstate.guarded, waiting)
+    }
+
+    /// [`Self::pmu_context`] at `el` and the guarded level `guarded`, the
+    /// other controls as they are.
+    pub fn pmu_context_at(&self, el: u8, guarded: bool, waiting: bool) -> super::pmu::Context {
         use super::pmu::Filter;
         super::pmu::Context {
-            el: self.pstate.el,
-            filter: if self.pstate.guarded {
+            el,
+            filter: if guarded {
                 Filter::Guarded
-            } else if self.regime() == TranslationRegime::El20 {
+            } else if el == 2 || el == 0 && self.in_host() {
                 Filter::Host
             } else {
                 Filter::Guest

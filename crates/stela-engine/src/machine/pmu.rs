@@ -238,6 +238,20 @@ pub struct Pmu {
     alike: bool,
 }
 
+/// Every context native code runs in: each EL under each filter, not
+/// waiting.
+fn running_contexts() -> impl Iterator<Item = Context> {
+    [Filter::Host, Filter::Guest, Filter::Guarded]
+        .into_iter()
+        .flat_map(|filter| {
+            (0..=2).map(move |el| Context {
+                el,
+                filter,
+                waiting: false,
+            })
+        })
+}
+
 impl Pmu {
     /// Preserve the original M2 monitor API.
     pub fn new(clock: u64, frequency: u64) -> Self {
@@ -503,10 +517,35 @@ impl Pmu {
         let armed = |n: usize| n < COUNTERS && fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
         self.asserted = (0..self.counter_count())
             .any(|n| armed(n) && self.counters[n] & self.layout.width.overflow() != 0);
-        self.cycle_deadline = None;
-        self.instruction_deadline = None;
+        (self.cycle_deadline, self.instruction_deadline) =
+            self.deadlines(|n| self.counts(n, self.context));
+    }
+
+    /// The earliest system count and retired instruction count at which
+    /// the PMI can assert while native code may pass through every level
+    /// (a native run that continues through transitions): each counter
+    /// that counts in some level counts as though it counted in all, so
+    /// neither comes later than the PMI's in any order of levels.
+    pub fn level_deadlines(&self) -> (Option<u64>, Option<u64>) {
+        self.deadlines(|n| running_contexts().any(|context| self.counts(n, context)))
+    }
+
+    /// Whether counter `n` counts alike in every context but a wait.
+    pub fn counts_alike(&self, n: usize) -> bool {
+        let mut counts = running_contexts().map(|context| self.counts(n, context));
+        let first = counts.next();
+        counts.all(|count| Some(count) == first)
+    }
+
+    /// When the armed counters that `counting` selects reach their PMI from
+    /// the last synchronization: the system count by cycles, the retired
+    /// instruction count by instructions.
+    fn deadlines(&self, counting: impl Fn(usize) -> bool) -> (Option<u64>, Option<u64>) {
+        let fiq = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ;
+        let armed = |n: usize| n < COUNTERS && fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
+        let (mut cycle_deadline, mut instruction_deadline) = (None, None);
         for n in 0..COUNTERS {
-            if !armed(n) || !self.counts(n, self.context) {
+            if !armed(n) || !counting(n) {
                 continue;
             }
             let needed = self.layout.width.overflow().wrapping_sub(self.counters[n])
@@ -520,23 +559,21 @@ impl Pmu {
                         .ok()
                         .and_then(|ticks| self.synced_count.checked_add(ticks));
                     if let Some(deadline) = deadline {
-                        self.cycle_deadline = Some(
-                            self.cycle_deadline
-                                .map_or(deadline, |old| old.min(deadline)),
-                        );
+                        cycle_deadline =
+                            Some(cycle_deadline.map_or(deadline, |old: u64| old.min(deadline)));
                     }
                 }
                 Some(Event::Instructions) => {
                     if let Some(deadline) = self.synced_retired.checked_add(needed) {
-                        self.instruction_deadline = Some(
-                            self.instruction_deadline
-                                .map_or(deadline, |old| old.min(deadline)),
+                        instruction_deadline = Some(
+                            instruction_deadline.map_or(deadline, |old: u64| old.min(deadline)),
                         );
                     }
                 }
                 Some(Event::None) | None => {}
             }
         }
+        (cycle_deadline, instruction_deadline)
     }
 
     /// Whether the PMI is asserted at system count `now` with `retired`
@@ -585,6 +622,11 @@ impl Pmu {
         self.asserted || self.instruction_deadline.is_some()
     }
 
+    /// The system counter frequency, in Hz.
+    pub fn count_frequency(&self) -> u64 {
+        self.frequency
+    }
+
     /// Whether a change of EL or guarded level leaves every count as it
     /// was: no enabled counter's filters tell the levels apart.
     pub fn alike(&self) -> bool {
@@ -619,20 +661,7 @@ impl Pmu {
 
     /// [`Self::alike`] for the controls now, which only writes change.
     fn refresh_alike(&mut self) {
-        let contexts = [Filter::Host, Filter::Guest, Filter::Guarded]
-            .into_iter()
-            .flat_map(|filter| {
-                (0..=2).map(move |el| Context {
-                    el,
-                    filter,
-                    waiting: false,
-                })
-            });
-        self.alike = (0..COUNTERS).all(|n| {
-            let mut counts = contexts.clone().map(|context| self.counts(n, context));
-            let first = counts.next();
-            counts.all(|count| Some(count) == first)
-        });
+        self.alike = (0..COUNTERS).all(|n| self.counts_alike(n));
     }
 
     pub fn read(

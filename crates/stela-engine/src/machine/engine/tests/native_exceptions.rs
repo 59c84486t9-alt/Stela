@@ -105,8 +105,8 @@ fn thunks() -> (x86_64_pointer::Thunk, x86_64_pointer::Thunk) {
         crate::machine::exception::syndrome(crate::machine::exception::Class::SupervisorCall, 0x80)
             as u32;
     (
-        transition::exception_return_thunk(GuestAddress(ERET_PC), &TRANSITIONS),
-        transition::supervisor_call_thunk(GuestAddress(USER), syndrome, &TRANSITIONS),
+        transition::exception_return_thunk(GuestAddress(ERET_PC), &TRANSITIONS, 0),
+        transition::supervisor_call_thunk(GuestAddress(USER), syndrome, &TRANSITIONS, 0),
     )
 }
 
@@ -482,4 +482,151 @@ fn svc_and_eret_leave_the_pac_service_of_the_level_entered() {
     let exit = run_native(&mut native, &eret.code);
     assert_eq!(exit, (ERET_PC, ExitKind::System as u64));
     assert_eq!(observed(&native), before);
+}
+
+/// The overflow bit of the M2 monitor's counters.
+const PMC_OVERFLOW: u64 = 1 << 63;
+
+/// A host PE at EL2 whose PMC0 counts cycles at EL2 only and PMC1
+/// instructions at EL0 only, PMC1 at `pmc1` with its PMI armed where
+/// `armed` (and PMC0's where `cycles_armed`), after 10 instructions at
+/// count 1000.
+fn levels_machine(pmc1: u64, armed: bool, cycles_armed: bool) -> Machine<FakeHost, NoDevices> {
+    use crate::machine::pmu::{self, Context, Filter, Pmu};
+    const AT_EL2: Context = Context {
+        el: 2,
+        filter: Filter::Host,
+        waiting: false,
+    };
+    let mut machine = host();
+    machine.host.now = 1_000;
+    let mut monitor = Pmu::new(36_000_000, 24_000_000);
+    let arms = u64::from(armed) << 13 | u64::from(cycles_armed) << 12;
+    let write = |monitor: &mut Pmu, encoding, value| {
+        monitor.write(encoding, value, 1_000, 10, AT_EL2).unwrap();
+    };
+    write(&mut monitor, pmu::PMCR1, 1 << 9 | 1 << 16);
+    write(&mut monitor, pmu::PMCR0, 0b11 | 4 << 8 | arms);
+    write(&mut monitor, pmu::PMC[1], pmc1);
+    machine.cpu.pmu = Some(monitor);
+    machine.cpu.retired = 10;
+    machine.derived_changed();
+    machine
+}
+
+/// PMC0, PMC1 and the PMI of `machine` at its count and instructions.
+fn level_counts(machine: &mut Machine<FakeHost, NoDevices>) -> (u64, u64, bool) {
+    use crate::machine::pmu;
+    let now = machine.now();
+    let retired = machine.cpu.retired;
+    let context = machine.cpu.pmu_context(false);
+    let monitor = machine.cpu.pmu.as_mut().unwrap();
+    (
+        monitor.read(pmu::PMC[0], now, retired, context).unwrap(),
+        monitor.read(pmu::PMC[1], now, retired, context).unwrap(),
+        monitor.asserted(now, retired),
+    )
+}
+
+/// A run that continues through ERET, SVC and ERET again, logging each
+/// ([`transition::CHAIN_LOGGED`]), counts as the engine path does when it
+/// synchronizes at each transition: PMC0 the cycles of the EL2 segments
+/// alone, PMC1 the instructions of the EL0 segments alone (each
+/// transition's own instruction in the level it leaves), and the PMI that
+/// PMC1's overflow raises in the last EL0 segment is asserted at the run's
+/// end, as the twin's is.
+#[test]
+fn logged_transitions_count_each_segment_in_its_own_level() {
+    use stela_compiler::x86_64::transition::Segment;
+    // Instructions retired and the count at each transition, and its word.
+    let transitions = [
+        (110, 2_000, ERET),
+        (130, 2_600, SVC_WORD),
+        (160, 3_000, ERET),
+    ];
+    let (end_retired, end_now) = (170, 3_500);
+    let mut twin = levels_machine(PMC_OVERFLOW - 25, true, false);
+    let mut native = levels_machine(PMC_OVERFLOW - 25, true, false);
+    let mut log = [Segment::default(); transition::LOG];
+    for (index, &(retired, now, word)) in transitions.iter().enumerate() {
+        if word == ERET {
+            prepare(&mut twin);
+        } else {
+            twin.cpu.pc = USER;
+        }
+        twin.cpu.retired = retired;
+        twin.host.now = now;
+        let count = twin.now();
+        twin.system_instruction(word).unwrap();
+        log[index] = Segment {
+            retired: retired - 10,
+            count,
+            to: twin.mirror_state() as u64,
+        };
+    }
+    assert_eq!(twin.mirror_state(), 0);
+    twin.cpu.retired = end_retired;
+    twin.host.now = end_now;
+    // The native run: the thunks' log, then the run's end at EL0.
+    native.mirrors.transitions.log = log;
+    native.mirrors.transitions.logged = transitions.len() as u64;
+    native.adopt_segments();
+    assert_eq!(native.mirrors.transitions.logged, 0);
+    native.cpu.retired = end_retired;
+    native.host.now = end_now;
+    native.cpu.pstate = twin.cpu.pstate;
+    native.sync_monitor();
+    let expected = level_counts(&mut twin);
+    assert_eq!(level_counts(&mut native), expected);
+    // PMC1: 20 instructions in the first EL0 segment and 10 in the last,
+    // 30 past its start 25 short of the overflow bit.
+    assert_eq!(expected.1, PMC_OVERFLOW + 5);
+    assert!(expected.2, "the PMI asserted in the last segment");
+    assert_ne!(expected.0, 0, "EL2's cycles");
+}
+
+/// Counters that tell the levels apart let a run continue through
+/// transitions only by logging them, where native code reads the count and
+/// no armed PMI could assert within the run in some level; counters that
+/// count alike let it continue freely. Under the log, native reads of a
+/// counter that counts otherwise in some level stay closed.
+#[test]
+fn transitions_continue_logged_only_where_no_pmi_falls_within_the_run() {
+    use stela_compiler::x86_64::transition::{CHAIN_FREE, CHAIN_LOGGED};
+    let native = |mut machine: Machine<FakeHost, NoDevices>| {
+        machine.clock.native((0, 1 << 32));
+        machine
+    };
+    let mut machine = native(levels_machine(1_000, true, false));
+    assert_eq!(machine.transition_chain(), CHAIN_LOGGED);
+    machine.mirrors.transitions.chain = CHAIN_LOGGED;
+    machine.enter_cycles();
+    assert_eq!(machine.mirrors.cycles.open, 0);
+    assert_eq!(machine.mirrors.instructions.open, 0);
+    machine.mirrors.transitions.chain = 0;
+    machine.enter_cycles();
+    assert_ne!(machine.mirrors.cycles.open, 0);
+    assert_ne!(machine.mirrors.instructions.open, 0);
+    // PMC1's PMI within the run's instructions, though EL2 counts none.
+    let mut machine = native(levels_machine(PMC_OVERFLOW - 25, true, false));
+    assert_eq!(machine.transition_chain(), 0);
+    // Unarmed, it may cross the bit within the run.
+    let mut machine = native(levels_machine(PMC_OVERFLOW - 25, false, false));
+    assert_eq!(machine.transition_chain(), CHAIN_LOGGED);
+    // PMC0's PMI within a second of count.
+    let mut machine = levels_machine(1_000, false, true);
+    let context = machine.cpu.pmu_context(false);
+    let monitor = machine.cpu.pmu.as_mut().unwrap();
+    let pmc0 = crate::machine::pmu::PMC[0];
+    monitor
+        .write(pmc0, PMC_OVERFLOW - 1_000, 1_000, 10, context)
+        .unwrap();
+    let mut machine = native(machine);
+    assert_eq!(machine.transition_chain(), 0);
+    // Without native count reads.
+    let mut machine = levels_machine(1_000, false, false);
+    assert_eq!(machine.transition_chain(), 0);
+    // Counting alike, or without a monitor.
+    let mut machine = host();
+    assert_eq!(machine.transition_chain(), CHAIN_FREE);
 }

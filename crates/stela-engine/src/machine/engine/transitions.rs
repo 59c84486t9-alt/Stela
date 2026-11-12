@@ -5,7 +5,8 @@
 use super::*;
 use crate::machine::cpu::Cpu;
 use stela_compiler::x86_64::transition::{
-    EXCEPTION_RETURN, GUARDED_ENTER, GUARDED_EXIT, KINDS, Record, SUPERVISOR_CALL,
+    CHAIN_FREE, CHAIN_LOGGED, EXCEPTION_RETURN, GUARDED_ENTER, GUARDED_EXIT, KINDS, Record,
+    SUPERVISOR_CALL,
 };
 
 /// The SPSR bits a GEXIT record fixes: M[4:0], D, BTYPE, IL, SS, PAN, TCO
@@ -536,6 +537,63 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.pstate.pan = self.cpu.state.pan != 0;
     }
 
+    /// Whether the next native run may continue through transitions
+    /// ([`transition::Table::chain`]): freely where no counter tells the
+    /// levels apart. Else, where native code reads the count, it logs each
+    /// ([`CHAIN_LOGGED`]) for [`Self::adopt_segments`], unless an armed PMI
+    /// could assert within the run in some level: by instructions within
+    /// the most a run retires, by cycles within a second of count, far
+    /// longer than a native run lasts. Otherwise a transition ends its run,
+    /// so the counts before it stay the old level's.
+    pub(super) fn transition_chain(&mut self) -> u64 {
+        let Some(pmu) = self.cpu.pmu.as_ref() else {
+            return CHAIN_FREE;
+        };
+        if pmu.alike() {
+            return CHAIN_FREE;
+        }
+        if !self.clock.reads_natively() {
+            return 0;
+        }
+        let (cycles, instructions) = pmu.level_deadlines();
+        let margin = pmu.count_frequency();
+        let retired = self.cpu.retired;
+        if instructions.is_some_and(|deadline| {
+            deadline.saturating_sub(retired) <= super::interrupts::NATIVE_RUN_INSTRUCTIONS
+        }) {
+            return 0;
+        }
+        if cycles.is_some_and(|deadline| deadline.saturating_sub(self.now()) <= margin) {
+            return 0;
+        }
+        CHAIN_LOGGED
+    }
+
+    /// Bring the performance monitor up to each transition the native run
+    /// just logged ([`transition::Segment`]) in the level it left, and go on
+    /// counting in the level it entered, as the engine path's
+    /// synchronization at each does: before the run's instructions are
+    /// retired, so that each segment's are those since the run's entry.
+    /// The last level's count goes on to the run's end as after any
+    /// transition ([`Self::adopt_transitions`]).
+    pub(super) fn adopt_segments(&mut self) {
+        let (log, logged) = self.mirrors.transitions.take_log();
+        let retired = self.cpu.retired;
+        for segment in &log[..logged] {
+            let state = segment.to as usize;
+            let context = self
+                .cpu
+                .pmu_context_at((state & 3) as u8, state & 4 != 0, false);
+            if let Some(pmu) = self.cpu.pmu.as_mut() {
+                pmu.sync(
+                    segment.count,
+                    retired.wrapping_add(segment.retired),
+                    context,
+                );
+            }
+        }
+    }
+
     /// What an engine-path transition does after its own effects
     /// ([`Self::transitioned`]) for the `counts` native code made, the
     /// last block's `ending` instructions not yet retired. The PAC service
@@ -544,8 +602,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// (SVC, ERET) the thunk swaps the service's tag words to those the
     /// engine path reopened (`transition::check_pointer`); traps agree at
     /// both levels ([`Self::pointer_use`]). With counters that tell the levels
-    /// apart a run ends at its first transition, so the counts before it
-    /// stay the old level's.
+    /// apart the counts reach each logged transition in its own level
+    /// ([`Self::adopt_segments`]) and the last one ends the run, so the
+    /// counts before it, with `ending`, stay the old level's.
     pub(super) fn adopt_transitions(&mut self, counts: [u64; KINDS], ending: u64) {
         for (total, count) in self.statistics.native_transitions.iter_mut().zip(counts) {
             *total += count;
@@ -559,41 +618,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Install the thunk completing the GENTER, GEXIT, SVC or ERET `word` that ends
-    /// block `code` (its bytes `native`) at `pc`; the address of its exit
-    /// to the target, which may be linked.
+    /// block `code` (its bytes `native`, its `ending` instructions, which
+    /// the thunk logs with the run's) at `pc`; the address of its exit to
+    /// the target, which may be linked.
     pub(super) fn complete_transition_natively(
         &mut self,
         code: NativeCode,
         native: &[u8],
         pc: u64,
         word: u32,
+        ending: u32,
     ) -> Option<u64> {
         let (kind, immediate) = transition_word(word)?;
         let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
         if !chain::is_direct_exit(&native[site..], GuestAddress(pc), ExitKind::System) {
             return None;
         }
-        // GEXIT and ERET read the count (`Places::lines_until`).
-        if matches!(kind, GUARDED_EXIT | EXCEPTION_RETURN) {
-            self.clock.native(self.host.tsc_counter()?);
+        // GEXIT and ERET read the count (`Places::lines_until`), and every
+        // kind logs it under `CHAIN_LOGGED` (`Self::transition_chain`).
+        match self.host.tsc_counter() {
+            Some(scale) => self.clock.native(scale),
+            None if matches!(kind, GUARDED_EXIT | EXCEPTION_RETURN) => return None,
+            None => {}
         }
         let pc_at = GuestAddress(pc);
         let thunk = match kind {
             GUARDED_ENTER => {
                 let syndrome = Cpu::guarded_enter_syndrome(immediate as u8);
                 let syndrome = u32::try_from(syndrome).ok()?;
-                transition::guarded_enter_thunk(pc_at, syndrome, &TRANSITIONS)
+                transition::guarded_enter_thunk(pc_at, syndrome, &TRANSITIONS, ending)
             }
-            GUARDED_EXIT => transition::guarded_exit_thunk(pc_at, &TRANSITIONS),
+            GUARDED_EXIT => transition::guarded_exit_thunk(pc_at, &TRANSITIONS, ending),
             SUPERVISOR_CALL => {
                 let syndrome = crate::machine::exception::syndrome(
                     crate::machine::exception::Class::SupervisorCall,
                     u32::from(immediate),
                 );
                 let syndrome = u32::try_from(syndrome).ok()?;
-                transition::supervisor_call_thunk(pc_at, syndrome, &TRANSITIONS)
+                transition::supervisor_call_thunk(pc_at, syndrome, &TRANSITIONS, ending)
             }
-            _ => transition::exception_return_thunk(pc_at, &TRANSITIONS),
+            _ => transition::exception_return_thunk(pc_at, &TRANSITIONS, ending),
         };
         self.install_stream = self.stream_at(code.0 as u64);
         let installed = self.install_native(&thunk.code, true).ok()?;
@@ -810,7 +874,7 @@ pub(super) mod tests {
         assert_eq!(observed(&engine), observed(&native));
         engine.system_instruction(GENTER_WORD).unwrap();
         let syndrome = Cpu::guarded_enter_syndrome(3) as u32;
-        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS);
+        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS, 0);
         let exit = run_native(&mut native, &enter.code);
         assert_eq!(exit, (ENTER, ExitKind::Return as u64));
         assert_eq!(observed(&engine), observed(&native));
@@ -822,7 +886,7 @@ pub(super) mod tests {
             machine.cpu.apple.guarded[1].spsr &= !(0b0001 << 6);
         }
         engine.system_instruction(GEXIT).unwrap();
-        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS);
+        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS, 0);
         let exit = run_native(&mut native, &leave.code);
         assert_eq!(exit, (pc + 4, ExitKind::Return as u64));
         assert_eq!(observed(&engine), observed(&native));
@@ -964,7 +1028,7 @@ pub(super) mod tests {
         assert!(native.pointer.tags.iter().any(|&tag| tag != 0), "keys open");
         engine.system_instruction(GENTER_WORD).unwrap();
         let syndrome = Cpu::guarded_enter_syndrome(3) as u32;
-        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS);
+        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS, 0);
         assert_eq!(
             run_native(&mut native, &enter.code),
             (ENTER, ExitKind::Return as u64)
@@ -979,7 +1043,7 @@ pub(super) mod tests {
         assert_eq!(observed(&engine), observed(&native));
         assert_eq!(pointer(&engine), pointer(&native));
         engine.system_instruction(GEXIT).unwrap();
-        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS);
+        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS, 0);
         assert_eq!(
             run_native(&mut native, &leave.code),
             (pc + 4, ExitKind::Return as u64)
@@ -1049,9 +1113,9 @@ pub(super) mod tests {
         /// What happens while the PE is at GL2.
         type Cause = fn(&mut Machine<FakeHost, NoDevices>, &CountState);
         let pc = BASE + 0x100;
-        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS);
+        let leave = transition::guarded_exit_thunk(GuestAddress(ENTER + 0x40), &TRANSITIONS, 0);
         let syndrome = Cpu::guarded_enter_syndrome(3) as u32;
-        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS);
+        let enter = transition::guarded_enter_thunk(GuestAddress(pc), syndrome, &TRANSITIONS, 0);
         // A machine with records, the virtual timer armed for DUE and FIQ
         // unmasked at EL2, at the GENTER at `pc`. Records hold for the
         // frame they were made with: the machine stays where it is.
@@ -1260,8 +1324,9 @@ pub(super) mod tests {
         };
         let (a_site, b_site) = (site(&a, genter), site(&b, gexit));
         let syndrome = Cpu::guarded_enter_syndrome(3) as u32;
-        let enter = transition::guarded_enter_thunk(GuestAddress(genter), syndrome, &TRANSITIONS);
-        let leave = transition::guarded_exit_thunk(GuestAddress(gexit), &TRANSITIONS);
+        let enter =
+            transition::guarded_enter_thunk(GuestAddress(genter), syndrome, &TRANSITIONS, 0);
+        let leave = transition::guarded_exit_thunk(GuestAddress(gexit), &TRANSITIONS, 0);
         let (enter_point, leave_point) = (dynamic_point(&enter), dynamic_point(&leave));
         let reads = |machine: &mut Machine<FakeHost, NoDevices>| {
             let x = &mut machine.cpu.state.x;
@@ -1412,8 +1477,8 @@ pub(super) mod tests {
             let site = |code: &[u8]| code.len() - chain::DIRECT_EXIT_BYTES;
             let syndrome = Cpu::guarded_enter_syndrome(3) as u32;
             let enter =
-                transition::guarded_enter_thunk(GuestAddress(genter), syndrome, &TRANSITIONS);
-            let leave = transition::guarded_exit_thunk(GuestAddress(gexit), &TRANSITIONS);
+                transition::guarded_enter_thunk(GuestAddress(genter), syndrome, &TRANSITIONS, 0);
+            let leave = transition::guarded_exit_thunk(GuestAddress(gexit), &TRANSITIONS, 0);
             let run = joined(
                 &[&a, &enter.code, &b, &leave.code, &c],
                 &[

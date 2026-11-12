@@ -1057,8 +1057,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .unwrap_or_default();
             successors.extend(successor);
             dynamic_site = dynamic_site.or(dynamic);
+            let ending = u32::try_from(instructions).unwrap_or(u32::MAX);
             if let Some(exit) =
-                self.complete_transition_natively(code, code_bytes, terminal_pc, terminal)
+                self.complete_transition_natively(code, code_bytes, terminal_pc, terminal, ending)
             {
                 dynamic_site = dynamic_site.or(Some(exit));
             }

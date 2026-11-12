@@ -461,13 +461,14 @@ fn a_pe_with_canonical_memory_completes_svc_and_eret_natively_without_a_reservat
         GuestAddress(USER),
         syndrome(Class::SupervisorCall, 0x80) as u32,
         &TRANSITIONS,
+        0,
     );
     let exit = run_native(&mut machine, &svc.code);
     assert_eq!(exit, (VECTORS + 0x400, ExitKind::Return as u64));
     assert_eq!(machine.cpu.pstate.el, 2);
     assert_eq!(machine.statistics.native_transitions[SUPERVISOR_CALL], 1);
     assert!(!machine.cpu.event_is_set());
-    let thunk = transition::exception_return_thunk(GuestAddress(0x8800), &TRANSITIONS);
+    let thunk = transition::exception_return_thunk(GuestAddress(0x8800), &TRANSITIONS, 0);
     let ready = |machine: &mut Machine<FakeHost, NoDevices>| {
         machine.cpu.pc = 0x8800;
         let registers = &mut machine.cpu.registers;

@@ -6,7 +6,8 @@ use super::*;
 /// More instructions than one native run retires: [`CHAIN_LIMIT`] chained
 /// blocks of at most [`block::MAX_BLOCK_INSTRUCTIONS`], each with a thunk
 /// that completes one more.
-const NATIVE_RUN_INSTRUCTIONS: u64 = (CHAIN_LIMIT + 1) * (block::MAX_BLOCK_INSTRUCTIONS as u64 + 1);
+pub(super) const NATIVE_RUN_INSTRUCTIONS: u64 =
+    (CHAIN_LIMIT + 1) * (block::MAX_BLOCK_INSTRUCTIONS as u64 + 1);
 
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The system counter's count (`clock`).

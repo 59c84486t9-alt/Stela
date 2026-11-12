@@ -32,6 +32,14 @@
 //! (`Thunk::dynamic`) while the table's and the record's `chain` words allow
 //! the next state's code to run in this native run, else through an exit
 //! that is never linked. It clobbers RAX, RCX, RDX and flags, and the pinned SP.
+//!
+//! Where counters tell the levels apart the table's `chain` is
+//! [`CHAIN_LOGGED`]: a transition continues only while the table's log has
+//! room, and logs the instructions the run retired up to it with those of
+//! its block (each builder's `ending`), the count and the state entered, so
+//! that the engine brings the counters up to each in its own level
+//! ([`Segment`]). Reading the count, it also takes two words of the host
+//! stack and the count reader's words.
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size};
 use super::flag_word::{ARM_MASK, ARM_SHIFT, PACK_MULTIPLIER, UNPACK_MULTIPLIER, WORD_MASK};
 use super::pointer::Thunk;
@@ -139,14 +147,35 @@ pub const AC_KEEP: u64 = 0;
 pub const AC_SET: u64 = 1;
 pub const AC_CLEAR: u64 = 2;
 
+/// [`Table::chain`]: native code continues in the new state.
+pub const CHAIN_FREE: u64 = 1;
+/// [`Table::chain`]: native code continues in the new state while
+/// [`Table::log`] has room, logging the transition.
+pub const CHAIN_LOGGED: u64 = 2;
+/// The transitions one native run logs at most.
+pub const LOG: usize = 16;
+
+/// A transition native code continued through under [`CHAIN_LOGGED`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Segment {
+    /// The instructions the run retired up to it, its own included.
+    pub retired: u64,
+    /// The count at it (the count reader's).
+    pub count: u64,
+    /// The state word it entered.
+    pub to: u64,
+}
+
 /// A PE's transition records. Two tables are equal when the same records
-/// hold in them, whatever their generations.
+/// hold in them, whatever their generations (and whatever the log holds).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Table {
     /// Starts at 1.
     pub generation: u64,
-    /// Nonzero while native code may continue in the new state.
+    /// Whether native code may continue in the new state: 0 never,
+    /// [`CHAIN_FREE`] or [`CHAIN_LOGGED`].
     pub chain: u64,
     /// Moves when lookup contexts go: records keep holding, but continue
     /// in the new state only once their contexts are taken again.
@@ -157,6 +186,10 @@ pub struct Table {
     /// Native completions of each kind since the engine last took them.
     pub counts: [u64; KINDS],
     pub records: [[Record; KINDS]; STATES],
+    /// The transitions this run continued through under [`CHAIN_LOGGED`],
+    /// the first `logged` of `log`.
+    pub logged: u64,
+    pub log: [Segment; LOG],
 }
 
 impl Default for Table {
@@ -168,6 +201,8 @@ impl Default for Table {
             stale_contexts: 0,
             counts: [0; KINDS],
             records: [[Record::default(); KINDS]; STATES],
+            logged: 0,
+            log: [Segment::default(); LOG],
         }
     }
 }
@@ -218,6 +253,13 @@ impl Table {
     /// The completions counted since the last call, which it clears.
     pub fn take_counts(&mut self) -> [u64; KINDS] {
         core::mem::take(&mut self.counts)
+    }
+
+    /// The transitions logged since the last call (the first of the log),
+    /// which it clears.
+    pub fn take_log(&mut self) -> ([Segment; LOG], usize) {
+        let logged = (core::mem::take(&mut self.logged) as usize).min(LOG);
+        (self.log, logged)
     }
 }
 
@@ -336,15 +378,17 @@ fn swap_stack(asm: &mut Asm<'_>) {
 }
 
 /// What every completion does after its own effects, RDX at the record,
-/// then the exits: RAX the target.
+/// then the exits: RAX the target. `ending` is the instructions of the
+/// block whose exit it completes.
 fn commit(
     mut code: Vec<u8>,
     places: &Places,
     kind: usize,
     misses: Vec<Patch>,
     pc: GuestAddress,
+    ending: u32,
 ) -> Thunk {
-    use Gpr::{Rax, Rcx};
+    use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let mut asm = Asm::new(&mut code);
     let to = |field| record_field(field);
@@ -419,16 +463,10 @@ fn commit(
     asm.fixed(&CLAC);
     asm.bind(not_clear);
     asm.bind(stays);
-    // The target, and whether this run may continue there.
+    // Whether this run may continue in the new state, then the target.
+    let table = |field: usize| Mem::base(Rcx, field as i32);
     asm.place(Rcx, places.table);
-    asm.mov_load(Qword, Rax, to(offset_of!(Record, target)));
-    asm.mov_load(Qword, Rax, Mem::base(Rax, 0));
-    asm.alu_imm8(
-        Alu::Cmp,
-        Qword,
-        Mem::base(Rcx, offset_of!(Table, chain) as i32),
-        0,
-    );
+    asm.alu_imm8(Alu::Cmp, Qword, table(offset_of!(Table, chain)), 0);
     let ends = asm.jcc(Cond::E);
     asm.alu_imm8(Alu::Cmp, Qword, to(offset_of!(Record, chain)), 0);
     let stops = asm.jcc(Cond::E);
@@ -444,11 +482,48 @@ fn commit(
         to(offset_of!(Record, contexts_generation)),
     );
     let older = asm.jcc(Cond::Ne);
+    asm.place(Rcx, places.table);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Qword,
+        table(offset_of!(Table, chain)),
+        CHAIN_LOGGED as i8,
+    );
+    let free = asm.jcc(Cond::Ne);
+    // The log: RAX at the segment, less the log's offset.
+    asm.mov_load(Qword, Rax, table(offset_of!(Table, logged)));
+    asm.alu_imm8(Alu::Cmp, Qword, Rax, LOG as i8);
+    let full = asm.jcc(Cond::Ae);
+    asm.alu_imm8(Alu::Add, Qword, table(offset_of!(Table, logged)), 1);
+    asm.imul_imm32(Qword, Rax, Rax, size_of::<Segment>() as i32);
+    asm.alu(Alu::Add, Qword, Rax, Rcx);
+    let segment = |field: usize| Mem::base(Rax, (offset_of!(Table, log) + field) as i32);
+    asm.mov_load(Qword, Rcx, to(offset_of!(Record, to)));
+    asm.mov_store(Qword, segment(offset_of!(Segment, to)), Rcx);
+    asm.place(Rcx, super::chain::CONTROL_PLACE);
+    asm.mov_load(Qword, Rcx, Mem::base(Rcx, super::chain::RETIRED_OFFSET));
+    if ending != 0 {
+        let ending = i32::try_from(ending).expect("a block's instructions");
+        asm.alu_imm32(Alu::Add, Qword, Rcx, ending);
+    }
+    asm.mov_store(Qword, segment(offset_of!(Segment, retired)), Rcx);
+    asm.push(Rdx);
+    asm.push(Rax);
+    super::register_read::read_count(&mut asm, places.count);
+    asm.pop(Rax);
+    asm.mov_store(Qword, segment(offset_of!(Segment, count)), Rdx);
+    asm.pop(Rdx);
+    asm.bind(free);
+    asm.mov_load(Qword, Rax, to(offset_of!(Record, target)));
+    asm.mov_load(Qword, Rax, Mem::base(Rax, 0));
     let dynamic = asm.len();
     super::block::exit_kind_with(&mut asm, ExitKind::Return);
     asm.bind(ends);
     asm.bind(stops);
     asm.bind(older);
+    asm.bind(full);
+    asm.mov_load(Qword, Rax, to(offset_of!(Record, target)));
+    asm.mov_load(Qword, Rax, Mem::base(Rax, 0));
     super::block::exit_kind_with(&mut asm, ExitKind::Return);
     for miss in misses {
         asm.bind(miss);
@@ -459,7 +534,7 @@ fn commit(
 
 /// The thunk completing `GENTER #immediate` at `pc`, whose ESR is
 /// `syndrome` (the immediate in it), else exiting at `pc` for the engine.
-pub fn guarded_enter_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -> Thunk {
+pub fn guarded_enter_thunk(pc: GuestAddress, syndrome: u32, places: &Places, ending: u32) -> Thunk {
     use Gpr::{Rax, Rcx};
     use Size::{Dword, Qword};
     let mut code = Vec::with_capacity(512);
@@ -491,11 +566,11 @@ pub fn guarded_enter_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -> 
     asm.mov_rm_imm32(Dword, frame_field(offset_of!(GuestState, daif)), 0xf);
     asm.place(Rcx, places.selected);
     asm.mov_rm_imm32(Qword, Mem::base(Rcx, 0), 1);
-    commit(code, places, GUARDED_ENTER, misses, pc)
+    commit(code, places, GUARDED_ENTER, misses, pc, ending)
 }
 
 /// The thunk completing GEXIT at `pc`, else exiting at `pc` for the engine.
-pub fn guarded_exit_thunk(pc: GuestAddress, places: &Places) -> Thunk {
+pub fn guarded_exit_thunk(pc: GuestAddress, places: &Places, ending: u32) -> Thunk {
     use Gpr::{Rax, Rcx};
     use Size::Qword;
     let mut code = Vec::with_capacity(512);
@@ -519,7 +594,7 @@ pub fn guarded_exit_thunk(pc: GuestAddress, places: &Places) -> Thunk {
     check_return_state(&mut asm, &mut misses);
     restore_pstate(&mut asm, places);
     swap_stack(&mut asm);
-    commit(code, places, GUARDED_EXIT, misses, pc)
+    commit(code, places, GUARDED_EXIT, misses, pc, ending)
 }
 
 /// The branch to the original exit unless no interrupt line falls due by
@@ -724,7 +799,12 @@ fn swap_pointer(asm: &mut Asm<'_>, places: &Places) {
 /// target's; every exception is masked; PAN, UAO and SSBS become the
 /// record's (with PSTATE.PAN the record's `check`), DIT stays; and the PE
 /// continues at the record's vector.
-pub fn supervisor_call_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -> Thunk {
+pub fn supervisor_call_thunk(
+    pc: GuestAddress,
+    syndrome: u32,
+    places: &Places,
+    ending: u32,
+) -> Thunk {
     use Gpr::{Rax, Rcx};
     use Size::{Dword, Qword};
     let mut code = Vec::with_capacity(512);
@@ -775,7 +855,7 @@ pub fn supervisor_call_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -
         );
         asm.mov_store(Qword, word, Rax);
     }
-    commit(code, places, SUPERVISOR_CALL, misses, pc)
+    commit(code, places, SUPERVISOR_CALL, misses, pc, ending)
 }
 
 /// The thunk completing ERET at `pc` from EL2 to EL0 in the host or to EL2,
@@ -788,7 +868,7 @@ pub fn supervisor_call_thunk(pc: GuestAddress, syndrome: u32, places: &Places) -
 /// (`Record::reservation`). PSTATE's operands come from SPSR, the PC
 /// from ELR with its tag removed where the record says, the SP moves, the
 /// frame's local monitor clears and the event register is set.
-pub fn exception_return_thunk(pc: GuestAddress, places: &Places) -> Thunk {
+pub fn exception_return_thunk(pc: GuestAddress, places: &Places, ending: u32) -> Thunk {
     use Gpr::{Rax, Rcx};
     use Size::{Byte, Dword, Qword};
     let mut code = Vec::with_capacity(640);
@@ -842,7 +922,7 @@ pub fn exception_return_thunk(pc: GuestAddress, places: &Places) -> Thunk {
     asm.mov_load(Qword, Rcx, record_field(offset_of!(Record, event)));
     asm.mov_imm32(Rax, 1);
     asm.mov_store(Byte, Mem::base(Rcx, 0), Rax);
-    commit(code, places, EXCEPTION_RETURN, misses, pc)
+    commit(code, places, EXCEPTION_RETURN, misses, pc, ending)
 }
 
 #[cfg(all(
@@ -1071,7 +1151,7 @@ mod tests {
         for chain in [0, 1] {
             let mut rig = entering();
             rig.table.chain = chain;
-            let thunk = guarded_enter_thunk(PC, syndrome, &PLACES);
+            let thunk = guarded_enter_thunk(PC, syndrome, &PLACES, 0);
             assert!(thunk.dynamic.is_some() && thunk.next.is_none());
             let exit = rig.run(&thunk);
             assert_eq!(
@@ -1095,11 +1175,73 @@ mod tests {
         }
     }
 
+    /// Under [`CHAIN_LOGGED`] a completion that may continue logs the
+    /// instructions the run retired with its block's, the count and the
+    /// state it entered, while the log has room; with the log full, under
+    /// [`CHAIN_FREE`], or where the run ends anyway, it logs nothing.
+    #[test]
+    fn logged_completions_log_their_segment_while_the_log_has_room() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let thunk = guarded_enter_thunk(PC, 0xfe01_0003, &PLACES, 7);
+        let cases = [
+            (CHAIN_LOGGED, 1, 0, true),
+            (CHAIN_LOGGED, 1, 3, true),
+            (CHAIN_LOGGED, 1, LOG as u64, false),
+            (CHAIN_LOGGED, 0, 0, false),
+            (CHAIN_FREE, 1, 0, false),
+        ];
+        for (chain, record_chain, logged, logs) in cases {
+            let mut rig = entering();
+            rig.table.chain = chain;
+            let contexts_generation = rig.table.contexts_generation;
+            let record = &mut rig.table.records[2][GUARDED_ENTER];
+            record.chain = record_chain;
+            record.contexts_generation = contexts_generation;
+            rig.table.logged = logged;
+            rig.control.retired = 40;
+            rig.clock.offset.store(5_000, Relaxed);
+            let exit = rig.run(&thunk);
+            assert_eq!(
+                exit,
+                Exit {
+                    pc: ENTER,
+                    kind: ExitKind::Return as u64,
+                }
+            );
+            rig.committed(GUARDED_ENTER, 6);
+            let case = (chain, record_chain, logged);
+            if logs {
+                assert_eq!(rig.table.logged, logged + 1, "{case:?}");
+                let segment = Segment {
+                    retired: 47,
+                    count: 5_000,
+                    to: 6,
+                };
+                assert_eq!(rig.table.log[logged as usize], segment, "{case:?}");
+                assert_eq!(rig.reader.last, 5_000, "{case:?}");
+            } else {
+                assert_eq!(rig.table.logged, logged, "{case:?}");
+                assert_eq!(rig.table.log, [Segment::default(); LOG], "{case:?}");
+            }
+            let (log, taken) = rig.table.take_log();
+            assert_eq!(
+                taken,
+                if logs {
+                    logged as usize + 1
+                } else {
+                    logged as usize
+                }
+            );
+            assert_eq!(log, rig.table.log);
+            assert_eq!(rig.table.logged, 0);
+        }
+    }
+
     /// Without a record that holds for the frame, the state and the stack
     /// selection, GENTER exits with nothing written.
     #[test]
     fn guarded_enter_leaves_the_rest_to_the_engine() {
-        let thunk = guarded_enter_thunk(PC, 0xfe01_0000, &PLACES);
+        let thunk = guarded_enter_thunk(PC, 0xfe01_0000, &PLACES, 0);
         let changes: [fn(&mut Rig); 5] = [
             |rig| rig.table.forget(),
             |rig| rig.words.selected = 0,
@@ -1153,7 +1295,7 @@ mod tests {
     #[test]
     fn guarded_exit_completes_from_the_record() {
         let mut rig = exiting();
-        let thunk = guarded_exit_thunk(PC, &PLACES);
+        let thunk = guarded_exit_thunk(PC, &PLACES, 0);
         assert_eq!(
             rig.run(&thunk),
             Exit {
@@ -1176,7 +1318,7 @@ mod tests {
     /// differs from the record's, or the record does not hold.
     #[test]
     fn guarded_exit_leaves_the_rest_to_the_engine() {
-        let thunk = guarded_exit_thunk(PC, &PLACES);
+        let thunk = guarded_exit_thunk(PC, &PLACES, 0);
         let changes: [fn(&mut Rig); 7] = [
             |rig| rig.words.selected = 0,
             |rig| rig.state.pending = 0b10,
@@ -1208,7 +1350,7 @@ mod tests {
     #[test]
     fn guarded_exit_leaves_a_due_deadline_to_the_engine() {
         use core::sync::atomic::Ordering::Relaxed;
-        let thunk = guarded_exit_thunk(PC, &PLACES);
+        let thunk = guarded_exit_thunk(PC, &PLACES, 0);
         for (count, until, completes) in [
             (99, 100, true),
             (100, 100, false),

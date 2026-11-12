@@ -284,10 +284,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let entry = self.code.blocks[index].code;
         self.finish_transition(budget);
         self.refresh_transition_contexts(budget);
-        // A transition may continue in this run unless counters tell the
-        // levels apart (`transitions`).
-        self.mirrors.transitions.chain =
-            u64::from(self.cpu.pmu.as_ref().is_none_or(|pmu| pmu.alike()));
+        // Whether a transition may continue in this run, logged where
+        // counters tell the levels apart (`transitions`).
+        self.mirrors.transitions.chain = self.transition_chain();
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
@@ -315,6 +314,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let transitions = self.mirrors.transitions.take_counts();
         let transitioned = transitions != [0; transition::KINDS];
+        if self.mirrors.transitions.logged != 0 {
+            self.adopt_segments();
+        }
         if transitioned {
             self.adopt_native_state();
         }
