@@ -295,15 +295,48 @@ pub fn fetch_recovery(image: &Image, model: &str, output: &Path) -> Result<u64> 
     )
 }
 
-/// The bytes [`fetch_recovery`] would copy of `image` for `model`, and the
-/// whole image's, from its ZIP directory read by byte ranges.
-pub fn recovery_size(image: &Image, model: &str) -> Result<(u64, u64)> {
-    let url = Url::parse(&image.url)?;
-    ensure!(
-        apple_url(&url),
-        "image must be hosted on Apple's HTTPS servers"
-    );
-    payload::recovery_bytes(remote::Remote::open(client()?, &image.url)?, model)
+/// Copy the members of `image` that preparing `model`'s boot bundles reads
+/// (`boot::restore_inputs`) from Apple's servers by byte ranges into the
+/// archive `output` ([`payload::copy_named_from`]), each range ending at
+/// its member's end. Returns the bytes downloaded for the members.
+pub fn fetch_inputs(image: &Image, model: &str, output: &Path) -> Result<u64> {
+    inputs_from(open_image(image)?, model, output)
+}
+
+/// [`fetch_inputs`] from the opened image `source`.
+pub fn inputs_from(source: remote::Remote, model: &str, output: &Path) -> Result<u64> {
+    let limit = source.limit();
+    let mut archive = zip::ZipArchive::new(source)?;
+    let names = crate::boot::restore_inputs_in(&mut archive, model)?;
+    let need = payload::members_bytes_in(&mut archive, &names, false)?;
+    let download = payload::members_bytes_in(&mut archive, &names, true)?;
+    crate::setup::ensure_room(
+        output.parent().unwrap_or(Path::new(".")),
+        "Downloading boot files",
+        need,
+    )?;
+    payload::copy_named_from(
+        &mut archive,
+        &names,
+        output,
+        "Downloading boot files",
+        Some(&limit),
+    )?;
+    Ok(download)
+}
+
+/// The bytes [`fetch_inputs`] downloads of `image` for `model`, as the
+/// image stores them, and the whole image's, from its ZIP directory read
+/// by byte ranges.
+pub fn inputs_size(image: &Image, model: &str) -> Result<(u64, u64)> {
+    let source = open_image(image)?;
+    let whole = source.size();
+    let mut archive = zip::ZipArchive::new(source)?;
+    let names = crate::boot::restore_inputs_in(&mut archive, model)?;
+    Ok((
+        payload::members_bytes_in(&mut archive, &names, true)?,
+        whole,
+    ))
 }
 
 /// The restore inventory of `image` for `model` that `stela.efi` streams

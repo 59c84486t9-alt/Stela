@@ -284,13 +284,13 @@ pub(super) fn shortfall(directory: &Path, what: &str, need: u64, free: u64) -> O
 }
 
 /// Download `--build`'s image, or reuse a complete earlier download: the
-/// whole IPSW for a full install medium, else its recovery members,
-/// which prepare the boot bundles.
+/// whole IPSW for a full install medium, else its boot files, which
+/// prepare the boot bundles.
 pub(super) fn fetch(command: &Request) -> Result<PathBuf> {
     let directory = command.download_dir.clone().unwrap_or_else(download_dir);
     match command.install_image {
         Some(InstallImage::Full) => fetch_image(&directory, &command.build, command.model()),
-        _ => fetch_recovery(&directory, &command.build, command.model()),
+        _ => fetch_inputs(&directory, &command.build, command.model()),
     }
 }
 
@@ -300,10 +300,16 @@ pub(super) fn recovery_name(build: &str, model: &str) -> String {
     format!("Recovery_{build}_{}.ipsw", model.replace(',', "_"))
 }
 
-/// Copy `build`'s recovery members for `model` from Apple's servers into
-/// `directory` (`restore::fetch_recovery`), or reuse an earlier complete
-/// copy: setup's install medium needs no more of the image.
-pub(super) fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Result<PathBuf> {
+/// The file name of `build`'s boot files for `model` in a download
+/// directory: the members preparing its boot bundles reads.
+pub(super) fn inputs_name(build: &str, model: &str) -> String {
+    format!("BootFiles_{build}_{}.ipsw", model.replace(',', "_"))
+}
+
+/// Copy `build`'s boot files for `model` from Apple's servers into
+/// `directory` (`restore::fetch_inputs`), or reuse an earlier complete
+/// copy: a setup whose install streams the image needs no more of it.
+pub(super) fn fetch_inputs(directory: &Path, build: &str, model: &str) -> Result<PathBuf> {
     ensure!(
         build.bytes().all(|c| c.is_ascii_alphanumeric())
             && model
@@ -311,13 +317,13 @@ pub(super) fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Resu
                 .all(|c| c.is_ascii_alphanumeric() || c == b','),
         "unexpected build or model identifier"
     );
-    let path = directory.join(recovery_name(build, model));
+    let path = directory.join(inputs_name(build, model));
     if path.is_file() {
         let archive = zip::ZipArchive::new(fs::File::open(&path)?)
             .with_context(|| format!("{} is not a complete archive", path.display()))?;
         ensure!(
-            archive.comment() == restore::payload::RECOVERY_COMMENT,
-            "{} is not a recovery archive; move it away",
+            archive.comment() == restore::payload::INPUTS_COMMENT,
+            "{} is not an archive of boot files; move it away",
             path.display()
         );
         eprintln!("Using downloaded boot files");
@@ -326,8 +332,11 @@ pub(super) fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Resu
     let images = restore::catalog()?;
     let image = restore::select(&images, Some(build), Some(model))?;
     fs::create_dir_all(directory)?;
-    let bytes = restore::fetch_recovery(&image, model, &path)?;
-    eprintln!("Downloaded {:.2} GB of boot files", bytes as f64 / 1e9);
+    let bytes = restore::fetch_inputs(&image, model, &path)?;
+    eprintln!(
+        "Downloaded {} of boot files",
+        super::host::bytes_text(bytes)
+    );
     Ok(path)
 }
 

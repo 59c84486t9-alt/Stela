@@ -24,6 +24,12 @@ pub struct MemberDigest {
     pub im4p_description: Option<String>,
 }
 
+/// The BuildManifest of the IPSW in `archive`, a local file or one read by
+/// ranges.
+pub fn build_manifest<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<Vec<u8>> {
+    read_limited(archive, "BuildManifest.plist", MANIFEST_LIMIT)
+}
+
 fn read_limited<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
@@ -105,7 +111,7 @@ pub fn manifest(
     hash_members: bool,
 ) -> Result<super::manifest::RestoreManifest> {
     let mut archive = zip::ZipArchive::new(File::open(image)?)?;
-    let bytes = read_limited(&mut archive, "BuildManifest.plist", MANIFEST_LIMIT)?;
+    let bytes = build_manifest(&mut archive)?;
     let mut report = super::manifest::inspect(&bytes, model)?;
     if hash_members {
         let mut digests = BTreeMap::new();

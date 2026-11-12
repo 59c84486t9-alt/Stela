@@ -44,7 +44,7 @@ impl Download {
         };
         let build = match boot {
             Some(boot) => {
-                restore::payload::trim(source, model, boot, "Downloading boot files")?;
+                restore::inputs_from(source, model, boot)?;
                 restore::payload::identity(boot, model)?.1
             }
             None => restore::payload::identity_of(source, model)?.1,

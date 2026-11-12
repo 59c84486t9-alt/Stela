@@ -1216,7 +1216,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
 /// A new setup's installer on a USB of `capacity` bytes: the one `asked`
 /// for, or else Offline where it can be made and Online where it cannot
 /// (`super::offline_unavailable`): on a smaller USB, or from a local IPSW
-/// with only the recovery members, which prepare the boot files alone.
+/// with only boot files, which prepare the boot bundles alone.
 /// Offline asked for where it cannot be made is refused, before anything
 /// is downloaded or changed.
 pub(super) fn choose_installer(

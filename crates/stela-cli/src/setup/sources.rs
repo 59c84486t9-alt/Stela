@@ -3,7 +3,7 @@
 //! command says up front what it reads and downloads.
 //!
 //! A command needs the image's boot files ([`Need::BootFiles`], the
-//! recovery members `restore::payload::trim` copies) to prepare boot
+//! members preparing a bundle reads, `boot::restore_inputs`) to prepare boot
 //! bundles or name a remote install medium, and the whole image
 //! ([`Need::WholeImage`]) only to write a full install medium
 //! ([`need`]). [`locate`] tries, in order:
@@ -16,7 +16,7 @@
 //! 3. for boot files, the members a setup that streams the image keeps on
 //!    its USB (`inputs`), or the USB's own full install medium of the
 //!    build, which holds the image byte for byte (`medium::image`);
-//! 4. Apple's servers: the boot files alone by byte ranges (about 2.2 GB of
+//! 4. Apple's servers: the boot files alone by byte ranges (about 0.45 GB of
 //!    macOS 27.2's 27 GB), or the whole image streamed onto the USB's
 //!    pieces (`medium::download`), its size read first.
 use super::{Environment, InstallImage, host::bytes_text, medium, record::Record};
@@ -427,6 +427,8 @@ fn cached(directory: &Path, lookup: &Lookup<'_>) -> Option<PathBuf> {
     let (build, model) = (lookup.build, lookup.model);
     let mut candidates = Vec::new();
     if lookup.need == Need::BootFiles {
+        candidates.push(directory.join(super::prepare::inputs_name(build, model)));
+        // A recovery archive an earlier stela downloaded holds them too.
         candidates.push(directory.join(super::prepare::recovery_name(build, model)));
         // Where a first setup keeps its downloads until it finishes.
         candidates.push(directory.join("setup").join("boot.ipsw"));

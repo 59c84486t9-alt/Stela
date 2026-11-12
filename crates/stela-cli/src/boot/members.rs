@@ -24,8 +24,12 @@ pub(super) struct Choice<'a> {
     pub(super) cryptex_trust_caches: bool,
 }
 
-/// The members of `ipsw` a bundle of `choice` reads, each once.
-pub(super) fn names(ipsw: &Path, choice: &Choice<'_>) -> Result<BTreeSet<String>> {
+/// The members of an IPSW a bundle of `choice` reads, each once; `has`
+/// says whether the IPSW holds an optional member.
+pub(super) fn names(
+    has: &mut dyn FnMut(&str) -> Result<bool>,
+    choice: &Choice<'_>,
+) -> Result<BTreeSet<String>> {
     let Choice {
         report,
         profile,
@@ -73,7 +77,7 @@ pub(super) fn names(ipsw: &Path, choice: &Choice<'_>) -> Result<BTreeSet<String>
     let variant = identity.macos_variant.as_ref().unwrap_or(&identity.variant);
     for cryptex1 in [false, true] {
         let member = manifest_member(cryptex1, variant, &identity.device_class);
-        if restore::archive::has_member(ipsw, &member)? {
+        if has(&member)? {
             names.insert(member);
         }
     }
@@ -114,15 +118,15 @@ impl Members {
     }
 }
 
+/// An image of the synthetic model whose erase identity names every
+/// component a restore bundle reads, and members nothing reads. Each
+/// member holds its name, or `bytes` bytes when that is larger, and the
+/// system image `system` bytes.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn synthetic_image(path: &Path, bytes: usize, system: usize) {
     use crate::restore::payload::SYNTHETIC_MODEL;
     use std::io::Write as _;
-
-    /// An image of the synthetic model whose erase identity names every
-    /// component a restore bundle reads, and members nothing reads.
-    fn image(path: &Path) {
+    {
         let (_, chip, board, class) = components::SYNTHETIC;
         let restore = [
             ("RestoreKernelCache", "kernelcache.restore"),
@@ -168,21 +172,34 @@ mod tests {
              </array></dict></plist>"
         );
         let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-        let options = zip::write::SimpleFileOptions::default();
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         zip.start_file(BUILD_MANIFEST, options).unwrap();
         zip.write_all(manifest.as_bytes()).unwrap();
         for (_, member) in restore {
             zip.start_file(member, options).unwrap();
-            zip.write_all(member.as_bytes()).unwrap();
+            let size = match member {
+                "system.dmg" => system,
+                _ => bytes,
+            };
+            let mut contents = member.as_bytes().to_vec();
+            contents.resize(contents.len().max(size), b'.');
+            zip.write_all(&contents).unwrap();
         }
         zip.finish().unwrap();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::restore::payload::SYNTHETIC_MODEL;
 
     #[test]
     fn a_restore_bundle_reads_its_components_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image.ipsw");
-        image(&path);
+        synthetic_image(&path, 0, 0);
         let names = crate::boot::restore_inputs(&path, SYNTHETIC_MODEL).unwrap();
         assert_eq!(
             names,

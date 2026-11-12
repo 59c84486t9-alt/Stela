@@ -12,8 +12,8 @@
 //! (`stela.efi --install`), which restores macOS and its paired recoveryOS
 //! and System Recovery onto the Mac's internal SSD, as a Mac's erase
 //! restore does. An erase restore needs the macOS system image, so a
-//! download's recovery members (`restore::payload::trim`) only prepare the
-//! boot bundles. The macOS choice
+//! download's boot files (`restore::fetch_inputs`) only prepare the boot
+//! bundles. The macOS choice
 //! boots the installed system afterwards. The restore personalizes its root
 //! tickets, its Cryptex1 ticket and the recoveryOS LocalPolicy with Apple's
 //! signing server (TSS); setup asks for them while it prepares the bundle
@@ -349,7 +349,7 @@ fn image_is_remote(ipsw: &Path, choice: InstallImage) -> Result<bool> {
         InstallImage::Full => {
             ensure!(
                 restore::payload::holds_system_image(ipsw)?,
-                "{} holds only the recovery members, without the macOS system image this USB's \
+                "{} holds only boot files, without the macOS system image this USB's \
                  install reads from it; pass the whole IPSW with --ipsw",
                 ipsw.display()
             );
@@ -515,10 +515,10 @@ type Prepare = dyn for<'a> Fn(prepare::RamdiskOptions<'a>) -> Result<()>;
 /// An IPSW's restore inventory for a model.
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
 /// The bytes of a build's boot files for a model on Apple's servers, and
-/// of its whole image (`restore::recovery_size`).
+/// of its whole image (`restore::inputs_size`).
 type ImageSizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
 /// Fetch what a command needs of a build's image for a model into a
-/// directory: the boot files (`prepare::fetch_recovery`), or the boot files
+/// directory: the boot files (`prepare::fetch_inputs`), or the boot files
 /// of a whole image that is written onto the USB as it downloads
 /// (`medium::download::Download`).
 /// The members of an image `boot prepare` reads for a model's restore
@@ -781,11 +781,11 @@ impl Request {
             },
             image_size: &|build, model| {
                 let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
-                restore::recovery_size(&image, model)
+                restore::inputs_size(&image, model)
             },
             fetch_image: &|directory, build, model, need| match need {
                 sources::Need::BootFiles => Ok(sources::Fetched {
-                    path: prepare::fetch_recovery(directory, build, model)?,
+                    path: prepare::fetch_inputs(directory, build, model)?,
                     download: None,
                 }),
                 sources::Need::WholeImage | sources::Need::Pieces => {

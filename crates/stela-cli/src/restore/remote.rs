@@ -11,8 +11,30 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::{StatusCode, blocking::Client, header};
 use std::{
     io::{self, Read, Seek, SeekFrom},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
+
+/// Where the member being copied ends ([`Remote::limit`]): no range runs
+/// past it, so copying members downloads their bytes and not the rest of
+/// a chunk. Unset, or behind the position, it bounds nothing.
+#[derive(Clone, Debug, Default)]
+pub struct Limit(Arc<AtomicU64>);
+
+impl Limit {
+    /// Bound the reads up to byte `end` (exclusive).
+    pub fn set(&self, end: u64) {
+        self.0.store(end, Ordering::Relaxed);
+    }
+
+    fn after(&self, position: u64) -> Option<u64> {
+        let end = self.0.load(Ordering::Relaxed);
+        (end > position).then(|| end - position)
+    }
+}
 
 /// Bytes fetched per request while reading on from the last range: large
 /// enough that a member streams at the connection's speed, small enough that
@@ -44,6 +66,7 @@ pub struct Remote {
     /// The last range fetched and where it starts.
     chunk: Vec<u8>,
     chunk_start: u64,
+    limit: Limit,
 }
 
 impl Remote {
@@ -81,7 +104,13 @@ impl Remote {
             position: 0,
             chunk: Vec::new(),
             chunk_start: 0,
+            limit: Limit::default(),
         })
+    }
+
+    /// The handle that bounds its reads to one member's bytes.
+    pub fn limit(&self) -> Limit {
+        self.limit.clone()
     }
 
     /// The pinned entity tag.
@@ -224,7 +253,9 @@ impl Read for Remote {
                 true => CHUNK,
                 false => PROBE.max(buffer.len() as u64).min(CHUNK),
             };
-            let bytes = wanted.min(self.len - self.position);
+            let bytes = wanted
+                .min(self.len - self.position)
+                .min(self.limit.after(self.position).unwrap_or(u64::MAX));
             self.fetch(self.position, bytes).map_err(io::Error::other)?;
         }
         let offset = (self.position - self.chunk_start) as usize;
@@ -384,6 +415,65 @@ mod tests {
         let mut rest = Vec::new();
         remote.read_to_end(&mut rest)?;
         assert_eq!(rest, body[50..]);
+        Ok(())
+    }
+
+    #[test]
+    fn boot_files_read_by_range_download_their_members_and_not_the_system_image() -> Result<()> {
+        use crate::restore::payload::{INPUTS_COMMENT, SYNTHETIC_MODEL};
+        let dir = tempfile::tempdir()?;
+        let image = dir.path().join("image.ipsw");
+        // Members larger than a probe, and a system image after them that
+        // a chunk past their end would take.
+        crate::boot::members::synthetic_image(&image, 200 * 1024, 8 * 1024 * 1024);
+        let body = std::fs::read(&image)?;
+        let (url, fetched) = serve_counting(body.clone());
+        let source = Remote::open(Client::new(), &url)?;
+        let output = dir.path().join("BootFiles.ipsw");
+        let downloaded = crate::restore::inputs_from(source, SYNTHETIC_MODEL, &output)?;
+        let names = crate::boot::restore_inputs(&image, SYNTHETIC_MODEL)?;
+        assert_eq!(
+            downloaded,
+            crate::restore::payload::members_bytes_in(
+                &mut zip::ZipArchive::new(std::fs::File::open(&image)?)?,
+                &names,
+                true
+            )?
+        );
+        // The members, their headers and the directory: well under the
+        // system image they never read.
+        let total = fetched.load(Ordering::SeqCst) as u64;
+        assert!(total < downloaded + 1024 * 1024, "{total} of {downloaded}");
+        let archive = zip::ZipArchive::new(std::fs::File::open(&output)?)?;
+        assert_eq!(archive.comment(), INPUTS_COMMENT);
+        let mut kept: Vec<&str> = archive.file_names().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, names);
+        Ok(())
+    }
+
+    #[test]
+    fn a_limit_ends_every_range_at_the_member_end() -> Result<()> {
+        let body: Vec<u8> = (0..(3 * CHUNK as usize)).map(|i| (i % 251) as u8).collect();
+        let (url, fetched) = serve_counting(body.clone());
+        let mut remote = Remote::open(Client::new(), &url)?;
+        let limit = remote.limit();
+        let opened = fetched.load(Ordering::SeqCst);
+        // A member of a chunk and a bit: read whole, nothing after it.
+        let (start, end) = (100, CHUNK + 300);
+        limit.set(end);
+        remote.seek(SeekFrom::Start(start))?;
+        let mut member = vec![0; (end - start) as usize];
+        remote.read_exact(&mut member)?;
+        assert_eq!(member, body[start as usize..end as usize]);
+        assert_eq!(
+            fetched.load(Ordering::SeqCst) - opened,
+            (end - start) as usize
+        );
+        // Past it, the limit bounds nothing.
+        let mut next = [0; 10];
+        remote.read_exact(&mut next)?;
+        assert_eq!(next[..], body[end as usize..end as usize + 10]);
         Ok(())
     }
 
