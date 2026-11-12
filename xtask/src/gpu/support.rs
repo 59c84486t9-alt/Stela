@@ -48,9 +48,14 @@ pub fn archive<'a>(
     )
 }
 
+/// Where the GPU build trees are.
+pub fn build_root() -> PathBuf {
+    crate::tools::root().join("target/gpu")
+}
+
 /// A build tree under Cargo's target directory.
 pub fn build_directory(name: &str) -> PathBuf {
-    crate::tools::root().join("target/gpu").join(name)
+    build_root().join(name)
 }
 
 pub fn capture(command: &mut Command) -> Result<String> {

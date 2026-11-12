@@ -89,8 +89,8 @@ fn build_bundle(component: &Path, output: &Path, include: &Path) -> Result<PathB
             fs::remove_dir_all(directory)?;
         }
     }
-    let clang = tools::which("clang").context("install clang 21 or newer")?;
-    let resources = Command::new(&clang).arg("-print-resource-dir").output()?;
+    let clang = &crate::clang::toolset()?.clang;
+    let resources = Command::new(clang).arg("-print-resource-dir").output()?;
     ensure!(
         resources.status.success(),
         "clang names no resource directory"
@@ -113,7 +113,7 @@ fn build_bundle(component: &Path, output: &Path, include: &Path) -> Result<PathB
             let object = directory
                 .join(path.file_stem().unwrap())
                 .with_extension("o");
-            let mut command = Command::new(&clang);
+            let mut command = Command::new(clang);
             command
                 .args(BUNDLE_FLAGS)
                 .arg(format!("--target={target}"))
@@ -173,14 +173,14 @@ fn build_kext(component: &Path, output: &Path, xnu: &Path, include: &Path) -> Re
     let info = fs::read_to_string(source.join("Info.plist"))?;
     let (identifier, version) = identity(&info)?;
     fs::write(bundle.join("Info.plist"), &info)?;
-    let clang = tools::which("clang++").context("install clang 21 or newer")?;
+    let clang = &crate::clang::toolset()?.clangxx;
     for entry in fs::read_dir(&source)? {
         let path = entry?.path();
         if path.extension().is_none_or(|extension| extension != "cpp") {
             continue;
         }
         let object = bundle.join(path.file_stem().unwrap()).with_extension("o");
-        let mut command = Command::new(&clang);
+        let mut command = Command::new(clang);
         command
             .args(KEXT_FLAGS)
             .arg(format!("--target={TARGET}"))

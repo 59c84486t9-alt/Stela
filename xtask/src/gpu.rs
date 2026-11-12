@@ -11,7 +11,7 @@ mod metal_suite;
 mod nvk;
 mod support;
 mod sysroot;
-mod toolchain;
+pub(crate) mod toolchain;
 
 /// Floating-point semantics required by the supplied AIR input.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -142,7 +142,7 @@ pub fn run(command: Command) -> Result<()> {
         // `stela.efi` carries the kext it links against each boot's kernel.
         Command::Nvk { jobs } => build_nvk(jobs),
         Command::MetalSuite(command) => metal_suite::run(command),
-        Command::Llvm { jobs, test } => llvm::build(&toolchain::Toolchain::discover()?, jobs, test),
+        Command::Llvm { jobs, test } => llvm::build(&toolchain::discover()?, jobs, test),
     }
 }
 

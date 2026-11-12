@@ -568,6 +568,7 @@ fn build_with_diagnostics(release: bool, diagnostics: bool, nvk: bool) -> Result
     if release {
         command.arg("--release");
     }
+    crate::clang::toolset()?.apply(&mut command);
     exec(&mut command)?;
     let profile = if release { "release" } else { "debug" };
     Ok(root()

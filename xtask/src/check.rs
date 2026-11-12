@@ -61,6 +61,7 @@ const RELEASE_HOST: &str = "aarch64-apple-darwin";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
 pub fn run(fix: bool, low_memory: bool) -> Result<()> {
+    crate::preflight::run()?;
     let gpu_jobs = if low_memory { 1 } else { 8 };
     if fix {
         exec(&mut command(["fmt", "--all"]))?;
@@ -229,9 +230,13 @@ fn install_targets() -> Result<()> {
 }
 
 /// Cargo with `args`.
+/// Cargo with `args`, whose build scripts compile with the chosen Clang.
 fn command<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> Command {
     let mut command = cargo();
     command.args(args);
+    if let Ok(toolset) = crate::clang::toolset() {
+        toolset.apply(&mut command);
+    }
     command
 }
 

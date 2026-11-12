@@ -1,7 +1,6 @@
 //! The pinned tools the GPU builds run, installed under `.tools/gpu`: Meson,
 //! Ninja and Mesa's Python generator modules in a virtual environment, and the
 //! Rust binding generators NAK's build calls.
-use super::support::capture;
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -115,8 +114,34 @@ pub fn install() -> Result<()> {
 /// `STELA_GPU_PYTHON`, else the first Python 3.10 or newer on PATH, else the
 /// pinned standalone CPython.
 fn base_python() -> Result<PathBuf> {
+    match found_python()? {
+        Some(python) => Ok(python),
+        None => standalone_python(),
+    }
+}
+
+/// What the preflight says of Python: nothing when `STELA_GPU_PYTHON` or a
+/// Python 3.10 or newer is there, or the standalone one can be fetched.
+pub(crate) fn python_problem() -> Option<String> {
+    if found_python().ok().flatten().is_some() {
+        return None;
+    }
+    let missing: Vec<&str> = ["curl", "tar"]
+        .into_iter()
+        .filter(|tool| tools::which(tool).is_none())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "install Python 3.{PYTHON_MINOR} or newer, or {} to fetch one",
+            missing.join(" and ")
+        )
+    })
+}
+
+/// `STELA_GPU_PYTHON`, else the first Python 3.10 or newer on PATH.
+fn found_python() -> Result<Option<PathBuf>> {
     if let Some(python) = std::env::var_os("STELA_GPU_PYTHON") {
-        return Ok(python.into());
+        return Ok(Some(python.into()));
     }
     for name in [
         "python3",
@@ -135,10 +160,10 @@ fn base_python() -> Result<PathBuf> {
             .status()?
             .success()
         {
-            return Ok(python);
+            return Ok(Some(python));
         }
     }
-    standalone_python()
+    Ok(None)
 }
 
 /// Downloads and unpacks the pinned standalone CPython for this host into
@@ -193,41 +218,181 @@ fn standalone_python() -> Result<PathBuf> {
     Ok(python)
 }
 
-/// The host's Clang and the active Rust toolchain's LLVM linker and archiver.
-pub(super) struct Toolchain {
-    pub(super) clang: PathBuf,
-    pub(super) clangxx: PathBuf,
-    pub(super) linker: PathBuf,
-    pub(super) archiver: PathBuf,
+/// The LLVM tools the GPU builds run: [`crate::clang`]'s one choice.
+pub(super) type Toolchain = crate::clang::Toolset;
+
+/// The chosen tools, with the GPU build trees that other tools or flags
+/// left removed.
+pub(super) fn discover() -> Result<Toolchain> {
+    let toolchain = crate::clang::toolset()?.clone();
+    rebuild_if_changed(&toolchain, &super::support::build_root())?;
+    Ok(toolchain)
 }
 
-impl Toolchain {
-    pub(super) fn discover() -> Result<Self> {
-        let rustc = tools::which("rustc").context("rustc is not in PATH")?;
-        let sysroot = capture(Command::new(&rustc).args(["--print", "sysroot"]))?;
-        let version = capture(Command::new(&rustc).arg("-vV"))?;
-        let host = version
+/// What the GPU build trees under `target/gpu` were made with, beside them.
+const IDENTITY: &str = "toolchain";
+
+/// Every flag the GPU builds pass to the compiler on their own, whose change
+/// must rebuild their objects as a compiler change does.
+fn flags() -> String {
+    use super::{nvk, sysroot};
+    [
+        nvk::TARGET_FLAGS.as_slice(),
+        nvk::LIBC_TEST_FLAGS.as_slice(),
+        sysroot::FREESTANDING.as_slice(),
+    ]
+    .concat()
+    .join(" ")
+}
+
+/// Removes the build trees under `root` when the tools or flags they were made
+/// with differ from these: their objects, Meson's configuration and the probe
+/// results it recorded all depend on them, and only the sources' times are
+/// watched otherwise.
+fn rebuild_if_changed(toolchain: &Toolchain, root: &Path) -> Result<()> {
+    let identity = format!("{}flags {}\n", toolchain.identity(), flags());
+    let record = root.join(IDENTITY);
+    let recorded = fs::read_to_string(&record).ok();
+    if recorded.as_deref() == Some(identity.as_str()) {
+        return Ok(());
+    }
+    if let Some(recorded) = &recorded {
+        let changed: Vec<&str> = identity
             .lines()
-            .find_map(|line| line.strip_prefix("host: "))
-            .context("rustc did not report its host target")?;
-        let directory = Path::new(sysroot.trim())
-            .join("lib/rustlib")
-            .join(host)
-            .join("bin");
-        let tool = |name: &str| directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        let toolchain = Self {
-            clang: tools::which("clang").context("install Clang")?,
-            clangxx: tools::which("clang++").context("install Clang's C++ compiler")?,
-            linker: tool("gcc-ld/ld.lld"),
-            archiver: tool("llvm-ar"),
-        };
-        for path in [&toolchain.linker, &toolchain.archiver] {
-            ensure!(
-                path.is_file(),
-                "{} is missing; install llvm-tools-preview for the active Rust toolchain",
-                path.display()
-            );
+            .filter(|line| !recorded.lines().any(|old| old == *line))
+            .collect();
+        eprintln!(
+            "The GPU builds' tools or flags changed ({}); rebuilding {}",
+            changed.join("; "),
+            root.display()
+        );
+    }
+    let mut announced = recorded.is_some();
+    for entry in fs::read_dir(root).into_iter().flatten() {
+        let path = entry?.path();
+        if path.is_dir() {
+            if !announced {
+                eprintln!(
+                    "{} records no tools it was built with; rebuilding it",
+                    root.display()
+                );
+                announced = true;
+            }
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("cannot remove {}", path.display()))?;
         }
-        Ok(toolchain)
+    }
+    fs::create_dir_all(root)?;
+    fs::write(record, identity)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toolset(clang: &str) -> Toolchain {
+        Toolchain {
+            version: crate::clang::Version {
+                major: 21,
+                minor: 1,
+                patch: 8,
+            },
+            clang: clang.into(),
+            clangxx: "/llvm/bin/clang++".into(),
+            linker: "/llvm/bin/ld.lld".into(),
+            archiver: "/llvm/bin/llvm-ar".into(),
+            symbols: "/llvm/bin/llvm-nm".into(),
+            libclang: "/llvm/lib/libclang.so.21.1".into(),
+        }
+    }
+
+    /// A change of compiler removes the trees built with the old one; the
+    /// same compiler keeps them.
+    #[test]
+    fn a_compiler_change_rebuilds_the_trees() {
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("nvk/sysroot");
+        fs::create_dir_all(&tree).unwrap();
+        // A tree from before the record existed.
+        rebuild_if_changed(&toolset("/llvm/bin/clang"), root.path()).unwrap();
+        assert!(!tree.exists());
+        fs::create_dir_all(&tree).unwrap();
+        rebuild_if_changed(&toolset("/llvm/bin/clang"), root.path()).unwrap();
+        assert!(tree.exists());
+        rebuild_if_changed(&toolset("/home/me/wrapper/clang"), root.path()).unwrap();
+        assert!(!tree.exists());
+        let record = fs::read_to_string(root.path().join(IDENTITY)).unwrap();
+        assert!(record.contains("/home/me/wrapper/clang"), "{record}");
+        assert!(record.contains("-fno-stack-protector"), "{record}");
+    }
+
+    /// A distribution's Clang that hardens by default, as Arch's turns on
+    /// the stack protector, simulated by a configuration file read first:
+    /// the build's own flags still leave every object free of the
+    /// protector, whose `__stack_chk_fail` Stela's C library lacks.
+    #[test]
+    #[ignore = "manual: opt-in"]
+    fn explicit_flags_override_a_hardened_default() {
+        let toolset = crate::clang::toolset().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let config = scratch.path().join("hardened.cfg");
+        fs::write(
+            &config,
+            "-fstack-protector-strong\n-fstack-clash-protection\n-fcf-protection=full\n\
+             -D_FORTIFY_SOURCE=3\n",
+        )
+        .unwrap();
+        let source = scratch.path().join("probe.c");
+        // A local array is what the strong protector guards.
+        fs::write(
+            &source,
+            "void fill(char *);\nint probe(void) { char buffer[64]; fill(buffer); return \
+             buffer[3]; }\n#ifdef _FORTIFY_SOURCE\n#error fortified\n#endif\n",
+        )
+        .unwrap();
+        let compile = |flags: &[&str], object: &str| {
+            let object = scratch.path().join(object);
+            let status = Command::new(&toolset.clang)
+                .arg(format!("--config={}", config.display()))
+                .args(["--target=x86_64-unknown-linux-gnu", "-O2", "-c"])
+                .args(flags)
+                .arg(&source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap();
+            (status.success(), object)
+        };
+        let symbols = |object: &Path| {
+            let output = Command::new(&toolset.symbols).arg(object).output().unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let endbr64 = |object: &Path| {
+            let bytes = fs::read(object).unwrap();
+            bytes.windows(4).any(|w| w == [0xf3, 0x0f, 0x1e, 0xfa])
+        };
+        // The configuration takes effect without the build's flags.
+        let (built, hardened) = compile(&["-U_FORTIFY_SOURCE"], "hardened.o");
+        assert!(built);
+        assert!(symbols(&hardened).contains("__stack_chk_fail"));
+        assert!(endbr64(&hardened));
+        for flags in [
+            super::super::sysroot::FREESTANDING.as_slice(),
+            super::super::nvk::TARGET_FLAGS.as_slice(),
+            super::super::nvk::LIBC_TEST_FLAGS.as_slice(),
+        ] {
+            // The target's own machine flags are another target's.
+            let flags: Vec<&str> = flags
+                .iter()
+                .copied()
+                .filter(|flag| !flag.starts_with("-m") && !flag.starts_with("--target"))
+                .collect();
+            let (built, object) = compile(&flags, "free.o");
+            assert!(built, "{flags:?}");
+            let listed = symbols(&object);
+            assert!(!listed.contains("__stack_chk"), "{flags:?}: {listed}");
+            assert!(!endbr64(&object), "{flags:?}");
+        }
     }
 }

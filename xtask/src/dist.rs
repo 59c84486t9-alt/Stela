@@ -7,15 +7,17 @@ use crate::tools::{cargo, exec, root};
 use anyhow::Result;
 
 pub fn run() -> Result<()> {
+    crate::preflight::run()?;
     crate::gpu::fetch::fetch(false)?;
     let built = crate::boot::build(true)?;
     let efi = built.with_file_name("stela-dist.efi");
     crate::boot::deploy_image(&built, &efi)?;
-    exec(
-        cargo()
-            .args(["build", "--release", "--locked", "-p", "stela-cli"])
-            .env("STELA_EFI", &efi),
-    )?;
+    let mut command = cargo();
+    command
+        .args(["build", "--release", "--locked", "-p", "stela-cli"])
+        .env("STELA_EFI", &efi);
+    crate::clang::toolset()?.apply(&mut command);
+    exec(&mut command)?;
     let release = root().join("target/release");
     println!("{}", release.join("stela").display());
     println!("{}", efi.display());

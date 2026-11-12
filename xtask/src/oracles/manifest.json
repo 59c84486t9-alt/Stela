@@ -4889,5 +4889,13 @@
     "kind": "manual",
     "inputs": [],
     "reason": "timing, release only; run on request"
+  },
+  {
+    "package": "xtask",
+    "test": "explicit_flags_override_a_hardened_default",
+    "source": "xtask/src/gpu/toolchain.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "needs a supported host Clang and llvm-nm; simulates a distribution Clang that hardens by default; run on request"
   }
 ]

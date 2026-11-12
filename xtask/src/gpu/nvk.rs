@@ -13,7 +13,7 @@ use super::{
     toolchain::{GENERATORS, Toolchain},
 };
 use crate::tools::{self, exec};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
@@ -186,10 +186,14 @@ const HOST_FLAGS: [&str; 9] = [
 ];
 /// The C target's flags: `stela-driver-gpu/build/native.rs`'s, with SSE, which
 /// Mesa uses, in place of its general registers only. A kernel's stacks follow.
-pub(super) const TARGET_FLAGS: [&str; 15] = [
+/// Hardening a distribution's Clang turns on by default is turned off by
+/// name, as `sysroot::FREESTANDING` explains.
+pub(super) const TARGET_FLAGS: [&str; 17] = [
     "-mno-stack-arg-probe",
     "-mno-incremental-linker-compatible",
+    "--no-default-config",
     "-fno-stack-protector",
+    "-fcf-protection=none",
     "-mno-red-zone",
     "-msse2",
     "-nostdinc",
@@ -204,14 +208,18 @@ pub(super) const TARGET_FLAGS: [&str; 15] = [
     "-femulated-tls",
 ];
 /// The C library's own test, on the build host.
-pub(super) const LIBC_TEST_FLAGS: [&str; 11] = [
+pub(super) const LIBC_TEST_FLAGS: [&str; 15] = [
     "--target=x86_64-unknown-linux-gnu",
     "-O1",
     "-msse2",
     "-nostdinc",
     "-ffreestanding",
     "-fno-builtin",
+    "--no-default-config",
     "-fno-stack-protector",
+    "-fno-stack-clash-protection",
+    "-fcf-protection=none",
+    "-U_FORTIFY_SOURCE",
     "-femulated-tls",
     "-fno-pic",
     "-Wall",
@@ -316,11 +324,67 @@ fn setup(
     if cfg!(windows) {
         setup.env("RUSTC_LD_FOR_BUILD", "lld-link");
     }
-    exec(&mut setup)
+    exec(&mut setup)?;
+    let commands = fs::read_to_string(build.join("compile_commands.json"))?;
+    let missing = missing_probes(&commands)?;
+    if !missing.is_empty() {
+        // The next run configures again rather than keep these results.
+        let log = build.join("meson-logs/meson-log.txt");
+        let kept = directory.join("meson-log-failed-probes.txt");
+        let _ = fs::copy(&log, &kept);
+        fs::remove_dir_all(build)?;
+        bail!(
+            "Mesa's configuration found no {} in Stela's C library, which has them: its link \
+             probes failed, usually from a default of this computer's Clang that the build \
+             does not turn off. Meson's log is {}",
+            missing.join(", "),
+            kept.display()
+        );
+    }
+    Ok(())
+}
+
+/// What Meson's probes must find in Stela's C library, by the define each
+/// adds to every compile: a link probe that fails turns a feature off without
+/// an error, and the units built without it then miss symbols at link time.
+const PROBED: [&str; 11] = [
+    "HAVE_GNU_QSORT_R",
+    "HAVE_STRTOF",
+    "HAVE_STRTOK_R",
+    "HAVE_SECURE_GETENV",
+    "HAVE_SYSCONF",
+    "HAVE_MEMFD_CREATE",
+    "HAVE_POSIX_MEMALIGN",
+    "HAVE_STRUCT_TIMESPEC",
+    "HAVE_PTHREAD",
+    "HAVE_ENDIAN_H",
+    "HAVE_DLFCN_H",
+];
+
+/// The [`PROBED`] defines that Meson's compile of [`SIZED_UNIT`] lacks, in
+/// `compile_commands.json`'s text.
+fn missing_probes(commands: &str) -> Result<Vec<&'static str>> {
+    let commands: Value = serde_json::from_str(commands)?;
+    let command = commands
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry["file"]
+                .as_str()
+                .is_some_and(|file| file.ends_with(SIZED_UNIT))
+        })
+        .and_then(|entry| entry["command"].as_str())
+        .with_context(|| format!("Meson's plan has no compile of {SIZED_UNIT}"))?;
+    let words = shlex::split(command).context("Meson's compile command")?;
+    Ok(PROBED
+        .into_iter()
+        .filter(|define| !words.iter().any(|word| word == &format!("-D{define}")))
+        .collect())
 }
 
 /// Every source Meson generates, and the structured copy of the compiler crate.
-fn generate(sysroot: &Sysroot, build: &Path, path: &Path) -> Result<()> {
+fn generate(sysroot: &Sysroot, build: &Path, path: &Path, libclang: &Path) -> Result<()> {
     let ninja = tool("ninja", GENERATORS)?;
     let mut targets = BTreeSet::new();
     for rule in ["CUSTOM_COMMAND", "CUSTOM_COMMAND_DEP"] {
@@ -365,6 +429,7 @@ fn generate(sysroot: &Sysroot, build: &Path, path: &Path) -> Result<()> {
             .args(&targets)
             .current_dir(build)
             .env("BINDGEN_EXTRA_CLANG_ARGS", quoted.join(" "))
+            .env("LIBCLANG_PATH", libclang)
             .env("PATH", path),
     )
 }
@@ -387,7 +452,7 @@ fn include_flags(clang: &Path, libc: &Path) -> Result<Vec<String>> {
 
 /// Bindgen's output against the C library the units compile with: Meson's run
 /// saw the build host's, which lays out its types differently.
-fn bindings(build: &Path, path: &Path, flags: &[String]) -> Result<()> {
+fn bindings(build: &Path, path: &Path, flags: &[String], libclang: &Path) -> Result<()> {
     let plan = fs::read_to_string(build.join("build.ninja"))?;
     for command in plan
         .lines()
@@ -418,6 +483,7 @@ fn bindings(build: &Path, path: &Path, flags: &[String]) -> Result<()> {
                         .filter(|word| !host_define(word)),
                 )
                 .current_dir(build)
+                .env("LIBCLANG_PATH", libclang)
                 .env("PATH", path),
         )?;
     }
@@ -750,7 +816,7 @@ fn linked_whole(object: &str) -> bool {
 }
 
 pub fn build(jobs: u16) -> Result<()> {
-    let toolchain = Toolchain::discover()?;
+    let toolchain = super::toolchain::discover()?;
     let directory = build_directory("nvk");
     let build = directory.join("build");
     let (_, path) = paths(&directory)?;
@@ -758,10 +824,10 @@ pub fn build(jobs: u16) -> Result<()> {
     super::llvm::build(&toolchain, jobs, false)?;
     let sysroot = Sysroot::build(&toolchain, &directory, jobs)?;
     setup(&toolchain, &sysroot, &directory, &build, &path)?;
-    generate(&sysroot, &build, &path)?;
+    generate(&sysroot, &build, &path, &toolchain.libclang)?;
     let libc = gpu().join("compat/libc");
     let includes = include_flags(&toolchain.clang, &libc)?;
-    bindings(&build, &path, &includes)?;
+    bindings(&build, &path, &includes, &toolchain.libclang)?;
     check_float_crossings(&build)?;
 
     let objects = directory.join("objects");
@@ -880,6 +946,26 @@ mod tests {
             retarget(&words, &common),
             ["--target=x", "-Iinclude", "-DMESA_DEBUG=0", "-c", "a.c"]
         );
+    }
+
+    #[test]
+    fn a_probe_that_failed_is_named() {
+        let all = PROBED.map(|define| format!("-D{define}")).join(" ");
+        let plan = |defines: &str| {
+            serde_json::json!([
+                {"file": "../mesa/src/util/u_math.c", "command": "clang -c u_math.c"},
+                {"file": "../mesa/src/util/ralloc.c",
+                 "command": format!("clang -DHAVE_OPENGL=0 {defines} -c ralloc.c")},
+            ])
+            .to_string()
+        };
+        assert!(missing_probes(&plan(&all)).unwrap().is_empty());
+        // As when every link probe fails: no qsort_r and no library calls.
+        let compile_only = "-DHAVE_STRUCT_TIMESPEC -DHAVE_ENDIAN_H -DHAVE_DLFCN_H";
+        let missing = missing_probes(&plan(compile_only)).unwrap();
+        assert_eq!(missing[0], "HAVE_GNU_QSORT_R");
+        assert_eq!(missing.len(), PROBED.len() - 3);
+        assert!(missing_probes("[]").is_err());
     }
 
     #[test]
