@@ -987,10 +987,10 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
                     .confirm_disk
                     .as_deref()
                     .is_some_and(|typed| found.confirmed_by(typed)),
-            "{disk} ({}, {}) is not a USB disk, or setup cannot tell which disk this computer \
-             runs from; pass --confirm-disk with its model or size to erase it",
+            "{disk} ({}, {}) {}; pass --confirm-disk with its model or size to erase it",
             found.name,
-            host::size_text(found.bytes)
+            host::size_text(found.bytes),
+            found.removal.why_typed()
         );
         // The installer it makes, refused before anything else when it
         // cannot be made on this USB.

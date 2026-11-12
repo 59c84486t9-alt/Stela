@@ -120,8 +120,28 @@ pub(crate) enum Removal {
     /// external Thunderbolt disk. Erased only once its model or size is
     /// typed back ([`Disk::confirmed_by`]).
     Typed,
+    /// A USB disk on a computer whose own disks setup cannot tell: erased
+    /// only once its model or size is typed back, since it may be the disk
+    /// this computer runs from. Only Linux can fail to tell.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "only the Linux disk listing builds it")
+    )]
+    Unsure,
     /// Part of the computer: never erased.
     Fixed,
+}
+
+impl Removal {
+    /// Why a disk needs its model or size typed back before it is erased.
+    pub(crate) fn why_typed(self) -> &'static str {
+        match self {
+            Removal::Unsure => {
+                "may be the disk this computer runs from: setup cannot tell which disk that is"
+            }
+            Removal::Usb | Removal::Typed | Removal::Fixed => "is not a USB disk",
+        }
+    }
 }
 
 impl DiskFacts {

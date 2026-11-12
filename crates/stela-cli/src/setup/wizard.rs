@@ -69,11 +69,11 @@ impl Usb {
     /// any disk when setup cannot tell which one this computer runs from.
     fn typed_back(&self) -> Result<String> {
         cliclack::log::warning(format!(
-            "{} ({}, {}) is not a USB disk, or setup cannot tell which disk this computer \
-             runs from.",
+            "{} ({}, {}) {}.",
             self.name,
             self.size(),
-            self.id
+            self.id,
+            self.removal.why_typed()
         ))?;
         let (name, bytes) = (self.name.clone(), self.bytes);
         let expected = format!("Type {} or {}", self.name, self.size());
@@ -386,7 +386,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             .interact()?
         {
             0 => {
-                if usb.removal == Removal::Typed {
+                if matches!(usb.removal, Removal::Typed | Removal::Unsure) {
                     command.confirm_disk = Some(usb.typed_back()?);
                 }
                 usb.verify(host)?;

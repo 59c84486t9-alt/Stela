@@ -1137,6 +1137,25 @@ fn setup_erases_usb_and_refuses_internal_disk() {
     card.dry_run = true;
     let error = setup(&environment(&host), card).unwrap_err().to_string();
     assert!(error.contains("--confirm-disk"), "{error}");
+    assert!(
+        error.contains("disk6 (Disk disk6, 137.4 GB) is not a USB disk;"),
+        "{error}"
+    );
+    // A USB on a computer whose own disks setup cannot tell: refused for
+    // that reason alone.
+    host.disks.push(Disk {
+        removal: host::Removal::Unsure,
+        ..disk("disk7", &[])
+    });
+    let mut unsure = command(&f, Path::new("disk7"));
+    unsure.dry_run = true;
+    let error = setup(&environment(&host), unsure).unwrap_err().to_string();
+    assert!(error.contains("--confirm-disk"), "{error}");
+    assert!(
+        error.contains("may be the disk this computer runs from"),
+        "{error}"
+    );
+    assert!(!error.contains("not a USB disk"), "{error}");
     for typed in ["Disk disk6", "137.4 GB"] {
         let mut card = command(&f, Path::new("disk6"));
         card.dry_run = true;

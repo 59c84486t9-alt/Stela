@@ -351,7 +351,7 @@ fn whole_disks(devices: Vec<Device>, system: &SystemDevices) -> Vec<Disk> {
         .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
         .map(|d| Disk {
             removal: match d.facts().removal() {
-                Removal::Usb if !root_known => Removal::Typed,
+                Removal::Usb if !root_known => Removal::Unsure,
                 removal => removal,
             },
             system: d.holds_system() || d.holds_any(&system.names),
@@ -816,8 +816,8 @@ mod tests {
             disks(&unknown()),
             [
                 ("nvme0n1".into(), false, Removal::Fixed),
-                ("sdb".into(), false, Removal::Typed),
-                ("sdc".into(), false, Removal::Typed),
+                ("sdb".into(), false, Removal::Unsure),
+                ("sdc".into(), false, Removal::Unsure),
             ]
         );
     }
