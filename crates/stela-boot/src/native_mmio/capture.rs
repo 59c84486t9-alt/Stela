@@ -19,18 +19,12 @@ use uefi::{
 
 const MAGIC: u64 = 0x5354_4c4d_4d49_4f31;
 const MAX_ROOTS: usize = 64;
-const MAX_MEMORY: usize = 512;
+const MAX_MEMORY: usize = firmware_map::INVENTORY_ENTRIES;
 const TABLE_BYTES: usize = 65536;
 /// Leaf tables in the aperture: 4 KiB mappings for 32 MiB.
 pub(super) const LEAVES: usize = 16;
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(super) struct Memory {
-    pub start: u64,
-    pub end: u64,
-    pub kind: u32,
-}
+pub(super) type Memory = firmware_map::Entry;
 /// All fields are initialized by the loader. Kept in reserved
 /// LOADER_DATA pages, mapped by the native physmap and never offered to guests.
 #[repr(C)]
@@ -109,6 +103,19 @@ impl Wire {
                     .iter()
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
             })
+    }
+    /// Keep `map` as the memory inventory; entries without pages are left
+    /// out. A refusal leaves no entry.
+    fn seal(&mut self, map: &impl MemoryMap) -> Result<firmware_map::Sealed> {
+        self.memory_count = 0;
+        let sealed = firmware_map::seal(
+            map.entries()
+                .map(|entry| (entry.phys_start, entry.page_count, entry.ty.0)),
+            &mut self.memory,
+        )
+        .map_err(|error| refuse!("{error}", error = %error))?;
+        self.memory_count = sealed.kept;
+        Ok(sealed)
     }
     /// Whether every map entry overlapping `first..end` is the firmware's:
     /// reserved, runtime services, ACPI tables or NVS, MMIO or PAL code,
@@ -327,46 +334,20 @@ impl Prepared {
     pub(crate) fn finish(self, exit: &mut SuccessfulExit) -> Result<Sealed> {
         // SAFETY: sole loader writer, not published to the engine until sealed.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
-        for entry in exit.map().entries() {
-            if wire.memory_count == MAX_MEMORY {
-                return Err(refuse!("MMIO final memory inventory capacity exceeded"));
-            }
-            let end = entry
-                .phys_start
-                .checked_add(
-                    entry
-                        .page_count
-                        .checked_mul(PAGE)
-                        .ok_or(refuse!("MMIO memory size overflow"))?,
-                )
-                .ok_or(refuse!("MMIO memory end overflow"))?;
-            if end <= entry.phys_start
-                || !entry.phys_start.is_multiple_of(PAGE)
-                || wire.memory[..wire.memory_count]
-                    .iter()
-                    .any(|previous| previous.start < end && entry.phys_start < previous.end)
-            {
-                return Err(refuse!(
-                    "MMIO final memory inventory has invalid or overlapping entries"
-                ));
-            }
-            wire.memory[wire.memory_count] = Memory {
-                start: entry.phys_start,
-                end,
-                kind: entry.ty.0,
-            };
-            wire.memory_count += 1;
-        }
+        wire.seal(exit.map())?;
         let end = self
             .region
             .physical
             .checked_add(self.region.bytes)
             .ok_or(refuse!("MMIO capture range overflow"))?;
-        if !(self.region.physical..end)
+        if let Some(page) = (self.region.physical..end)
             .step_by(PAGE as usize)
-            .all(|page| wire.table_owned(page))
+            .find(|&page| !wire.table_owned(page))
         {
-            return Err(refuse!("MMIO capture outside retained loader memory"));
+            return Err(refuse!(
+                "the native capture's page {page:#x} is not loader data in the final memory map",
+                page
+            ));
         }
         let ownership = exit
             .take_ownership()
