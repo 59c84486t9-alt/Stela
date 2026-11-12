@@ -57,6 +57,9 @@ pub enum WakeState {
 /// timer must remain usable under the original platform's power/context grant.
 pub unsafe trait Timer {
     fn check(&self) -> Result<(), Error>;
+    /// Caller-tracked, so a wait that ends a device's start budget names the
+    /// driver's own step (`budget::Bounded`).
+    #[track_caller]
     fn wait_us(&self, microseconds: u64) -> Result<(), Error>;
     /// Start a nonblocking minimum interval, when the same source can retain
     /// and revalidate it. A returned interval has the same physical guarantee
@@ -77,6 +80,7 @@ unsafe impl<T: Timer + ?Sized> Timer for alloc::rc::Rc<T> {
     fn check(&self) -> Result<(), Error> {
         (**self).check()
     }
+    #[track_caller]
     fn wait_us(&self, microseconds: u64) -> Result<(), Error> {
         (**self).wait_us(microseconds)
     }

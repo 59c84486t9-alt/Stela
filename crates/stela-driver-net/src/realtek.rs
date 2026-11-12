@@ -190,12 +190,14 @@ impl Registers for Mmio {
 }
 trait Timer {
     fn now(&self) -> u64;
+    #[track_caller]
     fn delay(&self, microseconds: u64) -> Result<(), BlockError>;
 }
 impl Timer for crate::timing::Timing {
     fn now(&self) -> u64 {
         self.now_us()
     }
+    #[track_caller]
     fn delay(&self, us: u64) -> Result<(), BlockError> {
         crate::timing::Timing::delay(self, us)
     }

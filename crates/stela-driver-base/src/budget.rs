@@ -233,6 +233,7 @@ unsafe impl power::Timer for Bounded {
     fn check(&self) -> Result<(), power::Error> {
         self.0.check()
     }
+    #[track_caller]
     fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
         self.0.wait_us(microseconds)?;
         if passed_at(Clock::ticks(), Location::caller()) {
@@ -323,6 +324,25 @@ mod tests {
         assert!(budget.expired().is_some());
         drop(budget);
         assert_eq!(minimum.wait_us(50_000), Ok(()));
+    }
+
+    #[test]
+    fn a_bounded_minimum_names_the_drivers_own_wait() {
+        let _virtual = test_clock::virtualize();
+        // As the mount hands it on: a shared provider in a driver's timing.
+        let minimum: Rc<dyn power::Timer> = Rc::new(Bounded(Rc::new(Instant)));
+        let timing = crate::timing::Timing::new(CLOCK, minimum.clone());
+        let budget = Budget::start(CLOCK, 1_000).unwrap();
+        let line = line!() + 1;
+        while timing.delay(50_000).is_ok() {}
+        let at = budget.expired().unwrap().at.expect("step named");
+        assert_eq!((at.file(), at.line()), (file!(), line));
+        drop(budget);
+        let budget = Budget::start(CLOCK, 1_000).unwrap();
+        let line = line!() + 1;
+        while minimum.wait_us(50_000).is_ok() {}
+        let at = budget.expired().unwrap().at.expect("step named");
+        assert_eq!((at.file(), at.line()), (file!(), line));
     }
 
     #[test]

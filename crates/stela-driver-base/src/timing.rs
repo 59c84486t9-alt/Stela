@@ -34,6 +34,7 @@ impl<N> Timing<N> {
     }
 
     /// Wait at least `us` microseconds.
+    #[track_caller]
     pub fn delay(&self, us: u64) -> Result<(), BlockError> {
         self.minimum.wait_us(us).map_err(BlockError::PciPower)
     }
@@ -72,6 +73,7 @@ unsafe impl<N> power::Timer for Timing<N> {
     fn check(&self) -> Result<(), power::Error> {
         self.minimum.check()
     }
+    #[track_caller]
     fn wait_us(&self, us: u64) -> Result<(), power::Error> {
         self.minimum.wait_us(us)
     }
