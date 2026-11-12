@@ -219,8 +219,7 @@ fn store(directory: &Path, artifact: &Artifact, bytes: &[u8]) -> Result<Vec<u8>>
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(&path)
+    crate::efi::persist_new(temporary, &path)
         .with_context(|| format!("cannot publish immutable firmware cache {}", path.display()))?;
     host_firmware::sync_directory(directory)?;
     read_cached(&path, artifact)

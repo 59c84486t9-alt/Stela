@@ -215,10 +215,8 @@ fn publish(output: &Path, body: &[u8], receipt: &serde_json::Value) -> Result<()
     serde_json::to_writer_pretty(&mut record, receipt)?;
     record.write_all(b"\n")?;
     record.as_file().sync_all()?;
-    key.persist_noclobber(output).map_err(|error| error.error)?;
-    record
-        .persist_noclobber(&receipt_path)
-        .map_err(|error| error.error)?;
+    crate::efi::persist_new(key, output)?;
+    crate::efi::persist_new(record, &receipt_path)?;
     Ok(())
 }
 

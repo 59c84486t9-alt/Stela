@@ -589,7 +589,7 @@ fn finish_inventory(
                 let mut file = tempfile::NamedTempFile::new_in(directory)?;
                 file.write_all(key.key_pem.as_bytes())?;
                 file.as_file().sync_all()?;
-                file.persist_noclobber(&path).map_err(|error| error.error)?;
+                crate::efi::persist_new(file, &path)?;
             }
             keys.push(
                 json!({"member": key.member, "header_sha256": key.header_sha256,
@@ -992,8 +992,7 @@ pub fn write(options: &WriteOptions<'_>) -> Result<serde_json::Value> {
     file.write_all(manifest.to_json().as_bytes())?;
     file.write_all(b"\n")?;
     file.as_file().sync_all()?;
-    file.persist_noclobber(&manifest_path)
-        .map_err(|error| error.error)?;
+    crate::efi::persist_new(file, &manifest_path)?;
     Ok(json!({
         "manifest": manifest_path,
         "build": manifest.product_build,

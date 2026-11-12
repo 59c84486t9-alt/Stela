@@ -109,11 +109,47 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()>
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     match fresh {
-        true => file.persist_noclobber(path).map_err(|error| error.error)?,
-        false => file.persist(path).map_err(|error| error.error)?,
+        true => persist_new(file, path)?,
+        false => drop(file.persist(path).map_err(|error| error.error)?),
     };
     // FAT may refuse to sync a directory; the file itself is already synced.
     let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+    Ok(())
+}
+
+/// Give the synced temporary `file` the name `path`, never replacing a
+/// `path` that exists: by a rename that refuses to replace where the file
+/// system has one, else, as on FAT and exFAT under macOS (which refuse that
+/// rename with ENOTSUP and have no hard links either), by a plain rename
+/// once `path` is checked to be absent.
+pub(crate) fn persist_new(file: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    persist_new_with(file, path, |file, path| file.persist_noclobber(path))
+}
+
+fn persist_new_with(
+    file: tempfile::NamedTempFile,
+    path: &Path,
+    no_replace: impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<fs::File, tempfile::PersistError>,
+) -> Result<()> {
+    let refused = match no_replace(file, path) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists", path.display())
+        }
+        Err(error) => error,
+    };
+    match fs::symlink_metadata(path) {
+        Ok(_) => bail!("{} already exists", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot inspect {}", path.display()));
+        }
+    }
+    refused
+        .file
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("cannot rename a temporary file to {}", path.display()))?;
     Ok(())
 }
 
@@ -246,4 +282,55 @@ pub fn uninstall(esp: &Path, owned: bool) -> Result<serde_json::Value> {
         "files": files,
         "kept_loader": (stela == Some(false)).then(|| esp.join(LOADER)),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What macOS answers for a rename that keeps an existing file on FAT
+    /// and exFAT: ENOTSUP.
+    fn unsupported(
+        file: tempfile::NamedTempFile,
+        _: &Path,
+    ) -> Result<fs::File, tempfile::PersistError> {
+        Err(tempfile::PersistError {
+            error: std::io::Error::from(std::io::ErrorKind::Unsupported),
+            file,
+        })
+    }
+
+    fn temporary(directory: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new_in(directory).unwrap();
+        file.write_all(bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_volume_without_a_keeping_rename_publishes_a_new_file_by_renaming() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("boot.log");
+        persist_new_with(temporary(temp.path(), b"new"), &path, unsupported).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        // Only the published file is left: the temporary file became it.
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn an_existing_file_is_never_replaced_either_way() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("boot.log");
+        fs::write(&path, b"earlier boots").unwrap();
+        let error = persist_new_with(temporary(temp.path(), b"new"), &path, unsupported)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"), "{error}");
+        let error = persist_new(temporary(temp.path(), b"new"), &path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"earlier boots");
+        // The refused temporary files are removed.
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 }
