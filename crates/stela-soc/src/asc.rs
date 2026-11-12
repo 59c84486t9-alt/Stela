@@ -533,6 +533,16 @@ impl MmioDevice for Asc {
         NAME
     }
 
+    /// Status polls and the outbox head; [`I2A_RECV1`] pops the outbox.
+    fn plain_read(&self, offset: u64, width: Width) -> bool {
+        matches!(
+            (offset, width),
+            (
+                CPU_CONTROL | IDLE_STATUS | A2I_CONTROL | I2A_CONTROL,
+                Width::Word
+            ) | (I2A_RECV0, Width::Double)
+        )
+    }
     fn read(
         &mut self,
         offset: u64,

@@ -59,6 +59,8 @@ pub mod mcc;
 pub mod nor;
 pub mod passive;
 pub mod perf;
+#[cfg(test)]
+mod plain_reads;
 pub mod pmgr;
 pub mod pmp;
 pub mod pmu;

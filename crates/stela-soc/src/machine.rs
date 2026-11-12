@@ -1285,6 +1285,15 @@ impl Devices for AppleDevices {
         self.bus.register_name_at(physical)
     }
 
+    fn plain_epoch(
+        &self,
+        physical: u64,
+        bytes: u8,
+    ) -> Option<(alloc::sync::Arc<core::sync::atomic::AtomicU64>, u64)> {
+        self.bus
+            .plain_epoch(physical, Width::from_bytes(u64::from(bytes))?)
+    }
+
     fn memory_lock(&self) -> stela_engine::machine::mmu::MemoryLocks {
         let Some(device) = self.memory_controller else {
             return [None; stela_soc_data::amcc::GROUPS];

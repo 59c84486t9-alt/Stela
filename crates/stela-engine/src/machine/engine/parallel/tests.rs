@@ -2568,6 +2568,67 @@ fn passive_registers_are_read_without_the_devices_lock() {
     assert_eq!(home.with(|devices| devices.reads), 2);
 }
 
+#[test]
+fn plain_reads_are_served_again_without_the_lock_while_their_epoch_holds() {
+    /// A model at 0x40 whose 8-byte read is plain, and a bump of its epoch
+    /// on every write, as a bus moves it.
+    #[derive(Default)]
+    struct Plain {
+        epoch: Arc<AtomicU64>,
+        value: u64,
+        reads: usize,
+    }
+    impl Devices for Plain {
+        fn plain_epoch(&self, physical: u64, bytes: u8) -> Option<(Arc<AtomicU64>, u64)> {
+            (physical == 0x40 && bytes == 8)
+                .then(|| (Arc::clone(&self.epoch), self.epoch.load(Ordering::SeqCst)))
+        }
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            self.reads += 1;
+            Ok(self.value)
+        }
+        fn write(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            value: u64,
+            _: u64,
+        ) -> Result<(), DeviceError> {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            self.value = value;
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+    }
+    let (hub, _) = hub(2);
+    let home = SharedDevices::new(Plain::default(), hub);
+    let mut worker = home.worker();
+    let reads = |home: &SharedDevices<Plain>| home.with(|devices| devices.reads);
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 0), ScalarRead::Served(Ok(0)));
+    assert_eq!(reads(&home), 1);
+    // Served again while another call holds the devices' lock.
+    let held = home.board.lock(Call::Other);
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 1), ScalarRead::Served(Ok(0)));
+    drop(held);
+    assert_eq!(reads(&home), 1);
+    // A write by another PE moves the epoch: the next read reaches the model.
+    let mut other = home.worker();
+    other.write(0, 0x40, 8, 5, 2).unwrap();
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 3), ScalarRead::Served(Ok(5)));
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 4), ScalarRead::Served(Ok(5)));
+    assert_eq!(reads(&home), 2);
+    // Other reads, and any read once a device deadline passed, reach it.
+    assert_eq!(worker.read_scalar(1, 0x48, 8, 5), ScalarRead::Served(Ok(5)));
+    assert_eq!(worker.read_scalar(1, 0x40, 4, 5), ScalarRead::Served(Ok(5)));
+    assert_eq!(reads(&home), 4);
+    home.board.time.store(6, Ordering::Release);
+    assert_eq!(worker.read_scalar(1, 0x40, 8, 6), ScalarRead::Served(Ok(5)));
+    assert_eq!(reads(&home), 5);
+}
+
 /// The copies a transfer leaves ([`Devices::take_unlocked`]) run on the PE
 /// that settled the write, after it released the devices' lock, each once,
 /// with PEs settling at once; and what each came to is published by a

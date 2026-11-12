@@ -799,6 +799,18 @@ pub trait Devices {
     fn register_name(&self, _physical: u64) -> Option<&'static str> {
         None
     }
+    /// For a plain read of `bytes` at `physical`, one that changes nothing
+    /// and whose value follows from its model's state alone, that model's
+    /// epoch and the count it holds now: while the count holds, the value
+    /// such a read gave stays its value, and a PE may serve it again
+    /// without the devices. `None` for any other read.
+    fn plain_epoch(
+        &self,
+        _physical: u64,
+        _bytes: u8,
+    ) -> Option<(alloc::sync::Arc<core::sync::atomic::AtomicU64>, u64)> {
+        None
+    }
     /// Host counter ticks this handle waited for a shared board's lock
     /// since the last call.
     fn take_lock_wait(&mut self) -> u64 {

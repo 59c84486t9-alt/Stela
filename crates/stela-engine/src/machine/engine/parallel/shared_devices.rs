@@ -437,9 +437,72 @@ pub struct SharedDevices<D> {
     local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
     /// [`Devices::passive_registers`], asked for once the board is built.
     passive: Option<Arc<dyn PassiveRegisters>>,
+    /// Plain reads this handle served through the devices
+    /// ([`Devices::plain_epoch`]), which it serves again without them while
+    /// their model's epoch holds.
+    plain: PlainReads,
     /// The ticks this handle's calls waited for the lock since
     /// [`Devices::take_lock_wait`].
     waited: AtomicU64,
+}
+
+/// The plain reads one handle keeps ([`SharedDevices::plain`]).
+const PLAIN_READS: usize = 32;
+
+/// One handle's plain reads: each read's address and size, its model's epoch,
+/// the count the epoch held before the read, and the value it gave.
+#[derive(Default)]
+struct PlainReads {
+    reads: Vec<PlainRead>,
+    /// The entry the next new read replaces once all are taken.
+    next: usize,
+}
+
+struct PlainRead {
+    physical: u64,
+    bytes: u8,
+    epoch: Arc<AtomicU64>,
+    seen: u64,
+    value: u64,
+}
+
+impl PlainReads {
+    /// The value a plain read of `bytes` at `physical` gave, while no access
+    /// that may change its model began since.
+    fn read(&self, physical: u64, bytes: u8) -> Option<u64> {
+        let read = self
+            .reads
+            .iter()
+            .find(|read| read.physical == physical && read.bytes == bytes)?;
+        (read.epoch.load(Ordering::SeqCst) == read.seen).then_some(read.value)
+    }
+
+    /// Keep `value`, read while `epoch` held `seen`, if it still holds it: an
+    /// access that may change the model began during the read otherwise.
+    fn keep(&mut self, physical: u64, bytes: u8, epoch: Arc<AtomicU64>, seen: u64, value: u64) {
+        if epoch.load(Ordering::SeqCst) != seen {
+            return;
+        }
+        let read = PlainRead {
+            physical,
+            bytes,
+            epoch,
+            seen,
+            value,
+        };
+        if let Some(kept) = self
+            .reads
+            .iter_mut()
+            .find(|kept| kept.physical == physical && kept.bytes == bytes)
+        {
+            *kept = read;
+        } else if self.reads.len() < PLAIN_READS {
+            self.reads.push(read);
+        } else {
+            self.reads[self.next] = read;
+            self.next = (self.next + 1) % PLAIN_READS;
+        }
+    }
 }
 
 impl<D: Devices> SharedDevices<D> {
@@ -497,6 +560,7 @@ impl<D: Devices> SharedDevices<D> {
             home: true,
             local: Vec::new(),
             passive,
+            plain: PlainReads::default(),
             waited: AtomicU64::new(0),
         }
     }
@@ -508,6 +572,7 @@ impl<D: Devices> SharedDevices<D> {
             home: false,
             local: Vec::new(),
             passive: self.passive.clone(),
+            plain: PlainReads::default(),
             waited: AtomicU64::new(0),
         }
     }
@@ -721,9 +786,21 @@ impl<D: Devices> Devices for SharedDevices<D> {
         if let Some(value) = self.passive.as_ref().and_then(|p| p.read(physical, bytes)) {
             return ScalarRead::Served(Ok(value));
         }
-        self.changing(Call::Access, cpu, now, |devices, now| {
-            devices.read_scalar(cpu, physical, bytes, now)
-        })
+        // A device deadline that passed may change what a model reads.
+        if now < self.board.time.load(Ordering::Acquire)
+            && let Some(value) = self.plain.read(physical, bytes)
+        {
+            return ScalarRead::Served(Ok(value));
+        }
+        let (read, plain) = self.changing(Call::Access, cpu, now, |devices, now| {
+            let plain = devices.plain_epoch(physical, bytes);
+            let read = devices.read_scalar(cpu, physical, bytes, now);
+            (read, plain)
+        });
+        if let (ScalarRead::Served(Ok(value)), Some((epoch, seen))) = (&read, plain) {
+            self.plain.keep(physical, bytes, epoch, seen, *value);
+        }
+        read
     }
     fn requires_canonical_read(&self, cpu: usize, physical: u64, shape: DeviceReadShape) -> bool {
         self.with(|devices| devices.requires_canonical_read(cpu, physical, shape))

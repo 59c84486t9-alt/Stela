@@ -7,9 +7,11 @@
 //! stop or fault rather than invent a value.
 use super::interrupt::{CpuIndex, InterruptSink};
 use crate::Refusal;
+use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 mod container;
 pub use container::SharedView;
@@ -181,6 +183,14 @@ pub trait MmioDevice: Any {
     fn register_name(&self, _offset: u64) -> Option<&'static str> {
         None
     }
+    /// Whether a read at `offset` of `width` is plain: it changes nothing in
+    /// the model, and its value follows from the model's state alone, not
+    /// from the time, the reading CPU or anything outside the model. The
+    /// bus then leaves the model's epoch ([`Bus::plain_epoch`]) as it was,
+    /// so a value read before stays the value while the epoch holds.
+    fn plain_read(&self, _offset: u64, _width: Width) -> bool {
+        false
+    }
     fn read(
         &mut self,
         offset: u64,
@@ -259,6 +269,9 @@ struct Region {
 #[derive(Default)]
 pub struct Bus {
     devices: Vec<Box<dyn MmioDevice>>,
+    /// Each device's epoch, which every access that may change it moves
+    /// before it does ([`Self::plain_epoch`]).
+    epochs: Vec<Arc<AtomicU64>>,
     /// Stable owner IDs in registration order; routes and aliases add no polls.
     advancing: Vec<DeviceId>,
     /// Sorted by `start`, nonoverlapping.
@@ -296,6 +309,7 @@ impl Bus {
             self.advancing.push(id);
         }
         self.devices.push(device);
+        self.epochs.push(Arc::default());
         id
     }
     /// Install one device and all its ranges atomically. Validate both
@@ -371,7 +385,11 @@ impl Bus {
                 self.advancing.push(id);
             }
         }
+        self.epochs
+            .try_reserve(N)
+            .map_err(|_| MapError::Allocation)?;
         self.devices.extend(devices);
+        self.epochs.extend((0..N).map(|_| Arc::default()));
         self.regions.extend(proposed);
         self.regions.sort_unstable_by_key(|region| region.start);
         Ok(ids)
@@ -500,6 +518,25 @@ impl Bus {
         let (device, _) = self.route(address, Width::Byte).ok()?;
         Some(self.devices.get(device.0)?.name())
     }
+    /// Move `device`'s epoch: an access that may change it follows.
+    fn changing(&self, device: DeviceId) {
+        if let Some(epoch) = self.epochs.get(device.0) {
+            epoch.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    /// For a plain read at `address` of `width` ([`MmioDevice::plain_read`]),
+    /// its model's epoch and the count it holds now: while the epoch still
+    /// holds that count, no access that may change the model has begun, so
+    /// a value the read gave since stays the value. `None` for any other
+    /// read.
+    pub fn plain_epoch(&self, address: u64, width: Width) -> Option<(Arc<AtomicU64>, u64)> {
+        let (device, offset) = self.route(address, width).ok()?;
+        if !self.devices.get(device.0)?.plain_read(offset, width) {
+            return None;
+        }
+        let epoch = self.epochs.get(device.0)?;
+        Some((Arc::clone(epoch), epoch.load(Ordering::SeqCst)))
+    }
     /// The name the model gives the register at `address`, for reports.
     pub fn register_name_at(&self, address: u64) -> Option<&'static str> {
         let (device, offset) = self.route(address, Width::Byte).ok()?;
@@ -512,6 +549,9 @@ impl Bus {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let (device, offset) = self.route(address, width)?;
+        if !self.devices[device.0].plain_read(offset, width) {
+            self.changing(device);
+        }
         let value = self.devices[device.0].read(offset, width, access)?;
         debug_assert_eq!(value & !width.mask(), 0, "device read wider than access");
         Ok(value & width.mask())
@@ -524,6 +564,7 @@ impl Bus {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let (device, offset) = self.route(address, width)?;
+        self.changing(device);
         self.devices[device.0].write(offset, width, value & width.mask(), access)
     }
     /// Advances every time-driven owner once and returns the earliest deadline.
@@ -536,6 +577,7 @@ impl Bus {
         let mut next: Option<u64> = None;
         for index in 0..self.advancing.len() {
             let id = self.advancing[index];
+            self.changing(id);
             let device = &mut self.devices[id.0];
             let advanced = device.advance(access);
             #[cfg(feature = "native-profile")]
@@ -562,6 +604,7 @@ impl Bus {
     }
     /// A model's state, for engine wiring such as the AMCC's write lock.
     pub fn lifecycle(&mut self, device: DeviceId) -> Option<&mut dyn Lifecycle> {
+        self.changing(device);
         self.devices.get_mut(device.0)?.lifecycle()
     }
 
@@ -576,6 +619,8 @@ impl Bus {
         a: DeviceId,
         b: DeviceId,
     ) -> Option<(&mut A, &mut B)> {
+        self.changing(a);
+        self.changing(b);
         let [a, b] = self.devices.get_disjoint_mut([a.0, b.0]).ok()?;
         let a: &mut dyn Any = a.as_mut();
         let b: &mut dyn Any = b.as_mut();
@@ -584,6 +629,7 @@ impl Bus {
     /// Typed access to a model, for engine wiring such as AIC inputs, UART
     /// receive data or fast-IPI system registers.
     pub fn device_mut<T: MmioDevice>(&mut self, device: DeviceId) -> Option<&mut T> {
+        self.changing(device);
         let device: &mut dyn Any = self.devices.get_mut(device.0)?.as_mut();
         device.downcast_mut::<T>()
     }

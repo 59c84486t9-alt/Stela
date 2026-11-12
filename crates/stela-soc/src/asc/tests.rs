@@ -758,3 +758,28 @@ fn firmware_events_leave_at_advance_and_transitions_reach_the_machine() {
         ("standby", Transition::PowerOff, 7)
     );
 }
+
+#[test]
+fn status_polls_and_the_outbox_head_read_plainly() {
+    use crate::plain_reads::{Op, check};
+    check(
+        || Box::new(Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap()),
+        WRAPPER_BYTES,
+        &[
+            (CPU_CONTROL, Width::Word),
+            (IDLE_STATUS, Width::Word),
+            (A2I_CONTROL, Width::Word),
+            (I2A_CONTROL, Width::Word),
+            (I2A_RECV0, Width::Double),
+        ],
+        &[
+            Op::Write(A2I_SEND0, Width::Double, &[0, 5, 0x20]),
+            Op::Write(A2I_SEND1, Width::Double, &[0x10, 0x20, 0xff]),
+            Op::Write(I2A_CONTROL, Width::Word, &[0, 1]),
+            Op::Write(A2I_CONTROL, Width::Word, &[0, 1]),
+            Op::Write(CPU_CONTROL, Width::Word, &[0, RUN]),
+            Op::Read(I2A_RECV1, Width::Double),
+            Op::Advance,
+        ],
+    );
+}

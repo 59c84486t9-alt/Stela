@@ -238,3 +238,79 @@ fn routes_ranges_with_device_offsets_and_refuses_gaps() {
     );
     assert!(bus.device_mut::<Scratch>(scratch).is_some());
 }
+
+/// [`Scratch`] whose low half reads plainly, advanced with time.
+struct PlainLow(Scratch);
+impl MmioDevice for PlainLow {
+    fn advance_policy(&self) -> AdvancePolicy {
+        AdvancePolicy::Always
+    }
+    fn name(&self) -> &'static str {
+        "plain low scratch"
+    }
+    fn plain_read(&self, offset: u64, _: Width) -> bool {
+        offset < 8
+    }
+    fn read(
+        &mut self,
+        offset: u64,
+        width: Width,
+        access: &mut Access<'_>,
+    ) -> Result<u64, MmioError> {
+        self.0.read(offset, width, access)
+    }
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        access: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        self.0.write(offset, width, value, access)
+    }
+}
+
+#[test]
+fn every_access_but_a_plain_read_moves_its_models_epoch_first() {
+    let mut bus = Bus::new();
+    let plain = bus.add(Box::new(PlainLow(Scratch([0; 16]))));
+    let other = bus.add(Box::new(Scratch([0; 16])));
+    bus.map(plain, 0x1000, 16, 0).unwrap();
+    bus.map(other, 0x2000, 16, 0).unwrap();
+    assert!(bus.plain_epoch(0x1008, Width::Word).is_none());
+    assert!(bus.plain_epoch(0x2000, Width::Word).is_none());
+    assert!(bus.plain_epoch(0x3000, Width::Word).is_none());
+    let (epoch, mut seen) = bus.plain_epoch(0x1000, Width::Word).unwrap();
+    let mut latch = InterruptLatch::new();
+    let mut moved = |bus: &mut Bus, f: &dyn Fn(&mut Bus, &mut Access<'_>)| {
+        f(bus, &mut Access::new(0, 0, &mut latch));
+        let now = epoch.load(Ordering::SeqCst);
+        let moved = now != seen;
+        seen = now;
+        assert_eq!(bus.plain_epoch(0x1000, Width::Word).unwrap().1, now);
+        moved
+    };
+    assert!(!moved(&mut bus, &|bus, access| {
+        bus.read(0x1000, Width::Word, access).unwrap();
+        bus.read(0x2000, Width::Word, access).unwrap();
+        bus.write(0x2000, Width::Word, 1, access).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, access| {
+        bus.write(0x1000, Width::Word, 1, access).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, access| {
+        bus.read(0x1008, Width::Word, access).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, access| {
+        bus.advance(access).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, _| {
+        bus.device_mut::<PlainLow>(plain).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, _| {
+        bus.pair_mut::<PlainLow, Scratch>(plain, other).unwrap();
+    }));
+    assert!(moved(&mut bus, &|bus, _| {
+        assert!(bus.lifecycle(plain).is_none());
+    }));
+}
