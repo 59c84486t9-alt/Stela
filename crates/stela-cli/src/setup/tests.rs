@@ -1285,6 +1285,31 @@ fn install_and_repair_unmount_target_filesystems() {
 }
 
 #[test]
+fn the_last_word_on_the_network_follows_the_installer() {
+    let run = |kind: InstallImage| {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let mut command = installed_command(&f);
+        command.install_image = Some(kind);
+        create::network_next_step(&setup(&environment(&f.host), command).unwrap())
+    };
+    let network = run(InstallImage::Network);
+    assert!(
+        network.starts_with("The install downloads macOS"),
+        "{network}"
+    );
+    // These fake bundles hold no signing answers.
+    let full = run(InstallImage::Full);
+    assert!(full.starts_with("macOS is on the USB."), "{full}");
+    let offline = format!("  note           {}\n", create::OFFLINE_NOTE);
+    let offline = create::network_next_step(&offline);
+    assert!(
+        offline.starts_with("The install needs no network"),
+        "{offline}"
+    );
+}
+
+#[test]
 fn install_reads_full_or_streamed_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);

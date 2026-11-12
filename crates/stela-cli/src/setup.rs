@@ -765,8 +765,8 @@ impl Request {
             cliclack::note(
                 "Next steps",
                 format!(
-                    "Boot the target PC from this USB and choose Install macOS.\nThe install \
-                     needs the internet for Apple's signing server.{profile}"
+                    "Boot the target PC from this USB and choose Install macOS.\n{}{profile}",
+                    create::network_next_step(&report)
                 ),
             )?;
             cliclack::outro("Your installer USB is ready")?;

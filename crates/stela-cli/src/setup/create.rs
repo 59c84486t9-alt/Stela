@@ -562,6 +562,21 @@ pub(super) fn network_notes(remote: bool, offline: bool) -> Vec<String> {
     }
 }
 
+/// The interactive setup's last word on the network, by the network note
+/// of the plan in `report` ([`network_notes`]).
+pub(super) fn network_next_step(report: &str) -> &'static str {
+    use stela_runtime::restore::tss::network_reason;
+    if report.contains(OFFLINE_NOTE) {
+        "The install needs no network: macOS and Apple's signing answers are on the USB."
+    } else if report.contains(network_reason(false)) {
+        "macOS is on the USB. The install needs a network for Apple's signing server: connect \
+         the PC to Ethernet, or to the Wi-Fi network set up for it."
+    } else {
+        "The install downloads macOS and asks Apple's signing server, so it needs a network: \
+         connect the PC to Ethernet, or to the Wi-Fi network set up for it."
+    }
+}
+
 /// The checks' result: everything setup will write, and where.
 pub(super) struct Plan {
     pub(super) record: Record,
