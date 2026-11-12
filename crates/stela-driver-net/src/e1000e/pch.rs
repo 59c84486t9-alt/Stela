@@ -430,7 +430,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         })
     }
     /// `e1000_phy_is_accessible_pchlan`'s identity read: whether the PHY
-    /// answers with its ID, tried twice with MDIC retries off. A PHY that
+    /// answers with a valid ID, tried twice with MDIC retries off. A PHY that
     /// does not answer is an answer, not a failure of the transport.
     pub fn accessible(&mut self) -> Result<bool, Error> {
         self.transaction(|this| {
@@ -445,7 +445,9 @@ impl<R: Registers, D: Delay> Phy<R, D> {
                 })();
                 match read {
                     Ok(raw) if raw >> 16 != 0xffff && raw & 0xffff != 0xffff => {
-                        found = raw & !0xf == this.expected_id();
+                        // At start Linux holds no PHY ID yet and takes any
+                        // valid one; `identify` names a wrong PHY after.
+                        found = true;
                         break;
                     }
                     Ok(_) | Err(Fault::MdicTimeout | Fault::MdicResponse(_)) => {}

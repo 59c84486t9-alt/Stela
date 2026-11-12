@@ -871,6 +871,21 @@ fn a_phy_reset_the_me_blocks_is_left_out_and_a_blocked_wake_is_named() {
     assert_eq!(released.load(Ordering::SeqCst), 0);
 }
 
+/// `e1000_phy_is_accessible_pchlan` takes any valid PHY ID as an answer:
+/// a PHY that answers with another ID is named as the wrong PHY by the
+/// identity check after recovery, with no LANPHYPC toggle before it.
+#[test]
+fn a_wrong_phy_that_answers_is_named_without_a_lanphypc_toggle() {
+    let (state, released, io, timer) = fixture_lpt();
+    state.borrow_mut().phy.insert((2, 0, 3), 0x00b7);
+    assert!(matches!(
+        start_lpt(0x153a, io, timer),
+        Err(Error::Phy(error)) if error.primary == Fault::WrongPhy(0x0154_00b7)
+    ));
+    assert_eq!(lanphypc_toggles(&state), 0);
+    assert_eq!(released.load(Ordering::SeqCst), 0);
+}
+
 /// An LPT PHY left behind SMBus is found with the MAC forced to SMBus mode
 /// or woken by the toggle, and the MAC ends out of SMBus mode.
 #[test]
