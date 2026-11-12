@@ -121,7 +121,7 @@ const SKIPPED: [&str; 22] = [
 ];
 /// Stela's own, under `compat/llvm`.
 const STELA: [&str; 3] = ["passes", "runtime", "support"];
-const CXX_FLAGS: [&str; 8] = [
+pub(super) const CXX_FLAGS: [&str; 8] = [
     "-std=c++17",
     "-O2",
     "-DNDEBUG",
@@ -132,14 +132,14 @@ const CXX_FLAGS: [&str; 8] = [
     "-fno-exceptions",
 ];
 /// What LLVM's Windows support code expects of a unit that builds on Windows.
-const TOOL_WINDOWS_FLAGS: [&str; 4] = [
+pub(super) const TOOL_WINDOWS_FLAGS: [&str; 4] = [
     "-DUNICODE",
     "-D_UNICODE",
     "-D_HAS_EXCEPTIONS=0",
     "-D_WIN32_WINNT=0x0A00",
 ];
 /// The system libraries `llvm-min-tblgen` links.
-const TOOL_LIBRARIES: &[&str] = if cfg!(windows) {
+pub(super) const TOOL_LIBRARIES: &[&str] = if cfg!(windows) {
     &[
         "-lole32",
         "-lpsapi",
@@ -153,21 +153,21 @@ const TOOL_LIBRARIES: &[&str] = if cfg!(windows) {
     &["-lm"]
 };
 /// What a C unit drops of the flags above.
-const CXX_ONLY: [&str; 4] = [
+pub(super) const CXX_ONLY: [&str; 4] = [
     "-std=c++17",
     "-fno-rtti",
     "-nostdinc++",
     "-fno-threadsafe-statics",
 ];
 /// BLAKE3's portable C.
-const BLAKE3_FLAGS: [&str; 5] = [
+pub(super) const BLAKE3_FLAGS: [&str; 5] = [
     "-DBLAKE3_NO_AVX2",
     "-DBLAKE3_NO_AVX512",
     "-DBLAKE3_NO_SSE2",
     "-DBLAKE3_NO_SSE41",
     "-DBLAKE3_USE_NEON=0",
 ];
-const TARGET_CXX_FLAGS: [&str; 4] = [
+pub(super) const TARGET_CXX_FLAGS: [&str; 4] = [
     "-fno-rtti",
     "-fno-threadsafe-statics",
     "-nostdinc++",

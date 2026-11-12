@@ -232,14 +232,28 @@ pub(super) fn discover() -> Result<Toolchain> {
 /// What the GPU build trees under `target/gpu` were made with, beside them.
 const IDENTITY: &str = "toolchain";
 
-/// Every flag the GPU builds pass to the compiler on their own, whose change
-/// must rebuild their objects as a compiler change does.
+/// Every flag, define and Meson option the GPU builds pass on their own,
+/// or drop from Meson's commands, whose change must rebuild their objects
+/// and Meson's probe results as a compiler change does.
 fn flags() -> String {
-    use super::{nvk, sysroot};
+    use super::{llvm, nvk, sysroot};
     [
+        nvk::OPTIONS.as_slice(),
         nvk::TARGET_FLAGS.as_slice(),
         nvk::LIBC_TEST_FLAGS.as_slice(),
+        nvk::HOST_FLAGS.as_slice(),
+        nvk::HOST_DEFINES.as_slice(),
+        nvk::LATE_DEFINES.as_slice(),
+        nvk::ADDED_DEFINES.as_slice(),
+        &[sysroot::TARGET, sysroot::POSITION_INDEPENDENT],
         sysroot::FREESTANDING.as_slice(),
+        sysroot::PROBE_LINK.as_slice(),
+        llvm::CXX_FLAGS.as_slice(),
+        llvm::CXX_ONLY.as_slice(),
+        llvm::TARGET_CXX_FLAGS.as_slice(),
+        llvm::TOOL_WINDOWS_FLAGS.as_slice(),
+        llvm::TOOL_LIBRARIES,
+        llvm::BLAKE3_FLAGS.as_slice(),
     ]
     .concat()
     .join(" ")
@@ -325,6 +339,15 @@ mod tests {
         let record = fs::read_to_string(root.path().join(IDENTITY)).unwrap();
         assert!(record.contains("/home/me/wrapper/clang"), "{record}");
         assert!(record.contains("-fno-stack-protector"), "{record}");
+        // The probes' link flags and Meson's options key the trees too.
+        for flag in [
+            super::super::sysroot::PROBE_LINK.join(" ").as_str(),
+            super::super::sysroot::POSITION_INDEPENDENT,
+            "-Dbuildtype=release",
+            "-mtls-dialect=gnu2",
+        ] {
+            assert!(record.contains(flag), "{flag}: {record}");
+        }
     }
 
     /// A distribution's Clang that hardens by default, as Arch's turns on

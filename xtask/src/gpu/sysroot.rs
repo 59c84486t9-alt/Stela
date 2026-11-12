@@ -14,12 +14,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
+pub(super) const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
 /// The Rust of the machine: nothing builds with it, and Meson checks that it
 /// links programs. This target carries the C library that takes.
 const RUST_TARGET: &str = "x86_64-unknown-linux-musl";
 /// Some of Mesa's probes link shared libraries.
-const POSITION_INDEPENDENT: &str = "-fPIC";
+pub(super) const POSITION_INDEPENDENT: &str = "-fPIC";
 /// What the machine's C library is, said to every compile and probe against
 /// it rather than left to the build host's Clang: distributions change its
 /// defaults (Arch and Nix turn on the stack protector, whose
@@ -39,7 +39,7 @@ pub(super) const FREESTANDING: [&str; 6] = [
 /// Mesa's probes link programs and shared libraries: position-independent
 /// code ([`POSITION_INDEPENDENT`]) linked as a position-independent
 /// executable, whichever the host's Clang makes by default.
-const PROBE_LINK: [&str; 2] = ["--no-default-config", "-pie"];
+pub(super) const PROBE_LINK: [&str; 2] = ["--no-default-config", "-pie"];
 
 pub(super) struct Sysroot {
     directory: PathBuf,

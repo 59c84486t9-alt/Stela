@@ -32,7 +32,7 @@ use std::{
 /// the tools that would build them are never run. A release build: NDEBUG drops
 /// NIR validation after every pass and NAK's debug assertions, which cost the
 /// image compile time and heap; the host compiler lane keeps them.
-const OPTIONS: [&str; 21] = [
+pub(super) const OPTIONS: [&str; 21] = [
     "-Dcpp_rtti=false",
     "-Dvulkan-drivers=nouveau",
     "-Dgallium-drivers=",
@@ -147,7 +147,7 @@ pub(super) const REGEX: [&str; 5] = ["regcomp", "regexec", "regfree", "regerror"
 
 /// What Meson's probes find that names a path the image does not take. SSE4.1
 /// and BLAKE3's assembly are host features; the image runs on any x86-64.
-const HOST_DEFINES: [&str; 8] = [
+pub(super) const HOST_DEFINES: [&str; 8] = [
     "ALLOW_KCMP",
     "HAVE_CET_H",
     "HAVE_DIRENT_D_TYPE",
@@ -157,14 +157,14 @@ const HOST_DEFINES: [&str; 8] = [
     "HAVE_FUNC_ATTRIBUTE_VISIBILITY",
     "HAVE_RENDERDOC_INTEGRATION=1",
 ];
-const LATE_DEFINES: [&str; 3] = [
+pub(super) const LATE_DEFINES: [&str; 3] = [
     "USE_SSE41",
     "VK_USE_PLATFORM_DISPLAY_KHR",
     "VK_USE_PLATFORM_HEADLESS_EXT",
 ];
 /// What the image has without the probes finding it: `HAVE_DL_ITERATE_PHDR`
 /// declares the build ID that `compat/mesa/build_id.c` provides.
-const ADDED_DEFINES: [&str; 6] = [
+pub(super) const ADDED_DEFINES: [&str; 6] = [
     "STELA_LIBC",
     "HAVE_DL_ITERATE_PHDR",
     "BLAKE3_NO_SSE2",
@@ -173,7 +173,7 @@ const ADDED_DEFINES: [&str; 6] = [
     "BLAKE3_NO_AVX512",
 ];
 /// Flags of Meson's that do not apply to a freestanding COFF object.
-const HOST_FLAGS: [&str; 9] = [
+pub(super) const HOST_FLAGS: [&str; 9] = [
     "-g",
     "-MD",
     "-pthread",
