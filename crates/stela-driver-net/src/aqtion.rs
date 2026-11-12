@@ -74,11 +74,19 @@ impl Profile {
         if vendor != 0x1d6a {
             return None;
         }
+        // hw_atl_boards' B1 and Antigua rows with their link_speed_msk:
+        // AQC100/107 10G, AQC108/111 5G, AQC109/112 2.5G (the S parts
+        // alike), AQC113 family 10G, AQC115C 2.5G and AQC116C 1G. The
+        // AQC100's SFP+ cage is driven by the same firmware interface.
         let (generation, rates) = match device {
-            0x07b1 | 0x87b1 => (Generation::Atlantic, 0xf20),
+            0x00b1 | 0x80b1 | 0x07b1 | 0x87b1 => (Generation::Atlantic, 0xf20),
             0x08b1 | 0x88b1 | 0x11b1 | 0x91b1 => (Generation::Atlantic, 0x720),
-            0x12b1 | 0x92b1 => (Generation::Atlantic, 0x320),
+            0x09b1 | 0x89b1 | 0x12b1 | 0x92b1 => (Generation::Atlantic, 0x320),
             0x00c0 | 0x94c0 | 0x93c0 | 0x04c0 | 0x14c0 | 0x34c0 => (Generation::Antigua, 0xff00),
+            // 10M, 100M, 1G, 2.5G and N2.5G.
+            0x12c0 => (Generation::Antigua, 0x1f00),
+            // 10M, 100M and 1G.
+            0x11c0 => (Generation::Antigua, 0x0700),
             _ => return None,
         };
         Some(Self {

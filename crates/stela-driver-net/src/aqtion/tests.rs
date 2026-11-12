@@ -743,21 +743,42 @@ fn setup_with_memory(device: u16, allocate_memory: bool) -> Fixture {
     (owner, peer, domain, dropped)
 }
 #[test]
-fn exact_profiles_do_not_admit_usb_fiber_or_unimplemented_silicon_families() {
+fn profiles_admit_every_b1_and_antigua_row_and_no_a0_or_usb_part() {
     if crate::test_process::isolate_model() {
         return;
     }
-    for id in [
-        0x07b1, 0x87b1, 0x08b1, 0x88b1, 0x11b1, 0x91b1, 0x12b1, 0x92b1, 0x00c0, 0x94c0, 0x93c0,
-        0x04c0, 0x14c0, 0x34c0,
+    // hw_atl_boards rows on hw_atl_ops_b1 and hw_atl2_ops, with their rates.
+    for (id, rates) in [
+        (0x00b1, 0xf20),
+        (0x80b1, 0xf20),
+        (0x07b1, 0xf20),
+        (0x87b1, 0xf20),
+        (0x08b1, 0x720),
+        (0x88b1, 0x720),
+        (0x11b1, 0x720),
+        (0x91b1, 0x720),
+        (0x09b1, 0x320),
+        (0x89b1, 0x320),
+        (0x12b1, 0x320),
+        (0x92b1, 0x320),
+        (0x00c0, 0xff00),
+        (0x94c0, 0xff00),
+        (0x93c0, 0xff00),
+        (0x04c0, 0xff00),
+        (0x14c0, 0xff00),
+        (0x34c0, 0xff00),
+        (0x12c0, 0x1f00),
+        (0x11c0, 0x0700),
     ] {
-        assert!(Profile::identify(0x1d6a, id).is_some());
+        assert_eq!(Profile::identify(0x1d6a, id).map(|p| p.rates), Some(rates));
     }
+    // A0/B0 engineering IDs (hw_atl_ops_a0/b0), a USB part and other vendors.
     for (vendor, id) in [
-        (0x1d6a, 0x00b1),
+        (0x1d6a, 0x0001),
+        (0x1d6a, 0xd100),
         (0x1d6a, 0xd107),
-        (0x1d6a, 0x12c0),
-        (0x1d6a, 0x11c0),
+        (0x1d6a, 0xd108),
+        (0x1d6a, 0xd109),
         (0x2eca, 0xc101),
         (0x8086, 0x07b1),
     ] {
@@ -769,7 +790,9 @@ fn b1_and_antigua_rings_transfer_and_wrap() {
     if crate::test_process::isolate_model() {
         return;
     }
-    for id in [0x07b1, 0x08b1, 0x11b1, 0x12b1, 0x04c0, 0x93c0] {
+    for id in [
+        0x07b1, 0x08b1, 0x11b1, 0x12b1, 0x09b1, 0x00b1, 0x04c0, 0x93c0, 0x12c0, 0x11c0,
+    ] {
         let (mut net, peer, domain, dropped) = setup(id);
         net.start().unwrap();
         assert_eq!(net.mac(), Mac([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
