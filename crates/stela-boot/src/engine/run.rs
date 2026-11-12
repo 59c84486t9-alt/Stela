@@ -102,10 +102,13 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
             exit.closes
         )
     };
-    let (numerical, mut keys): (Vec<step_timing::SystemExit>, Vec<_>) = exits
+    let (numerical, keys): (Vec<step_timing::SystemExit>, Vec<_>) = exits
         .counted()
         .copied()
         .partition(|exit| step_timing::numerical_key(exit.key));
+    let (mut pointer, mut keys): (Vec<step_timing::SystemExit>, Vec<_>) = keys
+        .into_iter()
+        .partition(|exit| step_timing::pointer_key(exit.key));
     let mut line = String::from("PES SYSTEM count/ns/closes by_count");
     keys.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.count));
     for exit in keys.iter().take(SHOWN) {
@@ -120,6 +123,16 @@ fn system_exits_report(exits: &step_timing::SystemExits, tsc_hz: u64) {
         line.push_str(&item("other", &exits.other));
     }
     output::arguments(format_args!("{line}\n"));
+    // `PES POINTER count/ns/closes`: the pointer authentication exits by
+    // word, the eight most frequent.
+    if !pointer.is_empty() {
+        let mut line = String::from("PES POINTER count/ns/closes by_count");
+        pointer.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.count));
+        for exit in pointer.iter().take(SHOWN) {
+            line.push_str(&item(&step_timing::system_key_name(exit.key), exit));
+        }
+        output::arguments(format_args!("{line}\n"));
+    }
     numerical_exits_report(numerical, &exits.floating, tsc_hz);
     numerical_causes_report(&exits.floating_words);
 }

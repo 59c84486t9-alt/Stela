@@ -116,6 +116,27 @@ pub fn numerical_key(key: u32) -> bool {
         )
 }
 
+/// Whether [`SystemExits`] key `key` is a pointer authentication exit's
+/// word (an authenticated branch, return or load, or a PAC form a closed
+/// key cell sent to the engine), which the report shows apart from the
+/// System keys; no System key decodes as one.
+pub fn pointer_key(key: u32) -> bool {
+    key != DEVICE_SITE_KEY
+        && matches!(
+            stela_compiler::block::decode_pointer_authentication(
+                stela_compiler::GuestAddress(0),
+                register_word(key)
+            ),
+            Ok(Some(_))
+        )
+}
+
+/// The word of [`system_key`] `key` with its MRS, MSR, SYS, SYSL or hint
+/// Rt set to 31, which the key cleared.
+fn register_word(key: u32) -> u32 {
+    if key >> 24 == 0xd5 { key | 0x1f } else { key }
+}
+
 /// A short name of [`system_key`] `key` for reports: the accessor's for
 /// MRS, MSR, SYS and SYSL (`MRS_TPIDR_EL1`, `TLBI_VAE1IS`), else the
 /// operation's kind and the key (`Exception.ExceptionReturn:0xd69f03e0`).
@@ -129,7 +150,15 @@ pub fn system_key_name(key: u32) -> alloc::string::String {
         let kind = debug.split(['(', ' ', '{']).next().unwrap_or("FP");
         return alloc::format!("{kind}:{key:#010x}");
     }
-    let word = if key >> 24 == 0xd5 { key | 0x1f } else { key };
+    if let Ok(Some(instruction)) = stela_compiler::block::decode_pointer_authentication(
+        stela_compiler::GuestAddress(0),
+        register_word(key),
+    ) {
+        let debug = alloc::format!("{:?}", instruction.operation);
+        let kind = debug.split(['(', ' ', '{']).next().unwrap_or("PAC");
+        return alloc::format!("PAC.{kind}:{key:#010x}");
+    }
+    let word = register_word(key);
     let access = registers::decode(word)
         .map(|access| (access, true))
         .or_else(|| registers::decode_sys(word).map(|access| (access, false)));
@@ -1608,6 +1637,36 @@ mod tests {
         assert_eq!(word.operands[Operands::Zero as usize], 1);
         assert_eq!(word.operands[Operands::Ordinary as usize], 1);
         assert_eq!(word.operands[Operands::Subnormal as usize], 0);
+    }
+
+    /// A pointer authentication exit is charged to its word, which the
+    /// report tells from System and floating-point keys, and stays out of
+    /// the System words.
+    #[test]
+    fn a_pointer_authentication_exit_is_charged_to_its_word() {
+        use super::super::tests::BASE;
+        const RETAA: u32 = 0xd65f_0bff;
+        // PACIASP, a hint whose key clears Rt.
+        const PACIASP: u32 = 0xd503_233f;
+        let mut machine = super::super::tests::machine(&[RETAA]);
+        machine.set_step_timing(true);
+        machine.cpu.state.x[30] = BASE + 0x40;
+        machine.host.exits.push(super::super::NativeExit::Exit {
+            next_pc: BASE,
+            kind: stela_compiler::block::ExitKind::PointerAuthentication as u64,
+        });
+        let _ = machine.step();
+        let slot = stela_compiler::block::ExitKind::PointerAuthentication as usize;
+        assert_eq!(machine.step_timing().unwrap().exits[slot].0, 1);
+        let exits = machine.take_system_exits();
+        let exit = *exits.counted().find(|exit| exit.key == RETAA).unwrap();
+        assert_eq!(exit.count, 1);
+        assert!(!machine.system_words().contains_key(&RETAA));
+        assert!(pointer_key(RETAA) && pointer_key(system_key(PACIASP)));
+        assert!(system_key_name(RETAA).starts_with("PAC."));
+        assert!(system_key_name(system_key(PACIASP)).starts_with("PAC."));
+        assert!(!pointer_key(0xd538_d080) && !pointer_key(DEVICE_SITE_KEY));
+        assert!(!pointer_key(0x1e22_2820) && !numerical_key(RETAA));
     }
 
     /// The census names what the operands of an exit held: subnormal, NaN

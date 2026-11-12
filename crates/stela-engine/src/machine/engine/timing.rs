@@ -152,7 +152,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if step_timing::exception_return(word) {
                     timing.levels.in_interrupt = false;
                 }
-                if slot != stela_compiler::block::ExitKind::FloatingPoint as usize {
+                if slot != stela_compiler::block::ExitKind::FloatingPoint as usize
+                    && slot != stela_compiler::block::ExitKind::PointerAuthentication as usize
+                {
                     let timed = self.system_words.entry(word).or_default();
                     timed.accesses += 1;
                     timed.ticks += spent;

@@ -432,9 +432,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         slot = step_timing::DEVICE_SITE_SLOT;
                     }
                     self.timed_word = Some(word);
-                } else if kind == ExitKind::FloatingPoint as u64 && self.step_timing.is_some() {
+                } else if (kind == ExitKind::FloatingPoint as u64
+                    || kind == ExitKind::PointerAuthentication as u64)
+                    && self.step_timing.is_some()
+                {
                     // Charged by word apart from System keys
-                    // (`step_timing::numerical_key`).
+                    // (`step_timing::numerical_key`, `pointer_key`).
                     self.timed_word = Some(self.timed_system_word(last, next_pc));
                 }
                 let spent = remaining > budget;
