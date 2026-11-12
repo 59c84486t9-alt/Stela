@@ -777,18 +777,46 @@ impl<D: Devices> Devices for SharedDevices<D> {
             devices.write_with_processors(cpu, physical, bytes, value, now, processors)
         })
     }
-    fn write_plain(
+    /// The write, its classification and its settlement under one lock:
+    /// one pass telling the PEs whose lines changed and one publication. A
+    /// write the board leaves to the home machine
+    /// ([`Devices::requires_canonical_write`]) is `None`, with nothing
+    /// written. The copies the settlement deferred run after the release.
+    fn write_settled(
         &mut self,
         cpu: usize,
         physical: u64,
         bytes: u8,
         value: u64,
         now: u64,
-        processors: super::super::ProcessorWrite<'_>,
-    ) -> Option<Result<(), DeviceError>> {
-        self.changing(Call::Access, cpu, now, |devices, now| {
-            devices.write_plain(cpu, physical, bytes, value, now, processors)
-        })
+        mut processors: super::super::ProcessorWrite<'_>,
+    ) -> Option<super::super::WriteSettled> {
+        let (outcome, copies) = self.changing(Call::Access, cpu, now, |devices, now| {
+            if devices.requires_canonical_write(cpu, physical, bytes) {
+                return (None, Vec::new());
+            }
+            let outcome =
+                devices.write_settled(cpu, physical, bytes, value, now, processors.reborrow());
+            let copies = match &outcome {
+                Some(super::super::WriteSettled {
+                    settled: Some(_), ..
+                }) => devices.take_unlocked(),
+                _ => Vec::new(),
+            };
+            (outcome, copies)
+        });
+        let mut outcome = outcome?;
+        if !copies.is_empty()
+            && let Some(settled) = &mut outcome.settled
+        {
+            let mut memory = processors.memory();
+            let memory = super::super::LockedMemory::under(&mut memory, settled.after);
+            let published = self.run_unlocked(cpu, now, copies, memory);
+            if settled.transfer.is_ok() {
+                settled.transfer = published;
+            }
+        }
+        Some(outcome)
     }
     /// The home machine's asking advances the devices to `now`, which can
     /// change any PE's lines; another PE's machine reads its latched pins.

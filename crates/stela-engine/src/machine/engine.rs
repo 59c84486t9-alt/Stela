@@ -8,6 +8,7 @@ use boundary::*;
 pub use boundary::{
     CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
     LockedMemory, NativeView, NoDevices, PassiveRegisters, ScalarRead, Settled, Start, UnlockedDma,
+    WriteSettled,
 };
 use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;

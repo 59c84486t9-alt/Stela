@@ -574,20 +574,35 @@ pub trait Devices {
     ) -> Result<(), DeviceError> {
         self.write(cpu, physical, bytes, value, now)
     }
-    /// [`Self::write_with_processors`] by a machine without canonical
-    /// memory, in one call with its classification: `None`, with nothing
-    /// written, for a write [`Self::requires_canonical_write`] holds for.
-    fn write_plain(
+    /// A device write by PE `cpu` through to its settlement, in one call:
+    /// the write ([`Self::write_with_processors`]) and, when it succeeded,
+    /// what follows it ([`Self::settle_write`]) on the guest RAM
+    /// `processors` reaches, under the memory lock its CPU holds. A board
+    /// shared between PEs takes its lock once for both, tells the PEs whose
+    /// lines changed once and publishes its deadlines once; the DMA copies
+    /// it defers and the host work its release leaves run outside the lock.
+    /// `None`, with nothing written, for a write this handle leaves to the
+    /// home machine ([`Self::requires_canonical_write`] on a shared board).
+    fn write_settled(
         &mut self,
         cpu: usize,
         physical: u64,
         bytes: u8,
         value: u64,
         now: u64,
-        processors: ProcessorWrite<'_>,
-    ) -> Option<Result<(), DeviceError>> {
-        (!self.requires_canonical_write(cpu, physical, bytes))
-            .then(|| self.write_with_processors(cpu, physical, bytes, value, now, processors))
+        mut processors: ProcessorWrite<'_>,
+    ) -> Option<WriteSettled> {
+        let written =
+            self.write_with_processors(cpu, physical, bytes, value, now, processors.reborrow());
+        let written_at = processors.native_host().profile_ticks();
+        let settled = written
+            .is_ok()
+            .then(|| self.settle_write(cpu, now, &mut processors.memory()));
+        Some(WriteSettled {
+            written,
+            written_at,
+            settled,
+        })
     }
     /// Bring time-driven state up to `now` and report the interrupt lines
     /// the devices drive into PE `cpu`.
@@ -772,13 +787,23 @@ pub struct Settled {
     pub after: super::super::mmu::MemoryLocks,
 }
 
+/// What a device write came to ([`Devices::write_settled`]).
+pub struct WriteSettled {
+    pub written: Result<(), DeviceError>,
+    /// The host's profile clock ([`Host::profile_ticks`]) once the write
+    /// itself was done, before its settlement.
+    pub written_at: u64,
+    /// The write's settlement, when it succeeded.
+    pub settled: Option<Settled>,
+}
+
 /// Guest RAM through the host, as device DMA reaches it.
-pub(super) struct HostMemory<'a, H: Host> {
+pub(super) struct HostMemory<'a, H: Host + ?Sized> {
     pub(super) host: &'a mut H,
     pub(super) lock: super::super::mmu::MemoryLocks,
 }
 
-impl<H: Host> Memory for HostMemory<'_, H> {
+impl<H: Host + ?Sized> Memory for HostMemory<'_, H> {
     fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         self.read_progress(physical, buffer).is_ok()
     }
@@ -818,14 +843,14 @@ impl<H: Host> Memory for HostMemory<'_, H> {
     }
 }
 
-impl<H: Host> LockedMemory for HostMemory<'_, H> {
+impl<H: Host + ?Sized> LockedMemory for HostMemory<'_, H> {
     fn under(&mut self, lock: super::super::mmu::MemoryLocks) -> &mut dyn Memory {
         self.lock = lock;
         self
     }
 }
 
-impl<H: Host> HostMemory<'_, H> {
+impl<H: Host + ?Sized> HostMemory<'_, H> {
     /// Whether a write of `bytes` at `physical` stays clear of every range
     /// the memory controller has locked. Its response to a write inside one
     /// is not modeled, so such a write refuses, naming the range.

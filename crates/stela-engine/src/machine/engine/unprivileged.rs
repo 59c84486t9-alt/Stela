@@ -134,7 +134,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.now();
             let result = if write {
                 self.device_write(translation.physical, operand.bytes, value, now)
-                    .map(|()| 0)
+                    .map(|_| 0)
             } else {
                 self.device_read(translation.physical, operand.bytes, now)
             };

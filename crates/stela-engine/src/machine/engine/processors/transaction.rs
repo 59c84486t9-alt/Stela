@@ -86,6 +86,18 @@ impl ProcessorWrite<'_> {
     pub(in crate::machine::engine) fn native_host(&mut self) -> &mut dyn Host {
         &mut *self.native.host
     }
+    /// Guest RAM through this PE's host, under the memory controllers' lock
+    /// its CPU holds: what the DMA its write started reaches. A lock the
+    /// write itself just took is the devices' to give ([`super::super::
+    /// Devices::settle_write`]).
+    pub(in crate::machine::engine) fn memory(
+        &mut self,
+    ) -> super::super::HostMemory<'_, dyn Host + '_> {
+        super::super::HostMemory {
+            host: &mut *self.native.host,
+            lock: self.cpu.memory_lock,
+        }
+    }
     pub(in crate::machine::engine) fn reborrow(&mut self) -> ProcessorWrite<'_> {
         ProcessorWrite {
             processors: &mut *self.processors,

@@ -2037,6 +2037,116 @@ fn a_pe_without_a_machine_waits_for_its_first_start() {
     assert_eq!(halts, 0);
 }
 
+/// A write and its settlement take the board's lock once: one release
+/// publishes, and another PE whose line the write raised is told once. The
+/// copy the settlement deferred runs after that release, and the transfer
+/// that publishes what it came to follows it.
+#[test]
+fn a_write_settles_under_one_lock_and_tells_another_pe_once() {
+    use super::super::tests::board;
+    use super::super::{Memory, UnlockedDma};
+    use core::cell::Cell;
+    use stela_contracts::identity::Identity;
+    type Log = Arc<Mutex<Vec<&'static str>>>;
+    struct Copy(Log);
+    impl UnlockedDma for Copy {
+        fn run(self: Box<Self>, _: &mut dyn Memory) {
+            self.0.lock().unwrap().push("copy");
+        }
+    }
+    struct Raising {
+        log: Log,
+        irq: bool,
+        copies: usize,
+        left: Vec<Box<dyn UnlockedDma>>,
+        publishes: Cell<usize>,
+    }
+    impl Devices for Raising {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, cpu: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            assert_eq!(cpu, 0);
+            self.log.lock().unwrap().push("write");
+            self.irq = true;
+            Ok(())
+        }
+        fn lines(&mut self, pe: usize, _: u64) -> Lines {
+            Lines {
+                irq: pe == 1 && self.irq,
+                ..Lines::default()
+            }
+        }
+        fn transfer(&mut self, _: usize, _: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
+            self.log.lock().unwrap().push("transfer");
+            if self.copies != 0 {
+                self.copies -= 1;
+                self.left.push(Box::new(Copy(Arc::clone(&self.log))));
+            }
+            Ok(())
+        }
+        fn take_unlocked(&mut self) -> Vec<Box<dyn UnlockedDma>> {
+            core::mem::take(&mut self.left)
+        }
+        fn dma_deadline(&self) -> Option<u64> {
+            // Read once by each release's publication.
+            self.publishes.set(self.publishes.get() + 1);
+            None
+        }
+    }
+    let (hub, _) = hub(2);
+    let log: Log = Arc::default();
+    let devices = Raising {
+        log: Arc::clone(&log),
+        irq: false,
+        copies: 1,
+        left: Vec::new(),
+        publishes: Cell::new(0),
+    };
+    let worker = SharedDevices::new(devices, Arc::clone(&hub)).worker();
+    let identities = vec![Identity {
+        midr: 0x611f_0320,
+        mpidr: 0x8000_0000,
+        clock: None,
+        caches: None,
+    }];
+    let mut machine = board(&[], worker, identities);
+    let publishes = |machine: &mut Machine<_, SharedDevices<Raising>>| {
+        machine.devices.with(|devices| devices.publishes.replace(0))
+    };
+    publishes(&mut machine);
+    let told = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    let (devices, processors) = machine.processor_write_parts();
+    let written = devices
+        .write_settled(0, 0x30, 4, 1, 0, processors)
+        .expect("a plain write");
+    assert_eq!(written.written, Ok(()));
+    assert!(
+        written
+            .settled
+            .is_some_and(|settled| settled.transfer.is_ok())
+    );
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["write", "transfer", "copy", "transfer"]
+    );
+    // The write's lock and the copy's publishing transfer: two releases,
+    // past the one of the call that counted last.
+    assert_eq!(publishes(&mut machine), 1 + 2);
+    assert_eq!(hub.inboxes[1].lines.load(Ordering::SeqCst), told + 1);
+    // Without a copy, one lock in all; PE 1's line is already up.
+    log.lock().unwrap().clear();
+    let (devices, processors) = machine.processor_write_parts();
+    assert!(
+        devices
+            .write_settled(0, 0x30, 4, 1, 0, processors)
+            .is_some_and(|written| written.written.is_ok())
+    );
+    assert_eq!(*log.lock().unwrap(), ["write", "transfer"]);
+    assert_eq!(publishes(&mut machine), 1 + 1);
+    assert_eq!(hub.inboxes[1].lines.load(Ordering::SeqCst), told + 1);
+}
+
 #[test]
 fn a_shared_board_classifies_and_serves_a_scalar_access_in_one_call() {
     use super::super::tests::board;
@@ -2088,13 +2198,18 @@ fn a_shared_board_classifies_and_serves_a_scalar_access_in_one_call() {
     let (devices, processors) = machine.processor_write_parts();
     assert!(
         devices
-            .write_plain(0, CANONICAL, 4, 1, 0, processors)
+            .write_settled(0, CANONICAL, 4, 1, 0, processors)
             .is_none()
     );
     let (devices, processors) = machine.processor_write_parts();
-    assert_eq!(
-        devices.write_plain(0, 0x30, 4, 1, 0, processors),
-        Some(Ok(()))
+    let written = devices
+        .write_settled(0, 0x30, 4, 1, 0, processors)
+        .expect("a plain write");
+    assert_eq!(written.written, Ok(()));
+    assert!(
+        written
+            .settled
+            .is_some_and(|settled| settled.transfer.is_ok())
     );
     // Only the plain accesses reached the registers.
     assert_eq!(

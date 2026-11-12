@@ -795,12 +795,13 @@ impl DeviceExit {
 pub const DEVICE_PAGES: usize = 64;
 
 /// Device writes the engine completed, and the ticks of their exits split:
-/// the whole exit, the device access call (the devices' lock, the model's
-/// write, the publication of what it changed and the PEs it woke), the
-/// settle after it (the lock again, every master's transfer, the
-/// publication and the host work after) and a gate call it made. The rest
-/// of the exit is the engine's own: leaving and entering the guest, decode,
-/// routing and watching.
+/// the whole exit; the access, up to the model's write done (the devices'
+/// lock and the write); the settle after it (in the same locked call every
+/// master's transfer, then the release: the PEs it woke, the publication,
+/// the deferred copies and the host work after); and a gate call it made
+/// ([`super::Devices::write_settled`]). The rest of the exit is the
+/// engine's own: leaving and entering the guest, decode, routing and
+/// watching.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeviceWrites {
     pub count: u64,

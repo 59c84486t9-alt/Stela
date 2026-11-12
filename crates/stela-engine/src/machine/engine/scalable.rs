@@ -693,7 +693,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let result = if write {
             value[..bytes].copy_from_slice(data);
             self.device_write(physical, bytes as u8, u64::from_le_bytes(value), now)
-                .map(|()| 0)
+                .map(|_| 0)
         } else {
             self.device_read(physical, bytes as u8, now)
         };

@@ -45,48 +45,90 @@ impl<H: Host, D: Devices> Machine<H, D> {
         result
     }
 
-    /// A device write by the running PE, watched.
+    /// A device write by the running PE, watched, through to its
+    /// settlement: the DMA it started, the gate call it made and the memory
+    /// controllers' write lock it left, which it returns. On a shared board
+    /// the write and its settlement take the devices' lock once
+    /// ([`Devices::write_settled`]); a write left to the home machine, or
+    /// made under the canonical hold, settles after it. A settlement the
+    /// devices cannot carry out degrades once and leaves the write alone; a
+    /// refused write still runs the call it queued.
     pub(super) fn device_write(
         &mut self,
         physical: u64,
         bytes: u8,
         value: u64,
         now: u64,
-    ) -> Result<(), DeviceError> {
+    ) -> Result<super::super::mmu::MemoryLocks, DeviceError> {
         let started = self
             .step_timing
             .is_some()
             .then(|| self.host.profile_ticks());
-        let result = if self.serial_hold.is_some() {
-            self.serial_write_canonical(physical, bytes, value, now)
-        } else if self.parallel.is_some() {
-            let current = self.current;
-            let (devices, processors) = self.processor_write_parts();
-            match devices.write_plain(current, physical, bytes, value, now, processors) {
-                Some(result) => result,
-                None => self.forward_write(physical, bytes, value),
-            }
-        } else {
-            let current = self.current;
-            let (devices, processors) = self.processor_write_parts();
-            devices.write_with_processors(current, physical, bytes, value, now, processors)
-        };
-        if let Some(started) = started {
-            let spent = self.host.profile_ticks().wrapping_sub(started);
-            self.timed_write = Some([spent, 0, 0]);
+        if started.is_some() {
+            self.timed_write = Some([0; 3]);
         }
-        self.watch(physical, bytes, result.is_ok().then_some(value), true);
-        result
+        let work = self.work();
+        let outcome = if self.serial_hold.is_some() {
+            None
+        } else {
+            self.observe_parallel_source(SourcePhase::DeviceAdvanceEnter);
+            let current = self.current;
+            let (devices, processors) = self.processor_write_parts();
+            devices.write_settled(current, physical, bytes, value, now, processors)
+        };
+        let (written, settlement) = match outcome {
+            Some(outcome) => {
+                if let Some(started) = started {
+                    let ended = self.host.profile_ticks();
+                    self.time_part(0, started, outcome.written_at);
+                    self.time_part(1, outcome.written_at, ended);
+                }
+                let settlement = outcome
+                    .settled
+                    .map(|settled| self.after_settle(settled, work));
+                (outcome.written, settlement)
+            }
+            None => {
+                let written = if self.serial_hold.is_some() {
+                    self.serial_write_canonical(physical, bytes, value, now)
+                } else {
+                    self.forward_write(physical, bytes, value)
+                };
+                if let Some(started) = started {
+                    let ended = self.host.profile_ticks();
+                    self.time_part(0, started, ended);
+                }
+                let settlement = written.is_ok().then(|| self.device_settle(now));
+                (written, settlement)
+            }
+        };
+        self.watch(physical, bytes, written.is_ok().then_some(value), true);
+        match settlement {
+            Some(settlement) => {
+                let lock = self.settled_lock(settlement);
+                written.map(|()| lock)
+            }
+            None => {
+                self.run_refused_store_call();
+                Err(written.expect_err("only a refused store goes unsettled"))
+            }
+        }
+    }
+
+    /// Add the ticks from `from` to `to` to part `part` of the device
+    /// write being timed ([`step_timing::DeviceWrites`]).
+    fn time_part(&mut self, part: usize, from: u64, to: u64) {
+        if let Some(parts) = &mut self.timed_write {
+            parts[part] += to.wrapping_sub(from);
+        }
     }
 
     /// Add the ticks since `started` to part `part` of the device write
     /// being timed ([`step_timing::DeviceWrites`]).
     fn time_write(&mut self, part: usize, started: Option<u64>) {
         if let Some(started) = started {
-            let spent = self.host.profile_ticks().wrapping_sub(started);
-            if let Some(parts) = &mut self.timed_write {
-                parts[part] += spent;
-            }
+            let now = self.host.profile_ticks();
+            self.time_part(part, started, now);
         }
     }
 
@@ -117,6 +159,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .then(|| memory.host.profile_ticks());
         let settled = self.devices.settle_write(self.current, now, &mut memory);
         self.time_write(1, timed);
+        self.after_settle(settled, work)
+    }
+
+    /// What follows a settlement ([`Devices::settle_write`]): the call it
+    /// made, run at once, and its transfer's result, with the memory
+    /// controllers' write lock the DMA left.
+    fn after_settle(
+        &mut self,
+        settled: Settled,
+        work: u64,
+    ) -> (Result<(), DeviceError>, super::super::mmu::MemoryLocks) {
         // The call is this step's store's whatever other devices' DMA came
         // to: the caller reads its answer at the next instruction, and a call
         // left pending would run at a later step, on a record its stack has
@@ -209,7 +262,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// [`Self::settle_devices`] after a store the devices took: the memory
     /// controllers' write lock it left, for [`Self::adopt_memory_lock`].
     pub(super) fn settle_store(&mut self, now: u64) -> super::super::mmu::MemoryLocks {
-        let (result, lock) = self.device_settle(now);
+        let settlement = self.device_settle(now);
+        self.settled_lock(settlement)
+    }
+
+    /// The memory controllers' write lock a settlement left, after
+    /// degrading once for what the devices could not carry out.
+    fn settled_lock(
+        &mut self,
+        (result, lock): (Result<(), DeviceError>, super::super::mmu::MemoryLocks),
+    ) -> super::super::mmu::MemoryLocks {
         if let Err(error) = result {
             let advance = RequirementKind::DeviceAdvance(alloc::format!("{error:?}"));
             self.degrade(self.requirement(advance));
@@ -352,14 +414,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let value = self.read_register(store.source_register());
             let now = self.now();
-            let written = self.device_write(physical, bytes, value, now);
             // The write lock the store's DMA left, read in the same call.
-            let lock = if written.is_ok() {
-                Some(self.settle_store(now))
-            } else {
-                self.run_refused_store_call();
-                None
-            };
+            let written = self.device_write(physical, bytes, value, now);
+            let lock = written.as_ref().ok().copied();
             if let Err(error) = written
                 && let Some(step) =
                     self.device_refused(error, address, physical, bytes, Some(value))
@@ -485,12 +542,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     let mut lock = None;
                     for (element, value) in elements.into_iter().zip(values) {
                         let written = self.device_write(element, bytes, value, now);
-                        lock = if written.is_ok() {
-                            Some(self.settle_store(now))
-                        } else {
-                            self.run_refused_store_call();
-                            None
-                        };
+                        lock = written.as_ref().ok().copied();
                         if let Err(error) = written {
                             let at = address + (element - physical);
                             if let Some(step) =
