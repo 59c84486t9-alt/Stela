@@ -51,12 +51,16 @@ impl Device {
     pub fn name(&self) -> String {
         match &self.product {
             Some(product) => product.clone(),
-            None => format!(
-                "{:04x}:{:04x}",
-                u16::from_le_bytes([self.descriptor[8], self.descriptor[9]]),
-                u16::from_le_bytes([self.descriptor[10], self.descriptor[11]])
-            ),
+            None => self.ids(),
         }
+    }
+    /// The vendor and product IDs, as `vvvv:pppp`.
+    fn ids(&self) -> String {
+        format!(
+            "{:04x}:{:04x}",
+            u16::from_le_bytes([self.descriptor[8], self.descriptor[9]]),
+            u16::from_le_bytes([self.descriptor[10], self.descriptor[11]])
+        )
     }
     /// One line for the account of a failed disk search: where it is, its
     /// speed, IDs, product, and the class, subclass and protocol of each
@@ -72,12 +76,7 @@ impl Device {
             SUPER_SPEED_PLUS => "SuperSpeedPlus",
             _ => "unknown speed",
         };
-        let mut line = format!(
-            "{}: {speed} {:04x}:{:04x}",
-            self.location,
-            u16::from_le_bytes([self.descriptor[8], self.descriptor[9]]),
-            u16::from_le_bytes([self.descriptor[10], self.descriptor[11]])
-        );
+        let mut line = format!("{}: {speed} {}", self.location, self.ids());
         if let Some(product) = self.product.as_deref().map(str::trim)
             && !product.is_empty()
         {
