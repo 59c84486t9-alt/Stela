@@ -105,13 +105,17 @@ pub struct Uninstall {
 /// the old file in place; with `fresh`, only when nothing is there yet.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()> {
     let parent = path.parent().context("a file without a parent directory")?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    match fresh {
-        true => persist_new(file, path)?,
-        false => drop(file.persist(path).map_err(|error| error.error)?),
-    };
+    (|| -> Result<()> {
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(bytes)?;
+        file.as_file().sync_all()?;
+        match fresh {
+            true => persist_new(file, path)?,
+            false => drop(file.persist(path).map_err(|error| error.error)?),
+        };
+        Ok(())
+    })()
+    .with_context(|| format!("cannot write {}", path.display()))?;
     // FAT may refuse to sync a directory; the file itself is already synced.
     let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
     Ok(())
@@ -332,5 +336,16 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"earlier boots");
         // The refused temporary files are removed.
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_write_names_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing").join("boot.log");
+        let error = format!("{:#}", write_atomic(&path, b"new", true).unwrap_err());
+        assert!(
+            error.contains(&format!("cannot write {}", path.display())),
+            "{error}"
+        );
     }
 }
