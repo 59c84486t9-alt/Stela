@@ -13,11 +13,19 @@ impl Timer for Time {
     fn now(&self) -> u64 {
         self.0.get()
     }
+    /// As the mount's `budget::Bounded` minimum under a start budget of
+    /// [`START_BUDGET_US`],
+    /// counted from the model's first instant.
     fn delay(&self, us: u64) -> Result<(), BlockError> {
         self.0.set(self.0.get() + us);
+        if self.0.get() >= START_BUDGET_US {
+            return Err(BlockError::Timeout);
+        }
         Ok(())
     }
 }
+/// The probe's start budget for one PCI function (`probe::DEVICE_START_US`).
+const START_BUDGET_US: u64 = 30_000_000;
 #[derive(Default)]
 struct State {
     bytes: Vec<u8>,
@@ -251,3 +259,4 @@ mod nbase_bp;
 mod nbase_d_cp;
 mod packet_io;
 mod registers;
+mod stuck_registers;

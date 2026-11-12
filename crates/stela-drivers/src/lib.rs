@@ -26,8 +26,8 @@ extern crate alloc;
 
 pub use stela_driver_audio as audio;
 pub use stela_driver_base::{
-    Clock, ClockError, Deadline, Handoff, block, bus, entropy, on_spin, on_wait, on_work, platform,
-    sync,
+    Clock, ClockError, Deadline, Handoff, block, budget, bus, entropy, on_spin, on_wait, on_work,
+    platform, sync,
 };
 pub use stela_driver_core::firmware;
 pub use stela_driver_gpu as gpu;

@@ -17,6 +17,9 @@ pub enum Error {
     BusMaster,
     Bars,
     NotReady,
+    /// The device's start budget passed during a minimum wait; the wait
+    /// itself ran in full (`budget::Bounded`).
+    StartBudget,
 }
 impl From<ConfigError> for Error {
     fn from(error: ConfigError) -> Self {

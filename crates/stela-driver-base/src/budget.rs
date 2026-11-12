@@ -1,17 +1,19 @@
 //! One device's start budget. The probe arms it as a driver starts on a
 //! device; once it has passed, every [`Clock`] wait and [`Deadline`] check
-//! that driver makes reports its deadline as passed, so a device that never
-//! answers ends its own start in bounded time even where a driver's inner
-//! timeouts add up to more, or restart one another. Nothing preempts a
-//! driver: a single register access that never completes is not bounded
-//! here.
+//! that driver makes reports its deadline as passed, and every minimum
+//! delay of a [`Bounded`] provider fails after waiting, so a
+//! device that never answers ends its own start in bounded time even where
+//! a driver's inner timeouts add up to more, or restart one another.
+//! Nothing preempts a driver: a single register access that never
+//! completes is not bounded here.
 //!
 //! An unarmed budget costs one relaxed load per check and changes nothing.
 //! Minimum delays a device needs ([`Clock::delay`], the qualified
 //! provider's waits) are never shortened.
 //!
 //! [`Deadline`]: crate::Deadline
-use crate::{Clock, ClockError};
+use crate::{Clock, ClockError, bus::pci::power};
+use alloc::rc::Rc;
 use core::{marker::PhantomData, panic::Location};
 
 /// When the budget ran out: how long the device had and which wait first
@@ -158,6 +160,34 @@ pub(crate) fn passed_at(counter: u64, at: &'static Location<'static>) -> bool {
     passed
 }
 
+/// A minimum-delay provider whose waits fail once an armed budget has
+/// passed, after waiting in full: a driver's counted polls and fixed
+/// delays, each bounded, can together outlast its start budget, and the
+/// mount gives every driver its minimum delays through this. Unarmed, it
+/// is the provider it wraps.
+pub struct Bounded(pub Rc<dyn power::Timer>);
+
+// SAFETY: every wait is the wrapped provider's own, run in full; a passed
+// budget only turns a completed wait into a failure.
+unsafe impl power::Timer for Bounded {
+    fn check(&self) -> Result<(), power::Error> {
+        self.0.check()
+    }
+    fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
+        self.0.wait_us(microseconds)?;
+        if passed_at(Clock::ticks(), Location::caller()) {
+            return Err(power::Error::StartBudget);
+        }
+        Ok(())
+    }
+    fn begin_interval(
+        &self,
+        microseconds: u64,
+    ) -> Result<Option<alloc::boxed::Box<dyn power::Interval>>, power::Error> {
+        self.0.begin_interval(microseconds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +232,37 @@ mod tests {
         assert!(CLOCK.wait(60_000_000, || true));
         drop(budget);
         assert!(!CLOCK.deadline(5_000_000).passed());
+    }
+
+    struct Instant;
+    // SAFETY: a test peer whose waits return at once on the virtual clock.
+    unsafe impl power::Timer for Instant {
+        fn check(&self) -> Result<(), power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, _: u64) -> Result<(), power::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_bounded_minimum_ends_a_start_past_its_budget() {
+        use power::Timer;
+        let _virtual = test_clock::virtualize();
+        let minimum = Bounded(Rc::new(Instant));
+        // Unarmed, a wait changes nothing.
+        assert_eq!(minimum.wait_us(50_000), Ok(()));
+        let budget = Budget::start(CLOCK, 1_000).unwrap();
+        // 100 virtual microseconds per counter read: the budget passes in a
+        // few waits of a poll whose own count would allow 2000.
+        let waits = (0..2000)
+            .take_while(|_| minimum.wait_us(50_000).is_ok())
+            .count();
+        assert!(waits < 20, "{waits}");
+        assert_eq!(minimum.wait_us(50_000), Err(power::Error::StartBudget));
+        assert!(budget.expired().is_some());
+        drop(budget);
+        assert_eq!(minimum.wait_us(50_000), Ok(()));
     }
 
     #[test]

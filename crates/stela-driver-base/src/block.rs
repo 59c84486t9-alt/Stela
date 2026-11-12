@@ -228,6 +228,9 @@ impl fmt::Display for BlockError {
             Self::Irq(error) => write!(f, "IRQ: {error:?}"),
             Self::Config(error) => write!(f, "PCI configuration: {error}"),
             Self::PciCapability(error) => write!(f, "PCI capability: {error:?}"),
+            Self::PciPower(crate::bus::pci::power::Error::StartBudget) => {
+                f.write_str("the device's start budget passed while it was not answering")
+            }
             Self::PciPower(error) => write!(f, "PCI power/timing: {error:?}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
         }

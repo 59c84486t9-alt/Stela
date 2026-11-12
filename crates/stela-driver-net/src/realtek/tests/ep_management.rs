@@ -25,7 +25,8 @@ fn ep_cmac_stop_acknowledges_w1c_before_shared_fifo_and_is_bounded_on_failure() 
         model.cmac_ready_delay = None;
         let hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(hw.initialize_modern(), Err(BlockError::Timeout));
-        assert_eq!(time.now(), 100_000_000);
+        // The source's 2000 x 50 ms ends at the device's start budget.
+        assert_eq!(time.now(), START_BUDGET_US);
         assert_eq!(model.state.borrow().writes, [(IBCR2, 0x84, 1)]);
         let time = Time::default();
         let mut model = Model::ep(&time, version, false);

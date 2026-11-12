@@ -156,11 +156,14 @@ unsafe impl NativeServices for Services<'_> {
         self.acpi.map_or(Ok(None), HostAcpi::embedded_controller)
     }
     /// The invariant TSC, which every supported host has and reads fastest,
-    /// else the HPET, which a boot without an invariant TSC retains.
+    /// else the HPET, which a boot without an invariant TSC retains. Its
+    /// waits fail once the starting device's budget has passed, so no
+    /// driver's start outlasts it by adding bounded waits.
     fn minimum_delay(&self) -> Result<Rc<dyn Timer>, ServiceError> {
         let invariant = crate::cpu::INVARIANT_TSC.present();
         crate::native_clock::tsc::Minimum::timer(self.tsc_hz, invariant)
             .map_or_else(|| self.mmio.pci_minimum(), Ok)
+            .map(|minimum| Rc::new(stela_drivers::budget::Bounded(minimum)) as Rc<dyn Timer>)
             .map_err(ServiceError::MinimumDelay)
     }
 
