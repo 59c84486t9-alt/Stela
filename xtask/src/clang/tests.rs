@@ -260,6 +260,21 @@ fn nix_shell_takes_tools_from_path_and_libclang_from_the_environment() {
     );
 }
 
+/// `LIBCLANG_PATH` naming macOS's `libclang.dylib`, whose name carries no
+/// release, as a file or by its directory: taken as given.
+#[test]
+fn an_unversioned_libclang_path_is_taken_as_given() {
+    let lib = "/opt/homebrew/opt/llvm@21/lib";
+    let mut host = Fake::new(&["/opt/homebrew/opt/llvm@21/bin"])
+        .llvm("/opt/homebrew/opt/llvm@21/bin", 21)
+        .file(&format!("{lib}/libclang.dylib"));
+    for given in [format!("{lib}/libclang.dylib"), lib.to_owned()] {
+        host = host.var("LIBCLANG_PATH", &given);
+        let toolset = select(&host).unwrap();
+        assert_eq!(toolset.libclang, path(&format!("{lib}/libclang.dylib")));
+    }
+}
+
 /// An empty `CLANG` is unset: an install directory without a `clang` is
 /// not listed as a missing compiler.
 #[test]

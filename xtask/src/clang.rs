@@ -442,14 +442,16 @@ fn is_libclang(name: &str) -> bool {
 
 /// The libclang of Clang `version`: `LIBCLANG_PATH`'s when it is set (a file
 /// or a directory), else its install's, else a distribution directory's
-/// with the same major.
+/// with the same major. A library whose name carries a release must carry
+/// `version`'s major; one without is taken from `LIBCLANG_PATH` or the
+/// install.
 fn libclang(
     host: &dyn Host,
     clang_directory: &Path,
     library: Option<&Path>,
     version: Version,
 ) -> Result<PathBuf, String> {
-    let matches = |path: &Path, in_install: bool| -> bool {
+    let matches = |path: &Path, unversioned: bool| -> bool {
         let name = host
             .canonical(path)
             .file_name()
@@ -457,10 +459,10 @@ fn libclang(
             .unwrap_or_default();
         match library_major(&name) {
             Some(major) => major == version.major,
-            None => in_install,
+            None => unversioned,
         }
     };
-    let search = |directory: &Path, in_install: bool| -> Option<PathBuf> {
+    let search = |directory: &Path, unversioned: bool| -> Option<PathBuf> {
         let mut names: Vec<String> = host
             .list(directory)
             .into_iter()
@@ -470,14 +472,16 @@ fn libclang(
         names
             .into_iter()
             .map(|name| directory.join(name))
-            .find(|path| host.is_file(path) && matches(path, in_install))
+            .find(|path| host.is_file(path) && matches(path, unversioned))
     };
     if let Some(given) = host.var("LIBCLANG_PATH").filter(|value| !value.is_empty()) {
         let given = PathBuf::from(given);
+        // A library named without its release, as macOS's libclang.dylib
+        // and Windows's libclang.dll are, is taken as given.
         let found = if host.is_file(&given) {
-            matches(&given, false).then_some(given.clone())
+            matches(&given, true).then_some(given.clone())
         } else {
-            search(&given, false)
+            search(&given, true)
         };
         return found.ok_or_else(|| {
             format!(
