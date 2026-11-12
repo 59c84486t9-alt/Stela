@@ -17,6 +17,9 @@ pub const TIMER_VECTOR: u8 = 0x40;
 pub(crate) const NATIVE_WAKE_VECTOR: u8 = 0x60;
 /// The MMIO aperture's TLB shootdown (`native_mmio::shootdown`).
 pub(crate) const SHOOTDOWN_VECTOR: u8 = 0x61;
+/// A host device's completion signal (`host::completion_signal`): a
+/// doorbell that also counts the signals apart from other cores' doorbells.
+pub(crate) const SIGNAL_VECTOR: u8 = 0x62;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
 const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
@@ -528,6 +531,7 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
         }
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
+        SIGNAL_VECTOR => host::signal_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),
         SPURIOUS_VECTOR => host::spurious_interrupt(),
         vector @ 32.. => host::stray_interrupt(vector),

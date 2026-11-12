@@ -826,3 +826,19 @@ fn a_busy_core_hands_each_completion_signal_on_once() {
     assert!(!handed.take(5, 4, false), "handed on already");
     assert!(handed.take(6, 4, false), "a later signal");
 }
+
+/// A disk whose completion message never arrives is found silent once, at
+/// its [`SILENT_COMPLETIONS`]th completion; one heard once never is.
+#[test]
+fn a_disk_whose_signal_never_comes_is_found_silent_once() {
+    let mut silent = SignalWatch::default();
+    let found: Vec<bool> = (0..SILENT_COMPLETIONS + 10)
+        .map(|_| silent.completed(7))
+        .collect();
+    assert_eq!(found.iter().filter(|&&found| found).count(), 1);
+    assert!(found[SILENT_COMPLETIONS as usize - 1]);
+    let mut heard = SignalWatch::default();
+    assert!(!heard.completed(7));
+    assert!(!heard.completed(8));
+    assert!((0..2 * SILENT_COMPLETIONS).all(|_| !heard.completed(8)));
+}

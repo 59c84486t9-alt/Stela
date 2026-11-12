@@ -508,6 +508,9 @@ struct Service {
     /// excuses looks for [`LOOK_WINDOW_MICROS`] while no doorbell moves, as
     /// a busy core takes the disk's signal only at its next interrupt window.
     looked: Cell<staged_disk::LookGate>,
+    /// Whether a disk that signals has been heard: one that completes many
+    /// commands without one is polled, and said so once.
+    heard: staged_disk::SignalWatch,
     /// Host commands that failed, which the guest sees only as its
     /// controller's error status.
     failures: u64,
@@ -537,6 +540,19 @@ impl Service {
 }
 
 impl Service {
+    /// A command completed: a disk said to signal that has sent no signal
+    /// over [`staged_disk::SILENT_COMPLETIONS`] completions is looked at
+    /// as one that sends none, and reported once.
+    fn heard(&mut self) {
+        if self.signals() && self.heard.completed(super::host::device_signals()) {
+            self.signals.set(Some(false));
+            output::arguments(format_args!(
+                "HOST DISK serial={} no completion interrupt, polling\n",
+                self.inner.identity().serial
+            ));
+        }
+    }
+
     /// Start `command` on the disk, which is told of it at once unless
     /// `more` follow ([`BlockDevice::commit`]).
     fn start_with(&mut self, command: Command, more: bool) -> Result<u32, BlockError> {
@@ -653,6 +669,9 @@ impl BlockDevice for Service {
         };
         self.running = self.running.saturating_sub(u32::from(finished.is_some()));
         self.looked.set(staged_disk::LookGate::default());
+        if finished.is_some() {
+            self.heard();
+        }
         // Reported with the loader's root and interrupts restored.
         finished.map(|result| self.failed("finished tag", u64::from(tag), result))
     }
@@ -664,6 +683,7 @@ impl BlockDevice for Service {
     fn finished(&mut self, tag: u32) -> Option<Finished> {
         let finished = self.inner.finished(tag)?;
         self.running = self.running.saturating_sub(1);
+        self.heard();
         Some(self.failed("finished tag", u64::from(tag), finished))
     }
     fn posted(&self) -> bool {
@@ -852,6 +872,7 @@ impl stela_drivers::probe::Observer for Observer {
             running: 0,
             signals: Cell::new(None),
             looked: Cell::new(staged_disk::LookGate::default()),
+            heard: staged_disk::SignalWatch::default(),
             failures: 0,
         });
         self.resumed = between_drivers(|| crate::log_file::resume_quietly(Box::new(log)));
@@ -1734,6 +1755,7 @@ pub unsafe fn open(
             running: 0,
             signals: Cell::new(None),
             looked: Cell::new(staged_disk::LookGate::default()),
+            heard: staged_disk::SignalWatch::default(),
             failures: 0,
         })
     };
@@ -1872,6 +1894,7 @@ pub unsafe fn open(
                 running: 0,
                 signals: Cell::new(None),
                 looked: Cell::new(staged_disk::LookGate::default()),
+                heard: staged_disk::SignalWatch::default(),
                 failures: 0,
             }) as Box<dyn BlockDevice>
         })

@@ -32,8 +32,22 @@ pub(crate) fn wake_interrupt() {
     local::doorbell();
 }
 
+/// A host device's completion signal: a doorbell, counted apart too.
+pub(crate) fn signal_interrupt() {
+    SIGNALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    wake_interrupt();
+}
+
 /// The doorbells any core has taken.
 static DOORBELLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The completion signals host devices sent.
+static SIGNALS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The completion signals host devices sent ([`completion_signal`]), which
+/// unlike [`doorbells`] no other core's doorbell moves.
+pub(crate) fn device_signals() -> u64 {
+    SIGNALS.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// The doorbells any core has taken, a host disk's completion signals among
 /// them: until this moves, a disk that signals has nothing new to look at.
@@ -41,8 +55,9 @@ pub(crate) fn doorbells() -> u64 {
     DOORBELLS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// The message a host disk sends as it completes a command: the doorbell
-/// vector, fixed and edge-triggered, to the processor with APIC ID `id`,
+/// The message a host disk sends as it completes a command: the signal
+/// vector, a doorbell counted apart, fixed and edge-triggered, to the
+/// processor with APIC ID `id`,
 /// which runs the engine's devices and looks for the disk's completions.
 /// `None` where the ID needs more than a compatibility-format MSI address
 /// holds.
@@ -95,7 +110,7 @@ pub(crate) fn sleep_for(micros: u64) {
 pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiMessage> {
     (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
         address: 0xfee0_0000 | id << 12,
-        data: u32::from(super::super::interrupts::NATIVE_WAKE_VECTOR),
+        data: u32::from(super::super::interrupts::SIGNAL_VECTOR),
     })
 }
 

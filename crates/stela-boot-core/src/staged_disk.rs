@@ -478,6 +478,44 @@ pub fn signalled(doorbells: u64, seen: u64, owed: bool, work: bool, taken: bool)
     (doorbells != seen || owed) && work && !taken
 }
 
+/// Completions a disk that signals may take without one signal before it is
+/// polled instead.
+pub const SILENT_COMPLETIONS: u32 = 64;
+
+/// Whether a disk that says it signals its completions has been heard.
+///
+/// Its message may never arrive (an interrupt the platform does not route,
+/// a controller that sends none): its commands then still complete, found by
+/// the looks for lost signals, but nothing should wait for a signal. Signals
+/// from other devices share the count, so one heard proves it only roughly.
+#[derive(Debug, Default)]
+pub struct SignalWatch {
+    /// The signal count at the first completion.
+    first: Option<u64>,
+    /// Completions since then with the count unmoved.
+    silent: u32,
+    /// Decided: a signal came, or the disk was found silent.
+    decided: bool,
+}
+
+impl SignalWatch {
+    /// A completion was taken with the signal count at `signals`: true once,
+    /// at the [`SILENT_COMPLETIONS`]th completion with no signal since the
+    /// first.
+    pub fn completed(&mut self, signals: u64) -> bool {
+        if self.decided {
+            return false;
+        }
+        if *self.first.get_or_insert(signals) != signals {
+            self.decided = true;
+            return false;
+        }
+        self.silent += 1;
+        self.decided = self.silent >= SILENT_COMPLETIONS;
+        self.decided
+    }
+}
+
 /// The completion signals a core that runs guest code handed to a sleeping
 /// core: each doorbell count once.
 #[derive(Debug, Default)]
