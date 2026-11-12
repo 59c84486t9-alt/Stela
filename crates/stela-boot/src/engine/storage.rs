@@ -1416,6 +1416,11 @@ pub unsafe fn open(
     for (location, error) in &devices.usb_vendor_failures {
         output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
     }
+    for (location, error) in &devices.usb_vendor_warnings {
+        output::arguments(format_args!(
+            "USB VENDOR WARNING {location}: {error}; started without its firmware patch\n"
+        ));
+    }
     for (address, class, why) in &devices.unsupported {
         output::arguments(format_args!(
             "HOST UNSUPPORTED pci={address} class={:02x}{:02x}{:02x}: {why}\n",

@@ -718,6 +718,14 @@ fn rtl8153_missing_firmware_starts_the_chip_unpatched() {
         );
         assert!(model.borrow().seen.contains(&CONFIGURE_ENDPOINT));
         assert!(model.borrow().active[3].is_none() && model.borrow().outgoing.is_empty());
+        // The probe account names the missing patch once, for the log.
+        let location = link.location.clone();
+        let mut devices = crate::probe::Devices::default();
+        let empty = crate::firmware::Catalog::from_handoff(Vec::new()).unwrap();
+        devices.absorb_usb(None, found, &empty);
+        assert_eq!(devices.usb_vendor_warnings.len(), 1);
+        assert_eq!(devices.usb_vendor_warnings[0].0, location);
+        assert!(devices.usb_vendor_failures.is_empty() && devices.nics.len() == 1);
     }
 }
 

@@ -462,6 +462,11 @@ impl Prepared {
         for (location, error) in &devices.usb_vendor_failures {
             output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
         }
+        for (location, error) in &devices.usb_vendor_warnings {
+            output::arguments(format_args!(
+                "USB VENDOR WARNING {location}: {error}; started without its firmware patch\n"
+            ));
+        }
         for device in &devices.disks {
             let id = device.identity();
             output::arguments(format_args!(

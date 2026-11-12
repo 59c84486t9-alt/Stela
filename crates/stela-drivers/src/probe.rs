@@ -695,6 +695,9 @@ pub struct Devices {
     pub usb_failures: Vec<(String, BlockError)>,
     /// Vendor initialization failures, preserving exact firmware requests.
     pub usb_vendor_failures: Vec<(String, crate::usb::ethernet::Error)>,
+    /// Vendor adapters that started without their optional firmware patch,
+    /// and why the patch was not applied, by location.
+    pub usb_vendor_warnings: Vec<(String, crate::usb::ethernet::Error)>,
     /// USB interfaces no driver here takes, and why.
     pub usb_unused: Vec<(String, &'static str)>,
     /// How long each xHCI root port took at probe, for the boot log's
@@ -885,6 +888,11 @@ impl Devices {
             self.bluetooth.push(device);
         }
         self.nics.extend(found.links.into_iter().map(Adapter::Usb));
+        self.usb_vendor_warnings
+            .extend(found.vendor_links.iter().filter_map(|link| {
+                let error = link.firmware_skipped.clone()?;
+                Some((link.location.clone(), error))
+            }));
         self.nics
             .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
         self.usb_failures.extend(found.failures);
