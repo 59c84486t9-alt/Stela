@@ -38,11 +38,12 @@
 //! nonzero value.
 //!
 //! Arm detects tininess before rounding with FPCR.AH zero, which is the
-//! subnormal-grid test here: UFC for a tiny inexact lane. FZ16 (which
-//! flushes tiny results and subnormal inputs) and AH (tininess after
-//! rounding) send lanes with a subnormal input or a tiny nonzero result to
-//! the helper, and so do NaN and infinite inputs, overflow and enabled traps.
-//! A zero divisor under FZ16 is a true zero, as subnormal inputs exit.
+//! subnormal-grid test here: UFC for a tiny inexact lane. FZ16 flushes
+//! subnormal inputs to signed zeros inline (without IDC, so a flushed
+//! divisor divides by zero) and sends a tiny nonzero result, which Arm
+//! flushes, to the helper. AH (tininess after rounding) sends lanes with a
+//! subnormal input or a tiny nonzero result to the helper, and so do NaN and
+//! infinite inputs, overflow and enabled traps.
 use super::super::super::numerical::{Condition, branch, jump, resolve, test_control};
 use super::super::super::{Host, packed};
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Unary, Vex};
@@ -247,7 +248,8 @@ fn policies(code: &mut Code, flip: bool) {
 }
 
 /// Branch to `helper` when an active lane of LEFT or RIGHT is infinite or
-/// NaN, or, under FZ16 or AH, subnormal. Clobbers XMM2 to XMM6 and EAX.
+/// NaN, or, under AH, subnormal; under FZ16 flush subnormal lanes to signed
+/// zeros (Half flushing raises no IDC). Clobbers XMM2 to XMM6 and EAX.
 fn guard_inputs(code: &mut Code, active: u32, helper: &mut Vec<usize>) {
     let word = |value: u16| u32::from(value) * 0x0001_0001;
     super::super::super::precision::dword_constant(code, T6, word(HALF_EXPONENT_FIELD));
@@ -277,13 +279,22 @@ fn guard_inputs(code: &mut Code, active: u32, helper: &mut Vec<usize>) {
         packed(code, Host::AndNot, scratch, T6);
         super::super::super::precision::dword_constant(code, T5, word(HALF_MAGNITUDE));
     }
-    packed(code, Host::Or, T2, T3);
-    Host::ByteSignMask.register(code, 0, T2, TargetCpu::Baseline);
+    packed(code, Host::MoveAligned, T4, T2);
+    packed(code, Host::Or, T4, T3);
+    Host::ByteSignMask.register(code, 0, T4, TargetCpu::Baseline);
     code.asm()
         .alu_imm32(Alu::And, Size::Dword, Rax, active as i32);
+    let normal = branch(code, Condition::Zero);
+    test_control(code, FPCR_AH);
     helper.push(branch(code, Condition::NotZero));
+    // FZ16: keep only the sign of each subnormal lane (T5 is the magnitude).
+    and(code, T2, T2, T5);
+    and_not(code, LEFT, T2, LEFT);
+    and(code, T3, T3, T5);
+    and_not(code, RIGHT, T3, RIGHT);
     let end = code.len();
     resolve(code, ordinary, end);
+    resolve(code, normal, end);
 }
 
 /// A quotient's zero divisors: SPECIAL = Arm's result words in those lanes

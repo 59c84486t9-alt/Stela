@@ -3,8 +3,9 @@
 //! every inline completion matches the reference in every V register and
 //! FPSR, every exit leaves the state unchanged, and on AVX2 hosts with
 //! F16C every input (zeros, subnormals, infinities and NaNs included)
-//! completes without an exit in every rounding mode unless FZ16, AH or a
-//! trap enable is set, but for a quiet NaN addend with a NaN product.
+//! completes without an exit in every rounding mode unless AH or a trap
+//! enable is set, but for a quiet NaN addend with a NaN product and a
+//! result FZ16 may flush.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -96,6 +97,32 @@ fn completes(addend: u64, left: u64, right: u64) -> bool {
     let nan_product =
         nan(left) || nan(right) || infinite_zero(left, right) || infinite_zero(right, left);
     !(nan(addend) && addend & 0x200 != 0 && nan_product)
+}
+
+/// Under FZ16, whether Arm may flush the result: with the inputs flushed,
+/// the unflushed result is nonzero and at most the minimum normal, or
+/// underflows (to zero).
+fn flushes(operation: FusedOperation, fpcr: u32, addend: u64, left: u64, right: u64) -> bool {
+    let flush = |bits: u64| {
+        if bits & 0x7c00 == 0 {
+            bits & 0x8000
+        } else {
+            bits
+        }
+    };
+    fpcr & FPCR_FZ16 != 0
+        && floating::fused::evaluate(
+            Format::Half,
+            operation,
+            fpcr & !FPCR_FZ16,
+            flush(addend),
+            flush(left),
+            flush(right),
+        )
+        .is_ok_and(|outcome| {
+            let magnitude = outcome.bits & 0x7fff;
+            magnitude != 0 && magnitude <= 0x0400 || outcome.exceptions & floating::UNDERFLOW != 0
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -216,10 +243,25 @@ fn half_fused_lanes_complete_inline() {
                                 || alloc::format!("{form:?} {vectors:x?} {fpcr:#x} {target:?}");
                             if exit == PC.0 {
                                 assert_eq!(actual, initial, "{}", label());
+                                let operation = if subtract {
+                                    FusedOperation::Subtract
+                                } else {
+                                    FusedOperation::Add
+                                };
+                                let flushed = (0..lanes as usize).any(|index| {
+                                    let right = element.map_or(index, |element| element as usize);
+                                    flushes(
+                                        operation,
+                                        fpcr,
+                                        lane(vectors[0], index),
+                                        lane(vectors[1], index),
+                                        lane(vectors[2], right),
+                                    )
+                                });
                                 let must_inline = wide
                                     && finite
-                                    && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH | FPCR_FZ16)
-                                        == 0;
+                                    && !flushed
+                                    && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0;
                                 assert!(!must_inline, "exited: {}", label());
                                 continue;
                             }
@@ -248,7 +290,8 @@ fn half_fused_lanes_complete_inline() {
 
 /// Scalar FMADD, FMSUB, FNMADD and FNMSUB of H, and FMLA and FMLS of H by
 /// element, against the reference: on AVX2 hosts with F16C every lane
-/// [`completes`] inline unless FZ16, AH or a trap enable is set, the result alone in Vd or, under FPCR.NEP, in the
+/// [`completes`] inline unless AH or a trap enable is set or FZ16
+/// [`flushes`] it, the result alone in Vd or, under FPCR.NEP, in the
 /// addend's other bits; every exit leaves the state unchanged.
 #[test]
 fn scalar_half_fused_forms_complete_inline() {
@@ -327,7 +370,8 @@ fn scalar_half_fused_forms_complete_inline() {
                         assert_eq!(actual, initial, "{label}");
                         let must_inline = wide
                             && finite
-                            && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH | FPCR_FZ16) == 0;
+                            && !flushes(operation, fpcr, a, n, m)
+                            && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0;
                         assert!(!must_inline, "exited: {label}");
                         continue;
                     }
@@ -450,5 +494,83 @@ fn special_half_fused_lanes_complete_inline() {
     let host = TargetCpu::detect();
     if host.supports(TargetCpu::Avx2) && host.supports(TargetCpu::F16c) {
         assert!(inline > 500, "{inline}");
+    }
+}
+
+/// Under FZ16 the packed Half recipes flush subnormal inputs inline without
+/// IDC: FADD 8H keeps the normal operand, FDIV 8H by a subnormal divides by
+/// zero (DZC), FMLA 8H drops a subnormal addend and factor; a product FZ16
+/// flushes takes the helper, leaving the state unchanged.
+#[test]
+fn fz16_flushes_half_inputs_inline() {
+    const SUBNORMAL: u64 = 0x0123;
+    const ONE: u64 = 0x3c00;
+    const SMALL: u64 = 0x0555;
+    let registers = M << 16 | N << 5 | D;
+    // (word, binary operation or None for FMLA, [Vn, Vm, Vd], inline).
+    let rows: [(u32, Option<floating::BinaryOperation>, [u64; 3], bool); 5] = [
+        (
+            0x4e40_1400 | registers,
+            Some(floating::BinaryOperation::Add),
+            [ONE, SUBNORMAL | 0x8000, 0],
+            true,
+        ),
+        (
+            0x6e40_3c00 | registers,
+            Some(floating::BinaryOperation::Divide),
+            [ONE, SUBNORMAL, 0],
+            true,
+        ),
+        (0x4e40_0c00 | registers, None, [ONE, ONE, SUBNORMAL], true),
+        (0x4e40_0c00 | registers, None, [SUBNORMAL, ONE, ONE], true),
+        // 0x0555 squared is far below 2^-14: Arm flushes it.
+        (0x4e40_0c00 | registers, None, [SMALL, SMALL, 0], false),
+    ];
+    for target in targets() {
+        let packed = target.supports(TargetCpu::Avx2)
+            && target.supports(TargetCpu::F16c)
+            && !target.data_independent_timing()
+            && !vector_extensions::half_supported(target);
+        if !packed {
+            continue;
+        }
+        for (row, &(word, operation, [n, m, d], inline)) in rows.iter().enumerate() {
+            let code = compile(word, target);
+            let mut initial = GuestState {
+                fpcr: FPCR_FZ16,
+                ..GuestState::default()
+            };
+            initial.x[30] = RETURN;
+            for index in 0..8 {
+                set_lane(&mut initial.v[N as usize], index, n);
+                set_lane(&mut initial.v[M as usize], index, m);
+                set_lane(&mut initial.v[D as usize], index, d);
+            }
+            let mut actual = initial.clone();
+            let exit = run(&code, &mut actual);
+            let label = alloc::format!("row {row} {target:?}");
+            if !inline {
+                assert_eq!(exit, PC.0, "{label}");
+                assert_eq!(actual, initial, "{label}");
+                continue;
+            }
+            assert_eq!(exit, RETURN, "{label}");
+            let outcome = match operation {
+                Some(operation) => floating::evaluate(Format::Half, operation, FPCR_FZ16, n, m),
+                None => {
+                    floating::fused::evaluate(Format::Half, FusedOperation::Add, FPCR_FZ16, d, n, m)
+                }
+            }
+            .unwrap();
+            assert_eq!(outcome.exceptions & floating::INPUT_DENORMAL, 0);
+            let mut expected = initial.clone();
+            expected.fpsr = outcome.exceptions;
+            let mut result = [0u64; 2];
+            for index in 0..8 {
+                set_lane(&mut result, index, outcome.bits);
+            }
+            expected.v[D as usize] = result;
+            assert_eq!(actual, expected, "{label}");
+        }
     }
 }

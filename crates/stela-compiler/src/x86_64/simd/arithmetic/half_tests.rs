@@ -8,7 +8,7 @@ use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         BinaryOperation, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP,
-        FPCR_ROUNDING_SHIFT, Format, INEXACT, OVERFLOW, evaluate,
+        FPCR_ROUNDING_SHIFT, Format, INEXACT, OVERFLOW, UNDERFLOW, evaluate,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::native::run,
@@ -186,6 +186,29 @@ fn half_arithmetic_lanes_match_the_reference() {
     assert!(inline > 20_000, "{inline}");
 }
 
+/// Whether Arm flushes the result of `left` and `right` under FZ16: with
+/// the inputs flushed, the unflushed result underflows (to zero, too), is
+/// subnormal, or is exactly the minimum normal (tiny before rounding).
+fn flushed_result(operation: BinaryOperation, fpcr: u32, left: u64, right: u64) -> bool {
+    let flush = |bits: u64| {
+        if bits & 0x7c00 == 0 {
+            bits & 0x8000
+        } else {
+            bits
+        }
+    };
+    let unflushed = evaluate(
+        Format::Half,
+        operation,
+        fpcr & !FPCR_FZ16,
+        flush(left),
+        flush(right),
+    )
+    .unwrap();
+    let magnitude = unflushed.bits & 0x7fff;
+    magnitude != 0 && magnitude <= 0x0400 || unflushed.exceptions & UNDERFLOW != 0
+}
+
 #[derive(Clone, Copy)]
 enum Pairing {
     Elementwise,
@@ -222,7 +245,8 @@ fn finite_half(random: &mut u64, partner: Option<u64>) -> u64 {
 /// exact cancellation, inexact quotients and tiny or subnormal results, with
 /// Arm's results and status, a scalar result alone or, under FPCR.NEP, in
 /// Vn's other bits, and a zero divisor (±inf with DZC, 0/0 the default NaN
-/// with IOC); FZ16, AH, overflow and NaN or infinite inputs exit or match.
+/// with IOC), and under FZ16 flushed inputs; AH, overflow, results FZ16
+/// flushes and NaN or infinite inputs exit or match.
 #[test]
 fn packed_half_arithmetic_completes_every_finite_lane_inline() {
     const PACKED_FORMS: &[(u32, BinaryOperation, usize, Pairing)] = &[
@@ -365,16 +389,19 @@ fn packed_half_arithmetic_completes_every_finite_lane_inline() {
                         .collect();
                     let finite = |bits: u64| bits >> 10 & 31 != 31;
                     let covered = packed
-                        && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_FZ16 | FPCR_AH) == 0
+                        && fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0
                         && operands
                             .iter()
                             .zip(&outcomes)
                             .all(|(&(left, right), outcome)| {
-                                // Only overflow exits: finite inputs raise IOC and
-                                // DZC only for a zero divisor, which completes.
+                                // Only overflow exits, and under FZ16 a result
+                                // Arm flushes: finite inputs raise IOC and DZC
+                                // only for a zero divisor, which completes.
                                 finite(left)
                                     && finite(right)
                                     && outcome.as_ref().unwrap().exceptions & OVERFLOW == 0
+                                    && !(fpcr & FPCR_FZ16 != 0
+                                        && flushed_result(operation, fpcr, left, right))
                             });
                     if exit == PC.0 {
                         assert_eq!(actual, initial, "{word:08x} {operands:x?} {fpcr:#x}");
@@ -457,10 +484,10 @@ fn packed_half_division_by_zero_completes_inline() {
                     let invalid = operands
                         .iter()
                         .any(|&(left, right)| left & 0x7fff == 0 && right & 0x7fff == 0);
-                    // The subnormal dividend exits under FZ16 and AH.
+                    // The subnormal dividend exits under AH (and is a zero
+                    // under FZ16).
                     let subnormal = operands.iter().any(|&(left, _)| left == 1);
-                    let exits = fpcr & FPCR_AH != 0 && invalid
-                        || fpcr & (FPCR_AH | FPCR_FZ16) != 0 && subnormal;
+                    let exits = fpcr & FPCR_AH != 0 && (invalid || subnormal);
                     if exits {
                         assert_eq!(exit, PC.0, "{base:08x} {operands:x?} {fpcr:#x}");
                         assert_eq!(actual, initial);

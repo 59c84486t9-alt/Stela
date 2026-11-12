@@ -5,8 +5,9 @@
 //! (24 bits, at least Half's 11 plus 2) rounds once more to Half exactly as
 //! the one rounding Arm's FPMulAdd makes. Zeros and subnormal inputs need
 //! nothing apart. Lanes with a NaN or infinite input take Arm's result from
-//! [`special_lanes`] and rerun as zeros; a quiet NaN addend with a NaN
-//! product, FZ16, AH and enabled traps take the caller's other path.
+//! [`special_lanes`] and rerun as zeros. FZ16 flushes subnormal inputs
+//! inline; a result it may flush, a quiet NaN addend with a NaN product, AH
+//! and enabled traps take the caller's other path.
 use super::super::numerical::{Condition, branch, jump, resolve, test_control};
 use super::super::{Host, commit, encode::guest, half as lanes, packed};
 use crate::x86_64::asm::{Alu, Code, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
@@ -34,6 +35,7 @@ const RESULT: u8 = 7;
 
 const EQUAL: u8 = 0;
 const LESS: u8 = 1;
+const LESS_EQUAL: u8 = 2;
 const UNORDERED: u8 = 3;
 const NOT_EQUAL: u8 = 4;
 const NOT_LESS: u8 = 5;
@@ -218,11 +220,31 @@ fn flag_if_active(code: &mut Code, lanes: &Lanes, xmm: u8, flag: u32) {
 }
 
 /// The Half inputs: Vn in LEFT, Vm (or its broadcast element) in RIGHT and
-/// the addend in ADDEND.
+/// the addend in ADDEND, each subnormal lane flushed to its signed zero
+/// under FZ16 (which raises no IDC for Half). Clobbers XMM3 to XMM5, XMM7
+/// and EAX.
 fn read_inputs(code: &mut Code, operand: &Operand) {
     super::prepare_right(code, operand);
     super::read_numerical_vector(code, operand.shape, operand.left, LEFT);
     super::read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
+    test_control(code, FPCR_FZ16);
+    let kept = branch(code, Condition::Zero);
+    let words = &Lanes {
+        wide: false,
+        active: 0,
+    };
+    constant(code, words, PRODUCT, HALF_INFINITY);
+    constant(code, words, SUM, HALF_MAGNITUDE);
+    word(code, PXOR, RESULT, RESULT, RESULT);
+    for input in [LEFT, RIGHT, ADDEND] {
+        // The magnitude of a lane whose exponent field is zero.
+        word(code, PAND, SCRATCH, input, PRODUCT);
+        word(code, PCMPEQW, SCRATCH, SCRATCH, RESULT);
+        word(code, PAND, SCRATCH, SCRATCH, SUM);
+        word(code, PANDN, input, SCRATCH, input);
+    }
+    let end = code.len();
+    resolve(code, kept, end);
 }
 
 const PAND: u8 = 0xdb;
@@ -297,6 +319,7 @@ const SPILL: i32 = 16;
 const HALF_INFINITY: u32 = 0x7c00_7c00;
 const HALF_QUIET: u32 = 0x0200_0200;
 const HALF_DEFAULT_NAN: u32 = 0x7e00_7e00;
+const HALF_MAGNITUDE: u32 = 0x7fff_7fff;
 const SIGN_WORD: u8 = 15;
 const QUIET_TO_SIGN: u8 = 6;
 
@@ -455,7 +478,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
         asm.test_imm(
             Size::Dword,
             Gpr::Rcx,
-            (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH | FPCR_FZ16) as i32,
+            (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) as i32,
         );
     }
     other.push(branch(code, Condition::NotZero));
@@ -506,6 +529,31 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) -> Vec<usize> {
     resolve(code, again, arithmetic);
     let finite_start = code.len();
     resolve(code, finite, finite_start);
+    // Under FZ16 a lane Arm may flush (a nonzero sum at most 2^-14, the
+    // exact one being tiny only then) takes `other`.
+    test_control(code, FPCR_FZ16);
+    let unflushed = branch(code, Condition::Zero);
+    ones(code, lanes, RESULT);
+    shift(code, lanes, true, RESULT, RESULT, 1);
+    and(code, lanes, LEFT, SUM, RESULT);
+    constant(code, lanes, RIGHT, HALF_MINIMUM_NORMAL);
+    compare(code, lanes, SCRATCH, LEFT, RIGHT, LESS_EQUAL);
+    xor(code, lanes, RIGHT, RIGHT, RIGHT);
+    compare(code, lanes, LEFT, LEFT, RIGHT, NOT_EQUAL);
+    and(code, lanes, SCRATCH, SCRATCH, LEFT);
+    let none = none_active(code, lanes, SCRATCH);
+    code.asm()
+        .test_imm(Size::Dword, Gpr::R8, SPECIAL_SAVED as i32);
+    let unsaved = branch(code, Condition::Zero);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SPECIAL_FRAME_BYTES);
+    let unsaved_start = code.len();
+    resolve(code, unsaved, unsaved_start);
+    code.asm().vzeroupper();
+    other.push(jump(code));
+    let ordinary = code.len();
+    resolve(code, unflushed, ordinary);
+    resolve(code, none, ordinary);
     // An exact zero sum is -0 rounding toward minus infinity unless both
     // terms are +0; the host's rounding to nearest gave +0 there.
     const TOWARD_MINUS: i32 = 2;
