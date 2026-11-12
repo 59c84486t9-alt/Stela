@@ -231,9 +231,12 @@ fn cached(directory: &Path, build: &str, model: &str) -> Option<PathBuf> {
 /// `sudo` and an update run without find each other's downloads, and a
 /// dry run looks where the real run does.
 pub(super) fn image_caches() -> Vec<PathBuf> {
-    let mut directories = vec![super::download_dir()];
+    let own = super::download_dir();
+    #[cfg(not(unix))]
+    let directories = vec![own];
     #[cfg(unix)]
-    {
+    let directories = {
+        let mut directories = vec![own];
         let homes = std::env::var("SUDO_USER")
             .ok()
             .filter(|user| !user.is_empty() && user != "root")
@@ -254,7 +257,8 @@ pub(super) fn image_caches() -> Vec<PathBuf> {
                 }
             }
         }
-    }
+        directories
+    };
     directories
 }
 
