@@ -1,6 +1,9 @@
 //! Geometry, colours and text the mount's screens compute before drawing.
 use alloc::{format, string::String};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+};
 
 const IDLE: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -49,6 +52,49 @@ pub struct Permit<'a> {
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.gate.0.store(IDLE, Ordering::Release);
+    }
+}
+
+/// The screen's text state, which any processor may reach: the boot PE's
+/// reports, and the host drivers' waits on whichever processor runs them.
+/// One at a time, and none waits: a processor that finds it in use skips
+/// its change, as a firmware timer tick that interrupts a draw does. A
+/// `RefCell` is not enough, as two processors updating its borrow count
+/// at once can leave it counting a borrow nobody holds, which freezes the
+/// screen for the rest of the boot.
+pub struct Exclusive<T> {
+    busy: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: `busy` admits one processor at a time to `value`, which moves
+// between them only through `try_with`'s exclusive borrow.
+unsafe impl<T: Send> Sync for Exclusive<T> {}
+
+impl<T> Exclusive<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Run `f` on the value unless another processor, or this one further
+    /// up its stack, has it now.
+    pub fn try_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        struct Release<'a>(&'a AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+        let _release = Release(&self.busy);
+        // SAFETY: `busy` was false and is now ours until `_release` drops,
+        // so this is the only reference to the value.
+        Some(f(unsafe { &mut *self.value.get() }))
     }
 }
 
@@ -154,6 +200,41 @@ mod tests {
         assert!(access.is_retired());
         assert!(access.enter().is_none());
         assert!(access.retire());
+    }
+
+    #[test]
+    fn exclusive_state_skips_a_nested_change_and_is_free_again_after_one() {
+        let state = Exclusive::new(0u32);
+        let nested = state.try_with(|value| {
+            *value += 1;
+            state.try_with(|value| *value += 10)
+        });
+        assert_eq!(nested, Some(None));
+        assert_eq!(state.try_with(|value| *value), Some(1));
+    }
+
+    /// Processors that update the state at once never lose it: every
+    /// change either lands or is skipped, and the state is free after all
+    /// of them, where a `RefCell`'s count could stay borrowed for good.
+    #[test]
+    fn exclusive_state_stays_usable_after_processors_race_for_it() {
+        use std::{sync::Arc, thread, vec::Vec};
+        let state = Arc::new(Exclusive::new(0u64));
+        let landed: u64 = (0..8)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                thread::spawn(move || {
+                    (0..20_000)
+                        .filter(|_| state.try_with(|value| *value += 1).is_some())
+                        .count() as u64
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .sum();
+        assert!(landed > 0);
+        assert_eq!(state.try_with(|value| *value), Some(landed));
     }
 
     #[test]

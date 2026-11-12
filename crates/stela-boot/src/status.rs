@@ -26,9 +26,9 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use core::{
     arch::x86_64::_rdtsc,
-    cell::RefCell,
     fmt::{self, Write as _},
 };
+use stela_boot_core::screen::Exclusive;
 
 /// Frames of the running marker: three cells moving across six and back.
 const FRAMES: usize = 14;
@@ -91,19 +91,16 @@ struct State {
     history: String,
 }
 
-/// One processor runs the mount; every access is a `try_borrow`, so a line
-/// drawn while the state is in use is skipped rather than re-entered.
-struct Global(RefCell<State>);
-// SAFETY: see `Global`.
-unsafe impl Sync for Global {}
-
-static STATE: Global = Global(RefCell::new(State {
+/// The boot PE's reports and the host drivers' waits on any processor
+/// ([`tick`]) reach the state, one at a time: a line drawn while it is in
+/// use is skipped rather than re-entered or waited for.
+static STATE: Exclusive<State> = Exclusive::new(State {
     tsc_hz: 0,
     running: None,
     stream: Vec::new(),
     streamed: true,
     history: String::new(),
-}));
+});
 
 fn now() -> u64 {
     // SAFETY: RDTSC has no memory effects.
@@ -299,9 +296,7 @@ impl State {
 }
 
 fn with(f: impl FnOnce(&mut State)) {
-    if let Ok(mut state) = STATE.0.try_borrow_mut() {
-        f(&mut state);
-    }
+    STATE.try_with(f);
 }
 
 /// The time-stamp counter's rate, for the times steps show.
@@ -467,12 +462,13 @@ pub fn take_screen(screen: Option<console::Framebuffer>) {
 
 /// The finished lines so far.
 pub fn history(into: &mut [u8; HISTORY_BYTES]) -> usize {
-    let mut bytes = 0;
-    if let Ok(state) = STATE.0.try_borrow() {
-        bytes = state.history.len();
-        into[..bytes].copy_from_slice(state.history.as_bytes());
-    }
-    bytes
+    STATE
+        .try_with(|state| {
+            let bytes = state.history.len();
+            into[..bytes].copy_from_slice(state.history.as_bytes());
+            bytes
+        })
+        .unwrap_or(0)
 }
 
 /// Draw the loader's finished lines again, as the system engine's screen
