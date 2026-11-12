@@ -122,39 +122,53 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()>
 }
 
 /// Give the synced temporary `file` the name `path`, never replacing a
-/// `path` that exists: by a rename that refuses to replace where the file
-/// system has one, else, as on FAT and exFAT under macOS (which refuse that
-/// rename with ENOTSUP and have no hard links either), by a plain rename
-/// once `path` is checked to be absent.
+/// `path` that exists ([`rename_new`]); a refused `file` is removed.
 pub(crate) fn persist_new(file: tempfile::NamedTempFile, path: &Path) -> Result<()> {
-    persist_new_with(file, path, |file, path| file.persist_noclobber(path))
+    let temporary = file.into_temp_path();
+    rename_new(&temporary, path)?;
+    // It is `path` now: nothing is left to remove.
+    let _ = temporary.keep();
+    Ok(())
 }
 
-fn persist_new_with(
-    file: tempfile::NamedTempFile,
-    path: &Path,
-    no_replace: impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<fs::File, tempfile::PersistError>,
+/// Give the finished file `from` the name `to`, never replacing a `to` that
+/// exists: by a rename that refuses to replace where the file system has
+/// one, else, as on FAT and exFAT under macOS (which refuse that rename with
+/// ENOTSUP and have no hard links either), by a plain rename once `to` is
+/// checked to be absent. A refused `from` stays where it is.
+pub(crate) fn rename_new(from: &Path, to: &Path) -> Result<()> {
+    rename_new_with(from, to, |from, to| {
+        tempfile::TempPath::try_from_path(from)?
+            .persist_noclobber(to)
+            .map_err(|error| {
+                // Kept for the caller, not removed with the handle.
+                let _ = error.path.keep();
+                error.error
+            })
+    })
+}
+
+fn rename_new_with(
+    from: &Path,
+    to: &Path,
+    no_replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let refused = match no_replace(file, path) {
-        Ok(_) => return Ok(()),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!("{} already exists", path.display())
+    match no_replace(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists", to.display())
         }
-        Err(error) => error,
-    };
-    match fs::symlink_metadata(path) {
-        Ok(_) => bail!("{} already exists", path.display()),
+        Err(_) => {}
+    }
+    match fs::symlink_metadata(to) {
+        Ok(_) => bail!("{} already exists", to.display()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| format!("cannot inspect {}", path.display()));
+            return Err(error).with_context(|| format!("cannot inspect {}", to.display()));
         }
     }
-    refused
-        .file
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("cannot rename a temporary file to {}", path.display()))?;
-    Ok(())
+    fs::rename(from, to)
+        .with_context(|| format!("cannot rename {} to {}", from.display(), to.display()))
 }
 
 /// Whether the partition's boot loader is a `stela.efi`; `None` when it has
@@ -294,14 +308,8 @@ mod tests {
 
     /// What macOS answers for a rename that keeps an existing file on FAT
     /// and exFAT: ENOTSUP.
-    fn unsupported(
-        file: tempfile::NamedTempFile,
-        _: &Path,
-    ) -> Result<fs::File, tempfile::PersistError> {
-        Err(tempfile::PersistError {
-            error: std::io::Error::from(std::io::ErrorKind::Unsupported),
-            file,
-        })
+    fn unsupported(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
     fn temporary(directory: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
@@ -313,10 +321,11 @@ mod tests {
     #[test]
     fn a_volume_without_a_keeping_rename_publishes_a_new_file_by_renaming() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("boot.log");
-        persist_new_with(temporary(temp.path(), b"new"), &path, unsupported).unwrap();
+        let (part, path) = (temp.path().join("a.part"), temp.path().join("boot.log"));
+        fs::write(&part, b"new").unwrap();
+        rename_new_with(&part, &path, unsupported).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
-        // Only the published file is left: the temporary file became it.
+        // Only the published file is left: the part became it.
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
@@ -325,10 +334,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("boot.log");
         fs::write(&path, b"earlier boots").unwrap();
-        let error = persist_new_with(temporary(temp.path(), b"new"), &path, unsupported)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("already exists"), "{error}");
+        // A refused part stays for its caller, either way.
+        let part = temp.path().join("a.part");
+        fs::write(&part, b"new").unwrap();
+        for result in [
+            rename_new_with(&part, &path, unsupported),
+            rename_new(&part, &path),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("already exists"), "{error}");
+            assert_eq!(fs::read(&part).unwrap(), b"new");
+        }
+        fs::remove_file(&part).unwrap();
         let error = persist_new(temporary(temp.path(), b"new"), &path)
             .unwrap_err()
             .to_string();

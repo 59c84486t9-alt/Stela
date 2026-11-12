@@ -604,69 +604,17 @@ fn publish(
         sha256: hex::encode(sha256.finalize()),
         catalog_sha1_verified: image.sha1.is_some(),
     };
-    move_into_place(part, output, |from, to| std::fs::hard_link(from, to))
-        .context("publish completed image")?;
+    // Never replacing an image created meanwhile.
+    crate::efi::rename_new(part, output).context("publish completed image")?;
     stela_engine::write_json(&sidecar(output, ".json"), &receipt)?;
-    match std::fs::remove_file(part) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
-    }
     std::fs::remove_file(metadata)?;
     progress.finish();
     Ok(receipt)
 }
 
-/// Give the verified file `part` the name `output`, never replacing an
-/// `output` created meanwhile: through a hard link where the file system
-/// has them (`part` is removed after the receipt is written), else, as on
-/// exFAT and FAT, by renaming it once `output` is checked to be absent.
-fn move_into_place(
-    part: &Path,
-    output: &Path,
-    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
-) -> Result<()> {
-    match link(part, output) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!("{} already exists", output.display())
-        }
-        Err(_) => {
-            ensure!(!output.exists(), "{} already exists", output.display());
-            std::fs::rename(part, output).with_context(|| {
-                format!("cannot rename {} to {}", part.display(), output.display())
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_volume_without_hard_links_publishes_by_renaming() {
-        let temp = tempfile::tempdir().unwrap();
-        let (part, output) = (temp.path().join("a.part"), temp.path().join("a.ipsw"));
-        let refused = |_: &Path, _: &Path| -> std::io::Result<()> {
-            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-        };
-        std::fs::write(&part, b"verified").unwrap();
-        move_into_place(&part, &output, refused).unwrap();
-        assert_eq!(std::fs::read(&output).unwrap(), b"verified");
-        assert!(!part.exists());
-        // An output that appeared meanwhile is never replaced, either way.
-        std::fs::write(&part, b"other").unwrap();
-        assert!(move_into_place(&part, &output, refused).is_err());
-        let linked = |from: &Path, to: &Path| std::fs::hard_link(from, to);
-        assert!(move_into_place(&part, &output, linked).is_err());
-        assert_eq!(std::fs::read(&output).unwrap(), b"verified");
-        assert_eq!(std::fs::read(&part).unwrap(), b"other");
-        // With hard links, the part stays until the receipt is written.
-        let second = temp.path().join("b.ipsw");
-        move_into_place(&part, &second, linked).unwrap();
-        assert_eq!(std::fs::read(&second).unwrap(), b"other");
-        assert!(part.exists());
-    }
 
     #[test]
     fn validates_hosts_and_ranges() {
