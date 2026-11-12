@@ -185,6 +185,17 @@ pub enum Aic2Error {
     UnknownInput(AicInput),
 }
 
+/// How the AIC delivered IRQs since [`Aic2::take_counts`]: the times its
+/// IRQ output rose, the CPU pins those rises raised, and the event reads
+/// that claimed an IRQ or found none. A report's facts, not state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AicCounts {
+    pub rises: u64,
+    pub pins_raised: u64,
+    pub claimed: u64,
+    pub empty: u64,
+}
+
 /// One shared timestamp slot: its configuration word and its latched
 /// system counter value.
 #[derive(Debug, Clone, Copy, Default)]
@@ -207,6 +218,7 @@ pub struct Aic2 {
     irq_level: u64,
     /// The CPUs whose SIQ_CFG_EL1 refuses IRQs ([`Aic2::steer`]).
     refusing: u64,
+    counts: AicCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,10 +322,15 @@ impl Aic2 {
             mask: vec![u32::MAX; words],
             irq_level: 0,
             refusing: 0,
+            counts: AicCounts::default(),
             config,
             layout,
             span,
         })
+    }
+    /// The delivery counts since the last call ([`AicCounts`]).
+    pub fn take_counts(&mut self) -> AicCounts {
+        core::mem::take(&mut self.counts)
     }
     /// Size of the device address space to map: core block plus event word.
     pub fn span(&self) -> u64 {
@@ -467,6 +484,11 @@ impl Aic2 {
             0
         };
         let mut changed = self.irq_level ^ level;
+        let raised = changed & level;
+        if raised != 0 {
+            self.counts.rises += 1;
+            self.counts.pins_raised += u64::from(raised.count_ones());
+        }
         self.irq_level = level;
         while changed != 0 {
             let cpu = changed.trailing_zeros() as usize;
@@ -580,13 +602,17 @@ impl Aic2 {
                 }
                 match self.pending_for(cpu) {
                     Some(irq) => {
+                        self.counts.claimed += 1;
                         let (word, bit) = position(irq);
                         self.mask[word] |= bit;
                         let die = irq / usize::from(self.config.max_irq);
                         let local = irq % usize::from(self.config.max_irq);
                         EVENT_TYPE_IRQ | (die as u32) << INFO_DIE_SHIFT | local as u32
                     }
-                    None => 0,
+                    None => {
+                        self.counts.empty += 1;
+                        0
+                    }
                 }
             }
         })

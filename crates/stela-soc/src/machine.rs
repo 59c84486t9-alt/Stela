@@ -709,6 +709,15 @@ impl AppleDevices {
         self.transfer_times.take()
     }
 
+    /// The AICv2 or AICv3's delivery counts since the last call
+    /// ([`crate::aic::AicCounts`]); `None` for an AICv1 or none.
+    pub fn take_aic_counts(&mut self) -> Option<crate::aic::AicCounts> {
+        let Some(Controller::V2(id)) = self.aic else {
+            return None;
+        };
+        self.bus.device_mut::<Aic2>(id).map(Aic2::take_counts)
+    }
+
     /// The NOR sectors the guest changed since the last call, as (offset,
     /// bytes), for the host to persist.
     pub fn nor_dirty(&mut self) -> Vec<(usize, Vec<u8>)> {

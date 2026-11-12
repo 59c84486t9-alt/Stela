@@ -482,6 +482,37 @@ fn two_eligible_cpus_claim_valid_words_in_die_priority_order() {
     assert!(!latch.pins(0).irq && !latch.pins(63).irq);
 }
 
+/// One pending IRQ raises every accepting CPU's pin: the counts show the
+/// fan-out and the empty event reads of the CPUs that lost the claim.
+#[test]
+fn counts_show_the_fan_out_of_one_irq_and_the_empty_claims() {
+    let mut aic = Aic2::new(Aic2Config {
+        cpus: 4,
+        default_cpus: 0b1111,
+        ..aic(1).config
+    })
+    .unwrap();
+    let mut latch = InterruptLatch::new();
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    write(&mut aic, &mut latch, MASK_CLR, 1 << 3);
+    assert_eq!(aic.take_counts(), AicCounts::default());
+    write(&mut aic, &mut latch, SW_SET, 1 << 3);
+    assert_eq!(read(&mut aic, &mut latch, 2, EVENT), EVENT_TYPE_IRQ | 3);
+    for cpu in [0, 1, 3] {
+        assert_eq!(read(&mut aic, &mut latch, cpu, EVENT), 0);
+    }
+    assert_eq!(
+        aic.take_counts(),
+        AicCounts {
+            rises: 1,
+            pins_raised: 4,
+            claimed: 1,
+            empty: 3,
+        }
+    );
+    assert_eq!(aic.take_counts(), AicCounts::default());
+}
+
 #[test]
 fn explicit_layout_routes_claims_masks_and_timestamps_independently_per_die() {
     let (config, layout) = two_dies();

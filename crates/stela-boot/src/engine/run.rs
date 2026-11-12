@@ -655,6 +655,24 @@ fn transfer_times_report<H: Host>(machine: &Machine<H, parallel::Board>, tsc_hz:
     output::arguments(format_args!("{line}\n"));
 }
 
+/// `DEVICE AIC rises/pins_raised/claimed/empty`: since the last beat, how
+/// often the AIC's IRQ output rose, the CPU pins those rises raised, and
+/// the event reads that claimed an IRQ or found none
+/// (`stela_soc::aic::AicCounts`): pins per rise is the fan-out, and the
+/// empty reads mostly the CPUs that lost the claim.
+fn aic_counts_report<H: Host>(machine: &Machine<H, parallel::Board>) {
+    let Some(counts) = machine.devices.with(|devices| devices.take_aic_counts()) else {
+        return;
+    };
+    if counts == stela_soc::aic::AicCounts::default() {
+        return;
+    }
+    output::arguments(format_args!(
+        "DEVICE AIC rises={} pins_raised={} claimed={} empty={}\n",
+        counts.rises, counts.pins_raised, counts.claimed, counts.empty
+    ));
+}
+
 /// Completed intervals of this owned home machine only. Other PEs' state
 /// is not inspected; an unfinished phase has no completed maximum yet.
 pub(super) fn profile_lifetime_maxima(timing: &step_timing::StepTiming, tsc_hz: u64, report: &str) {
@@ -1891,6 +1909,7 @@ impl Heartbeat {
             regime_syncs_report(&exits.regimes, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
+            aic_counts_report(machine);
             hot_blocks_report(
                 machine,
                 &mut self.dynamic,
