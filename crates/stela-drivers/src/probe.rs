@@ -601,7 +601,7 @@ fn unclaimed(class: [u8; 3], address: Address, displays: &[Address]) -> Option<&
 fn unsupported(class: [u8; 3]) -> Option<&'static str> {
     match class {
         [0x01, 0x01, _] => Some("IDE storage controller"),
-        [0x01, 0x04, _] => Some("RAID storage controller (Intel RST/VMD mode)"),
+        [0x01, 0x04, _] => Some("RAID storage controller outside the AHCI table"),
         [0x01, 0x06, _] => Some("SATA controller without the AHCI interface"),
         [0x01, 0x08, _] => Some("non-NVMe non-volatile memory controller"),
         [0x01, ..] => Some("storage controller"),
@@ -3159,7 +3159,7 @@ mod tests {
         );
         assert_eq!(
             unsupported([0x01, 0x04, 0x00]),
-            Some("RAID storage controller (Intel RST/VMD mode)")
+            Some("RAID storage controller outside the AHCI table")
         );
         assert_eq!(
             unsupported([0x0c, 0x03, 0x10]),

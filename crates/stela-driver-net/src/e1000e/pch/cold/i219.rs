@@ -3,8 +3,8 @@
 // Copyright (c) 2026 Stela contributors
 //! Exact PCI-table-selected I219 SPT/CNP/TGP/ADP cohorts. Family selection is
 //! pinned to the donor's PCI table, not the product suffix or PHY ID.
-//! In particular CMP12 selects SPT; CMP10/11 select CNP. MTP and later MACs
-//! require additional PHY/K1/retry and real platform-quirk permission and refuse.
+//! In particular CMP12 selects SPT; CMP10/11 select CNP. MTP and PTP, with
+//! their PHY, K1, retry and board-quirk rules, are selected in `mtp`.
 use super::{Controller, Delay, Error, lpt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
