@@ -124,8 +124,8 @@ impl Record {
     /// Whether installs stream `ipsw`'s build from Apple's servers rather
     /// than read it from the USB, by the setup's installer
     /// ([`Self::install_kind`]). A full installer's erase restore needs the
-    /// macOS system image, which a recovery archive
-    /// (`restore::payload::trim`) leaves out.
+    /// macOS system image, which an archive of boot files
+    /// (`restore::fetch_inputs`) leaves out.
     pub(super) fn remote_install(&self, ipsw: &Path) -> Result<bool> {
         image_is_remote(ipsw, self.install_kind())
     }

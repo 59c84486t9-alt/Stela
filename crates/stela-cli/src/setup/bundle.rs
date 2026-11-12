@@ -77,8 +77,8 @@ pub(super) enum Kind {
 }
 
 /// The kinds the install medium's restores boot: the erase restore alone.
-/// The medium holds the recovery members only
-/// (`restore::payload::trim`), which have no update identity; the installed
+/// The medium holds only the members the erase restore bundle reads
+/// (`restore::fetch_inputs`), which have no update identity; the installed
 /// macOS updates itself, as on a Mac.
 pub(super) const RESTORE_KINDS: [Kind; 1] = [Kind::Restore];
 

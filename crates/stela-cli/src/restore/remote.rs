@@ -1,6 +1,6 @@
 //! An IPSW on Apple's servers read by byte ranges, so setup copies the
-//! members a recovery medium needs ([`super::payload::trim`]) without
-//! downloading the whole image.
+//! members preparing its boot bundles reads ([`super::fetch_inputs`])
+//! without downloading the whole image.
 //!
 //! The first range answer pins the object's ETag and length. Every later
 //! request carries `If-Range` with that ETag, so a server that holds a
