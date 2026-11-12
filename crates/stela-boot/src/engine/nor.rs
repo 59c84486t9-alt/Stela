@@ -384,8 +384,8 @@ pub(crate) fn open_log(disk: &Shared, block: u64, available: u64) -> bool {
             return false;
         }
         Err(error) => {
-            output::arguments(format_args!("BOOT LOG refusal: {error}\n"));
-            output::fatal("the boot log could not be opened")
+            output::log_lost(output::Log::Machine, error);
+            return false;
         }
     };
     if let Some(reason) = writer.fresh() {
@@ -401,8 +401,8 @@ pub(crate) fn open_log(disk: &Shared, block: u64, available: u64) -> bool {
     match output::add_log(writer, device, output::Log::Machine) {
         Ok(()) => true,
         Err(error @ output::Unopened::Store(_)) => {
-            output::arguments(format_args!("BOOT LOG refusal: {error}\n"));
-            output::fatal("the boot log could not be stored")
+            output::log_lost(output::Log::Machine, error);
+            false
         }
         // The disk took the writes and keeps none: NVRAM will not persist
         // either. The boot goes on, so the screen shows how far it gets.

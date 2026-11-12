@@ -500,15 +500,26 @@ fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
-/// What a log is kept for, which decides what its failure does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Log {
-    /// The machine state's: a failed store stops the machine.
-    Machine,
-    /// The USB's file through the firmware, closed as boot services end.
-    Firmware,
-    /// The USB's file through Stela's drivers.
-    Usb,
+pub use stela_boot_core::log_sinks::Log;
+
+/// The logs lost this boot, each reported once: reached only while
+/// holding [`HELD`].
+static LOST: Global<stela_boot_core::log_sinks::Lost> =
+    Global(RefCell::new(stela_boot_core::log_sinks::Lost::new()));
+
+/// Report that `log` could not be opened or stored: once per place, in the
+/// log and on the screen. The boot goes on without it: a diagnostic copy of
+/// the output never stops the machine.
+pub fn log_lost(log: Log, error: impl fmt::Display) {
+    arguments(format_args!(
+        "BOOT LOG refusal: {} log: {error}; closed for this boot\n",
+        log.name()
+    ));
+    // Never waits: another processor may hold the logs for good.
+    let notice = with_sinks(false, |_| LOST.0.borrow_mut().lose(log)).flatten();
+    if let Some(notice) = notice {
+        crate::status::info(notice);
+    }
 }
 
 /// The open logs, which any processor may flush or report: reached only
@@ -723,8 +734,8 @@ pub fn close_logs() {
 }
 
 /// Store in every open log the output it does not hold yet, waiting for
-/// the stores. A USB log that fails is reported and closed; a failed
-/// machine-state store stops the machine. Output printed during the flush
+/// the stores. A log that fails is reported and closed for this boot
+/// ([`log_lost`]). Output printed during the flush
 /// is not recorded.
 pub fn flush_log() {
     flush_where(|_| true, true);
@@ -809,10 +820,7 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
         );
     });
     for (kind, error) in failed {
-        arguments(format_args!("BOOT LOG refusal: {error}\n"));
-        if kind == Log::Machine {
-            fatal("the boot log could not be stored");
-        }
+        log_lost(kind, error);
     }
 }
 
@@ -841,11 +849,7 @@ pub fn report_log_stores() {
         return;
     };
     for (kind, stores, millis) in costs {
-        let name = match kind {
-            Log::Machine => "machine",
-            Log::Firmware => "firmware",
-            Log::Usb => "usb",
-        };
+        let name = kind.name();
         arguments(format_args!(
             "BOOT LOG {name} stores={stores} ms={millis}\n"
         ));
