@@ -1206,7 +1206,7 @@ impl Writer {
             let protect = UsedKeys::parse(&used_now(&self.added_keys), &self.translator);
             let mut merge = Merge::new(
                 self.translator,
-                self.segments.clone(),
+                self.segments.iter().copied().map(Into::into).collect(),
                 self.used.clone(),
                 self.limit.min(free),
             );

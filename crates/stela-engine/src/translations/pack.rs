@@ -360,6 +360,74 @@ fn index_field(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("a field"))
 }
 
+/// A segment a merge reads: one read from the file, or one laid out in
+/// memory (a new segment, or an earlier merge's), whose records the merge
+/// moves out instead of copying when nothing else holds it.
+#[derive(Debug, Clone)]
+pub enum Segment<'a> {
+    Packed(Pack<'a>),
+    Laid(Arc<Layout<'a>>),
+}
+
+impl<'a> From<Pack<'a>> for Segment<'a> {
+    fn from(pack: Pack<'a>) -> Self {
+        Self::Packed(pack)
+    }
+}
+
+impl<'a> Segment<'a> {
+    /// Its index: the pack's bytes, or the layout's prefix.
+    fn index(&self) -> &[u8] {
+        match self {
+            Self::Packed(pack) => pack.bytes,
+            Self::Laid(layout) => &layout.prefix,
+        }
+    }
+
+    pub fn records(&self) -> usize {
+        match self {
+            Self::Packed(pack) => pack.count,
+            Self::Laid(layout) => layout.records.len(),
+        }
+    }
+
+    fn format(&self) -> PackFormat {
+        PackFormat::read(self.index()).unwrap_or(PackFormat::Raw)
+    }
+
+    fn key(&self, index: usize) -> Digest {
+        entry(self.index(), index).0
+    }
+
+    fn age(&self, index: usize) -> u8 {
+        entry_age(self.index(), index)
+    }
+
+    /// The record of index entry `index`, to decode.
+    fn record(&self, index: usize) -> PackedRecord<'_> {
+        match self {
+            Self::Packed(pack) => pack.record_at(index),
+            Self::Laid(layout) => PackedRecord {
+                bytes: layout.records[index].1.bytes(),
+                format: self.format(),
+                checked: false,
+            },
+        }
+    }
+
+    /// The record of index entry `index` for a merge's layout, which reads
+    /// it no more: moved out of a layout nothing else holds.
+    fn take(&mut self, index: usize) -> Piece<'a> {
+        match self {
+            Self::Packed(pack) => Piece::Kept(pack.record_at(index).bytes),
+            Self::Laid(layout) => match Arc::get_mut(layout) {
+                Some(layout) => core::mem::replace(&mut layout.records[index].1, Piece::Kept(&[])),
+                None => layout.records[index].1.clone(),
+            },
+        }
+    }
+}
+
 /// A record of a pack being laid out: one of the read pack's, or new.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Piece<'a> {
@@ -662,7 +730,7 @@ impl Delta {
 /// lists since the last that names it.
 pub struct Merge<'a> {
     translator: Digest,
-    segments: Vec<Pack<'a>>,
+    segments: Vec<Segment<'a>>,
     used: Vec<UsedKeys>,
     /// Keys the running boot used so far: their records stay, whatever
     /// their age, and its own list counts the boot at the next merge.
@@ -730,11 +798,14 @@ impl<'a> Merge<'a> {
     /// records used most recently are kept first.
     pub fn new(
         translator: Digest,
-        segments: Vec<Pack<'a>>,
+        segments: Vec<Segment<'a>>,
         used: Vec<UsedKeys>,
         bound: u64,
     ) -> Self {
-        let format = if segments.iter().any(|pack| pack.format == PackFormat::Mixed) {
+        let format = if segments
+            .iter()
+            .any(|segment| segment.format() == PackFormat::Mixed)
+        {
             PackFormat::Mixed
         } else {
             PackFormat::Raw
@@ -791,23 +862,23 @@ impl<'a> Merge<'a> {
             .segments
             .iter()
             .zip(&self.cursors)
-            .filter(|(pack, at)| **at < pack.count)
-            .map(|(pack, &at)| entry(pack.bytes, at).0)
+            .filter(|(segment, at)| **at < segment.records())
+            .map(|(segment, &at)| segment.key(at))
             .min();
         let Some(key) = next else {
             return false;
         };
         let mut holders = Vec::new();
-        for (index, pack) in self.segments.iter().enumerate() {
+        for (index, segment) in self.segments.iter().enumerate() {
             let at = self.cursors[index];
-            if at < pack.count && entry(pack.bytes, at).0 == key {
+            if at < segment.records() && segment.key(at) == key {
                 holders.push((index, at));
                 self.cursors[index] += 1;
             }
         }
         let age = holders
             .iter()
-            .map(|&(index, at)| entry_age(self.segments[index].bytes, at))
+            .map(|&(index, at)| self.segments[index].age(at))
             .min()
             .unwrap_or(0);
         let age = self.age(&key, age);
@@ -816,11 +887,11 @@ impl<'a> Merge<'a> {
             return true;
         }
         let piece = if let [(index, at)] = holders[..] {
-            Piece::Kept(self.segments[index].record_at(at).bytes)
+            self.segments[index].take(at)
         } else {
             let mut merged: Option<Record> = None;
             for &(index, at) in &holders {
-                let stored = self.segments[index].record_at(at);
+                let stored = self.segments[index].record(at);
                 match stored.decode(&self.translator, &key, &mut self.scratch) {
                     Ok(record) => match &mut merged {
                         Some(merged) => merged.merge(record),
@@ -2155,6 +2226,7 @@ mod tests {
                 .map(|bytes| Pack::parse(bytes, &translator).unwrap()),
         );
         let used = vec![UsedKeys::parse(&used, &translator).unwrap()];
+        let segments = segments.into_iter().map(Segment::from).collect();
         Merge::new(translator, segments, used, bound)
             .finish()
             .layout
@@ -2226,6 +2298,7 @@ mod tests {
         };
         assert_eq!(offsets(&next.record(&key).unwrap()), [8, 0x10]);
         assert_eq!(next.counters.loaded, 1);
+        let segments = segments.into_iter().map(Segment::from).collect();
         let mut merge = Merge::new(translator, segments, Vec::new(), u64::MAX);
         while !merge.step(1) {}
         let merged = merge.finish();
@@ -2253,13 +2326,16 @@ mod tests {
     }
 
     /// A merge or a delta stepped a unit at a time lays out what one done
-    /// at once does, in a number of steps bounded by its keys.
+    /// at once does, in a number of steps bounded by its keys; segments laid
+    /// out in memory merge as their written bytes do, and a merge's layout
+    /// merges again.
     #[test]
     fn merges_and_deltas_step_a_bounded_unit_at_a_time() {
         let translator = translator_id();
         let keys: Vec<Digest> = (0u32..60).map(|n| Digest::of(&n.to_le_bytes())).collect();
         let mut store = Store::new(translator, None).0;
-        let mut segments = Vec::new();
+        let mut laid = Vec::new();
+        let mut packed = Vec::new();
         for round in 0..3u64 {
             for key in keys.iter().skip(round as usize * 15).take(30) {
                 store.offer(offer(0x1_0000_4008 + 8 * round, *key));
@@ -2270,10 +2346,26 @@ mod tests {
                 steps += 1;
             }
             assert!(steps <= 3 * 30 + 2, "{steps}");
-            let bytes: &'static [u8] = Vec::leak(delta.finish().unwrap().to_vec());
-            segments.push(Pack::parse(bytes, &translator).unwrap());
+            let layout = delta.finish().unwrap();
+            let bytes: &'static [u8] = Vec::leak(layout.to_vec());
+            packed.push(Segment::from(Pack::parse(bytes, &translator).unwrap()));
+            laid.push(Segment::Laid(Arc::new(layout)));
         }
+        let from_laid = Merge::new(translator, laid.clone(), Vec::new(), u64::MAX).finish();
+        let segments = packed;
         let all = Merge::new(translator, segments.clone(), Vec::new(), u64::MAX).finish();
+        assert_eq!(from_laid.layout.to_vec(), all.layout.to_vec());
+        // A held layout is copied from, one nothing else holds moved from:
+        // the held one still reads whole.
+        assert_eq!(laid[0].records(), 30);
+        let again = Merge::new(
+            translator,
+            vec![Segment::Laid(Arc::new(from_laid.layout))],
+            Vec::new(),
+            u64::MAX,
+        )
+        .finish();
+        assert_eq!(again.layout.to_vec(), all.layout.to_vec());
         assert_eq!(all.layout.records(), keys.len());
         let bound = all.layout.bytes() / 2;
         let whole = Merge::new(translator, segments.clone(), Vec::new(), bound).finish();
@@ -2324,7 +2416,7 @@ mod tests {
         let list = |keys: &[Digest]| {
             UsedKeys::parse(&UsedKeys::encode(&translator, keys.iter()), &translator).unwrap()
         };
-        let segments = vec![Pack::parse(&bytes, &translator).unwrap()];
+        let segments = vec![Segment::from(Pack::parse(&bytes, &translator).unwrap())];
         let lists = vec![list(&[unused]), list(&[used]), list(&[])];
         let merged = Merge::new(translator, segments.clone(), lists.clone(), u64::MAX).finish();
         let merged = merged.layout.to_vec();
