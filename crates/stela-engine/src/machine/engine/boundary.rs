@@ -794,6 +794,11 @@ pub trait Devices {
     fn device_name(&self, _physical: u64) -> Option<&'static str> {
         None
     }
+    /// The name the model mapped at `physical` gives that register, for
+    /// reports.
+    fn register_name(&self, _physical: u64) -> Option<&'static str> {
+        None
+    }
     /// Host counter ticks this handle waited for a shared board's lock
     /// since the last call.
     fn take_lock_wait(&mut self) -> u64 {

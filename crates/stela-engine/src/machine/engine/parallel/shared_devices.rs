@@ -1093,6 +1093,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
     fn device_name(&self, physical: u64) -> Option<&'static str> {
         self.with(|devices| devices.device_name(physical))
     }
+    fn register_name(&self, physical: u64) -> Option<&'static str> {
+        self.with(|devices| devices.register_name(physical))
+    }
     fn take_lock_wait(&mut self) -> u64 {
         self.waited.swap(0, Ordering::Relaxed)
     }

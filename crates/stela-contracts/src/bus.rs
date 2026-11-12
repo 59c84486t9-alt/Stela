@@ -176,6 +176,11 @@ pub trait MmioDevice: Any {
         None
     }
     fn name(&self) -> &'static str;
+    /// The name of the register at `offset`, for reports; `None` where the
+    /// model names none.
+    fn register_name(&self, _offset: u64) -> Option<&'static str> {
+        None
+    }
     fn read(
         &mut self,
         offset: u64,
@@ -494,6 +499,11 @@ impl Bus {
     pub fn name_at(&self, address: u64) -> Option<&'static str> {
         let (device, _) = self.route(address, Width::Byte).ok()?;
         Some(self.devices.get(device.0)?.name())
+    }
+    /// The name the model gives the register at `address`, for reports.
+    pub fn register_name_at(&self, address: u64) -> Option<&'static str> {
+        let (device, offset) = self.route(address, Width::Byte).ok()?;
+        self.devices.get(device.0)?.register_name(offset)
     }
     pub fn read(
         &mut self,

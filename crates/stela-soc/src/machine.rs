@@ -1281,6 +1281,10 @@ impl Devices for AppleDevices {
         self.bus.name_at(physical)
     }
 
+    fn register_name(&self, physical: u64) -> Option<&'static str> {
+        self.bus.register_name_at(physical)
+    }
+
     fn memory_lock(&self) -> stela_engine::machine::mmu::MemoryLocks {
         let Some(device) = self.memory_controller else {
             return [None; stela_soc_data::amcc::GROUPS];

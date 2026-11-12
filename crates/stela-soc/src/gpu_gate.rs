@@ -256,6 +256,32 @@ impl MmioDevice for Gate {
         NAME
     }
 
+    /// The control page's registers and a gate's, by the window's names,
+    /// so device reports count each gate operation over every connection.
+    fn register_name(&self, offset: u64) -> Option<&'static str> {
+        let (page, register) = (offset / PAGE, offset % PAGE);
+        Some(match (page, register) {
+            (0, OPEN) => "OPEN",
+            (0, OPENED) => "OPENED",
+            (0, CLOSE) => "CLOSE",
+            (0, COUNT) => "COUNT",
+            (0, STATUS) => "STATUS",
+            (0, ACK) => "ACK",
+            (0, IMPORT_ADDRESS) => "IMPORT_ADDRESS",
+            (0, IMPORT_BYTES) => "IMPORT_BYTES",
+            (0, IMPORT_TOKEN) => "IMPORT_TOKEN",
+            (0, IMPORT) => "IMPORT",
+            (0, IMPORTED) => "IMPORTED",
+            (0, RETIRE) => "RETIRE",
+            (0, RETIRED) => "RETIRED",
+            (0, BUNDLE) => "BUNDLE",
+            (0, _) => return None,
+            (_, CALL) => "CALL",
+            (_, FAULT) => "FAULT",
+            _ => return None,
+        })
+    }
+
     fn read(
         &mut self,
         offset: u64,
@@ -566,6 +592,22 @@ mod tests {
 
     fn gate(log: &Arc<Service>) -> Gate {
         Gate::new(0, log.clone(), IRQ)
+    }
+
+    /// Reports name the control page's registers and every gate's CALL and
+    /// FAULT alike, and nothing else.
+    #[test]
+    fn registers_are_named_by_the_window() {
+        let log = Arc::new(Service(Mutex::default()));
+        let gate = gate(&log);
+        assert_eq!(gate.register_name(ACK), Some("ACK"));
+        assert_eq!(gate.register_name(STATUS), Some("STATUS"));
+        for page in [1, CONNECTIONS as u64] {
+            assert_eq!(gate.register_name(page * PAGE + CALL), Some("CALL"));
+            assert_eq!(gate.register_name(page * PAGE + FAULT), Some("FAULT"));
+            assert_eq!(gate.register_name(page * PAGE + 0x10), None);
+        }
+        assert_eq!(gate.register_name(0x70), None);
     }
 
     #[test]

@@ -265,7 +265,8 @@ fn numerical_exits_report(
 /// holds pages past the table's, and `forwarded` the accesses sent to the
 /// home machine with their PEs' wait for its answer. `PES DEVICE MODELS`
 /// sums the pages by model, and `PES DEVICE REGISTERS` gives the sixteen
-/// costliest registers by direction (`name@address:r` or `:w`).
+/// costliest registers by direction (`name@address:r` or `:w`, or
+/// `name.REGISTER:r` summed over the model's pages where it names them).
 fn device_exits_report<H: Host>(
     machine: &Machine<H, parallel::Board>,
     exits: &step_timing::DeviceExits,
@@ -331,28 +332,45 @@ fn device_exits_report<H: Host>(
     }
     output::arguments(format_args!("{line}\n"));
     // The same accesses by register and direction, the sixteen costliest:
-    // which registers translated code could complete itself.
+    // which registers translated code could complete itself. A register
+    // its model names counts as `model.NAME`, summed over the model's pages
+    // (a gate's CALL over every connection).
     const REGISTERS: usize = 16;
-    let mut registers: Vec<step_timing::DeviceRegisterExit> =
-        exits.counted_registers().copied().collect();
-    registers.sort_unstable_by_key(|exit| core::cmp::Reverse(exit.ticks));
-    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns");
-    for exit in registers.iter().take(REGISTERS) {
+    let mut registers: Vec<(String, u64, u64, u64)> = Vec::new();
+    for exit in exits.counted_registers() {
         let physical = exit.register & !step_timing::DEVICE_REGISTER_WRITE;
         let direction = if exit.register & step_timing::DEVICE_REGISTER_WRITE != 0 {
             'w'
         } else {
             'r'
         };
-        let name = machine
-            .devices
-            .with(|devices| stela_engine::machine::Devices::device_name(devices, physical));
+        let (name, register) = machine.devices.with(|devices| {
+            (
+                stela_engine::machine::Devices::device_name(devices, physical),
+                stela_engine::machine::Devices::register_name(devices, physical),
+            )
+        });
+        let name = name.unwrap_or("unmapped");
+        let label = match register {
+            Some(register) => format!("{name}.{register}:{direction}"),
+            None => format!("{name}@{physical:#x}:{direction}"),
+        };
+        match registers.iter_mut().find(|(known, ..)| *known == label) {
+            Some((_, count, ticks, waited)) => {
+                *count += exit.count;
+                *ticks += exit.ticks;
+                *waited += exit.waited;
+            }
+            None => registers.push((label, exit.count, exit.ticks, exit.waited)),
+        }
+    }
+    registers.sort_unstable_by_key(|&(_, _, ticks, _)| core::cmp::Reverse(ticks));
+    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns");
+    for (label, count, ticks, waited) in registers.iter().take(REGISTERS) {
         line.push_str(&format!(
-            " {}@{physical:#x}:{direction}={}/{}/{}",
-            name.unwrap_or("unmapped"),
-            exit.count,
-            nanos(exit.ticks),
-            lock_nanos(exit.waited)
+            " {label}={count}/{}/{}",
+            nanos(*ticks),
+            lock_nanos(*waited)
         ));
     }
     let other = exits.other_registers;
