@@ -924,11 +924,11 @@ fn halt(code: u32) -> ! {
 /// Show `message` as the reason the mount stopped: as a failed step on
 /// Stela's console, followed by `next`, or on the firmware's before it
 /// exists.
-fn stopped(message: &str, next: &str) {
+fn stopped(message: &str, next: &dyn Fn() -> &'static str) {
     console::reclaim();
     if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
         crate::status::fail(message);
-        crate::status::info(next);
+        crate::status::info(next());
     } else if FIRMWARE_CONSOLE.load(Ordering::Relaxed) {
         firmware_console("\nStela stopped: ");
         firmware_console(message);
@@ -948,13 +948,24 @@ pub const STOPPED_UNLOGGED: &str = "Stela stopped before it could write this par
     to the USB: this screen is the only record of it. Take a photo of it for a report. Turn the \
     PC off to try again.";
 
-/// [`STOPPED`], or [`STOPPED_UNLOGGED`] while no USB log is open. Never
-/// waits: a stop raised inside a log store finds the logs held.
-pub fn stopped_text() -> &'static str {
-    let open = with_sinks(false, |sinks| {
+/// Whether the USB's log is open and none of its stores failed this boot.
+/// Never waits: a stop raised inside a log store finds the logs held, and
+/// a log whose store was cut short is not claimed.
+pub fn usb_log_kept() -> bool {
+    with_sinks(false, |sinks| {
+        let lost = LOST.0.borrow();
         sinks.iter().any(|sink| sink.kind != Log::Machine)
-    });
-    if open.unwrap_or(true) {
+            && !lost.is_lost(Log::Usb)
+            && !lost.is_lost(Log::Firmware)
+    })
+    .unwrap_or(false)
+}
+
+/// [`STOPPED`] while the USB's log is kept ([`usb_log_kept`]), else
+/// [`STOPPED_UNLOGGED`]: a log that was closed as lost is never claimed.
+/// Read after the last store, so a store that fails then counts.
+pub fn stopped_text() -> &'static str {
+    if usb_log_kept() {
         STOPPED
     } else {
         STOPPED_UNLOGGED
@@ -967,7 +978,12 @@ pub fn fatal(message: impl core::fmt::Display) -> ! {
     // The reason reaches the port before any later step can stop for good.
     unqueue_serial();
     crate::engine::stop_gpus_for_fatal();
-    stopped(&message, stopped_text());
+    // The reason is on the screen before the last store, which may be what
+    // fails, and the advice after it says whether the log was kept.
+    stopped(&message, &|| {
+        flush_log();
+        stopped_text()
+    });
     terminate(0x11)
 }
 
@@ -978,5 +994,5 @@ pub fn fatal(message: impl core::fmt::Display) -> ! {
 pub fn stopping(message: &str) {
     arguments(format_args!("\nSTELA STOP {message}\n"));
     unqueue_serial();
-    stopped(message, "Stela stopped. The PC turns off.");
+    stopped(message, &|| "Stela stopped. The PC turns off.");
 }

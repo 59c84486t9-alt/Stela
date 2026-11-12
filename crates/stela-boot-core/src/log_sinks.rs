@@ -65,6 +65,11 @@ impl Lost {
         self.0 |= log.bit();
         first.then(|| log.lost_notice())
     }
+
+    /// Whether `log` was lost this boot.
+    pub fn is_lost(&self, log: Log) -> bool {
+        self.0 & log.bit() != 0
+    }
 }
 
 #[cfg(test)]
@@ -77,6 +82,16 @@ mod tests {
         assert_eq!(lost.lose(Log::Machine), Some(Log::Machine.lost_notice()));
         assert_eq!(lost.lose(Log::Machine), None);
         assert_eq!(lost.lose(Log::Usb), Some(Log::Usb.lost_notice()));
+    }
+
+    /// A lost log stays lost, so a later stop never points to it.
+    #[test]
+    fn a_lost_log_is_remembered() {
+        let mut lost = Lost::default();
+        assert!(!lost.is_lost(Log::Usb));
+        lost.lose(Log::Usb);
+        assert!(lost.is_lost(Log::Usb));
+        assert!(!lost.is_lost(Log::Firmware) && !lost.is_lost(Log::Machine));
     }
 
     #[test]

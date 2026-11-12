@@ -869,16 +869,20 @@ fn show_reset(otherwise: &str, action: &str, hold: u64) {
         return;
     }
     show_stop(&guest_down(String::from(otherwise)));
-    crate::status::info(
-        "Its full log is on this USB: on another computer, `stela setup boot-log --output \
-         log.txt` saves it.",
-    );
+    output::flush_log();
+    if output::usb_log_kept() {
+        crate::status::info(
+            "Its full log is on this USB: on another computer, `stela setup boot-log --output \
+             log.txt` saves it.",
+        );
+    }
     crate::status::countdown(action, hold);
 }
 
 /// [`show_stop`], then halt until the PC is turned off.
 fn stop_here(text: &str, code: u32) -> ! {
     show_stop(text);
+    output::flush_log();
     crate::status::info(output::stopped_text());
     output::terminate(code)
 }
