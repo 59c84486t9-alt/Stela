@@ -455,10 +455,12 @@ fn a_usb3_root_port_the_reset_left_untrained_is_warm_reset_and_enumerated() {
     }
 }
 
-/// A warm reset that leaves the link untrained is reported as such; Cold
-/// Attach Status means nothing on a USB 2 port, which stays empty.
+/// A warm reset that leaves no connection is an empty port, as Linux's
+/// -ENOTCONN leaves it, with Cold Attach Status cleared and the port
+/// disabled; Cold Attach Status means nothing on a USB 2 port, which stays
+/// empty.
 #[test]
-fn an_untrainable_usb3_link_is_reported_and_a_usb2_port_ignores_cold_attach() {
+fn an_untrainable_usb3_link_is_an_empty_port_and_a_usb2_port_ignores_cold_attach() {
     let nodes = BTreeMap::from([(0, hub::model::Node::leaf(SUPER_SPEED))]);
     let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = hub::tests::controller(&mut dma, 32, nodes);
@@ -466,11 +468,9 @@ fn an_untrainable_usb3_link_is_reported_and_a_usb2_port_ignores_cold_attach() {
     model.borrow_mut().root_untrainable = true;
     let mut failures = Vec::new();
     assert!(controller.enumerate(&mut dma, &mut failures).is_empty());
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(
-        failures[0].1,
-        BlockError::Unsupported("USB 3 link did not train after a warm reset")
-    );
+    assert!(failures.is_empty(), "{failures:?}");
+    let after = model.borrow().root_status.unwrap();
+    assert_eq!(after & (CAS | CCS | PED | WRC | PRC), 0);
 
     let nodes = BTreeMap::from([(0, hub::model::Node::leaf(HIGH_SPEED))]);
     let mut dma = TestRegion::new(256 * 1024 * 8);

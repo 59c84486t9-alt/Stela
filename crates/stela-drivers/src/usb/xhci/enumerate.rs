@@ -554,10 +554,12 @@ impl Controller {
             }
         }
         let portsc = self.registers.read32(at);
+        // Linux `hub_port_reset` returns -ENOTCONN for a warm reset that
+        // leaves no connection, and the port stays disabled: it is empty,
+        // not a failure. The warm reset cleared CAS, so the next look does
+        // not reset it again.
         if warm && portsc & CCS == 0 {
-            return Err(BlockError::Unsupported(
-                "USB 3 link did not train after a warm reset",
-            ));
+            return Ok(None);
         }
         if portsc & PED == 0 {
             return Err(BlockError::Unsupported("root port did not enable"));
