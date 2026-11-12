@@ -11,7 +11,10 @@ pub const LINUX_FIRMWARE: &str = "https://gitlab.com/kernel-firmware/linux-firmw
 /// The same repository on git.kernel.org, which holds every pinned commit.
 pub const LINUX_FIRMWARE_KERNEL_ORG: &str =
     "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git";
-pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
+/// The r8169 files and their notice: linux-firmware 20261019, which holds
+/// every file the driver loads, the older ones byte for byte as at earlier
+/// commits, and keeps the notice under `LICENSES/`.
+pub const REALTEK_REVISION: &str = "a2dcb924f0897368b0b4f305cbf9808cdda90ce0";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
 pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01";
 /// MT7925 Bluetooth build 20260605184935. On this PC's controller
@@ -100,7 +103,7 @@ impl Artifact {
 const LICENSE: Artifact = Artifact {
     source: LINUX_FIRMWARE,
     revision: REALTEK_REVISION,
-    member: "LICENSE.r8169",
+    member: "LICENSES/LICENSE.r8169",
     length: 219,
     sha256: "f9689ba2640d61e7b4527ad84cbfa6a9f0ec11484e2c9f6b5500197e22c27ecd",
 };
@@ -1514,7 +1517,7 @@ mod tests {
         );
         assert_eq!(
             LICENSE.url(),
-            format!("{LINUX_FIRMWARE}/-/raw/{REALTEK_REVISION}/LICENSE.r8169")
+            format!("{LINUX_FIRMWARE}/-/raw/{REALTEK_REVISION}/LICENSES/LICENSE.r8169")
         );
         // linux-firmware members come from git.kernel.org first, GitLab
         // second; every recipe of the catalog but the regulatory database
@@ -1523,7 +1526,7 @@ mod tests {
             LICENSE.urls(),
             [
                 format!(
-                    "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/LICENSE.r8169?id={REALTEK_REVISION}"
+                    "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/LICENSES/LICENSE.r8169?id={REALTEK_REVISION}"
                 ),
                 LICENSE.url()
             ]
