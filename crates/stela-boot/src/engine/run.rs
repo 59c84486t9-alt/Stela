@@ -655,6 +655,49 @@ fn transfer_times_report<H: Host>(machine: &Machine<H, parallel::Board>, tsc_hz:
     output::arguments(format_args!("{line}\n"));
 }
 
+/// `DEVICE WRITE PARTS calls/entry_us/model_us/service_us/longest_us`:
+/// since the last beat, the board's scalar device writes by register page
+/// (`stela_soc::machine::WRITE_PARTS`), the most costly first: the model's
+/// own work under the devices' lock, apart from the lock, the transfer and
+/// the release a write's exit also holds.
+fn write_times_report<H: Host>(machine: &Machine<H, parallel::Board>, tsc_hz: u64) {
+    let times = machine.devices.with(|devices| devices.take_write_times());
+    let mut pages: Vec<_> = times
+        .pages
+        .iter()
+        .map(|page| (Some(page.page), *page))
+        .chain(core::iter::once((None, times.other)))
+        .filter(|(_, page)| page.calls != 0)
+        .collect();
+    if pages.is_empty() {
+        return;
+    }
+    pages.sort_unstable_by_key(|(_, page)| core::cmp::Reverse(page.parts.iter().sum::<u64>()));
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    let mut line = String::from("DEVICE WRITE PARTS calls/entry_us/model_us/service_us/longest_us");
+    for (address, page) in &pages {
+        let name = match address {
+            Some(address) => {
+                let device = machine
+                    .devices
+                    .with(|devices| stela_engine::machine::Devices::device_name(devices, *address))
+                    .unwrap_or("unmapped");
+                format!("{device}@{address:#x}")
+            }
+            None => String::from("other"),
+        };
+        line.push_str(&format!(
+            " {name}={}/{}/{}/{}/{}",
+            page.calls,
+            micros(page.parts[0]),
+            micros(page.parts[1]),
+            micros(page.parts[2]),
+            micros(page.longest)
+        ));
+    }
+    output::arguments(format_args!("{line}\n"));
+}
+
 /// `DEVICE AIC rises/pins_raised/claimed/empty`: since the last beat, how
 /// often the AIC's IRQ output rose, the CPU pins those rises raised, and
 /// the event reads that claimed an IRQ or found none
@@ -1910,6 +1953,7 @@ impl Heartbeat {
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
             aic_counts_report(machine);
+            write_times_report(machine, tsc_hz);
             hot_blocks_report(
                 machine,
                 &mut self.dynamic,

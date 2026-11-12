@@ -13,7 +13,9 @@ pub mod t6000_pmgr;
 mod timekeeping;
 mod transfer_times;
 mod usb;
-pub use transfer_times::{PartTime, TRANSFER_PARTS};
+pub use transfer_times::{
+    PageWrites, PartTime, TRANSFER_PARTS, WRITE_PAGES, WRITE_PARTS, WriteTimes,
+};
 
 use crate::Result;
 pub use crate::pmu::{RtcAnchor, RtcEpoch};
@@ -707,6 +709,13 @@ impl AppleDevices {
     /// last call, by [`TRANSFER_PARTS`].
     pub fn take_transfer_times(&mut self) -> [PartTime; TRANSFER_PARTS.len()] {
         self.transfer_times.take()
+    }
+
+    /// The scalar device writes timed since the last call, by register
+    /// page and by [`WRITE_PARTS`], while transfers are timed
+    /// ([`Self::time_transfers`]).
+    pub fn take_write_times(&mut self) -> WriteTimes {
+        self.transfer_times.take_writes()
     }
 
     /// The AICv2 or AICv3's delivery counts since the last call

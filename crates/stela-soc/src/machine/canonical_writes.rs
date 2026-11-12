@@ -15,6 +15,8 @@ impl AppleDevices {
         now: u64,
         mut memory: Option<&mut dyn CanonicalDeviceMemory>,
     ) -> Result<ConsumedWrite, DeviceError> {
+        let mut lap = self.transfer_times.lap();
+        let mut parts = [0; transfer_times::WRITE_PARTS.len()];
         self.check_raw_processor_power_write(physical, bytes, value)?;
         let width = width(bytes)?;
         let canonical = self.read_needs_ram(physical, DeviceReadShape::Scalar { bytes })
@@ -46,6 +48,7 @@ impl AppleDevices {
             if width == Width::Word {
                 self.check_power_request(physical, value)?;
             }
+            parts[0] = lap.split();
             let mut access = Access::new(cpu, now, &mut self.latch);
             let written = if canonical {
                 let memory = memory
@@ -74,6 +77,7 @@ impl AppleDevices {
                     .map_err(describe)
             };
             let reset = reset_reason(&access);
+            parts[1] = lap.split();
             let result = written.map_err(|error| {
                 if let Some((_, reason)) = self
                     .power_refusals
@@ -108,9 +112,12 @@ impl AppleDevices {
             Ok(reset)
         })();
         Ok(match reached {
-            Ok(reset) => ConsumedWrite::Complete {
-                settlement: self.settle(cpu, now, reset),
-            },
+            Ok(reset) => {
+                let settlement = self.settle(cpu, now, reset);
+                parts[2] = lap.split();
+                self.transfer_times.add_write(physical, parts);
+                ConsumedWrite::Complete { settlement }
+            }
             Err(error) => {
                 // Early RTC/lifecycle refusals can also have reached wires.
                 // A second capture after the register error is empty, never a
