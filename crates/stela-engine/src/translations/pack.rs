@@ -220,11 +220,30 @@ impl<'a> Pack<'a> {
 
     /// The index entry of `key`.
     fn position(&self, key: &Digest) -> Option<usize> {
-        let (mut low, mut high) = (0, self.count);
+        let count = self.count;
+        if count == 0 {
+            return None;
+        }
+        let key_at = |index: usize| {
+            let at = HEADER_BYTES + index * INDEX_ENTRY_BYTES;
+            &self.bytes[at..at + DIGEST_BYTES]
+        };
+        // Page keys are SHA-256 digests, spread evenly: a key's index is
+        // near its share of the key space, within a few standard deviations
+        // (at most half the square root of the count). The search starts
+        // in that window, and in the rest only when the key lies outside.
+        let prefix = u64::from_be_bytes(key.0[..8].try_into().expect("a prefix"));
+        let guess = ((u128::from(prefix) * count as u128) >> 64) as usize;
+        let reach = 2 * count.isqrt() + 8;
+        let (mut low, mut high) = (guess.saturating_sub(reach), (guess + reach + 1).min(count));
+        if key.0[..] < *key_at(low) {
+            (low, high) = (0, low);
+        } else if high < count && key.0[..] >= *key_at(high) {
+            (low, high) = (high, count);
+        }
         while low < high {
             let middle = (low + high) / 2;
-            let (found, _, _) = entry(self.bytes, middle);
-            match found.cmp(key) {
+            match key_at(middle).cmp(&key.0[..]) {
                 core::cmp::Ordering::Less => low = middle + 1,
                 core::cmp::Ordering::Greater => high = middle,
                 core::cmp::Ordering::Equal => return Some(middle),
@@ -252,6 +271,59 @@ impl<'a> Pack<'a> {
         (0..self.count).map(|index| {
             let (key, offset, bytes) = entry(self.bytes, index);
             (key, &self.bytes[offset as usize..(offset + bytes) as usize])
+        })
+    }
+}
+
+/// A filter of the page keys of each segment: a key a filter does not hold
+/// is not in its segment, so a lookup searches only the segments that may
+/// hold it, mostly the one that does, and seldom any for a key none holds.
+/// Each key sets [`FILTER_BITS`] bits of one 64-bit word,
+/// from about 16 bits a key: about one key in 40 a segment does not hold
+/// passes its filter.
+#[derive(Debug, Default)]
+pub struct KeyFilters {
+    filters: Vec<alloc::boxed::Box<[u64]>>,
+}
+
+const FILTER_BITS: usize = 4;
+const FILTER_BITS_PER_KEY: usize = 16;
+
+impl KeyFilters {
+    /// The filters of `segments`, shared by every part of a store.
+    pub fn new(segments: &[Pack<'_>]) -> Arc<Self> {
+        let filters = segments
+            .iter()
+            .map(|pack| {
+                let words = (pack.records() * FILTER_BITS_PER_KEY / 64)
+                    .max(1)
+                    .next_power_of_two();
+                let mut filter = alloc::vec![0u64; words].into_boxed_slice();
+                for index in 0..pack.records() {
+                    let (key, _, _) = entry(pack.bytes, index);
+                    let (word, bits) = Self::place(&key, words);
+                    filter[word] |= bits;
+                }
+                filter
+            })
+            .collect();
+        Arc::new(Self { filters })
+    }
+
+    /// The word of a filter of `words` words a key sets, and its bits: from
+    /// key bytes no part split or search start depends on.
+    fn place(key: &Digest, words: usize) -> (usize, u64) {
+        let word = u64::from_le_bytes(key.0[8..16].try_into().expect("a word index"));
+        let hash = u64::from_le_bytes(key.0[16..24].try_into().expect("bits"));
+        let bits = (0..FILTER_BITS).fold(0u64, |bits, at| bits | 1 << ((hash >> (6 * at)) & 63));
+        (word as usize & (words - 1), bits)
+    }
+
+    /// Whether segment `index` may hold `key`.
+    fn may_hold(&self, index: usize, key: &Digest) -> bool {
+        self.filters.get(index).is_none_or(|filter| {
+            let (word, bits) = Self::place(key, filter.len());
+            filter[word] & bits == bits
         })
     }
 }
@@ -1390,6 +1462,7 @@ pub struct Store<'a> {
     translator: Digest,
     /// The file's segments, oldest first: at most [`MAX_SEGMENTS`].
     segments: Vec<Pack<'a>>,
+    filters: Arc<KeyFilters>,
     /// The keys looked up, and whether the segments held a valid record for
     /// each. The records themselves are the engine's to keep: decoded, they
     /// take several times the pack's bytes.
@@ -1459,10 +1532,23 @@ impl<'a> Store<'a> {
     /// store, or one part of a store split by page key.
     pub fn over(translator: Digest, mut segments: Vec<Pack<'a>>) -> Self {
         segments.truncate(MAX_SEGMENTS);
+        let filters = KeyFilters::new(&segments);
+        Self::filtered(translator, segments, filters)
+    }
+
+    /// [`Self::over`] with the segments' filters already built, to share
+    /// between the parts of a store.
+    pub fn filtered(
+        translator: Digest,
+        mut segments: Vec<Pack<'a>>,
+        filters: Arc<KeyFilters>,
+    ) -> Self {
+        segments.truncate(MAX_SEGMENTS);
         let bounds = Bounds::default();
         Self {
             translator,
             segments,
+            filters,
             loaded: BTreeMap::new(),
             decoded: DecodedCache::new(bounds.decoded),
             decode_scratch: DecodeScratch::default(),
@@ -1640,7 +1726,10 @@ impl<'a> Store<'a> {
             records: [None; MAX_SEGMENTS],
         };
         let mut found = false;
-        for (slot, pack) in stored.records.iter_mut().zip(&self.segments) {
+        for (index, (slot, pack)) in stored.records.iter_mut().zip(&self.segments).enumerate() {
+            if !self.filters.may_hold(index, key) {
+                continue;
+            }
             *slot = pack.record(key).map(|mut record| {
                 // A first lookup that decoded the slot checked its bytes whole.
                 record.checked = loaded == Some(true);
@@ -2444,6 +2533,137 @@ mod tests {
         let pack = Pack::parse(&kept, &translator).unwrap();
         assert_eq!(pack.records(), 1);
         assert_eq!(pack.age(&used), Some(MAX_UNUSED_BOOTS));
+    }
+
+    /// The time a store's lookup of a page key takes over one segment and
+    /// over [`MAX_SEGMENTS`] holding the same records, for keys held and
+    /// keys absent, as a boot looks up both.
+    #[test]
+    #[ignore = "manual: opt-in"]
+    fn segment_lookup_costs() {
+        segment_lookups();
+    }
+
+    #[test]
+    fn lookups_find_every_held_key_whether_keys_are_spread_or_not() {
+        let translator = translator_id();
+        let layout = |keys: &[Digest]| {
+            let records = keys
+                .iter()
+                .map(|&key| (key, Piece::New(Record::new(translator, key).encode())))
+                .collect();
+            Layout::new(&translator, records).to_vec()
+        };
+        // Digests, and keys bunched at the bottom of the key space, which
+        // start the search far from where they lie.
+        let spread: Vec<Digest> = (0u32..3000).map(|n| Digest::of(&n.to_le_bytes())).collect();
+        let bunched: Vec<Digest> = (0u32..3000)
+            .map(|n| {
+                let mut key = [0; 32];
+                key[4..8].copy_from_slice(&n.to_be_bytes());
+                key[8..].copy_from_slice(&Digest::of(&n.to_le_bytes()).0[..24]);
+                Digest(key)
+            })
+            .collect();
+        let mut sorted = spread.clone();
+        sorted.sort_unstable();
+        let mut high = bunched.clone();
+        for key in &mut high {
+            key.0[0] = 0xff;
+        }
+        let bytes = [
+            layout(&sorted[..2000]),
+            layout(&sorted[2000..]),
+            layout(&bunched),
+            layout(&high),
+        ];
+        let segments: Vec<Pack> = bytes
+            .iter()
+            .map(|bytes| Pack::parse(bytes, &translator).unwrap())
+            .collect();
+        let store = Store::over(translator, segments.clone());
+        for (index, keys) in [&sorted[..2000], &sorted[2000..], &bunched, &high]
+            .into_iter()
+            .enumerate()
+        {
+            for key in keys {
+                assert!(segments[index].get(key).is_some());
+                let stored = store.stored(key).expect("a held key");
+                assert!(stored.records[index].is_some());
+            }
+        }
+        let absent = (5000u32..9000).map(|n| Digest::of(&n.to_le_bytes()));
+        let filtered: Vec<usize> = (0..4).collect();
+        let passed: usize = absent
+            .map(|key| {
+                assert!(store.stored(&key).is_none());
+                filtered
+                    .iter()
+                    .filter(|&&index| store.filters.may_hold(index, &key))
+                    .count()
+            })
+            .sum();
+        // About one key in 40 passes each filter.
+        assert!(passed < 4 * 4000 / 20, "{passed}");
+    }
+
+    /// Lookups of held and absent keys over one segment and over eight
+    /// holding the same keys, and over one large segment and seven small.
+    fn segment_lookups() {
+        const RECORDS: u32 = 1 << 18;
+        const PROBES: u32 = 1 << 18;
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0..RECORDS).map(|n| Digest::of(&n.to_le_bytes())).collect();
+        let layout = |keys: &[Digest]| {
+            let records = keys
+                .iter()
+                .map(|&key| (key, Piece::New(Record::new(translator, key).encode())))
+                .collect();
+            Layout::new(&translator, records).to_vec()
+        };
+        let one = [layout(&keys)];
+        let eight: Vec<Vec<u8>> = keys.chunks(keys.len() / MAX_SEGMENTS).map(layout).collect();
+        fn store(translator: Digest, bytes: &[Vec<u8>]) -> Store<'_> {
+            let segments = bytes
+                .iter()
+                .map(|bytes| Pack::parse(bytes, &translator).unwrap())
+                .collect();
+            Store::over(translator, segments)
+        }
+        // Sizes a run of pair merges leaves: halves, quarters, and so on.
+        let mut tiers = Vec::new();
+        let mut rest = &keys[..];
+        for _ in 1..MAX_SEGMENTS {
+            let (large, small) = rest.split_at(rest.len() / 2);
+            tiers.push(layout(large));
+            rest = small;
+        }
+        tiers.push(layout(rest));
+        let (one, eight, tiers) = (
+            store(translator, &one),
+            store(translator, &eight),
+            store(translator, &tiers),
+        );
+        // Held keys in a scattered order, and absent ones.
+        let held: Vec<Digest> = (0..PROBES)
+            .map(|n| keys[(n.wrapping_mul(2_654_435_761) % RECORDS) as usize])
+            .collect();
+        let absent: Vec<Digest> = (0..PROBES)
+            .map(|n| Digest::of(&(n + RECORDS).to_le_bytes()))
+            .collect();
+        for (name, probes) in [("held", &held), ("absent", &absent)] {
+            for (segments, store) in [("1", &one), ("8 equal", &eight), ("8 tiered", &tiers)] {
+                let started = std::time::Instant::now();
+                let found = probes
+                    .iter()
+                    .filter(|key| store.stored(key).is_some())
+                    .count();
+                let nanos = started.elapsed().as_nanos() / u128::from(PROBES);
+                std::println!(
+                    "{name} keys over {segments} segments: {nanos} ns per lookup ({found} found)"
+                );
+            }
+        }
     }
 
     #[test]

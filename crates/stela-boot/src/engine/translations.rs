@@ -662,9 +662,12 @@ fn bounds(heap: usize) -> (pack::Bounds, usize) {
 fn install_parts(translator: Digest, segments: Vec<Pack<'static>>, shared: usize) {
     let (bounds, kept_pages) = bounds(crate::ALLOCATOR.usage().total);
     AVAILABLE.kept_pages.store(kept_pages, Ordering::Release);
+    let filters = pack::KeyFilters::new(&segments);
     for lock in &STORES {
         let evicted = lock.with(|store| {
-            let store = store.get_or_insert_with(|| Store::over(translator, segments.clone()));
+            let store = store.get_or_insert_with(|| {
+                Store::filtered(translator, segments.clone(), filters.clone())
+            });
             store.share(shared / PARTS);
             store.set_bounds(bounds.share(PARTS))
         });
