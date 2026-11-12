@@ -309,7 +309,7 @@ jobs:
       - name: Package
         run: |
           # The archive's copy has no Changes heading: that section lives on the release.
-          sed -e "s/@VERSION@/${{ needs.version.outputs.version }}/g" -e '/^## Changes$/,+1d' "$NOTES" > "$ARCHIVE/INSTALL.txt"
+          sed -e "s/@VERSION@/${{ needs.version.outputs.version }}/g" -e '/^## Changes$/{N;d;}' "$NOTES" > "$ARCHIVE/INSTALL.txt"
           cp -R LICENSE NOTICE LICENSES "$ARCHIVE/"
           if [[ "$RUNNER_OS" == Windows ]]; then
             7z a -tzip -bso0 "$ARCHIVE.zip" "$ARCHIVE"
