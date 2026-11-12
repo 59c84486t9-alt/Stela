@@ -2717,9 +2717,8 @@ fn seqlock_check(asm: &mut crate::x86_64::asm::Asm, entry: Gpr) -> [crate::x86_6
 }
 
 /// Translate the target in RAX through the ITLB, RCX at the control: R8
-/// is then the block key of its page in the current context of its half,
-/// and RCX the control again; a page with no entry there takes one of
-/// `misses`. Clobbers R9.
+/// is then the block key of its page in the current context of its half;
+/// a page with no entry there takes one of `misses`. Clobbers R9 and R11.
 fn translate(asm: &mut crate::x86_64::asm::Asm, misses: &mut Vec<crate::x86_64::asm::Patch>) {
     // R8 = the target's half; R9 = the first slot of its page's ITLB set
     // in that half's context.
@@ -2740,10 +2739,10 @@ fn translate(asm: &mut crate::x86_64::asm::Asm, misses: &mut Vec<crate::x86_64::
     );
     asm.alu_load(Alu::Add, Qword, R9, Mem::base(Rcx, ITLB));
     asm.mov_load(Qword, R8, Mem::indexed(Rcx, R8, 8, CONTEXTS));
-    // RCX = the target's page; either entry of the set may hold it.
-    asm.mov(Qword, Rcx, Rax);
-    asm.alu_imm32(Alu::And, Qword, Rcx, -(1 << PAGE_SHIFT));
-    asm.alu_load(Alu::Cmp, Qword, Rcx, Mem::base(R9, 0));
+    // R11 = the target's page; either entry of the set may hold it.
+    asm.mov(Qword, R11, Rax);
+    asm.alu_imm32(Alu::And, Qword, R11, -(1 << PAGE_SHIFT));
+    asm.alu_load(Alu::Cmp, Qword, R11, Mem::base(R9, 0));
     let other_page = asm.jcc8(Cond::Ne);
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_KEY));
     let hit = asm.jcc8(Cond::E);
@@ -2754,13 +2753,12 @@ fn translate(asm: &mut crate::x86_64::asm::Asm, misses: &mut Vec<crate::x86_64::
         R9,
         core::mem::size_of::<LookupEntry>() as i8,
     );
-    asm.alu_load(Alu::Cmp, Qword, Rcx, Mem::base(R9, 0));
+    asm.alu_load(Alu::Cmp, Qword, R11, Mem::base(R9, 0));
     misses.push(asm.jcc(Cond::Ne));
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_KEY));
     misses.push(asm.jcc(Cond::Ne));
     asm.bind(hit);
     asm.mov_load(Qword, R8, Mem::base(R9, ENTRY_CODE));
-    asm.place(Rcx, CONTROL);
 }
 
 /// A probe's transfer, counted: into the block at R9.
@@ -2865,14 +2863,15 @@ fn lookup_tail_with_policy(
 
 /// Fill this PE's jump cache entry of the target in RAX ([`lookup_tail`])
 /// with the block the table probe just entered: its code in R9, its index
-/// in R8D and its BTYPEs in R11D, as the probe read them; nothing for a
-/// control without stamps. Clobbers RDX, R10 and R11.
+/// in R8D and its entry's last word in R11D, as the probe read them, whose
+/// low byte is the BTYPEs it accepts (`META_TARGETS`), all a tail reads of
+/// it; nothing for a control without stamps. Clobbers RDX, R10 and R11.
 fn fill_jump_cache(asm: &mut crate::x86_64::asm::Asm) {
+    const _: () = assert!(META_TARGETS == 0xff);
     let entry = |field: i32| Mem::indexed(R10, Rdx, 8, JUMP_CACHE + field);
     asm.mov_load(Qword, R10, Mem::base(Rcx, STAMPS));
     asm.test(Qword, R10, R10);
     let none = asm.jcc8(Cond::E);
-    asm.alu_imm32(Alu::And, Dword, R11, META_TARGETS as i32);
     asm.mov(Dword, Rdx, Rax);
     asm.alu_imm32(Alu::And, Dword, Rdx, JUMP_INDEX);
     asm.mov_store(Qword, entry(JUMP_PC), Rax);
