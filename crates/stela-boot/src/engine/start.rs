@@ -2878,6 +2878,13 @@ fn start_devices(
                 for line in network_account.iter().take(NETWORK_ACCOUNT_LINES) {
                     crate::status::info(&format!("Network adapter not started: {line}."));
                 }
+                if let Some(rest) = network_account
+                    .len()
+                    .checked_sub(NETWORK_ACCOUNT_LINES)
+                    .filter(|&rest| rest > 0)
+                {
+                    crate::status::info(&format!("{rest} more network adapters not started."));
+                }
             }
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
