@@ -6,6 +6,7 @@ use super::numerical::{
     test_control, vector_exponent_range,
 };
 use super::numerical::{helper_section, jump};
+use super::precision::dword_constant;
 use super::{Host, commit, packed, read_vector};
 use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
@@ -14,7 +15,9 @@ use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
         flags::{NZCV_C, NZCV_N, NZCV_SHIFT, NZCV_Z},
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, comparison::Predicate},
+        floating::{
+            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP, Format, comparison::Predicate,
+        },
         simd::{
             arithmetic::Shape,
             comparison::{CompareSource, Operand},
@@ -48,6 +51,8 @@ const HALF_SIGN_TO_DWORD_TOP: u8 = (u32::BITS - u16::BITS) as u8;
 const COMPARE_EQUAL: u8 = 0;
 const COMPARE_LESS: u8 = 1;
 const COMPARE_LESS_EQUAL: u8 = 2;
+/// The ByteSignMask bits of a scalar Half lane.
+const HALF_SCALAR_MASK: u32 = 0x03;
 const HALF_LOW_MASK: u32 = 0xff;
 const HALF_FULL_MASK: u32 = 0xffff;
 const SINGLE_LOW_MASK: u32 = 0x03;
@@ -205,13 +210,79 @@ fn vector_zero_or_normal_guard(
     helper.push(branch(code, Condition::NotZero));
 }
 
-/// Signed order key for nonzero normal half values. Sign-complementing the
-/// fraction/exponent reverses negative magnitudes without a host FP operation.
-fn half_order_key(code: &mut Code, vector: u8) {
-    packed(code, Host::MoveAligned, TEMP_VECTOR, vector);
-    ShiftOpcode::ArithmeticWord.emit(code, TEMP_VECTOR, HALF_SIGN_SHIFT);
-    ShiftOpcode::RightWord.emit(code, TEMP_VECTOR, SIGN_BITS);
-    packed(code, Host::Xor, vector, TEMP_VECTOR);
+/// Replace each Half lane of LEFT_VECTOR and RIGHT_VECTOR by a signed word
+/// key that orders as Arm compares: its magnitude, FZ16 flushing a
+/// subnormal's to zero (without IDC), negated for a negative value unless
+/// `absolute`. Both zeros key as 0 and the infinities sit at the ends. NaN
+/// lanes, whose keys order arbitrarily, go to NAN_VECTOR; R11D takes IOC
+/// when an active lane raises it (any NaN for the ordered predicates, a
+/// signalling one for FCMEQ). Uses ZERO_RESULT_VECTOR, ZERO_VECTOR,
+/// QWORD_EQUAL_VECTOR, TEMP_VECTOR and EAX.
+fn half_keys(code: &mut Code, operation: Predicate, shape: Shape) {
+    const MAGNITUDE: u8 = ZERO_RESULT_VECTOR;
+    const CONSTANT: u8 = ZERO_VECTOR;
+    const SIGNALLING: u8 = QWORD_EQUAL_VECTOR;
+    const INFINITY: u32 = 0x7c00_7c00;
+    /// Moves the quiet bit to the sign.
+    const QUIET_TO_SIGN: u8 = 6;
+    packed(code, Host::Xor, NAN_VECTOR, NAN_VECTOR);
+    packed(code, Host::Xor, SIGNALLING, SIGNALLING);
+    for source in [LEFT_VECTOR, RIGHT_VECTOR] {
+        packed(code, Host::MoveAligned, MAGNITUDE, source);
+        ShiftOpcode::LeftWord.emit(code, MAGNITUDE, SIGN_BITS);
+        ShiftOpcode::RightWord.emit(code, MAGNITUDE, SIGN_BITS);
+        // TEMP_VECTOR: the NaN lanes, magnitudes above the infinity's.
+        dword_constant(code, CONSTANT, INFINITY);
+        packed(code, Host::MoveAligned, TEMP_VECTOR, MAGNITUDE);
+        packed(code, Host::GreaterWord, TEMP_VECTOR, CONSTANT);
+        packed(code, Host::Or, NAN_VECTOR, TEMP_VECTOR);
+        if operation == Predicate::Equal {
+            packed(code, Host::MoveAligned, CONSTANT, source);
+            ShiftOpcode::LeftWord.emit(code, CONSTANT, QUIET_TO_SIGN);
+            ShiftOpcode::ArithmeticWord.emit(code, CONSTANT, HALF_SIGN_SHIFT);
+            packed(code, Host::AndNot, CONSTANT, TEMP_VECTOR);
+            packed(code, Host::Or, SIGNALLING, CONSTANT);
+        }
+        test_control(code, FPCR_FZ16);
+        let kept = branch(code, Condition::Zero);
+        // A zero exponent field: the magnitude becomes zero.
+        packed(code, Host::MoveAligned, TEMP_VECTOR, MAGNITUDE);
+        ShiftOpcode::RightWord.emit(code, TEMP_VECTOR, Format::Half.fraction_bits() as u8);
+        packed(code, Host::Xor, CONSTANT, CONSTANT);
+        packed(code, Host::EqualWord, TEMP_VECTOR, CONSTANT);
+        packed(code, Host::AndNot, TEMP_VECTOR, MAGNITUDE);
+        packed(code, Host::MoveAligned, MAGNITUDE, TEMP_VECTOR);
+        let flushed = code.len();
+        resolve(code, kept, flushed);
+        if !absolute(operation) {
+            packed(code, Host::MoveAligned, TEMP_VECTOR, source);
+            ShiftOpcode::ArithmeticWord.emit(code, TEMP_VECTOR, HALF_SIGN_SHIFT);
+            packed(code, Host::Xor, MAGNITUDE, TEMP_VECTOR);
+            packed(code, Host::SubWord, MAGNITUDE, TEMP_VECTOR);
+        }
+        packed(code, Host::MoveAligned, source, MAGNITUDE);
+    }
+    let raising = if operation == Predicate::Equal {
+        SIGNALLING
+    } else {
+        NAN_VECTOR
+    };
+    Host::ByteSignMask.register(code, 0, raising, TargetCpu::Baseline);
+    let active = if shape == Shape::Scalar {
+        HALF_SCALAR_MASK
+    } else {
+        active_mask(Format::Half, shape)
+    };
+    code.asm().test_imm(Size::Dword, Gpr::Rax, active as i32);
+    let none = branch(code, Condition::Zero);
+    code.asm().alu_imm32(
+        Alu::Or,
+        Size::Dword,
+        Gpr::R11,
+        crate::aarch64::floating::INVALID as i32,
+    );
+    let end = code.len();
+    resolve(code, none, end);
 }
 
 /// `register` takes the low Half of `vector` as a signed integer of its
@@ -413,19 +484,14 @@ fn invert_mask(code: &mut Code, vector: u8) {
     packed(code, Host::Xor, vector, TEMP_VECTOR);
 }
 
+/// The predicate over the [`half_keys`] of the operands, right in XMM0 and
+/// left in XMM1.
 fn half_predicate(code: &mut Code, operation: Predicate) -> u8 {
-    if operation == Predicate::Equal {
-        packed(code, Host::EqualWord, LEFT_VECTOR, RIGHT_VECTOR);
-        return LEFT_VECTOR;
-    }
-    if absolute(operation) {
-        magnitude(code, Format::Half);
-    } else {
-        half_order_key(code, LEFT_VECTOR);
-        half_order_key(code, RIGHT_VECTOR);
-    }
-    // Right is in XMM0, left in XMM1.
     match operation {
+        Predicate::Equal => {
+            packed(code, Host::EqualWord, LEFT_VECTOR, RIGHT_VECTOR);
+            LEFT_VECTOR
+        }
         Predicate::Greater | Predicate::AbsoluteGreater => {
             packed(code, Host::GreaterWord, RIGHT_VECTOR, LEFT_VECTOR);
             RIGHT_VECTOR
@@ -444,7 +510,6 @@ fn half_predicate(code: &mut Code, operation: Predicate) -> u8 {
             invert_mask(code, RIGHT_VECTOR);
             RIGHT_VECTOR
         }
-        Predicate::Equal => unreachable!("equality needs no half order transform"),
     }
 }
 
@@ -593,71 +658,29 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     }
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
-    if shape != Shape::Scalar
-        && operation == Predicate::Equal
-        && right == CompareSource::Register(left)
-    {
-        // Normal values, both zero signs and infinities equal themselves
-        // without changing FPSR. One guard suffices for the shared source.
-        read_numerical_vector(code, shape, left, LEFT_VECTOR);
-        vector_zero_guard(code, format, shape, &mut helper);
-        helper_section(code, &helper, pc);
-        packed(code, Host::EqualDword, LEFT_VECTOR, LEFT_VECTOR);
-        commit_predicate(code, format, shape, destination, LEFT_VECTOR, false, false);
-        return;
-    }
     let zero = right == CompareSource::Zero;
-    let merge = shape == Shape::Scalar
-        && !zero
-        && (format == Format::Half
-            || absolute(operation)
-            || matches!(operation, Predicate::Less | Predicate::LessEqual));
-    if let CompareSource::Register(right) = right {
-        // Reversed operands let ordered LT/LE implement GT/GE, and keep Vm's
-        // upper bits for the scalar case.
-        read_numerical_vector(code, shape, right, LEFT_VECTOR);
-        read_numerical_vector(code, shape, left, RIGHT_VECTOR);
-        if merge {
-            packed(code, Host::MoveAligned, MERGE_VECTOR, LEFT_VECTOR);
-        }
-        // CMPSS/CMPPS order zeros of either sign and infinities as Arm
-        // does, without a status; NaNs (IOC) and subnormals (FZ) take the
-        // helper. The Half order key holds for normal values alone.
-        if shape == Shape::Scalar {
-            for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-                if format == Format::Half {
-                    scalar_normal_guard(code, format, source, &mut helper);
-                } else {
-                    scalar_zero_guard(code, format, source, &mut helper);
-                }
-            }
-        } else {
-            prepare_vector_input_range(code, format);
-            for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-                if format == Format::Half {
-                    vector_exponent_range(code, format, shape, source);
-                    helper.push(branch(code, Condition::NotZero));
-                } else {
-                    vector_zero_or_normal_guard(code, format, shape, source, &mut helper);
-                }
+    let merge = shape == Shape::Scalar && !zero;
+    // Reversed operands let ordered LT/LE implement GT/GE, and keep Vm's
+    // upper bits for the scalar case. A comparison with zero compares Vn
+    // with +0.
+    match right {
+        CompareSource::Register(right) => {
+            read_numerical_vector(code, shape, right, LEFT_VECTOR);
+            if merge {
+                packed(code, Host::MoveAligned, MERGE_VECTOR, LEFT_VECTOR);
             }
         }
-    } else {
-        read_numerical_vector(code, shape, left, LEFT_VECTOR);
-        if shape == Shape::Scalar {
-            scalar_zero_guard(code, format, LEFT_VECTOR, &mut helper);
-        } else {
-            vector_zero_guard(code, format, shape, &mut helper);
-        }
+        CompareSource::Zero => packed(code, Host::Xor, LEFT_VECTOR, LEFT_VECTOR),
     }
-    let result = if zero {
-        zero_predicate(code, operation, format)
-    } else if format == Format::Half {
-        half_predicate(code, operation)
-    } else {
-        floating_predicate(code, operation, format, shape)
-    };
+    read_numerical_vector(code, shape, left, RIGHT_VECTOR);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    half_keys(code, operation, shape);
+    let result = half_predicate(code, operation);
+    // A NaN lane compares false.
+    packed(code, Host::AndNot, NAN_VECTOR, result);
+    packed(code, Host::MoveAligned, result, NAN_VECTOR);
     helper_section(code, &helper, pc);
+    super::numerical::commit_flush_status(code);
     commit_predicate(code, format, shape, destination, result, merge, zero);
 }
 

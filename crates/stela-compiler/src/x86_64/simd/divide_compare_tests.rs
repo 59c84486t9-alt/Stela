@@ -1,15 +1,15 @@
-//! S/D FDIV with zero divisors and S/D FCMEQ/FCMGE/FCMGT/FACGE/FACGT and
+//! S/D FDIV with zero divisors and H/S/D FCMEQ/FCMGE/FCMGT/FACGE/FACGT and
 //! the comparisons with zero over every input class, against the Arm
 //! reference, compiled as blocks for every tier this host has: every inline
 //! completion matches the reference in every V register and FPSR, every
 //! exit leaves the state unchanged, a finite normal dividend over a zero
 //! divisor completes with DZC, and every comparison completes without an
-//! exit where AH and the trap enables are clear.
+//! exit where the trap enables (and for S/D, AH) are clear.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         self, BinaryOperation, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ,
-        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, comparison::Predicate,
+        FPCR_FZ16, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, comparison::Predicate,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::native::run,
@@ -48,7 +48,7 @@ fn compile(word: u32, target: TargetCpu) -> Vec<u8> {
         .x86_64_code
 }
 
-fn controls() -> [u32; 8] {
+fn controls() -> [u32; 10] {
     [
         0,
         2 << FPCR_ROUNDING_SHIFT,
@@ -57,6 +57,8 @@ fn controls() -> [u32; 8] {
         FPCR_DN,
         FPCR_FZ | FPCR_NEP,
         FPCR_AH,
+        FPCR_FZ16,
+        FPCR_FZ16 | FPCR_AH | FPCR_NEP,
         FPCR_EXCEPTION_ENABLE_MASK,
     ]
 }
@@ -89,36 +91,42 @@ fn floats(format: Format) -> Vec<u64> {
 }
 
 fn lane(vector: [u64; 2], format: Format, index: usize) -> u64 {
-    if format == Format::Double {
-        vector[index]
-    } else {
-        vector[index / 2] >> (32 * (index % 2)) & 0xffff_ffff
-    }
+    let per_limb = (u64::BITS / format.bits()) as usize;
+    let mask = u64::MAX >> (u64::BITS - format.bits());
+    vector[index / per_limb] >> (format.bits() as usize * (index % per_limb)) & mask
 }
 
 fn set_lane(vector: &mut [u64; 2], format: Format, index: usize, bits: u64) {
-    if format == Format::Double {
-        vector[index] = bits;
-    } else {
-        let shift = 32 * (index % 2);
-        vector[index / 2] = vector[index / 2] & !(0xffff_ffff << shift) | bits << shift;
-    }
+    let per_limb = (u64::BITS / format.bits()) as usize;
+    let mask = u64::MAX >> (u64::BITS - format.bits());
+    let shift = format.bits() as usize * (index % per_limb);
+    vector[index / per_limb] = vector[index / per_limb] & !(mask << shift) | bits << shift;
 }
 
 /// The comparison word (`zero`: against #0) and whether it is one.
 fn compare_word(predicate: Predicate, zero: bool, format: Format, lanes: u32) -> u32 {
     let double = u32::from(format == Format::Double);
-    let base = match (predicate, zero) {
-        (Predicate::Equal, false) => 0x0e20_e400,
-        (Predicate::GreaterEqual, false) => 0x2e20_e400,
-        (Predicate::Greater, false) => 0x2ea0_e400,
-        (Predicate::AbsoluteGreaterEqual, false) => 0x2e20_ec00,
-        (Predicate::AbsoluteGreater, false) => 0x2ea0_ec00,
-        (Predicate::Equal, true) => 0x0ea0_d800,
-        (Predicate::GreaterEqual, true) => 0x2ea0_c800,
-        (Predicate::Greater, true) => 0x0ea0_c800,
-        (Predicate::LessEqual, true) => 0x2ea0_d800,
-        (Predicate::Less, true) => 0x0ea0_e800,
+    let base = match (predicate, zero, format) {
+        (Predicate::Equal, false, Format::Half) => 0x0e40_2400,
+        (Predicate::GreaterEqual, false, Format::Half) => 0x2e40_2400,
+        (Predicate::Greater, false, Format::Half) => 0x2ec0_2400,
+        (Predicate::AbsoluteGreaterEqual, false, Format::Half) => 0x2e40_2c00,
+        (Predicate::AbsoluteGreater, false, Format::Half) => 0x2ec0_2c00,
+        (Predicate::Equal, true, Format::Half) => 0x0ef8_d800,
+        (Predicate::GreaterEqual, true, Format::Half) => 0x2ef8_c800,
+        (Predicate::Greater, true, Format::Half) => 0x0ef8_c800,
+        (Predicate::LessEqual, true, Format::Half) => 0x2ef8_d800,
+        (Predicate::Less, true, Format::Half) => 0x0ef8_e800,
+        (Predicate::Equal, false, _) => 0x0e20_e400,
+        (Predicate::GreaterEqual, false, _) => 0x2e20_e400,
+        (Predicate::Greater, false, _) => 0x2ea0_e400,
+        (Predicate::AbsoluteGreaterEqual, false, _) => 0x2e20_ec00,
+        (Predicate::AbsoluteGreater, false, _) => 0x2ea0_ec00,
+        (Predicate::Equal, true, _) => 0x0ea0_d800,
+        (Predicate::GreaterEqual, true, _) => 0x2ea0_c800,
+        (Predicate::Greater, true, _) => 0x0ea0_c800,
+        (Predicate::LessEqual, true, _) => 0x2ea0_d800,
+        (Predicate::Less, true, _) => 0x0ea0_e800,
         _ => unreachable!("listed forms"),
     };
     let shape = if lanes == 0 {
@@ -187,10 +195,10 @@ fn check(
 }
 
 fn shapes(format: Format) -> &'static [u32] {
-    if format == Format::Double {
-        &[0, 2]
-    } else {
-        &[0, 2, 4]
+    match format {
+        Format::Half => &[0, 4, 8],
+        Format::Single => &[0, 2, 4],
+        Format::Double => &[0, 2],
     }
 }
 
@@ -275,7 +283,7 @@ fn float_comparisons_complete_inline() {
         (Less, true),
     ];
     for target in targets() {
-        for format in [Format::Single, Format::Double] {
+        for format in [Format::Half, Format::Single, Format::Double] {
             let all = floats(format);
             for &lanes in shapes(format) {
                 for (predicate, zero) in forms {
@@ -303,7 +311,9 @@ fn float_comparisons_complete_inline() {
                             initial.v[M as usize] = m;
                             initial.v[D as usize] = [0xdead_beef_0bad_f00d, 0xfeed_face_cafe_d00d];
                             let merge = (lanes == 0 && !zero && fpcr & FPCR_NEP != 0).then_some(m);
-                            let must_inline = fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
+                            // Half comparisons complete under AH too.
+                            let ah = if format == Format::Half { 0 } else { FPCR_AH };
+                            let must_inline = fpcr & (ah | FPCR_EXCEPTION_ENABLE_MASK) == 0;
                             check(
                                 word,
                                 target,

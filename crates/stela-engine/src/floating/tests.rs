@@ -1438,9 +1438,9 @@ fn vector_self_comparisons_accept_zeros_and_infinities_without_fp_status() {
                 let expected_result = complete(&mut expected, &operation);
                 // SAFETY: baseline non-memory code accesses only the provided frame.
                 let exit = unsafe { mapping.call_block(&mut actual) }.unwrap();
-                // S/D lanes complete NaN and subnormal inputs too unless AH
-                // is set.
-                let inline = ordinary || format != Format::Half && fpcr & FPCR_AH == 0;
+                // Half lanes complete NaN and subnormal inputs too, S/D
+                // lanes unless AH is set.
+                let inline = ordinary || format == Format::Half || fpcr & FPCR_AH == 0;
                 if inline && expected_result.is_ok() {
                     assert_eq!(exit.kind, ExitKind::Fallthrough as u64);
                     assert_eq!(exit.next_pc, PC + 4);
