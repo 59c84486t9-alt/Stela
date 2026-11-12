@@ -49,7 +49,7 @@ impl Target for File {
 }
 
 /// What a reader finds: the newest commit whose blobs read back whole.
-fn content(file: &[u8]) -> Option<(Commit, Vec<Blob>)> {
+fn content(file: &[u8]) -> Option<(Commit, Vec<Found>)> {
     let size = file.len() as u64;
     candidates(&file[..DATA_START as usize], DOMAIN, size)
         .into_iter()
@@ -64,13 +64,26 @@ fn content(file: &[u8]) -> Option<(Commit, Vec<Blob>)> {
 }
 
 fn run(file: &mut File, plan: Plan) -> Result<Option<Commit>, ()> {
-    let last = plan.last.clone();
     let mut execution = Execution::new(plan);
     while !execution.advance(file, 8192)? {}
-    Ok(last)
+    Ok(execution.last())
 }
 
-fn sorted(mut blobs: Vec<Blob>) -> Vec<Blob> {
+/// All of `blob`'s bytes.
+fn bytes_of(blob: &Blob) -> Vec<u8> {
+    let mut bytes = vec![0; blob.length() as usize];
+    blob.source.read_at(0, &mut bytes);
+    bytes
+}
+
+/// Blobs to write, from `(kind, bytes)` pairs.
+macro_rules! blobs {
+    ($(($kind:expr, $bytes:expr)),* $(,)?) => {
+        vec![$(Blob::new($kind, $bytes)),*]
+    };
+}
+
+fn sorted(mut blobs: Vec<Found>) -> Vec<Found> {
     blobs.sort();
     blobs
 }
@@ -136,7 +149,7 @@ fn appends_keep_what_was_committed_and_replacements_take_its_place() {
     let mut file = File::new(DATA_START + 64 * ALIGN);
     let first = Change {
         replace: vec![CACHE],
-        blobs: vec![(CACHE, blob(1, 20_000)), (LOG, blob(2, 5000))],
+        blobs: blobs![(CACHE, blob(1, 20_000)), (LOG, blob(2, 5000))],
     };
     let size = file.bytes.len() as u64;
     let last = run(&mut file, plan(None, DOMAIN, KEY, size, first)).unwrap();
@@ -148,7 +161,7 @@ fn appends_keep_what_was_committed_and_replacements_take_its_place() {
     );
     let second = Change {
         replace: vec![CACHE],
-        blobs: vec![(CACHE, blob(3, 30_000)), (LOG, blob(4, 100))],
+        blobs: blobs![(CACHE, blob(3, 30_000)), (LOG, blob(4, 100))],
     };
     run(&mut file, plan(Some(&commit), DOMAIN, KEY, size, second)).unwrap();
     let (_, blobs) = content(&file.bytes).unwrap();
@@ -168,7 +181,7 @@ fn another_keys_content_is_not_kept() {
     let size = file.bytes.len() as u64;
     let change = Change {
         replace: vec![],
-        blobs: vec![(LOG, blob(1, 9000))],
+        blobs: blobs![(LOG, blob(1, 9000))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, change.clone())).unwrap();
     run(
@@ -188,12 +201,12 @@ fn a_replacement_with_no_room_beside_the_old_goes_where_it_was() {
     let size = file.bytes.len() as u64;
     let old = Change {
         replace: vec![CACHE],
-        blobs: vec![(CACHE, blob(1, 6 * ALIGN as usize))],
+        blobs: blobs![(CACHE, blob(1, 6 * ALIGN as usize))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, old)).unwrap();
     let new = Change {
         replace: vec![CACHE],
-        blobs: vec![(CACHE, blob(2, 6 * ALIGN as usize))],
+        blobs: blobs![(CACHE, blob(2, 6 * ALIGN as usize))],
     };
     let plan = plan(commit.as_ref(), DOMAIN, KEY, size, new);
     assert!(plan.dropped.is_empty());
@@ -216,12 +229,12 @@ fn a_replacement_that_can_never_fit_keeps_the_old_and_an_append_without_room_is_
     let size = file.bytes.len() as u64;
     let old = Change {
         replace: vec![CACHE],
-        blobs: vec![(CACHE, blob(1, 3 * ALIGN as usize))],
+        blobs: blobs![(CACHE, blob(1, 3 * ALIGN as usize))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, old)).unwrap();
     let new = Change {
         replace: vec![CACHE],
-        blobs: vec![
+        blobs: blobs![
             (CACHE, blob(2, 5 * ALIGN as usize)),
             (LOG, blob(3, 2 * ALIGN as usize)),
         ],
@@ -245,11 +258,11 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
         (
             Change {
                 replace: vec![CACHE],
-                blobs: vec![(CACHE, blob(1, 3 * ALIGN as usize)), (LOG, blob(2, 1000))],
+                blobs: blobs![(CACHE, blob(1, 3 * ALIGN as usize)), (LOG, blob(2, 1000))],
             },
             Change {
                 replace: vec![CACHE],
-                blobs: vec![
+                blobs: blobs![
                     (CACHE, blob(3, 4 * ALIGN as usize)),
                     (LOG, blob(4, 2 * ALIGN as usize)),
                 ],
@@ -259,11 +272,11 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
         (
             Change {
                 replace: vec![CACHE],
-                blobs: vec![(CACHE, blob(5, 7 * ALIGN as usize))],
+                blobs: blobs![(CACHE, blob(5, 7 * ALIGN as usize))],
             },
             Change {
                 replace: vec![CACHE],
-                blobs: vec![(CACHE, blob(6, 8 * ALIGN as usize)), (LOG, blob(7, 100))],
+                blobs: blobs![(CACHE, blob(6, 8 * ALIGN as usize)), (LOG, blob(7, 100))],
             },
         ),
         // Into a blank file.
@@ -271,7 +284,7 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
             Change::default(),
             Change {
                 replace: vec![],
-                blobs: vec![(LOG, blob(8, 5 * ALIGN as usize))],
+                blobs: blobs![(LOG, blob(8, 5 * ALIGN as usize))],
             },
         ),
     ];
@@ -281,20 +294,23 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
         let old = content(&base.bytes).map(|(_, blobs)| sorted(blobs));
         let full = plan(committed.as_ref(), DOMAIN, KEY, size, after.clone());
         // Each commit's content is a state the reader may find.
-        let mut whole: Vec<Option<Vec<Blob>>> = vec![old.clone()];
+        let mut whole: Vec<Option<Vec<Found>>> = vec![old.clone()];
+        // A new entry's digest comes as its blob streams: the plan's data
+        // steps name the blob at each offset.
+        let placed = |offset: u64| {
+            full.steps.iter().find_map(|step| match *step {
+                Step::Data { blob, offset: at } if at == offset => Some(blob),
+                _ => None,
+            })
+        };
         for step in &full.steps {
             if let Step::Commit(commit) = step {
                 let blobs = commit
                     .entries
                     .iter()
                     .map(|entry| {
-                        let from_plan = full
-                            .blobs
-                            .iter()
-                            .find(|(kind, bytes)| {
-                                *kind == entry.kind && Sha256::digest(bytes)[..] == entry.digest
-                            })
-                            .map(|(kind, bytes)| (*kind, bytes.clone()));
+                        let from_plan = placed(entry.offset)
+                            .map(|blob| (full.blobs[blob].kind, bytes_of(&full.blobs[blob])));
                         from_plan.unwrap_or_else(|| {
                             old.as_ref()
                                 .unwrap()
@@ -314,7 +330,7 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
             .steps
             .iter()
             .map(|step| match step {
-                Step::Data { blob, .. } => aligned(full.blobs[*blob].1.len() as u64),
+                Step::Data { blob, .. } => aligned(full.blobs[*blob].length()),
                 Step::Commit(_) => SLOT_BYTES,
                 Step::Flush => 0,
             })
@@ -365,7 +381,7 @@ fn a_queued_write_is_made_again_until_it_completes() {
     };
     let change = Change {
         replace: vec![],
-        blobs: vec![(LOG, blob(9, 3 * ALIGN as usize + 5))],
+        blobs: blobs![(LOG, blob(9, 3 * ALIGN as usize + 5))],
     };
     let mut execution = Execution::new(plan(None, DOMAIN, KEY, size, change));
     let mut rounds = 0;
@@ -402,4 +418,83 @@ fn file_ranges_map_onto_the_extents_in_order() {
     // Past the file, or off a block.
     assert_eq!(device_ranges(&extents, 512, 8192, 8192), None);
     assert_eq!(device_ranges(&extents, 512, 100, 512), None);
+}
+
+#[test]
+fn a_streamed_blob_is_read_a_piece_at_a_time_and_its_digest_committed() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    /// A source that counts the most bytes any one read asked for.
+    struct Counted {
+        bytes: Vec<u8>,
+        largest: AtomicUsize,
+    }
+    impl Source for Counted {
+        fn length(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, into: &mut [u8]) {
+            self.largest.fetch_max(into.len(), Ordering::Relaxed);
+            let at = offset as usize;
+            into.copy_from_slice(&self.bytes[at..at + into.len()]);
+        }
+    }
+    let size = DATA_START + 64 * ALIGN;
+    let mut file = File::new(size);
+    let bytes = blob(5, 40 * ALIGN as usize + 123);
+    let source = Arc::new(Counted {
+        bytes: bytes.clone(),
+        largest: AtomicUsize::new(0),
+    });
+    let change = Change {
+        replace: vec![],
+        blobs: vec![Blob {
+            kind: LOG,
+            source: source.clone(),
+        }],
+    };
+    let mut execution = Execution::new(plan(None, DOMAIN, KEY, size, change));
+    while !execution.advance(&mut file, 2 * ALIGN).unwrap() {}
+    assert!(source.largest.load(Ordering::Relaxed) <= 2 * ALIGN as usize);
+    let last = execution.last().unwrap();
+    assert_eq!(last.entries[0].digest[..], Sha256::digest(&bytes)[..]);
+    let (commit, found) = content(&file.bytes).unwrap();
+    assert_eq!(commit, last);
+    assert_eq!(found, vec![(LOG, bytes)]);
+}
+
+#[test]
+fn the_largest_free_run_takes_a_blob_beside_every_committed_one() {
+    let size = DATA_START + 16 * ALIGN;
+    let mut file = File::new(size);
+    assert_eq!(largest_free(None, DOMAIN, KEY, size), 16 * ALIGN);
+    // Blocks 0-2 and 3-4 taken: 11 free after them.
+    let change = Change {
+        replace: vec![],
+        blobs: blobs![(LOG, blob(1, 3 * ALIGN as usize - 5)), (LOG, blob(2, 5000))],
+    };
+    let commit = run(&mut file, plan(None, DOMAIN, KEY, size, change)).unwrap();
+    let free = largest_free(commit.as_ref(), DOMAIN, KEY, size);
+    assert_eq!(free, 11 * ALIGN);
+    // Another key's blobs leave the whole area free.
+    assert_eq!(
+        largest_free(commit.as_ref(), DOMAIN, [8; 32], size),
+        16 * ALIGN
+    );
+    // A replacement of that size lands in one commit, which keeps the old
+    // blobs until it is whole.
+    let replacement = Change {
+        replace: vec![LOG],
+        blobs: blobs![(LOG, blob(3, free as usize))],
+    };
+    let planned = plan(commit.as_ref(), DOMAIN, KEY, size, replacement);
+    assert!(planned.dropped.is_empty());
+    let commits = planned
+        .steps
+        .iter()
+        .filter(|step| matches!(step, Step::Commit(_)))
+        .count();
+    assert_eq!(commits, 1);
+    run(&mut file, planned).unwrap();
+    let (_, blobs) = content(&file.bytes).unwrap();
+    assert_eq!(blobs, vec![(LOG, blob(3, free as usize))]);
 }

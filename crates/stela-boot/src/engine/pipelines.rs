@@ -27,7 +27,7 @@ use core::{
 use stela_drivers::block::{BlockDevice, Command};
 use stela_drivers::gpu::metal::native::pipeline_store::{self, Key, MAX_BYTES};
 use stela_formats::journal::{
-    self, Change, Commit, DATA_START, Execution, SLOT_BYTES, Target, device_ranges,
+    self, Blob, Change, Commit, DATA_START, Execution, SLOT_BYTES, Target, device_ranges,
 };
 use stela_formats::payload::pieces::Extent;
 use uefi::{
@@ -137,7 +137,7 @@ pub fn read() -> Option<Region> {
 }
 
 /// The device's store layout of `commit`'s `blobs`: header, cache, NIR.
-fn linear(commit: &Commit, blobs: &[journal::Blob]) -> Vec<u8> {
+fn linear(commit: &Commit, blobs: &[journal::Found]) -> Vec<u8> {
     let part = |kind| -> Vec<u8> {
         blobs
             .iter()
@@ -170,7 +170,7 @@ struct Writer {
 }
 
 struct Running {
-    execution: Execution,
+    execution: Execution<'static>,
     update: pipeline_store::Update,
     /// The staged commands of the write in flight.
     queued: Queued,
@@ -263,11 +263,11 @@ pub fn prepare() {
 }
 
 /// The journal change that writes `update` after `committed`.
-fn change(update: &pipeline_store::Update, committed: Option<&Commit>) -> Change {
+fn change(update: &pipeline_store::Update, committed: Option<&Commit>) -> Change<'static> {
     let mut change = Change::default();
     if let Some(cache) = &update.cache {
         change.replace.push(CACHE);
-        change.blobs.push((CACHE, cache.to_vec()));
+        change.blobs.push(Blob::new(CACHE, cache.to_vec()));
     }
     if !update.nir.is_empty() {
         let pieces = committed
@@ -283,9 +283,9 @@ fn change(update: &pipeline_store::Update, committed: Option<&Commit>) -> Change
             change.replace.push(NIR);
             change
                 .blobs
-                .push((NIR, pipeline_store::all_nir(&update.key)));
+                .push(Blob::new(NIR, pipeline_store::all_nir(&update.key)));
         } else {
-            change.blobs.push((NIR, update.nir.clone()));
+            change.blobs.push(Blob::new(NIR, update.nir.clone()));
         }
     }
     change
@@ -326,8 +326,8 @@ impl Writer {
     /// The update finished: its commit is the file's newest.
     fn finish(&mut self) {
         if let Some(running) = self.running.take() {
-            if let Some(last) = &running.execution.plan().last {
-                self.committed = Some(last.clone());
+            if let Some(last) = running.execution.last() {
+                self.committed = Some(last);
             }
             pipeline_store::written(&running.update);
         }
@@ -394,7 +394,7 @@ pub fn write() {
                 .plan()
                 .blobs
                 .iter()
-                .map(|(_, blob)| blob.len() as u64)
+                .map(Blob::length)
                 .sum::<u64>();
             let done = translations::with_store_file(NAME, |device, extents| {
                 let mut target = Direct { device, extents };

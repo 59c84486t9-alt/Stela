@@ -18,8 +18,13 @@
 //! The format knows nothing of what the blobs hold: each user names its own
 //! domain and kinds, and a key that a reader of another key ignores, so a
 //! store of pipelines and a store of translations can share it.
+//!
+//! A blob to write is read from its [`Source`] a piece at a time as it is
+//! written, and its digest is computed as it streams: an update holds no
+//! copy of its content, however large, and no step hashes more than the
+//! piece it writes.
 use crate::payload::pieces::Extent;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use stela_crypto::{Sha256, digest::Digest};
 
 /// Bytes of each commit slot.
@@ -39,8 +44,75 @@ const CHECKSUM_AT: usize = SLOT_BYTES as usize - 32;
 /// The most blobs one commit names.
 pub const MAX_ENTRIES: usize = (CHECKSUM_AT - HEAD_BYTES) / ENTRY_BYTES;
 
-/// A blob's kind and bytes.
-pub type Blob = (u32, Vec<u8>);
+/// A blob's kind and bytes, as a reader finds them ([`read_entries`]).
+pub type Found = (u32, Vec<u8>);
+
+/// The content of a blob to write, read a piece at a time.
+pub trait Source {
+    /// Its bytes in all.
+    fn length(&self) -> u64;
+    /// Fill `into` with its bytes from `offset`, which with `into` lies
+    /// within [`Self::length`].
+    fn read_at(&self, offset: u64, into: &mut [u8]);
+}
+
+impl Source for [u8] {
+    fn length(&self) -> u64 {
+        self.len() as u64
+    }
+    fn read_at(&self, offset: u64, into: &mut [u8]) {
+        let at = offset as usize;
+        into.copy_from_slice(&self[at..at + into.len()]);
+    }
+}
+
+impl Source for Vec<u8> {
+    fn length(&self) -> u64 {
+        self.as_slice().length()
+    }
+    fn read_at(&self, offset: u64, into: &mut [u8]) {
+        self.as_slice().read_at(offset, into);
+    }
+}
+
+impl Source for &[u8] {
+    fn length(&self) -> u64 {
+        (**self).length()
+    }
+    fn read_at(&self, offset: u64, into: &mut [u8]) {
+        (**self).read_at(offset, into);
+    }
+}
+
+/// A blob to write: its kind and where its bytes come from.
+#[derive(Clone)]
+pub struct Blob<'a> {
+    pub kind: u32,
+    pub source: Arc<dyn Source + 'a>,
+}
+
+impl<'a> Blob<'a> {
+    pub fn new(kind: u32, source: impl Source + 'a) -> Self {
+        Self {
+            kind,
+            source: Arc::new(source),
+        }
+    }
+    /// Its bytes in all.
+    pub fn length(&self) -> u64 {
+        self.source.length()
+    }
+}
+
+impl core::fmt::Debug for Blob<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Blob")
+            .field("kind", &self.kind)
+            .field("length", &self.length())
+            .finish()
+    }
+}
 
 /// Where [`layout`] places blobs: by index and offset in the first commit
 /// and in the second, and the indices of those placed in neither.
@@ -202,7 +274,7 @@ pub fn candidates(slots: &[u8], domain: [u8; 8], file_bytes: u64) -> Vec<Commit>
 pub fn read_entries(
     commit: &Commit,
     mut read_at: impl FnMut(u64, &mut [u8]) -> Option<()>,
-) -> Option<Vec<Blob>> {
+) -> Option<Vec<Found>> {
     commit
         .entries
         .iter()
@@ -217,9 +289,9 @@ pub fn read_entries(
 /// New content for a file: blobs to add, and the kinds whose committed blobs
 /// those of the same kind replace.
 #[derive(Clone, Debug, Default)]
-pub struct Change {
+pub struct Change<'a> {
     pub replace: Vec<u32>,
-    pub blobs: Vec<Blob>,
+    pub blobs: Vec<Blob<'a>>,
 }
 
 /// One write of an update, in order.
@@ -229,19 +301,23 @@ pub enum Step {
     Data { blob: usize, offset: u64 },
     /// Every write before it durable.
     Flush,
-    /// A commit into its slot.
+    /// A commit into its slot. The entries of the blobs this update
+    /// writes hold their digests once those blobs are written
+    /// ([`Execution::advance`]); until then, zeros.
     Commit(Commit),
 }
 
 /// An update's writes and what it leaves.
 #[derive(Debug)]
-pub struct Plan {
-    pub blobs: Vec<Blob>,
+pub struct Plan<'a> {
+    pub blobs: Vec<Blob<'a>>,
     pub steps: Vec<Step>,
     /// The blobs no room was found for, by index: their content is not kept,
     /// and a replaced kind with such a blob keeps its committed blobs.
     pub dropped: Vec<usize>,
-    /// The commit the steps end with, the current one when they are none.
+    /// The commit the steps end with, the current one when they are none;
+    /// its new entries' digests as in [`Step::Commit`]
+    /// ([`Execution::last`] has them).
     pub last: Option<Commit>,
 }
 
@@ -265,12 +341,13 @@ fn place(taken: &mut Vec<(u64, u64)>, end: u64, length: u64) -> Option<u64> {
     Some(at)
 }
 
-fn entry(kind: u32, offset: u64, bytes: &[u8]) -> Entry {
+/// The entry of a blob this update writes; its digest comes as it streams.
+fn entry(kind: u32, offset: u64, length: u64) -> Entry {
     Entry {
         kind,
         offset,
-        length: bytes.len() as u64,
-        digest: Sha256::digest(bytes).into(),
+        length,
+        digest: [0; 32],
     }
 }
 
@@ -279,7 +356,7 @@ fn entry(kind: u32, offset: u64, bytes: &[u8]) -> Entry {
 /// the rest where the replaced ones were, after a commit without them.
 /// Answers the first commit's new entries, the second's, and the blobs that
 /// fit in neither.
-fn layout(current: &[Entry], replace: &[u32], blobs: &[Blob], end: u64, room: usize) -> Layout {
+fn layout(current: &[Entry], replace: &[u32], blobs: &[u64], end: u64, room: usize) -> Layout {
     let mut taken: Vec<(u64, u64)> = current.iter().map(Entry::span).collect();
     taken.sort_unstable();
     let kept = current
@@ -288,12 +365,12 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[Blob], end: u64, room: us
         .count();
     let mut first = Vec::new();
     let mut left = Vec::new();
-    for (index, (_, bytes)) in blobs.iter().enumerate() {
-        if bytes.is_empty() {
+    for (index, &length) in blobs.iter().enumerate() {
+        if length == 0 {
             continue;
         }
         match (kept + first.len() < room)
-            .then(|| place(&mut taken, end, bytes.len() as u64))
+            .then(|| place(&mut taken, end, length))
             .flatten()
         {
             Some(offset) => first.push((index, offset)),
@@ -311,7 +388,7 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[Blob], end: u64, room: us
         .chain(
             first
                 .iter()
-                .map(|&(index, offset)| (offset, offset + aligned(blobs[index].1.len() as u64))),
+                .map(|&(index, offset)| (offset, offset + aligned(blobs[index]))),
         )
         .collect();
     taken.sort_unstable();
@@ -319,7 +396,7 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[Blob], end: u64, room: us
     let mut dropped = Vec::new();
     for index in left {
         match (kept + first.len() + second.len() < room)
-            .then(|| place(&mut taken, end, blobs[index].1.len() as u64))
+            .then(|| place(&mut taken, end, blobs[index]))
             .flatten()
         {
             Some(offset) => second.push((index, offset)),
@@ -334,13 +411,13 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[Blob], end: u64, room: us
 /// domain or key are not kept, and their space is reused. A replaced kind
 /// whose new blobs do not all fit keeps its committed blobs, and those new
 /// blobs are dropped.
-pub fn plan(
+pub fn plan<'a>(
     current: Option<&Commit>,
     domain: [u8; 8],
     key: [u8; 32],
     file_bytes: u64,
-    change: Change,
-) -> Plan {
+    change: Change<'a>,
+) -> Plan<'a> {
     let Change { mut replace, blobs } = change;
     let end = data_end(file_bytes);
     let generation = current.map_or(0, |commit| commit.generation);
@@ -351,23 +428,22 @@ pub fn plan(
     // A replacement that cannot fit whole keeps what it would replace.
     let mut withdrawn: Vec<usize> = Vec::new();
     let (first, second, dropped) = loop {
-        let candidates: Vec<Blob> = blobs
+        let candidates: Vec<u64> = blobs
             .iter()
             .enumerate()
-            .map(|(index, (kind, bytes))| {
-                let bytes = if withdrawn.contains(&index) {
-                    Vec::new()
+            .map(|(index, blob)| {
+                if withdrawn.contains(&index) {
+                    0
                 } else {
-                    bytes.clone()
-                };
-                (*kind, bytes)
+                    blob.length()
+                }
             })
             .collect();
         let (first, second, dropped) = layout(committed, &replace, &candidates, end, MAX_ENTRIES);
         let short: Vec<u32> = replace
             .iter()
             .copied()
-            .filter(|kind| dropped.iter().any(|&index| blobs[index].0 == *kind))
+            .filter(|kind| dropped.iter().any(|&index| blobs[index].kind == *kind))
             .collect();
         if short.is_empty() {
             break (first, second, dropped);
@@ -377,7 +453,7 @@ pub fn plan(
             blobs
                 .iter()
                 .enumerate()
-                .filter(|(_, (kind, _))| short.contains(kind))
+                .filter(|(_, blob)| short.contains(&blob.kind))
                 .map(|(index, _)| index),
         );
     };
@@ -406,7 +482,7 @@ pub fn plan(
                 blob: index,
                 offset,
             });
-            entries.push(entry(blobs[index].0, offset, &blobs[index].1));
+            entries.push(entry(blobs[index].kind, offset, blobs[index].length()));
         }
         if !placed.is_empty() {
             steps.push(Step::Flush);
@@ -434,6 +510,31 @@ pub fn plan(
     }
 }
 
+/// The largest blob an update of `domain` and `key` can place beside every
+/// blob of `current` in a file of `file_bytes`, so its first commit keeps
+/// them all ([`plan`]): the longest free run of the data area.
+pub fn largest_free(
+    current: Option<&Commit>,
+    domain: [u8; 8],
+    key: [u8; 32],
+    file_bytes: u64,
+) -> u64 {
+    let mut taken: Vec<(u64, u64)> = match current {
+        Some(commit) if commit.domain == domain && commit.key == key => {
+            commit.entries.iter().map(Entry::span).collect()
+        }
+        _ => Vec::new(),
+    };
+    taken.sort_unstable();
+    let end = data_end(file_bytes);
+    let (mut at, mut largest) = (DATA_START, 0);
+    for (start, stop) in taken {
+        largest = largest.max(start.saturating_sub(at));
+        at = at.max(stop);
+    }
+    largest.max(end.saturating_sub(at))
+}
+
 /// Where an update's writes go: the file, as offsets from its start.
 pub trait Target {
     type Error;
@@ -447,28 +548,76 @@ pub trait Target {
 
 /// A plan being carried out a piece at a time, so no call writes more than
 /// its budget.
-#[derive(Debug)]
-pub struct Execution {
-    plan: Plan,
+pub struct Execution<'a> {
+    plan: Plan<'a>,
     step: usize,
     /// Bytes of the current data step done.
     done: u64,
     /// The piece written last, while its write is queued.
     pending: Option<Vec<u8>>,
+    /// The digest of the current data step's blob so far.
+    hasher: Sha256,
+    /// Each blob's digest once written, by index.
+    digests: Vec<Option<[u8; 32]>>,
 }
 
-impl Execution {
-    pub fn new(plan: Plan) -> Self {
+impl core::fmt::Debug for Execution<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Execution")
+            .field("plan", &self.plan)
+            .field("step", &self.step)
+            .field("done", &self.done)
+            .finish()
+    }
+}
+
+impl<'a> Execution<'a> {
+    pub fn new(plan: Plan<'a>) -> Self {
+        let digests = alloc::vec![None; plan.blobs.len()];
         Self {
             plan,
             step: 0,
             done: 0,
             pending: None,
+            hasher: Sha256::new(),
+            digests,
         }
     }
 
-    pub fn plan(&self) -> &Plan {
+    pub fn plan(&self) -> &Plan<'a> {
         &self.plan
+    }
+
+    /// `commit` with the digests of the blobs this update wrote.
+    fn completed(&self, commit: &Commit) -> Commit {
+        let mut commit = commit.clone();
+        for step in &self.plan.steps {
+            let Step::Data { blob, offset } = *step else {
+                continue;
+            };
+            if let Some(digest) = self.digests[blob]
+                && let Some(entry) = commit
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.offset == offset)
+            {
+                entry.digest = digest;
+            }
+        }
+        commit
+    }
+
+    /// The commit the update leaves once finished ([`Plan::last`]), with
+    /// the digests of the blobs it wrote.
+    pub fn last(&self) -> Option<Commit> {
+        self.plan.last.as_ref().map(|commit| {
+            if self.finished() {
+                self.completed(commit)
+            } else {
+                commit.clone()
+            }
+        })
     }
 
     /// Whether every step is done.
@@ -488,16 +637,17 @@ impl Execution {
             }
             match step {
                 Step::Data { blob, offset } => {
-                    let bytes = &self.plan.blobs[*blob].1;
-                    let total = aligned(bytes.len() as u64);
+                    let source = &self.plan.blobs[*blob].source;
+                    let length = source.length();
+                    let total = aligned(length);
                     let piece = match self.pending.take() {
                         Some(piece) => piece,
                         None => {
                             let take = (total - self.done).min(budget);
-                            let from = self.done as usize;
-                            let to = (self.done + take).min(bytes.len() as u64) as usize;
-                            let mut piece = bytes.get(from..to).unwrap_or(&[]).to_vec();
-                            piece.resize(take as usize, 0);
+                            let filled = (self.done + take).min(length).saturating_sub(self.done);
+                            let mut piece = alloc::vec![0; take as usize];
+                            source.read_at(self.done, &mut piece[..filled as usize]);
+                            self.hasher.update(&piece[..filled as usize]);
                             piece
                         }
                     };
@@ -508,6 +658,8 @@ impl Execution {
                     spent += piece.len() as u64;
                     self.done += piece.len() as u64;
                     if self.done == total {
+                        let hasher = core::mem::replace(&mut self.hasher, Sha256::new());
+                        self.digests[*blob] = Some(hasher.finalize().into());
                         self.done = 0;
                         self.step += 1;
                     }
@@ -521,7 +673,7 @@ impl Execution {
                 Step::Commit(commit) => {
                     let slot = match self.pending.take() {
                         Some(slot) => slot,
-                        None => commit.encode(),
+                        None => self.completed(commit).encode(),
                     };
                     if !target.write_at(commit.slot_offset(), &slot)? {
                         self.pending = Some(slot);
