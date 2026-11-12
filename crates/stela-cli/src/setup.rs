@@ -524,8 +524,10 @@ type ImageSizeOf<'a> = dyn Fn(&str, &str) -> Result<(u64, u64)> + 'a;
 /// of a whole image that is written onto the USB as it downloads
 /// (`medium::download::Download`).
 /// The members of an image `boot prepare` reads for a model's restore
-/// bundle (`boot::restore_inputs`).
-type InputsOf<'a> = dyn Fn(&Path, &str) -> Result<Vec<String>> + 'a;
+/// bundle (`boot::restore_inputs_in`), from the image's directory and
+/// BuildManifest wherever its bytes are.
+type InputsOf<'a> =
+    dyn Fn(&mut zip::ZipArchive<&mut dyn restore::ImageSource>, &str) -> Result<Vec<String>> + 'a;
 /// Ask the user a yes-or-no question on the terminal; None without one.
 type AskOf<'a> = dyn Fn(&str) -> Option<bool> + 'a;
 type FetchImageOf<'a> = dyn Fn(&Path, &str, &str, sources::Need) -> Result<sources::Fetched> + 'a;
@@ -770,7 +772,7 @@ impl Request {
         let environment = Environment {
             host: &host::System,
             image_caches: &image_caches,
-            bundle_inputs: &|ipsw, model| crate::boot::restore_inputs(ipsw, model),
+            bundle_inputs: &|archive, model| crate::boot::restore_inputs_in(archive, model),
             ask: &|question| {
                 use std::io::IsTerminal;
                 if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {

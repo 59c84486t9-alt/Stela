@@ -390,7 +390,10 @@ static TEST_CACHES: std::sync::LazyLock<[PathBuf; 1]> = std::sync::LazyLock::new
 
 /// What `boot prepare` reads of the synthetic images, which have no
 /// kernel: their manifest and restore ramdisk.
-fn fake_bundle_inputs(_: &Path, _: &str) -> Result<Vec<String>> {
+fn fake_bundle_inputs(
+    _: &mut zip::ZipArchive<&mut dyn restore::ImageSource>,
+    _: &str,
+) -> Result<Vec<String>> {
     Ok(vec![
         "BuildManifest.plist".into(),
         "stelatest-ramdisk.dmg".into(),
@@ -2613,6 +2616,36 @@ fn repair_puts_a_damaged_bundle_back_from_the_usbs_own_image() {
             .unwrap()
             .contains("No problems found.")
     );
+}
+
+/// The boot files read from the USB's full install medium are the members
+/// a download fetches, not the recovery set.
+#[test]
+fn boot_files_read_from_the_usb_are_the_members_a_download_fetches() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let record = record(&f);
+    let medium = record.active_medium().cloned().unwrap();
+    let lookup = sources::Lookup {
+        need: sources::Need::BootFiles,
+        build: &record.build,
+        model: &record.model,
+        ipsw: None,
+        download_dir: Some(&f._dir.path().join("cache")),
+        medium: Some(&medium),
+    };
+    let environment = environment(&f.host);
+    let source = sources::Source::Medium(medium.clone());
+    let obtained = sources::obtain(&environment, &source, &lookup).unwrap();
+    let archive = zip::ZipArchive::new(fs::File::open(&obtained.path).unwrap()).unwrap();
+    assert_eq!(archive.comment(), restore::payload::INPUTS_COMMENT);
+    let mut held: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    held.sort_unstable();
+    let mut image = fs::File::open(&f.ipsw).unwrap();
+    let mut whole = zip::ZipArchive::new(&mut image as &mut dyn restore::ImageSource).unwrap();
+    assert_eq!(held, fake_bundle_inputs(&mut whole, &record.model).unwrap());
+    assert!(!restore::payload::holds_system_image(&obtained.path).unwrap());
 }
 
 #[test]

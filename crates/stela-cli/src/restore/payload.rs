@@ -65,7 +65,7 @@ fn restored_members<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 pub const RECOVERY_COMMENT: &[u8] = b"Stela recovery members";
 
 /// The archive comment of the boot inputs a setup keeps on its USB
-/// ([`copy_named`] of `boot::restore_inputs`): fewer members still than a
+/// ([`copy_named`] of `boot::restore_inputs_in`): fewer members still than a
 /// recovery archive, enough to prepare restore bundles.
 pub const INPUTS_COMMENT: &[u8] = b"Stela boot inputs";
 

@@ -3,7 +3,7 @@
 //! command says up front what it reads and downloads.
 //!
 //! A command needs the image's boot files ([`Need::BootFiles`], the
-//! members preparing a bundle reads, `boot::restore_inputs`) to prepare boot
+//! members preparing a bundle reads, `boot::restore_inputs_in`) to prepare boot
 //! bundles or name a remote install medium, and the whole image
 //! ([`Need::WholeImage`]) only to write a full install medium
 //! ([`need`]). [`locate`] tries, in order:
@@ -357,12 +357,20 @@ pub(super) fn obtain(
                 "Reading the boot files of macOS {} from this USB",
                 lookup.build
             );
-            restore::payload::trim(
-                medium::image::open(medium)?,
-                lookup.model,
-                &path,
-                "Reading boot files from the USB",
-            )
+            // The members a download reads, and no more.
+            (|| -> Result<u64> {
+                let mut image = medium::image::open(medium)?;
+                let mut archive =
+                    zip::ZipArchive::new(&mut image as &mut dyn restore::ImageSource)?;
+                let names = (environment.bundle_inputs)(&mut archive, lookup.model)?;
+                restore::copy_inputs(
+                    &mut archive,
+                    &names,
+                    &path,
+                    "Reading boot files from the USB",
+                    None,
+                )
+            })()
             .with_context(|| format!("reading {}", medium.directory().display()))?;
             Ok(Obtained {
                 path,

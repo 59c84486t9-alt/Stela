@@ -1,7 +1,7 @@
 //! The restore image members a setup keeps on its USB, so a later Stela
 //! update prepares the boot bundles again without the image: exactly the
 //! members `boot prepare` reads for a restore bundle
-//! (`boot::restore_inputs`, the list prepare's reads are held to), about
+//! (`boot::restore_inputs_in`, the list prepare's reads are held to), about
 //! 0.45 GB of macOS 27.2's 27 GB, in `stela/boot/<build>/inputs.ipsw`.
 //!
 //! A setup whose install medium streams the image keeps them; a full
@@ -21,6 +21,18 @@ const FILE: &str = "inputs.ipsw";
 /// Where `build`'s inputs are on `volume`.
 pub(super) fn path(volume: &Path, build: &str) -> PathBuf {
     bundle::build_directory(volume, build).join(FILE)
+}
+
+/// The members of the IPSW `ipsw` that preparing `model`'s bundles reads
+/// (`Environment::bundle_inputs`).
+pub(super) fn names(
+    environment: &Environment<'_>,
+    ipsw: &Path,
+    model: &str,
+) -> Result<Vec<String>> {
+    let mut file = fs::File::open(ipsw)?;
+    let mut archive = zip::ZipArchive::new(&mut file as &mut dyn restore::ImageSource)?;
+    (environment.bundle_inputs)(&mut archive, model)
 }
 
 /// Whether `record` keeps inputs: its installs stream the image.
@@ -45,7 +57,7 @@ pub(super) fn kept(
     {
         return None;
     }
-    let names = (environment.bundle_inputs)(&path, model).ok()?;
+    let names = names(environment, &path, model).ok()?;
     let archive = zip::ZipArchive::new(fs::File::open(&path).ok()?).ok()?;
     names
         .iter()
@@ -64,7 +76,7 @@ pub(super) fn needed(
     if !wanted(record) || kept(environment, &record.volume, build, &record.model).is_some() {
         return Ok(0);
     }
-    let names = (environment.bundle_inputs)(ipsw, &record.model)?;
+    let names = names(environment, ipsw, &record.model)?;
     restore::payload::members_bytes(ipsw, &names)
 }
 
@@ -91,7 +103,7 @@ pub(super) fn keep(
     if needed(environment, record, build, ipsw)? == 0 {
         return Ok(());
     }
-    let names = (environment.bundle_inputs)(ipsw, &record.model)?;
+    let names = names(environment, ipsw, &record.model)?;
     let path = path(&record.volume, build);
     fs::create_dir_all(path.parent().expect("a build directory"))?;
     restore::payload::copy_named(ipsw, &names, &path, "Keeping boot files on the USB")?;

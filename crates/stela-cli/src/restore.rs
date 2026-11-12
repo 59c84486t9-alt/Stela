@@ -296,7 +296,7 @@ pub fn fetch_recovery(image: &Image, model: &str, output: &Path) -> Result<u64> 
 }
 
 /// Copy the members of `image` that preparing `model`'s boot bundles reads
-/// (`boot::restore_inputs`) from Apple's servers by byte ranges into the
+/// (`boot::restore_inputs_in`) from Apple's servers by byte ranges into the
 /// archive `output` ([`payload::copy_named_from`]), each range ending at
 /// its member's end. Returns the bytes downloaded for the members.
 pub fn fetch_inputs(image: &Image, model: &str, output: &Path) -> Result<u64> {
@@ -308,21 +308,38 @@ pub fn inputs_from(source: remote::Remote, model: &str, output: &Path) -> Result
     let limit = source.limit();
     let mut archive = zip::ZipArchive::new(source)?;
     let names = crate::boot::restore_inputs_in(&mut archive, model)?;
-    let need = payload::members_bytes_in(&mut archive, &names, false)?;
-    let download = payload::members_bytes_in(&mut archive, &names, true)?;
-    crate::setup::ensure_room(
-        output.parent().unwrap_or(Path::new(".")),
-        "Downloading boot files",
-        need,
-    )?;
-    payload::copy_named_from(
+    copy_inputs(
         &mut archive,
         &names,
         output,
         "Downloading boot files",
         Some(&limit),
-    )?;
-    Ok(download)
+    )
+}
+
+/// An IPSW's bytes: a local file, the USB's install medium or Apple's
+/// servers read by ranges.
+pub(crate) trait ImageSource: std::io::Read + std::io::Seek {}
+
+impl<T: std::io::Read + std::io::Seek> ImageSource for T {}
+
+/// Copy `names`, the members of the IPSW in `archive` that preparing the
+/// boot bundles reads (`boot::restore_inputs_in`), into the archive `output`
+/// once its directory has room; a ranged reader's reads end at each
+/// member's end (`limit`). Returns the bytes read for the members, as the
+/// image stores them.
+pub(crate) fn copy_inputs<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    names: &[String],
+    output: &Path,
+    what: &str,
+    limit: Option<&remote::Limit>,
+) -> Result<u64> {
+    let need = payload::members_bytes_in(archive, names, false)?;
+    let read = payload::members_bytes_in(archive, names, true)?;
+    crate::setup::ensure_room(output.parent().unwrap_or(Path::new(".")), what, need)?;
+    payload::copy_named_from(archive, names, output, what, limit)?;
+    Ok(read)
 }
 
 /// The bytes [`fetch_inputs`] downloads of `image` for `model`, as the

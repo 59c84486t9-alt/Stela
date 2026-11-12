@@ -534,8 +534,8 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
     line.prepare.run()
 }
 
-/// The members of `ipsw` that [`prepare`] reads for `model`'s erase
-/// restore bundle (`--restore`), the list its reads are held to.
+/// [`restore_inputs_in`] of the IPSW file `ipsw`.
+#[cfg(test)]
 pub(crate) fn restore_inputs(ipsw: &std::path::Path, model: &str) -> Result<Vec<String>> {
     restore_inputs_in(
         &mut zip::ZipArchive::new(std::fs::File::open(ipsw)?)?,
@@ -543,8 +543,10 @@ pub(crate) fn restore_inputs(ipsw: &std::path::Path, model: &str) -> Result<Vec<
     )
 }
 
-/// [`restore_inputs`] of an IPSW in `archive`, a local file or one read by
-/// ranges: its directory and BuildManifest alone are read.
+/// The members of the IPSW in `archive` (a local file, the USB's install
+/// medium or one read by ranges) that [`prepare`] reads for `model`'s erase
+/// restore bundle (`--restore`), the list its reads are held to: its
+/// directory and BuildManifest alone are read.
 pub(crate) fn restore_inputs_in<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     model: &str,
