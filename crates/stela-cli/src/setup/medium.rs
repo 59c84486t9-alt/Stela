@@ -60,6 +60,11 @@ pub(super) struct Medium {
     /// It names the IPSW on Apple's servers instead of holding it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) remote: bool,
+    /// Pieces a repair read and found damaged ([`Medium::damaged_pieces`]):
+    /// written again like missing ones, and removed only once nothing can
+    /// refuse the repair. Never recorded.
+    #[serde(skip)]
+    pub(super) damaged: Vec<String>,
 }
 
 impl Medium {
@@ -160,6 +165,12 @@ impl Medium {
                 )),
                 Err(_) => problems.push(format!("{} is missing", path.display())),
             }
+        }
+        for piece in &self.damaged {
+            problems.push(format!(
+                "{} differs from its recorded SHA-256",
+                directory.join(piece).display()
+            ));
         }
         for file in [PIECE_HASHES_FILE, BLOCK_HASHES_FILE] {
             if !directory.join(file).is_file() {
@@ -332,17 +343,25 @@ pub(super) fn needed_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_by
 }
 
 /// The bytes of the IPSW's pieces not on `volume` at their size: what a
-/// download onto it fetches, the intact pieces being kept.
-pub(super) fn missing_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_bytes: u64) -> u64 {
+/// download onto it fetches, the intact pieces being kept. The `damaged`
+/// pieces ([`Medium::damaged`]) count as missing.
+pub(super) fn missing_bytes(
+    volume: &Path,
+    build: &str,
+    ipsw_bytes: u64,
+    piece_bytes: u64,
+    damaged: &[String],
+) -> u64 {
     let directory = directory(volume, build);
     piece_sizes(ipsw_bytes, piece_bytes)
         .into_iter()
         .enumerate()
         .filter(|(index, size)| {
-            fs::metadata(directory.join(piece_name(*index)))
-                .map(|m| m.len())
-                .ok()
-                != Some(*size)
+            damaged.contains(&piece_name(*index))
+                || fs::metadata(directory.join(piece_name(*index)))
+                    .map(|m| m.len())
+                    .ok()
+                    != Some(*size)
         })
         .map(|(_, size)| size)
         .sum()
@@ -815,6 +834,7 @@ pub(super) mod tests {
                 partition_guid: "G".into(),
                 manifest_sha256: first.manifest_sha256.clone(),
                 remote: false,
+                damaged: Vec::new(),
             }
             .problems()
             .is_empty()
@@ -921,6 +941,7 @@ pub(super) mod tests {
             partition_guid: "G".into(),
             manifest_sha256: String::new(),
             remote: false,
+            damaged: Vec::new(),
         };
         assert_eq!(medium.problems().len(), 1);
     }
@@ -953,6 +974,7 @@ pub(super) mod tests {
             partition_guid: String::new(),
             manifest_sha256: write_remote(&volume, remote).unwrap(),
             remote: true,
+            damaged: Vec::new(),
         };
         assert!(medium.problems().is_empty(), "{:?}", medium.problems());
         let mut names: Vec<_> = fs::read_dir(medium.directory())
@@ -977,6 +999,7 @@ pub(super) mod tests {
             partition_guid: String::new(),
             manifest_sha256: String::new(),
             remote: false,
+            damaged: Vec::new(),
         };
         assert_eq!(
             medium("26A434").removable_directory().unwrap(),

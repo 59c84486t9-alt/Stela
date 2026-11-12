@@ -2701,6 +2701,39 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
         clean.contains("every block is checked as the install reads it"),
         "{clean}"
     );
+    // Without the image or the network, repair refuses before it changes
+    // anything: the damaged piece stays rather than going missing.
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let offline = || {
+        let mut request = update_request(&f, &f._dir.path().join("empty"));
+        request.action = Action::Repair;
+        request.verify = true;
+        request
+    };
+    let error = format!(
+        "{:#}",
+        offline().dispatch(&environment(&f.host)).unwrap_err()
+    );
+    assert!(error.contains("needs the macOS"), "{error}");
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    // With Apple's servers reachable, the dry run names the download of
+    // that piece alone.
+    let whole = fs::metadata(&f.ipsw).unwrap().len();
+    let size = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((2_200_000_000, whole)) };
+    let mut request = offline();
+    request.dry_run = true;
+    let plan = request
+        .dispatch(&Environment {
+            image_size: &size,
+            ..environment(&f.host)
+        })
+        .unwrap();
+    let piece = host::bytes_text(good.len() as u64);
+    assert!(
+        plan.contains(&format!("download {piece} from Apple")),
+        "{plan}"
+    );
+    assert!(plan.contains("this USB's copy lacks"), "{plan}");
     // The image, downloaded earlier.
     let cache = f._dir.path().join("cache");
     fs::create_dir_all(&cache).unwrap();
@@ -2725,6 +2758,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
         plan.contains("ipsw.000 damaged: would be removed"),
         "{plan}"
     );
+    assert!(plan.contains(&format!("({piece} to write)")), "{plan}");
     assert_eq!(fs::read(&first).unwrap(), bad);
     // An install that found the block: status names the piece and repair.
     let line = format!("[   12.000] {DAMAGED_LOG_LINE}ipsw.000 block 0\n");

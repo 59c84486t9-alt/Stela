@@ -771,7 +771,8 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     let has_media = record.installs_media();
     // The full medium's bytes, read whole when asked or when an install
     // found a piece damaged since it was last checked: a damaged piece is
-    // removed (in a dry run, named) and written again like a missing one.
+    // written again like a missing one, and removed only after everything
+    // that can refuse the repair.
     let mut checked = None;
     if let Some(medium) = record
         .active_medium()
@@ -800,14 +801,12 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
                     damaged.join(", "),
                     match command.dry_run {
                         true => "would be removed and written again",
-                        false => "removed, to be written again",
+                        false => "removed and written again",
                     }
                 )?,
             }
-            if !command.dry_run {
-                for piece in &damaged {
-                    fs::remove_file(medium.directory().join(piece))?;
-                }
+            if let Some(active) = record.media.iter_mut().find(|m| m.build == medium.build) {
+                active.damaged = damaged;
             }
             checked = Some(super::medium::log_head(&record.esp));
         }
@@ -1115,6 +1114,14 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
+    }
+    // Nothing refuses the repair from here: the damaged pieces go, and the
+    // install below writes them again as missing ones.
+    if let Some(medium) = record.media.iter_mut().find(|m| !m.damaged.is_empty()) {
+        for piece in std::mem::take(&mut medium.damaged) {
+            let path = medium.directory().join(&piece);
+            fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
+        }
     }
     if let Some(store) = &record.translations
         && !store_repairs.is_empty()

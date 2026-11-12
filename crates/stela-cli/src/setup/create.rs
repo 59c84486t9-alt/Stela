@@ -158,7 +158,11 @@ pub(super) fn plan_install(
                 None => fs::metadata(ipsw)?.len(),
             };
             let need = medium::needed_bytes(&volume, build, ipsw_bytes, environment.piece_bytes);
-            let write = medium::missing_bytes(&volume, build, ipsw_bytes, environment.piece_bytes);
+            let damaged = record
+                .medium_of(build)
+                .map_or(&[][..], |m| m.damaged.as_slice());
+            let write =
+                medium::missing_bytes(&volume, build, ipsw_bytes, environment.piece_bytes, damaged);
             let created = missing_directories(&volume, &medium::directory(&volume, build));
             Some(MediumPlan {
                 volume,
@@ -296,6 +300,7 @@ pub(super) fn apply_install(
         partition_guid: plan.guid.clone(),
         manifest_sha256: String::new(),
         remote: plan.remote,
+        damaged: Vec::new(),
     });
     let mut created = record.created_directories.clone();
     for directory in plan.created {

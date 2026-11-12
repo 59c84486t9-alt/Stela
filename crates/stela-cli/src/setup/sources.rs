@@ -227,6 +227,7 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
                         lookup.build,
                         whole,
                         environment.piece_bytes,
+                        &m.damaged,
                     ),
                     _ => whole,
                 },
