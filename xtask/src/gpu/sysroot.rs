@@ -37,9 +37,8 @@ pub(super) const FREESTANDING: [&str; 6] = [
     "-U_GLIBCXX_ASSERTIONS",
 ];
 /// Mesa's probes link programs and shared libraries: position-independent
-/// code linked as a position-independent executable, whichever the host's
-/// Clang makes by default.
-const PROBE_COMPILE: &str = "-fPIC";
+/// code ([`POSITION_INDEPENDENT`]) linked as a position-independent
+/// executable, whichever the host's Clang makes by default.
 const PROBE_LINK: [&str; 2] = ["--no-default-config", "-pie"];
 
 pub(super) struct Sysroot {
@@ -96,7 +95,7 @@ impl Sysroot {
         let system = |include: &Path| format!("-isystem{}", slashed(include));
         let mut shared = vec![TARGET.to_owned(), "-nostdinc".to_owned()];
         shared.extend(FREESTANDING.map(str::to_owned));
-        shared.push(PROBE_COMPILE.to_owned());
+        shared.push(POSITION_INDEPENDENT.to_owned());
         let mut compile = shared.to_vec();
         compile.extend([system(&libc), installed.clone(), "-DSTELA_LIBC".to_owned()]);
         let compat = gpu().join("compat/llvm");
