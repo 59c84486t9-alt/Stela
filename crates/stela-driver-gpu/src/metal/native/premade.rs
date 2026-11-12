@@ -19,12 +19,12 @@
 //! when it is dropped unadopted, when newer images push it out, and when
 //! the backend is dropped. A job never runs on a destroyed device
 //! ([`super::deferral`]).
-use super::{
-    kept::{Kept, Taken},
-    memory, objects,
-};
+use super::{memory, objects};
 use crate::metal::{
-    deferred::{Job, Made, Owner},
+    deferred::{
+        Job, Made, Owner,
+        kept::{Kept, Taken},
+    },
     vulkan::object::{ImageInfo, MemoryRequest},
 };
 use alloc::{boxed::Box, collections::BTreeSet, format, sync::Arc, vec::Vec};

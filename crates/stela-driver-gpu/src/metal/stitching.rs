@@ -210,6 +210,55 @@ pub fn decode(stream: &[u8], functions: usize) -> Result<Vec<StitchedGraph>> {
     Ok(graphs)
 }
 
+/// The stream [`decode`] reads `graphs` from.
+pub fn encode(graphs: &[StitchedGraph]) -> Vec<u8> {
+    let mut words = Vec::new();
+    for graph in graphs {
+        let name = graph.name.as_bytes();
+        words.extend([
+            name.len() as u32,
+            graph.nodes.len() as u32,
+            graph.output.map_or(0, |output| output + 1),
+            graph.kernel.into(),
+        ]);
+        let mut padded = name.to_vec();
+        padded.resize(name.len().next_multiple_of(4), 0);
+        let (chunks, _) = padded.as_chunks::<4>();
+        words.extend(chunks.iter().map(|chunk| u32::from_le_bytes(*chunk)));
+        for node in &graph.nodes {
+            match node {
+                StitchedNode::Input(index) => words.extend([0, *index]),
+                &StitchedNode::Builtin(builtin) => words.extend([BUILTIN, builtin as u32]),
+                &StitchedNode::BufferAddress {
+                    index,
+                    offset,
+                    dereference,
+                } => words.extend([
+                    BUFFER_ADDRESS,
+                    index,
+                    offset as u32,
+                    (offset >> 32) as u32,
+                    dereference.into(),
+                ]),
+                StitchedNode::EarlyReturn { condition, value } => {
+                    words.extend([EARLY_RETURN, *condition, value.map_or(0, |value| value + 1)])
+                }
+                StitchedNode::Texture(index) => words.extend([TEXTURE, *index]),
+                StitchedNode::Sampler(index) => words.extend([SAMPLER, *index]),
+                StitchedNode::Threadgroup(index) => words.extend([THREADGROUP, *index]),
+                StitchedNode::Call {
+                    function,
+                    arguments,
+                } => {
+                    words.extend([function + 1, arguments.len() as u32]);
+                    words.extend(arguments);
+                }
+            }
+        }
+    }
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +387,41 @@ mod tests {
             bad[at] = later;
             assert!(decode(&stream(&bad), 1).is_err(), "{at}");
         }
+    }
+
+    #[test]
+    fn graphs_encode_as_they_decode() {
+        let streams: [&[u32]; 5] = [
+            &[1, 3, 3, 0, 0x66, 0, 0, 1, 1, 0, 1, 1, 1],
+            &[1, 2, 0, 1, 0x66, u32::MAX, 1, 1, 1, 0],
+            &[1, 2, 0, 1, 0x66, u32::MAX - 1, 3, 8, 1, 1, 1, 1, 0],
+            &[1, 3, 0, 0, 0x66, 0, 0, 1, 1, 0, u32::MAX - 2, 1, 2],
+            &[
+                5,
+                4,
+                0,
+                1,
+                0x6c_6c_65_68,
+                0x6f,
+                u32::MAX - 3,
+                3,
+                u32::MAX - 4,
+                1,
+                u32::MAX - 5,
+                2,
+                1,
+                3,
+                0,
+                1,
+                2,
+            ],
+        ];
+        let mut all = Vec::new();
+        for words in streams {
+            assert_eq!(encode(&decode(&stream(words), 1).unwrap()), stream(words));
+            all.extend_from_slice(words);
+        }
+        assert_eq!(encode(&decode(&stream(&all), 1).unwrap()), stream(&all));
     }
 
     #[test]

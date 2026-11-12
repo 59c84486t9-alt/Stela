@@ -22,14 +22,13 @@
 //! no turn; the queue and command pools stay the turn's. The backend holds
 //! the job lock while it destroys the device, so no job runs on a destroyed
 //! one, and later jobs see it gone.
-use super::{
-    NativeBackend, failure,
-    kept::{Kept, Taken},
-    objects, raw,
-};
+use super::{NativeBackend, failure, objects, raw};
 use crate::metal::{
     compiler::{DEFERRED, clone_nir, free_nir_copy, nir_releases},
-    deferred::{Done, Job, JobLock, Made, Owner},
+    deferred::{
+        Done, Job, JobLock, Made, Owner,
+        kept::{Kept, Taken},
+    },
     error::{Error, Result},
     vulkan::object::{ComputePipelineInfo, GraphicsPipelineInfo, PipelineCache, PipelineSource},
 };

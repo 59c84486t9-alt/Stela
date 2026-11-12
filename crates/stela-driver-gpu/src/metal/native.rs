@@ -18,7 +18,6 @@
 mod blocks;
 mod deferral;
 mod device_generated;
-mod kept;
 mod memory;
 mod objects;
 mod physical;

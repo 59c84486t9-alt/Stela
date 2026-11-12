@@ -92,6 +92,11 @@ unsafe extern "C" fn sampler_states(
     true
 }
 
+std::thread_local! {
+    /// Stitched modules and function listings the service made.
+    static STITCHES: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+}
+
 unsafe extern "C" fn functions(
     _: *const c_void,
     _: usize,
@@ -99,19 +104,29 @@ unsafe extern "C" fn functions(
     _: *mut c_void,
     _: *mut ffi::AirError,
 ) -> bool {
+    let (stitched, listed) = STITCHES.get();
+    STITCHES.set((stitched, listed + 1));
     true
 }
+
+/// The module every stitch makes: bare bitcode.
+const STITCHED_AIR: &[u8] = b"BC\xc0\xde";
 
 unsafe extern "C" fn stitch(
     _: *const ffi::StitchSource,
     _: u32,
     _: *const ffi::StitchGraph,
     _: u32,
-    _: ffi::VisitBytes,
-    _: *mut c_void,
+    visit: ffi::VisitBytes,
+    data: *mut c_void,
     _: *mut ffi::AirError,
 ) -> bool {
-    false
+    enter_service();
+    let (stitched, listed) = STITCHES.get();
+    STITCHES.set((stitched + 1, listed));
+    // SAFETY: the callback takes the bytes for the call.
+    unsafe { visit(data, STITCHED_AIR.as_ptr().cast(), STITCHED_AIR.len()) };
+    true
 }
 
 /// Each compilation's NIR is at its own address.
@@ -285,6 +300,53 @@ fn a_deferred_reflection_runs_outside_and_the_call_finds_it() {
     assert_eq!(prepared.constants, vec![(0, vec![1, 0, 0, 0])]);
     assert!(compiler.take_job().is_none());
     assert_eq!(calls().0, reflected + 1);
+}
+
+#[test]
+fn a_deferred_stitch_runs_outside_and_the_call_finds_it_with_its_functions() {
+    let (mut compiler, library) = caching();
+    let lock = compiler.compile_lock(core::hint::spin_loop);
+    let sources = [LinkedFunction {
+        library,
+        entry: String::from("kernel"),
+        constants: vec![(0, vec![1, 0, 0, 0])],
+        alias: None,
+    }];
+    let graphs = [StitchedGraph {
+        name: "stitched".into(),
+        nodes: vec![
+            StitchedNode::Input(0),
+            StitchedNode::Call {
+                function: 0,
+                arguments: vec![0],
+            },
+        ],
+        output: Some(1),
+        kernel: false,
+    }];
+    compiler.set_deferring(true);
+    assert_eq!(compiler.stitch(&sources, &graphs), Err(DEFERRED));
+    assert!(lock.deferred() && Compiler::deferred(&compiler));
+    let job = compiler.take_job().unwrap();
+    compiler.end_call();
+    assert_eq!(STITCHES.get(), (0, 0), "nothing ran in the turn");
+    let done = job.run(&lock.hold(core::hint::spin_loop));
+    assert_eq!(STITCHES.get(), (1, 1), "the job stitched and listed");
+    compiler.adopt_job(done);
+
+    // The call's next run takes the module and its listing.
+    compiler.set_deferring(true);
+    assert_eq!(compiler.stitch(&sources, &graphs).unwrap(), STITCHED_AIR);
+    assert_eq!(compiler.functions(STITCHED_AIR), Ok(Vec::new()));
+    assert!(compiler.take_job().is_none());
+    compiler.end_call();
+    assert_eq!(STITCHES.get(), (1, 1));
+
+    // Without deferring, the turn stitches and lists itself.
+    compiler.set_deferring(false);
+    assert_eq!(compiler.stitch(&sources, &graphs).unwrap(), STITCHED_AIR);
+    assert_eq!(compiler.functions(STITCHED_AIR), Ok(Vec::new()));
+    assert_eq!(STITCHES.get(), (2, 2));
 }
 
 #[test]

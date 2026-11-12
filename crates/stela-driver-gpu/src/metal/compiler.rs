@@ -40,7 +40,10 @@ mod tests;
 use super::{
     abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
-    deferred::{Done, Job, Made, Owner},
+    deferred::{
+        Done, Job, Made, Owner,
+        kept::{Kept, Taken},
+    },
     error::{Error, Result, ensure},
     library::Air,
     reflection::Binding,
@@ -315,6 +318,12 @@ pub struct AirCompiler {
     deferred: Option<CompileJob>,
     /// A reflection the cache missed, deferred as a compilation is.
     reflecting: Option<ReflectJob>,
+    /// A stitched library deferred as a compilation is, what such jobs
+    /// made for their calls' next runs, and the functions of the AIR the
+    /// last one taken stitched, for its library's listing.
+    stitching: Option<StitchJob>,
+    stitched: Kept<Option<StitchedAir>>,
+    listed: Option<(Vec<u8>, Listing)>,
     /// A call that would wait in its turn for a job's use of LLVM waits
     /// for this job, which runs after it, instead.
     waiting: Waiting,
@@ -346,6 +355,10 @@ pub type Persist = fn(&[u8; 32], &[u8]);
 
 /// The serialized NIR of a key that [`Persist`] took this boot, if kept.
 pub type Recall = fn(&[u8; 32]) -> Option<Vec<u8>>;
+
+/// Stitched libraries jobs made that wait for their calls' next runs; past
+/// this the oldest is dropped, and its call stitches again.
+const STITCHED: usize = 16;
 
 /// The NIR budget of a device's compiled shaders.
 pub const NIR_BUDGET: usize = 96 << 20;
@@ -420,6 +433,9 @@ impl AirCompiler {
             deferring: false,
             deferred: None,
             reflecting: None,
+            stitching: None,
+            stitched: Kept::new(STITCHED),
+            listed: None,
             waiting: Waiting::default(),
             failed: alloc::collections::BTreeSet::new(),
             lock: alloc::sync::Arc::new(CompileLock::new()),
@@ -515,6 +531,15 @@ impl AirCompiler {
         self.lock.set_deferred(false);
     }
 
+    /// Whether the call may still leave a job: it defers, and has left
+    /// none yet.
+    fn may_wait(&self) -> bool {
+        self.deferring
+            && self.deferred.is_none()
+            && self.reflecting.is_none()
+            && self.stitching.is_none()
+    }
+
     /// The compilation the call deferred.
     pub fn take_deferred(&mut self) -> Option<CompileJob> {
         self.lock.set_deferred(false);
@@ -599,6 +624,8 @@ impl AirCompiler {
     pub fn end_call(&mut self) {
         self.deferring = false;
         self.reflecting = None;
+        self.stitching = None;
+        self.listed = None;
         self.waiting.job = None;
         if let Some(nir) = self.nir.as_mut() {
             nir.unpin();
@@ -670,9 +697,7 @@ impl AirCompiler {
         // A large module's reflection, which parses and specializes its
         // AIR, can take seconds: it runs outside the turn like a compile.
         if let Some(key) = &key
-            && self.deferring
-            && self.deferred.is_none()
-            && self.reflecting.is_none()
+            && self.may_wait()
         {
             let digest = reflection_digest(key);
             if !self.failed.remove(&digest) {
@@ -697,12 +722,8 @@ impl AirCompiler {
         // job holds this lock while it runs.
         let reflection = {
             let lock = self.lock.clone();
-            let _held = Self::llvm(
-                &lock,
-                &mut self.waiting,
-                self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-                self.relax,
-            )?;
+            let may_wait = self.may_wait();
+            let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
             let selected = select(&self.libraries, library, entry)?;
             selected.reflect_raw(&self.service, raw.as_deref(), &mut self.refusal)?
         };
@@ -739,7 +760,10 @@ impl Compiler for AirCompiler {
     }
 
     fn deferred(&self) -> bool {
-        self.deferred.is_some() || self.reflecting.is_some() || self.waiting.job.is_some()
+        self.deferred.is_some()
+            || self.reflecting.is_some()
+            || self.stitching.is_some()
+            || self.waiting.job.is_some()
     }
 
     fn defer_compiles(&mut self, deferring: bool) {
@@ -757,6 +781,12 @@ impl Compiler for AirCompiler {
                 Box::new(reflect.run()) as Made
             }));
         }
+        if let Some(stitch) = self.stitching.take() {
+            self.lock.set_deferred(false);
+            return Some(Job::new(stitch.key, Owner::Compiler, move || {
+                Box::new(stitch.run()) as Made
+            }));
+        }
         let job = self.take_deferred()?;
         let key = job.key.expect("a deferred compilation has its key");
         Some(Job::new(key, Owner::Compiler, move || {
@@ -767,11 +797,16 @@ impl Compiler for AirCompiler {
     fn adopt_job(&mut self, done: Done) {
         match done.made.downcast::<Finished>() {
             Ok(finished) => self.adopt(*finished),
-            Err(made) => {
-                if let Ok(reflected) = made.downcast::<Reflected>() {
-                    self.adopt_reflection(*reflected);
+            Err(made) => match made.downcast::<Reflected>() {
+                Ok(reflected) => self.adopt_reflection(*reflected),
+                Err(made) => {
+                    if let Ok(stitched) = made.downcast::<Stitched>() {
+                        let Stitched { key, made } = *stitched;
+                        // One pushed out stitches again in its call.
+                        drop(self.stitched.keep(key, 0, made));
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -792,54 +827,19 @@ impl Compiler for AirCompiler {
     }
 
     fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>> {
-        unsafe extern "C" fn visit(
-            data: *mut c_void,
-            name: *const c_char,
-            name_bytes: usize,
-            stage: u32,
-        ) -> bool {
-            // SAFETY: the data is the list below, and the service's name is
-            // `name_bytes` long for the call.
-            let (list, name) = unsafe {
-                (
-                    &mut *data.cast::<Vec<(String, FunctionType)>>(),
-                    slice::from_raw_parts(name.cast::<u8>(), name_bytes),
-                )
-            };
-            let (Ok(name), Some(stage)) =
-                (str::from_utf8(name), FunctionType::from_raw(stage.into()))
-            else {
-                return false;
-            };
-            list.push((String::from(name), stage));
-            true
+        // A stitched library's job listed its functions with its AIR.
+        if let Some((listed, functions)) = self.listed.take()
+            && listed == air
+        {
+            return Ok(functions);
         }
-        let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
-        let mut functions = Vec::new();
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let _held = Self::llvm(
-            &lock,
-            &mut self.waiting,
-            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-            self.relax,
-        )?;
-        // SAFETY: the bitcode and the list outlive the call, which writes
-        // the list through `visit` and the error.
-        let listed = unsafe {
-            (self.service.functions)(
-                air.bitcode.as_ptr().cast(),
-                air.bitcode.len(),
-                visit,
-                ptr::from_mut(&mut functions).cast(),
-                &mut error,
-            )
-        };
-        if !listed {
-            return Err(refuse(&mut self.refusal, "the library", &error));
-        }
-        Ok(functions)
+        let may_wait = self.may_wait();
+        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        list_functions(&self.service, air, &mut error)?
+            .ok_or_else(|| refuse(&mut self.refusal, "the library", &error))
     }
 
     fn exports(&mut self, air: &[u8]) -> Result<Vec<String>> {
@@ -868,12 +868,8 @@ impl Compiler for AirCompiler {
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let _held = Self::llvm(
-            &lock,
-            &mut self.waiting,
-            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-            self.relax,
-        )?;
+        let may_wait = self.may_wait();
+        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
         // SAFETY: the bitcode and the list outlive the call, which writes
         // the list through `visit` and the error.
         let listed = unsafe {
@@ -892,152 +888,67 @@ impl Compiler for AirCompiler {
     }
 
     fn stitch(&mut self, sources: &[LinkedFunction], graphs: &[StitchedGraph]) -> Result<Vec<u8>> {
-        unsafe extern "C" fn visit(data: *mut c_void, bytes: *const c_void, size: usize) {
-            // SAFETY: the data is the module below, and the service's bytes
-            // are `size` long for the call.
-            let (module, bytes) = unsafe {
-                (
-                    &mut *data.cast::<Vec<u8>>(),
-                    slice::from_raw_parts(bytes.cast::<u8>(), size),
-                )
-            };
-            module.extend_from_slice(bytes);
+        let key = {
+            let selected = sources
+                .iter()
+                .map(|function| select(&self.libraries, function.library, &function.entry))
+                .collect::<Result<Vec<_>>>()?;
+            stitch_digest(&selected, sources, graphs)
+        };
+        // What a job stitched for the call's last run; a refusal it met
+        // the turn repeats, so the call reports it.
+        let refused = match self.stitched.take(&key, 0) {
+            Taken::Fresh(Some(StitchedAir { air, functions })) => {
+                self.listed = Some((air.clone(), functions));
+                return Ok(air);
+            }
+            Taken::Fresh(None) => true,
+            // The key names its inputs' contents: no generation is older.
+            Taken::Stale(_) | Taken::Missing => false,
+        };
+        // Stitching and listing its functions run LLVM for milliseconds:
+        // outside the turn, like a compile.
+        if !refused && self.may_wait() {
+            let sources = sources
+                .iter()
+                .map(|function| {
+                    let library = self
+                        .libraries
+                        .get(&function.library)
+                        .ok_or(Error::Invalid("unknown library"))?;
+                    Ok((
+                        library.clone(),
+                        function.entry.clone(),
+                        function.constants.clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.deferrals += 1;
+            self.stitching = Some(StitchJob {
+                service: self.service,
+                sources,
+                graphs: graphs.to_vec(),
+                key,
+            });
+            self.lock.set_deferred(true);
+            return Err(DEFERRED);
         }
-        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
-        let selected = sources
-            .iter()
-            .map(|function| select(&self.libraries, function.library, &function.entry))
-            .collect::<Result<Vec<_>>>()?;
         let values: Vec<_> = sources
             .iter()
             .map(|function| constant_values(&function.constants))
             .collect();
-        let sources = selected
-            .iter()
-            .zip(&values)
-            .map(|(selected, values)| {
-                Ok(ffi::StitchSource {
-                    bitcode: selected.module.bitcode.as_ptr().cast(),
-                    size: selected.module.bitcode.len(),
-                    name: selected.entry.as_ptr(),
-                    constants: values.as_ptr(),
-                    constant_count: count(values.len())?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let names = graphs
-            .iter()
-            .map(|graph| CString::new(graph.name.as_str()).map_err(|_| MALFORMED))
-            .collect::<Result<Vec<_>>>()?;
-        let nodes = graphs
-            .iter()
-            .map(|graph| {
-                graph
-                    .nodes
-                    .iter()
-                    .map(|node| {
-                        Ok(match node {
-                            StitchedNode::Input(index) => ffi::StitchNode {
-                                function: ffi::STITCH_INPUT,
-                                input: *index,
-                                ..ffi::StitchNode::NONE
-                            },
-                            &StitchedNode::Builtin(builtin) => ffi::StitchNode {
-                                function: ffi::STITCH_BUILTIN,
-                                input: builtin as u32,
-                                ..ffi::StitchNode::NONE
-                            },
-                            &StitchedNode::BufferAddress {
-                                index,
-                                offset,
-                                dereference,
-                            } => ffi::StitchNode {
-                                function: ffi::STITCH_BUFFER_ADDRESS,
-                                input: index,
-                                dereference,
-                                offset,
-                                ..ffi::StitchNode::NONE
-                            },
-                            StitchedNode::EarlyReturn { condition, value } => ffi::StitchNode {
-                                function: ffi::STITCH_EARLY_RETURN,
-                                input: *condition,
-                                arguments: value.as_slice().as_ptr(),
-                                argument_count: u32::from(value.is_some()),
-                                ..ffi::StitchNode::NONE
-                            },
-                            &StitchedNode::Texture(index) => ffi::StitchNode {
-                                function: ffi::STITCH_TEXTURE,
-                                input: index,
-                                ..ffi::StitchNode::NONE
-                            },
-                            &StitchedNode::Sampler(index) => ffi::StitchNode {
-                                function: ffi::STITCH_SAMPLER,
-                                input: index,
-                                ..ffi::StitchNode::NONE
-                            },
-                            &StitchedNode::Threadgroup(index) => ffi::StitchNode {
-                                function: ffi::STITCH_THREADGROUP,
-                                input: index,
-                                ..ffi::StitchNode::NONE
-                            },
-                            StitchedNode::Call {
-                                function,
-                                arguments,
-                            } => ffi::StitchNode {
-                                function: *function,
-                                arguments: arguments.as_ptr(),
-                                argument_count: count(arguments.len())?,
-                                ..ffi::StitchNode::NONE
-                            },
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let raw = graphs
-            .iter()
-            .zip(&names)
-            .zip(&nodes)
-            .map(|((graph, name), nodes)| {
-                Ok(ffi::StitchGraph {
-                    name: name.as_ptr(),
-                    nodes: nodes.as_ptr(),
-                    node_count: count(nodes.len())?,
-                    output: graph.output.unwrap_or(u32::MAX),
-                    kernel: graph.kernel,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut module = Vec::new();
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let _held = Self::llvm(
-            &lock,
-            &mut self.waiting,
-            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-            self.relax,
-        )?;
-        // SAFETY: the sources and graphs, with what they point to, and the
-        // module outlive the call, which writes the module through `visit`
-        // and the error.
-        let stitched = unsafe {
-            (self.service.stitch)(
-                sources.as_ptr(),
-                count(sources.len())?,
-                raw.as_ptr(),
-                count(raw.len())?,
-                visit,
-                ptr::from_mut(&mut module).cast(),
-                &mut error,
-            )
-        };
-        if !stitched {
-            return Err(refuse(&mut self.refusal, "stitched functions", &error));
-        }
-        Ok(module)
+        let may_wait = self.may_wait();
+        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        let selected = sources
+            .iter()
+            .map(|function| select(&self.libraries, function.library, &function.entry))
+            .collect::<Result<Vec<_>>>()?;
+        stitch_raw(&self.service, &selected, &values, graphs, &mut error)?
+            .ok_or_else(|| refuse(&mut self.refusal, "stitched functions", &error))
     }
-
     fn library_data(&self, library: u64) -> Result<&[u8]> {
         self.libraries
             .get(&library)
@@ -1106,12 +1017,8 @@ impl Compiler for AirCompiler {
         let count = u32::try_from(values.as_ref().map_or(0, Vec::len)).map_err(|_| MALFORMED)?;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let _held = Self::llvm(
-            &lock,
-            &mut self.waiting,
-            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-            self.relax,
-        )?;
+        let may_wait = self.may_wait();
+        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
         // only the bindings and the error.
         let reflected = unsafe {
@@ -1160,12 +1067,8 @@ impl Compiler for AirCompiler {
             let mut error = ffi::AirError::NONE;
             // LLVM, built without threads, runs on one processor at a time.
             let lock = self.lock.clone();
-            let _held = Self::llvm(
-                &lock,
-                &mut self.waiting,
-                self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
-                self.relax,
-            )?;
+            let may_wait = self.may_wait();
+            let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
             // SAFETY: the bitcode outlives the call, which writes at most
             // SAMPLER_STATES states, the count and the error.
             let valid = unsafe {
@@ -2675,4 +2578,271 @@ fn vertex_formats(words: &[Option<VertexFormat>]) -> [u8; 32] {
         *slot = format.map_or(0, |format| format.raw() as u8);
     }
     raw
+}
+
+/// The AIR module of `graphs` stitched from the `selected` functions with
+/// their constant `values`, or `None` when the service refused, as `error`
+/// says. The caller holds the compile lock.
+fn stitch_raw(
+    service: &Service,
+    selected: &[Selected],
+    values: &[Vec<ffi::ConstantValue>],
+    graphs: &[StitchedGraph],
+    error: &mut ffi::AirError,
+) -> Result<Option<Vec<u8>>> {
+    unsafe extern "C" fn visit(data: *mut c_void, bytes: *const c_void, size: usize) {
+        // SAFETY: the data is the module below, and the service's bytes
+        // are `size` long for the call.
+        let (module, bytes) = unsafe {
+            (
+                &mut *data.cast::<Vec<u8>>(),
+                slice::from_raw_parts(bytes.cast::<u8>(), size),
+            )
+        };
+        module.extend_from_slice(bytes);
+    }
+    let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
+    let sources = selected
+        .iter()
+        .zip(values)
+        .map(|(selected, values)| {
+            Ok(ffi::StitchSource {
+                bitcode: selected.module.bitcode.as_ptr().cast(),
+                size: selected.module.bitcode.len(),
+                name: selected.entry.as_ptr(),
+                constants: values.as_ptr(),
+                constant_count: count(values.len())?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let names = graphs
+        .iter()
+        .map(|graph| CString::new(graph.name.as_str()).map_err(|_| MALFORMED))
+        .collect::<Result<Vec<_>>>()?;
+    let nodes = graphs
+        .iter()
+        .map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .map(|node| {
+                    Ok(match node {
+                        StitchedNode::Input(index) => ffi::StitchNode {
+                            function: ffi::STITCH_INPUT,
+                            input: *index,
+                            ..ffi::StitchNode::NONE
+                        },
+                        &StitchedNode::Builtin(builtin) => ffi::StitchNode {
+                            function: ffi::STITCH_BUILTIN,
+                            input: builtin as u32,
+                            ..ffi::StitchNode::NONE
+                        },
+                        &StitchedNode::BufferAddress {
+                            index,
+                            offset,
+                            dereference,
+                        } => ffi::StitchNode {
+                            function: ffi::STITCH_BUFFER_ADDRESS,
+                            input: index,
+                            dereference,
+                            offset,
+                            ..ffi::StitchNode::NONE
+                        },
+                        StitchedNode::EarlyReturn { condition, value } => ffi::StitchNode {
+                            function: ffi::STITCH_EARLY_RETURN,
+                            input: *condition,
+                            arguments: value.as_slice().as_ptr(),
+                            argument_count: u32::from(value.is_some()),
+                            ..ffi::StitchNode::NONE
+                        },
+                        &StitchedNode::Texture(index) => ffi::StitchNode {
+                            function: ffi::STITCH_TEXTURE,
+                            input: index,
+                            ..ffi::StitchNode::NONE
+                        },
+                        &StitchedNode::Sampler(index) => ffi::StitchNode {
+                            function: ffi::STITCH_SAMPLER,
+                            input: index,
+                            ..ffi::StitchNode::NONE
+                        },
+                        &StitchedNode::Threadgroup(index) => ffi::StitchNode {
+                            function: ffi::STITCH_THREADGROUP,
+                            input: index,
+                            ..ffi::StitchNode::NONE
+                        },
+                        StitchedNode::Call {
+                            function,
+                            arguments,
+                        } => ffi::StitchNode {
+                            function: *function,
+                            arguments: arguments.as_ptr(),
+                            argument_count: count(arguments.len())?,
+                            ..ffi::StitchNode::NONE
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw = graphs
+        .iter()
+        .zip(&names)
+        .zip(&nodes)
+        .map(|((graph, name), nodes)| {
+            Ok(ffi::StitchGraph {
+                name: name.as_ptr(),
+                nodes: nodes.as_ptr(),
+                node_count: count(nodes.len())?,
+                output: graph.output.unwrap_or(u32::MAX),
+                kernel: graph.kernel,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut module = Vec::new();
+    // SAFETY: the sources and graphs, with what they point to, and the
+    // module outlive the call, which writes the module through `visit`
+    // and the error.
+    let stitched = unsafe {
+        (service.stitch)(
+            sources.as_ptr(),
+            count(sources.len())?,
+            raw.as_ptr(),
+            count(raw.len())?,
+            visit,
+            ptr::from_mut(&mut module).cast(),
+            error,
+        )
+    };
+    Ok(stitched.then_some(module))
+}
+
+/// The functions the AIR module `air` defines, or `None` when the service
+/// refused, as `error` says. The caller holds the compile lock.
+fn list_functions(
+    service: &Service,
+    air: &[u8],
+    error: &mut ffi::AirError,
+) -> Result<Option<Listing>> {
+    unsafe extern "C" fn visit(
+        data: *mut c_void,
+        name: *const c_char,
+        name_bytes: usize,
+        stage: u32,
+    ) -> bool {
+        // SAFETY: the data is the list below, and the service's name is
+        // `name_bytes` long for the call.
+        let (list, name) = unsafe {
+            (
+                &mut *data.cast::<Listing>(),
+                slice::from_raw_parts(name.cast::<u8>(), name_bytes),
+            )
+        };
+        let (Ok(name), Some(stage)) = (str::from_utf8(name), FunctionType::from_raw(stage.into()))
+        else {
+            return false;
+        };
+        list.push((String::from(name), stage));
+        true
+    }
+    let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
+    let mut functions = Vec::new();
+    // SAFETY: the bitcode and the list outlive the call, which writes the
+    // list through `visit` and the error.
+    let listed = unsafe {
+        (service.functions)(
+            air.bitcode.as_ptr().cast(),
+            air.bitcode.len(),
+            visit,
+            ptr::from_mut(&mut functions).cast(),
+            error,
+        )
+    };
+    Ok(listed.then_some(functions))
+}
+
+/// The digest a stitched library is known by among jobs and in
+/// [`AirCompiler::stitched`]: its functions' modules, entries and constant
+/// values, and its graphs.
+fn stitch_digest(
+    selected: &[Selected],
+    sources: &[LinkedFunction],
+    graphs: &[StitchedGraph],
+) -> [u8; 32] {
+    use stela_crypto::{Sha256, digest::Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(b"stitch");
+    hasher.update((selected.len() as u64).to_le_bytes());
+    for (selected, source) in selected.iter().zip(sources) {
+        hasher.update(selected.module.slice_hash);
+        hasher.update((source.entry.len() as u64).to_le_bytes());
+        hasher.update(source.entry.as_bytes());
+        hasher.update((source.constants.len() as u64).to_le_bytes());
+        for (index, value) in &source.constants {
+            hasher.update(index.to_le_bytes());
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value);
+        }
+    }
+    hasher.update(crate::metal::stitching::encode(graphs));
+    hasher.finalize().into()
+}
+
+/// The functions an AIR module defines, with their types.
+type Listing = Vec<(String, FunctionType)>;
+
+/// A function a [`StitchJob`] stitches: its library, entry and constant
+/// values.
+type StitchSource = (Arc<LoadedLibrary>, String, Vec<(u32, Vec<u8>)>);
+
+/// A stitched library the call's turn left, owned, to run outside the
+/// service's lock: its functions' libraries, entries and constant values,
+/// and its graphs.
+struct StitchJob {
+    service: Service,
+    sources: Vec<StitchSource>,
+    graphs: Vec<StitchedGraph>,
+    key: [u8; 32],
+}
+
+// SAFETY: as for a compile job.
+unsafe impl Send for StitchJob {}
+
+/// What a [`StitchJob`] made: the library's AIR and its functions, or
+/// `None` when the service refused, which the call's turn then repeats.
+struct Stitched {
+    key: [u8; 32],
+    made: Option<StitchedAir>,
+}
+
+/// A stitched library's AIR, with the functions it defines.
+struct StitchedAir {
+    air: Vec<u8>,
+    functions: Listing,
+}
+
+impl StitchJob {
+    fn run(self) -> Stitched {
+        let made = (|| {
+            let selected = self
+                .sources
+                .iter()
+                .map(|(library, entry, _)| library.select(entry))
+                .collect::<Result<Vec<_>>>()
+                .ok()?;
+            let values: Vec<_> = self
+                .sources
+                .iter()
+                .map(|(_, _, constants)| constant_values(constants))
+                .collect();
+            let mut error = ffi::AirError::NONE;
+            let air =
+                stitch_raw(&self.service, &selected, &values, &self.graphs, &mut error).ok()??;
+            let functions = list_functions(&self.service, &air, &mut error).ok()??;
+            Some(StitchedAir { air, functions })
+        })();
+        Stitched {
+            key: self.key,
+            made,
+        }
+    }
 }

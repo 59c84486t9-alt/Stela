@@ -11,6 +11,8 @@ use super::compiler::CompileLock;
 use alloc::{boxed::Box, sync::Arc};
 use core::any::Any;
 
+pub(crate) mod kept;
+
 /// Which of the device's parts made a job, and adopts what it made.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Owner {
