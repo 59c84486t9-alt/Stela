@@ -699,7 +699,9 @@ pub fn energy_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thun
 /// `synced` with `remainder` of a cycle in 1/`frequency` units, then
 /// `clock` cycles a `frequency` ticks (0 while the counter does not count),
 /// the sum wrapped to `mask`; `remainder` is below `frequency`. `open` is nonzero while these are the
-/// monitor's; `frequency` is never 0 then.
+/// monitor's; `frequency` is never 0 then. `overflow` is the counter's
+/// overflow bit while its PMI is armed, else 0: a count with it set exits,
+/// so that the engine's read raises the PMI at the read.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CycleCounter {
@@ -710,11 +712,13 @@ pub struct CycleCounter {
     pub clock: u64,
     pub frequency: u64,
     pub mask: u64,
+    pub overflow: u64,
 }
 
 impl CycleCounter {
     /// The counter at system count `now`, `None` where the thunk exits
-    /// (closed, or a quotient that does not fit in 64 bits).
+    /// (closed, a quotient that does not fit in 64 bits, or a count with
+    /// the armed overflow bit set).
     pub fn at(&self, now: u64) -> Option<u64> {
         if self.open == 0 || self.frequency == 0 {
             return None;
@@ -722,7 +726,8 @@ impl CycleCounter {
         let ticks = now.saturating_sub(self.synced);
         let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
         let increment = u64::try_from(scaled / u128::from(self.frequency)).ok()?;
-        Some(self.counter.wrapping_add(increment) & self.mask)
+        let count = self.counter.wrapping_add(increment) & self.mask;
+        (count & self.overflow == 0).then_some(count)
     }
 }
 
@@ -804,6 +809,12 @@ pub fn cycle_counter_thunk(
         Rax,
         field(core::mem::offset_of!(CycleCounter, mask)),
     );
+    asm.test(
+        Qword,
+        field(core::mem::offset_of!(CycleCounter, overflow)),
+        Rax,
+    );
+    let crossed = asm.jcc(Cond::Ne);
     asm.mov(Qword, Rdx, Rax);
     asm.place(Rax, cell);
     asm.mov_store(Qword, Mem::base_disp8(Rax, VALUE), Rdx);
@@ -813,7 +824,7 @@ pub fn cycle_counter_thunk(
     if rt != 31 {
         asm.mov_store(Qword, register(rt), Rdx);
     }
-    finish_unless(code, [unplain, closed, wide], pc)
+    finish_unless(code, [unplain, closed, wide, crossed], pc)
 }
 
 /// What an [`instruction_counter_thunk`] computes a retired-instruction
@@ -821,7 +832,9 @@ pub fn cycle_counter_thunk(
 /// the count as native code was entered, plus the instructions retired
 /// since, masked by `step` (all ones while the counter counts, 0 while it
 /// does not), the sum wrapped to `mask`. `open` is nonzero while these are
-/// the monitor's.
+/// the monitor's. `overflow` is the counter's overflow bit while its PMI is
+/// armed, else 0: a count with it set exits, so that the engine's read
+/// raises the PMI at the read.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionCounter {
@@ -829,13 +842,16 @@ pub struct InstructionCounter {
     pub base: u64,
     pub step: u64,
     pub mask: u64,
+    pub overflow: u64,
 }
 
 impl InstructionCounter {
     /// The counter after native code retired `retired` instructions, `None`
-    /// where the thunk exits (closed).
+    /// where the thunk exits (closed, or a count with the armed overflow
+    /// bit set).
     pub fn at(&self, retired: u64) -> Option<u64> {
-        (self.open != 0).then(|| self.base.wrapping_add(retired & self.step) & self.mask)
+        let count = self.base.wrapping_add(retired & self.step) & self.mask;
+        (self.open != 0 && count & self.overflow == 0).then_some(count)
     }
 }
 
@@ -903,6 +919,12 @@ pub fn instruction_counter_thunk(
         Rdx,
         field(core::mem::offset_of!(InstructionCounter, mask)),
     );
+    asm.test(
+        Qword,
+        field(core::mem::offset_of!(InstructionCounter, overflow)),
+        Rdx,
+    );
+    let crossed = asm.jcc(Cond::Ne);
     asm.place(Rax, cell);
     asm.mov_store(Qword, Mem::base_disp8(Rax, VALUE), Rdx);
     asm.mov_imm32(Rcx, 1);
@@ -911,7 +933,7 @@ pub fn instruction_counter_thunk(
     if rt != 31 {
         asm.mov_store(Qword, register(rt), Rdx);
     }
-    Some(finish_unless(code, [unplain, closed], pc))
+    Some(finish_unless(code, [unplain, closed, crossed], pc))
 }
 
 /// The thunk completing `MRS Xt, ISR_EL1` at `pc` where the register reads
@@ -1803,6 +1825,7 @@ mod tests {
                 clock: 7,
                 frequency: 3,
                 mask: u64::MAX >> 16,
+                overflow: 0,
             },
         });
         let published = alloc::boxed::Box::new(CountState::default());
@@ -1868,6 +1891,34 @@ mod tests {
         cells.cycles.open = 0;
         assert_eq!(run_at(&mut cells, 100, &mut state), MISS);
         assert_eq!((state.x[3], cells.cell.readable), (0xdead, 0));
+        cells.cycles.open = 1;
+        cells.cycles.counter = 1_000;
+        // With the PMI armed, a count below the overflow bit completes and
+        // one that reaches it exits for the engine to raise the PMI: past
+        // 1000, (448 * 7 + 2) / 3 = 1046 cycles at 538 stay below bit 11,
+        // 1048 at 539 reach it; so does the last count below the width's
+        // top bit, 21 cycles at 99, and not the first at it, 24 at 100.
+        cells.cycles.overflow = 1 << 11;
+        cells.cell.readable = 0;
+        assert_eq!(run_at(&mut cells, 100, &mut state), NEXT);
+        assert_eq!(state.x[3], 1_024);
+        cells.cell.readable = 0;
+        assert_eq!(run_at(&mut cells, 538, &mut state), NEXT);
+        assert_eq!(state.x[3], 2_046);
+        assert_eq!(cells.cycles.at(538), Some(2_046));
+        cells.cell.readable = 0;
+        state.x[3] = 0xdead;
+        assert_eq!(cells.cycles.at(539), None);
+        assert_eq!(run_at(&mut cells, 539, &mut state), MISS);
+        assert_eq!((state.x[3], cells.cell.readable), (0xdead, 0));
+        cells.cycles.overflow = 1 << 47;
+        cells.cycles.counter = (1 << 47) - 24;
+        assert_eq!(run_at(&mut cells, 99, &mut state), NEXT);
+        assert_eq!(state.x[3], (1 << 47) - 3);
+        cells.cell.readable = 0;
+        state.x[3] = 0xdead;
+        assert_eq!(run_at(&mut cells, 100, &mut state), MISS);
+        cells.cycles.overflow = 0;
         // XZR discards it but the cell still opens.
         cells.cycles.open = 1;
         cells.cycles.counter = 1_000;
@@ -1905,6 +1956,7 @@ mod tests {
                 base: 1_000,
                 step: u64::MAX,
                 mask: u64::MAX >> 16,
+                overflow: 0,
             },
         });
         let mut control = alloc::boxed::Box::new(ChainControl {
@@ -1967,12 +2019,29 @@ mod tests {
             base: 1_000,
             step: u64::MAX,
             mask: u64::MAX,
+            overflow: 0,
         };
         control.retired = 7;
         let discard = instruction_counter_thunk(PC, 31, CELL, PLAIN, COUNTER, 0).unwrap();
         assert!(discard.code.len() < read.code.len());
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x[3], cells.cell.value), (0xdead, 1_007));
+        // With the PMI armed on the top bit, the last count below it
+        // completes and the first at it exits for the engine to raise the
+        // PMI, Xt and the cell untouched.
+        cells.counter.overflow = 1 << 63;
+        cells.counter.base = (1 << 63) - 13;
+        cells.cell.readable = 0;
+        control.retired = 7;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], (1 << 63) - 1);
+        assert_eq!(cells.counter.at(12), Some((1 << 63) - 1));
+        cells.cell.readable = 0;
+        control.retired = 8;
+        state.x[3] = 0xdead;
+        assert_eq!(cells.counter.at(13), None);
+        assert_eq!(run(&read.code, &mut state), MISS);
+        assert_eq!((state.x[3], cells.cell.readable), (0xdead, 0));
     }
 
     /// ISR_EL1 reads the waiting I and F masks as bits 7 and 6 while the

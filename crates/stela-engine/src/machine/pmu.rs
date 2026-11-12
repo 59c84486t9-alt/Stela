@@ -393,18 +393,19 @@ impl Pmu {
     /// synchronization, which no read changes, so the count at `now` is
     /// `counters[0]` plus the floor of the ticks since, scaled with the
     /// carried remainder, and nothing while PMC0 does not count there.
-    /// Closed while PMC0's PMI is armed: a read then leaves the crossing of
-    /// the overflow bit to the engine.
+    /// While PMC0's PMI is armed a count with the overflow bit set exits
+    /// ([`Self::armed_overflow`]).
     pub fn native_cycles(&self) -> stela_compiler::x86_64::register_read::CycleCounter {
         let counting = self.counts(CYCLES, self.context);
         stela_compiler::x86_64::register_read::CycleCounter {
-            open: u64::from(!self.armed(CYCLES)),
+            open: 1,
             counter: self.counters[CYCLES],
             synced: self.synced_count,
             remainder: self.remainder[CYCLES],
             clock: if counting { self.clock } else { 0 },
             frequency: self.frequency,
             mask: self.layout.width.mask(),
+            overflow: self.armed_overflow(CYCLES),
         }
     }
 
@@ -414,16 +415,16 @@ impl Pmu {
     /// instructions since `synced_retired` in the context of the last
     /// synchronization, which every change of context brings up to date
     /// (`Machine::sync_monitor`), so the count is `counters[1]` plus them
-    /// while PMC1 counts there. It is closed while PMC1's PMI is armed, so
-    /// that a read never decides on the crossing of the overflow bit, and
-    /// where `context` counts otherwise than the synchronized one.
+    /// while PMC1 counts there. It is closed where `context` counts
+    /// otherwise than the synchronized one. While PMC1's PMI is armed a
+    /// count with the overflow bit set exits ([`Self::armed_overflow`]).
     pub fn native_instructions(
         &self,
         retired: u64,
         context: Context,
     ) -> stela_compiler::x86_64::register_read::InstructionCounter {
         let counting = self.counts(INSTRUCTIONS, self.context);
-        if self.armed(INSTRUCTIONS) || counting != self.counts(INSTRUCTIONS, context) {
+        if counting != self.counts(INSTRUCTIONS, context) {
             return Default::default();
         }
         let since = if counting {
@@ -436,12 +437,24 @@ impl Pmu {
             base: self.counters[INSTRUCTIONS].wrapping_add(since),
             step: if counting { u64::MAX } else { 0 },
             mask: self.layout.width.mask(),
+            overflow: self.armed_overflow(INSTRUCTIONS),
         }
     }
 
-    /// Whether counter `n`'s PMI is armed: PMCR0 selects FIQ and enables it.
-    fn armed(&self, n: usize) -> bool {
-        self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ && self.pmcr0 & counter_bit(12, 44, n) != 0
+    /// Counter `n`'s overflow bit while its PMI is armed (PMCR0 selects FIQ
+    /// and enables it), else 0. A native read whose count has it set exits,
+    /// so that the engine's read raises the PMI ([`Self::update`]) before
+    /// the next instruction, as it does for every read; a read below it
+    /// answers what the engine's would, which no read changes. The PMI
+    /// deadline bounds native runs as without a read.
+    fn armed_overflow(&self, n: usize) -> u64 {
+        let armed = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ
+            && self.pmcr0 & counter_bit(12, 44, n) != 0;
+        if armed {
+            self.layout.width.overflow()
+        } else {
+            0
+        }
     }
 
     /// Whether an enabled event depends on the core clock.

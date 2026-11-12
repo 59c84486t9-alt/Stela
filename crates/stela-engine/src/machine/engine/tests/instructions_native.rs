@@ -134,8 +134,8 @@ fn native_instruction_reads_equal_the_engine_path_after_the_same_instructions() 
 
 /// The thunk exits where the read may not be plain: before the engine
 /// completed one in the state, after derived state changed, with a degraded
-/// answer, without a monitor, while the counter's PMI is armed or where the
-/// PE counts otherwise than the monitor's context; a block ending in the
+/// answer, without a monitor or where the PE counts otherwise than the
+/// monitor's context; an armed PMI leaves it open. A block ending in the
 /// read gets the thunk with the instructions before it.
 #[test]
 fn native_instruction_reads_exit_unless_the_read_is_plain() {
@@ -155,16 +155,23 @@ fn native_instruction_reads_exit_unless_the_read_is_plain() {
     machine.cpu.degraded.remove(&selector);
     assert!(native(&mut machine, 4, 0).is_some());
     transition_natively(&mut machine);
-    // PMCR0: PMC0 and PMC1 count, FIQ PMI armed on PMC1, then on PMC0.
-    for (armed, cycles_open) in [(1 << 13, 1), (1 << 12, 0)] {
+    // PMCR0: PMC0 and PMC1 count, FIQ PMI armed on PMC1, then on PMC0:
+    // each read stays open, the armed counter's with its overflow bit.
+    for (armed, overflows) in [(1 << 13, [0, 1 << 63]), (1 << 12, [1 << 63, 0])] {
         let retired = machine.cpu.retired;
         let monitor = machine.cpu.pmu.as_mut().unwrap();
         monitor
             .write(pmu::PMCR0, 0b11 | 4 << 8 | armed, 0, retired, CONTEXT)
             .unwrap();
-        let read = native(&mut machine, 4, 0);
-        assert_eq!(read.is_none(), armed == 1 << 13, "PMI armed");
-        assert_eq!(machine.mirrors.cycles.open, cycles_open);
+        assert!(native(&mut machine, 4, 0).is_some(), "PMI armed");
+        assert_eq!(machine.mirrors.cycles.open, 1);
+        assert_eq!(
+            [
+                machine.mirrors.cycles.overflow,
+                machine.mirrors.instructions.overflow
+            ],
+            overflows
+        );
         transition_natively(&mut machine);
     }
     let retired = machine.cpu.retired;
@@ -196,4 +203,49 @@ fn native_instruction_reads_exit_unless_the_read_is_plain() {
     )
     .unwrap();
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+}
+
+/// With PMC1's PMI armed, a native read of the last count below the
+/// overflow bit answers what the engine reads after the same instructions
+/// and raises nothing; the read that reaches the bit exits, and the
+/// engine's read there answers the count and raises the PMI.
+#[test]
+fn native_instruction_reads_with_the_pmi_armed_exit_at_the_overflow_bit() {
+    const OVERFLOW: u64 = 1 << 63;
+    let armed = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let retired = machine.cpu.retired;
+        let monitor = machine.cpu.pmu.as_mut().unwrap();
+        // PMC1 counts, FIQ PMI armed on it, 20 instructions short of the
+        // overflow bit after the 10 retired.
+        monitor
+            .write(pmu::PMCR0, 0b10 | 4 << 8 | 1 << 13, 0, retired, CONTEXT)
+            .unwrap();
+        monitor
+            .write(pmu::PMC[1], OVERFLOW - 20, 0, retired, CONTEXT)
+            .unwrap();
+        machine.derived_changed();
+    };
+    let mut machine = counting_machine(true);
+    let mut twin = counting_machine(true);
+    armed(&mut machine);
+    armed(&mut twin);
+    assert_eq!(engine(&mut machine), OVERFLOW - 20);
+    assert_eq!(engine(&mut twin), OVERFLOW - 20);
+    let now = 0;
+    // 19 instructions on: the last count below the bit.
+    transition_natively(&mut machine);
+    transition_natively(&mut twin);
+    machine.cpu.retired = 10;
+    twin.cpu.retired = 29;
+    let expected = engine(&mut twin);
+    assert_eq!(expected, OVERFLOW - 1);
+    assert!(!twin.cpu.pmu.as_ref().unwrap().asserted(now, 29));
+    assert_eq!(native(&mut machine, 15, 4), Some(expected));
+    // 20 on: the native read exits, the engine's answers the count with the
+    // overflow bit and raises the PMI.
+    transition_natively(&mut machine);
+    assert_eq!(native(&mut machine, 16, 4), None, "crossed");
+    machine.cpu.retired = 30;
+    assert_eq!(engine(&mut machine), OVERFLOW);
+    assert!(machine.cpu.pmu.as_ref().unwrap().asserted(now, 30));
 }
