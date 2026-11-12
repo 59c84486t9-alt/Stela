@@ -1328,6 +1328,7 @@ impl Writer {
                             Ok(pack) => {
                                 let change = Change {
                                     replace: Vec::new(),
+                                    remove: Vec::new(),
                                     blobs: vec![Blob::new(SEGMENT, bytes)],
                                 };
                                 self.write(change, Done::Segment(pack), "segment")
@@ -1350,6 +1351,7 @@ impl Writer {
                         ));
                         let change = Change {
                             replace: vec![SEGMENT, USED],
+                            remove: Vec::new(),
                             blobs: vec![Blob::new(SEGMENT, merged.layout)],
                         };
                         self.write(change, Done::Merge, "merge")

@@ -149,6 +149,7 @@ fn appends_keep_what_was_committed_and_replacements_take_its_place() {
     let mut file = File::new(DATA_START + 64 * ALIGN);
     let first = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![(CACHE, blob(1, 20_000)), (LOG, blob(2, 5000))],
     };
     let size = file.bytes.len() as u64;
@@ -161,6 +162,7 @@ fn appends_keep_what_was_committed_and_replacements_take_its_place() {
     );
     let second = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![(CACHE, blob(3, 30_000)), (LOG, blob(4, 100))],
     };
     run(&mut file, plan(Some(&commit), DOMAIN, KEY, size, second)).unwrap();
@@ -181,6 +183,7 @@ fn another_keys_content_is_not_kept() {
     let size = file.bytes.len() as u64;
     let change = Change {
         replace: vec![],
+        remove: Vec::new(),
         blobs: blobs![(LOG, blob(1, 9000))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, change.clone())).unwrap();
@@ -201,11 +204,13 @@ fn a_replacement_with_no_room_beside_the_old_goes_where_it_was() {
     let size = file.bytes.len() as u64;
     let old = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![(CACHE, blob(1, 6 * ALIGN as usize))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, old)).unwrap();
     let new = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![(CACHE, blob(2, 6 * ALIGN as usize))],
     };
     let plan = plan(commit.as_ref(), DOMAIN, KEY, size, new);
@@ -229,11 +234,13 @@ fn a_replacement_that_can_never_fit_keeps_the_old_and_an_append_without_room_is_
     let size = file.bytes.len() as u64;
     let old = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![(CACHE, blob(1, 3 * ALIGN as usize))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, old)).unwrap();
     let new = Change {
         replace: vec![CACHE],
+        remove: Vec::new(),
         blobs: blobs![
             (CACHE, blob(2, 5 * ALIGN as usize)),
             (LOG, blob(3, 2 * ALIGN as usize)),
@@ -258,10 +265,12 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
         (
             Change {
                 replace: vec![CACHE],
+                remove: Vec::new(),
                 blobs: blobs![(CACHE, blob(1, 3 * ALIGN as usize)), (LOG, blob(2, 1000))],
             },
             Change {
                 replace: vec![CACHE],
+                remove: Vec::new(),
                 blobs: blobs![
                     (CACHE, blob(3, 4 * ALIGN as usize)),
                     (LOG, blob(4, 2 * ALIGN as usize)),
@@ -272,10 +281,12 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
         (
             Change {
                 replace: vec![CACHE],
+                remove: Vec::new(),
                 blobs: blobs![(CACHE, blob(5, 7 * ALIGN as usize))],
             },
             Change {
                 replace: vec![CACHE],
+                remove: Vec::new(),
                 blobs: blobs![(CACHE, blob(6, 8 * ALIGN as usize)), (LOG, blob(7, 100))],
             },
         ),
@@ -284,6 +295,7 @@ fn a_cut_anywhere_leaves_the_old_or_the_new_content_whole() {
             Change::default(),
             Change {
                 replace: vec![],
+                remove: Vec::new(),
                 blobs: blobs![(LOG, blob(8, 5 * ALIGN as usize))],
             },
         ),
@@ -381,6 +393,7 @@ fn a_queued_write_is_made_again_until_it_completes() {
     };
     let change = Change {
         replace: vec![],
+        remove: Vec::new(),
         blobs: blobs![(LOG, blob(9, 3 * ALIGN as usize + 5))],
     };
     let mut execution = Execution::new(plan(None, DOMAIN, KEY, size, change));
@@ -447,6 +460,7 @@ fn a_streamed_blob_is_read_a_piece_at_a_time_and_its_digest_committed() {
     });
     let change = Change {
         replace: vec![],
+        remove: Vec::new(),
         blobs: vec![Blob {
             kind: LOG,
             source: source.clone(),
@@ -463,6 +477,49 @@ fn a_streamed_blob_is_read_a_piece_at_a_time_and_its_digest_committed() {
 }
 
 #[test]
+fn blobs_replaced_by_offset_leave_and_stay_when_the_new_ones_do_not_fit() {
+    let size = DATA_START + 16 * ALIGN;
+    let mut file = File::new(size);
+    let change = Change {
+        replace: vec![],
+        remove: vec![],
+        blobs: blobs![
+            (LOG, blob(1, 100)),
+            (LOG, blob(2, 200)),
+            (LOG, blob(3, 300))
+        ],
+    };
+    let commit = run(&mut file, plan(None, DOMAIN, KEY, size, change))
+        .unwrap()
+        .unwrap();
+    let offsets: Vec<u64> = commit.entries.iter().map(|entry| entry.offset).collect();
+    // The last two leave for one blob of both.
+    let merged = Change {
+        replace: vec![],
+        remove: offsets[1..].to_vec(),
+        blobs: blobs![(LOG, blob(4, 500))],
+    };
+    let planned = plan(Some(&commit), DOMAIN, KEY, size, merged);
+    assert!(planned.dropped.is_empty());
+    let commit = run(&mut file, planned).unwrap().unwrap();
+    let (_, blobs) = content(&file.bytes).unwrap();
+    assert_eq!(
+        sorted(blobs),
+        sorted(vec![(LOG, blob(1, 100)), (LOG, blob(4, 500))])
+    );
+    // A blob that fits nowhere leaves the ones it would replace.
+    let offsets: Vec<u64> = commit.entries.iter().map(|entry| entry.offset).collect();
+    let huge = Change {
+        replace: vec![],
+        remove: offsets.clone(),
+        blobs: blobs![(LOG, blob(5, 20 * ALIGN as usize))],
+    };
+    let planned = plan(Some(&commit), DOMAIN, KEY, size, huge);
+    assert_eq!(planned.dropped, [0]);
+    assert_eq!(planned.last.as_ref(), Some(&commit));
+}
+
+#[test]
 fn the_largest_free_run_takes_a_blob_beside_every_committed_one() {
     let size = DATA_START + 16 * ALIGN;
     let mut file = File::new(size);
@@ -470,6 +527,7 @@ fn the_largest_free_run_takes_a_blob_beside_every_committed_one() {
     // Blocks 0-2 and 3-4 taken: 11 free after them.
     let change = Change {
         replace: vec![],
+        remove: Vec::new(),
         blobs: blobs![(LOG, blob(1, 3 * ALIGN as usize - 5)), (LOG, blob(2, 5000))],
     };
     let commit = run(&mut file, plan(None, DOMAIN, KEY, size, change)).unwrap();
@@ -484,6 +542,7 @@ fn the_largest_free_run_takes_a_blob_beside_every_committed_one() {
     // blobs until it is whole.
     let replacement = Change {
         replace: vec![LOG],
+        remove: Vec::new(),
         blobs: blobs![(LOG, blob(3, free as usize))],
     };
     let planned = plan(commit.as_ref(), DOMAIN, KEY, size, replacement);

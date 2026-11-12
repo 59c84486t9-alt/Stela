@@ -286,11 +286,13 @@ pub fn read_entries(
         .collect()
 }
 
-/// New content for a file: blobs to add, and the kinds whose committed blobs
-/// those of the same kind replace.
+/// New content for a file: blobs to add, the kinds whose committed blobs
+/// those of the same kind replace, and committed blobs they replace by
+/// offset.
 #[derive(Clone, Debug, Default)]
 pub struct Change<'a> {
     pub replace: Vec<u32>,
+    pub remove: Vec<u64>,
     pub blobs: Vec<Blob<'a>>,
 }
 
@@ -351,18 +353,21 @@ fn entry(kind: u32, offset: u64, length: u64) -> Entry {
     }
 }
 
-/// Where each blob goes when `current` is the newest commit and `change`
-/// replaces `replace`: blobs placed beside every committed blob first, then
-/// the rest where the replaced ones were, after a commit without them.
-/// Answers the first commit's new entries, the second's, and the blobs that
-/// fit in neither.
-fn layout(current: &[Entry], replace: &[u32], blobs: &[u64], end: u64, room: usize) -> Layout {
+/// Where each blob goes when `current` is the newest commit and the change
+/// replaces the committed blobs `replaced` names: blobs placed beside every
+/// committed blob first, then the rest where the replaced ones were, after
+/// a commit without them. Answers the first commit's new entries, the
+/// second's, and the blobs that fit in neither.
+fn layout(
+    current: &[Entry],
+    replaced: &dyn Fn(&Entry) -> bool,
+    blobs: &[u64],
+    end: u64,
+    room: usize,
+) -> Layout {
     let mut taken: Vec<(u64, u64)> = current.iter().map(Entry::span).collect();
     taken.sort_unstable();
-    let kept = current
-        .iter()
-        .filter(|entry| !replace.contains(&entry.kind))
-        .count();
+    let kept = current.iter().filter(|entry| !replaced(entry)).count();
     let mut first = Vec::new();
     let mut left = Vec::new();
     for (index, &length) in blobs.iter().enumerate() {
@@ -383,7 +388,7 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[u64], end: u64, room: usi
     // Freed by the first commit: the replaced blobs.
     let mut taken: Vec<(u64, u64)> = current
         .iter()
-        .filter(|entry| !replace.contains(&entry.kind))
+        .filter(|entry| !replaced(entry))
         .map(Entry::span)
         .chain(
             first
@@ -410,7 +415,8 @@ fn layout(current: &[Entry], replace: &[u32], blobs: &[u64], end: u64, room: usi
 /// `current`, to `change` for `domain` and `key`. Committed blobs of another
 /// domain or key are not kept, and their space is reused. A replaced kind
 /// whose new blobs do not all fit keeps its committed blobs, and those new
-/// blobs are dropped.
+/// blobs are dropped; blobs replaced by offset stay when any new blob is
+/// dropped.
 pub fn plan<'a>(
     current: Option<&Commit>,
     domain: [u8; 8],
@@ -418,7 +424,11 @@ pub fn plan<'a>(
     file_bytes: u64,
     change: Change<'a>,
 ) -> Plan<'a> {
-    let Change { mut replace, blobs } = change;
+    let Change {
+        mut replace,
+        mut remove,
+        blobs,
+    } = change;
     let end = data_end(file_bytes);
     let generation = current.map_or(0, |commit| commit.generation);
     let committed: &[Entry] = match current {
@@ -439,7 +449,9 @@ pub fn plan<'a>(
                 }
             })
             .collect();
-        let (first, second, dropped) = layout(committed, &replace, &candidates, end, MAX_ENTRIES);
+        let replaced =
+            |entry: &Entry| replace.contains(&entry.kind) || remove.contains(&entry.offset);
+        let (first, second, dropped) = layout(committed, &replaced, &candidates, end, MAX_ENTRIES);
         let short: Vec<u32> = replace
             .iter()
             .copied()
@@ -460,9 +472,12 @@ pub fn plan<'a>(
     let mut dropped: Vec<usize> = dropped.into_iter().chain(withdrawn).collect();
     dropped.sort_unstable();
     dropped.dedup();
+    if !dropped.is_empty() {
+        remove.clear();
+    }
     let kept: Vec<Entry> = committed
         .iter()
-        .filter(|entry| !replace.contains(&entry.kind))
+        .filter(|entry| !replace.contains(&entry.kind) && !remove.contains(&entry.offset))
         .copied()
         .collect();
     let mut steps = Vec::new();
