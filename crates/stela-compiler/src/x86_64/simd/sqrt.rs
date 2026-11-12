@@ -1,4 +1,6 @@
-//! FSQRT: SSE2 for positive normals, software fallback otherwise.
+//! FSQRT: SSE2 for every S/D input with FPCR.AH clear and for positive
+//! normals otherwise, F16C or integer roots for H, software fallback
+//! otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, branch, clear_scalar,
@@ -6,14 +8,20 @@ use super::numerical::{
     read_inputs, read_numerical_vector, reject_other_status, resolve, restore_environment,
     sticky_inexact, sticky_result_check, test_control, vector_positive_exponent_range,
 };
-use super::numerical::{helper_section, jump};
+use super::numerical::{
+    NanRegisters, commit_flush_status, commit_invalid_lanes, commit_rounded_status, environment,
+    flush_subnormal_lanes, helper_section, jump, merge_nans, select_input_nans,
+};
 use super::{Host, commit, packed, read_vector};
 use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
-        floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_SHIFT, Format},
+        floating::{
+            FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_SHIFT,
+            Format,
+        },
         simd::{arithmetic::Shape, sqrt::Operand},
     },
 };
@@ -41,10 +49,13 @@ const HALF_BIAS_POSITION: u8 = HALF_TO_SINGLE_BIAS.trailing_zeros() as u8;
 const HALF_BIAS_DIGITS: u8 = (HALF_TO_SINGLE_BIAS >> HALF_BIAS_POSITION).ilog2() as u8 + 1;
 const UPPER_HALF_BYTES: u8 = (u64::BITS / u8::BITS) as u8;
 
-fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
+/// Read the source; S and D take [`rounded_root`] first, whose jump to the
+/// commit this returns.
+fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) -> Option<usize> {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     read_numerical_vector(code, operand.shape, operand.source, SOURCE);
+    let rounded = (operand.format != Format::Half).then(|| rounded_root(code, operand));
     if operand.shape == Shape::Scalar {
         positive_exponent_range(code, operand.format, SOURCE, INPUT_MINIMUM_EXPONENT);
         helper.push(branch(code, Condition::AboveOrEqual));
@@ -53,6 +64,53 @@ fn source_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
         vector_positive_exponent_range(code, operand.format, operand.shape, SOURCE);
         helper.push(branch(code, Condition::NotZero));
     }
+    rounded
+}
+
+/// [`rounded_root`]'s NaN registers, apart from RESULT and SOURCE.
+const NAN_REGISTERS: NanRegisters = NanRegisters {
+    selected: 2,
+    inputs: 3,
+    invalid: 4,
+    mask: 5,
+    temporary: 7,
+};
+const FLUSH_SCRATCH: [u8; 4] = [2, 3, 4, 5];
+
+/// S/D FSQRT with FPCR.AH clear, for every input: FZ or FIZ flush
+/// subnormal inputs first (FZ raising IDC), and the host's root in Arm's
+/// rounding mode is the guest's, exact for zeros (keeping the sign) and
+/// +infinity, rounded once for the rest; its inexact status is IXC (a root
+/// never underflows or overflows). A NaN input propagates by Arm's rules
+/// and a negative one gives the default NaN with IOC
+/// ([`select_input_nans`], [`merge_nans`]). Leaves the result in RESULT
+/// and returns the jump to the commit; AH continues past it.
+fn rounded_root(code: &mut Code, operand: &Operand) -> usize {
+    let (format, shape) = (operand.format, operand.shape);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::R11, Gpr::R11);
+    test_control(code, FPCR_AH);
+    let alternative = branch(code, Condition::NotZero);
+    test_control(code, FPCR_FZ | FPCR_FIZ);
+    let unflushed = branch(code, Condition::Zero);
+    flush_subnormal_lanes(code, format, shape, SOURCE, FLUSH_SCRATCH);
+    let flushed = code.len();
+    resolve(code, unflushed, flushed);
+    if shape == Shape::Scalar {
+        // Legacy scalar SQRT preserves destination upper bits for NEP.
+        read_vector(code, operand.destination, RESULT);
+    }
+    environment(code);
+    select_input_nans(code, format, shape, &[SOURCE], NAN_REGISTERS);
+    square_root(code, format, shape, SOURCE);
+    merge_nans(code, format, shape, RESULT, NAN_REGISTERS);
+    restore_environment(code);
+    commit_flush_status(code);
+    commit_invalid_lanes(code, format, shape, NAN_REGISTERS.invalid);
+    commit_rounded_status(code);
+    let done = jump(code);
+    let alternative_start = code.len();
+    resolve(code, alternative, alternative_start);
+    done
 }
 
 fn square_root(code: &mut Code, format: Format, shape: Shape, source: u8) {
@@ -231,7 +289,8 @@ pub(in crate::x86_64) fn emit(
     let mut helper = Vec::new();
     // The sticky-inexact path (`numerical::sticky_inexact`) for S and D: the
     // root of a negative input is NaN and of +infinity infinite, which take
-    // the helper; every other root is exact IEEE on both sides.
+    // the full path ([`rounded_root`]); every other root is exact IEEE on
+    // both sides.
     let mut sticky = None;
     if operand.format != Format::Half {
         let mut crossing = sticky_inexact(code, entry);
@@ -246,7 +305,6 @@ pub(in crate::x86_64) fn emit(
         square_root(code, operand.format, operand.shape, source);
         let rejected =
             sticky_result_check(code, operand.format, operand.shape, RESULT, true, target);
-        helper.push(rejected);
         if operand.shape == Shape::Vector64 {
             clear_scalar(code, Format::Double, RESULT);
         }
@@ -255,13 +313,13 @@ pub(in crate::x86_64) fn emit(
         let done = jump(code);
         let cold = code.checkpoint();
         let full_start = code.len();
+        crossing.push(rejected);
         for &patch in &crossing {
             resolve(code, patch, full_start);
         }
-        crossing.push(rejected);
         sticky = Some((done, full_start, crossing, cold, inline_end));
     }
-    source_guard(code, operand, &mut helper);
+    let rounded = source_guard(code, operand, &mut helper);
     if operand.shape == Shape::Scalar && operand.format != Format::Half {
         // Legacy scalar SQRT preserves destination upper bits for NEP.
         read_vector(code, operand.destination, RESULT);
@@ -282,6 +340,10 @@ pub(in crate::x86_64) fn emit(
     helper.push(reject_other_status(code));
     helper_section(code, &helper, pc);
     commit_inexact(code);
+    if let Some(rounded) = rounded {
+        let commit_start = code.len();
+        resolve(code, rounded, commit_start);
+    }
     commit_result(code, operand);
     let (done, full, crossing, cold, inline_end) = sticky?;
     let end = code.len();

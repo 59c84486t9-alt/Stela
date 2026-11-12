@@ -3,8 +3,9 @@
 //! for every tier this host has: every inline completion matches the
 //! reference in every V register, FPSR and FPCR; every other run exits at
 //! the instruction with the state unchanged. Ordered min/max inputs with AH
-//! clear (FZ and FIZ flushing inline), and finite vector sums and roots
-//! after IXC, must complete inline.
+//! clear (FZ and FIZ flushing inline), every FSQRT input with AH and the
+//! trap enables clear, and finite vector sums and roots after IXC, must
+//! complete inline.
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -316,11 +317,12 @@ fn quick_float_guards_match_the_reference() {
                                         "{op:?} {format:?} {lanes} {target:?}"
                                     );
                                     // FZ and FIZ flush subnormal inputs inline.
-                                    let must_inline = matches!(op, Op::MinMax(..))
+                                    let must_inline = (matches!(op, Op::MinMax(..))
                                         && ordered
-                                        && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0
                                         && !target.data_independent_timing()
-                                        && target.supports(TargetCpu::Sse41);
+                                        && target.supports(TargetCpu::Sse41)
+                                        || matches!(op, Op::Sqrt))
+                                        && fpcr & (FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK) == 0;
                                     assert!(
                                         !must_inline,
                                         "ordered min/max exited: {op:?} {format:?} {lanes} {n:x?} {m:x?} {fpcr:#x} {target:?}"
