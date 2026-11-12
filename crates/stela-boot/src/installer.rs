@@ -609,8 +609,12 @@ fn disks() -> Vec<Disk> {
             Ok(Found::Blank | Found::Interrupted) => {}
             Err(_) => disk.foreign = true,
         }
-        // Stela finds the disk again by its serial number.
+        // Stela's own drivers must reach the disk, and find it again by its
+        // serial number.
+        let controller = crate::pci_io::disk_controller(handle)
+            .and_then(|function| stela_drivers::probe::disk_refusal(&function));
         disk.refusal = match &disk.serial {
+            _ if controller.is_some() => controller,
             None => Some("No serial number"),
             Some(serial) if serial.contains(char::is_whitespace) => {
                 Some("Serial number has spaces")
