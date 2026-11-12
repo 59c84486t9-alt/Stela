@@ -67,6 +67,21 @@ impl Controller {
         }
     }
 
+    /// The first `bytes` of tag `tag`'s data pages, copied once into a new
+    /// buffer, which is not filled first.
+    fn gathered(&self, tag: usize, bytes: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(bytes);
+        for &page in &self.held[tag] {
+            let left = bytes - data.len();
+            if left == 0 {
+                break;
+            }
+            let page = self.pool.pages[usize::from(page)].bytes();
+            data.extend_from_slice(&page[..left.min(page.len())]);
+        }
+        data
+    }
+
     /// The pool's pages back from tag `tag`, whose command ended for good.
     pub(super) fn release(&mut self, tag: usize) {
         let mut pages = core::mem::take(&mut self.held[tag]);
@@ -683,9 +698,7 @@ impl Controller {
                     self.gather(tag, read.bytes);
                     Tag::Done(Ok(None))
                 } else {
-                    let mut data = alloc::vec![0; bytes];
-                    self.gather(tag, &mut data);
-                    Tag::Done(Ok(Some(data)))
+                    Tag::Done(Ok(Some(self.gathered(tag, bytes))))
                 }
             }
             (Ok(()), 0, _) => Tag::Done(Ok(None)),

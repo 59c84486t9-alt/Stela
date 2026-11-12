@@ -119,6 +119,16 @@ pub(super) fn merge(
     }
 }
 
+/// Where the last of a merged command's requests ends in its data: each
+/// request is its ticket, offset and bytes.
+fn offset_end(requests: &[(u32, usize, usize)]) -> usize {
+    requests
+        .iter()
+        .map(|&(_, offset, bytes)| offset + bytes)
+        .max()
+        .unwrap_or(0)
+}
+
 impl Held<'_> {
     pub(super) fn requests(&mut self) -> &mut Requests {
         // SAFETY: the lock is held; the requests are apart from the device.
@@ -296,13 +306,31 @@ impl Held<'_> {
                 finished.insert(ticket, result);
                 continue;
             }
-            let tickets = core::iter::once((ticket, 0, bytes)).chain(merged.more);
-            for (ticket, offset, bytes) in tickets {
-                let part = match &result {
-                    Ok(Some(data)) => Ok(Some(data[offset..offset + bytes].to_vec())),
-                    other => other.clone(),
-                };
-                finished.insert(ticket, part);
+            let tickets: Vec<_> = core::iter::once((ticket, 0, bytes))
+                .chain(merged.more)
+                .collect();
+            match result {
+                // Each request's part, split off the end so the first keeps
+                // the command's buffer: only the later parts are copied.
+                Ok(Some(mut data)) if data.len() >= offset_end(&tickets) => {
+                    data.truncate(offset_end(&tickets));
+                    for &(ticket, offset, _) in tickets[1..].iter().rev() {
+                        let part = data.split_off(offset);
+                        finished.insert(ticket, Ok(Some(part)));
+                    }
+                    finished.insert(tickets[0].0, Ok(Some(data)));
+                }
+                Ok(Some(_)) => {
+                    for &(ticket, ..) in &tickets {
+                        let short = BlockError::Protocol("a read returned too little data");
+                        finished.insert(ticket, Err(short));
+                    }
+                }
+                other => {
+                    for &(ticket, ..) in &tickets {
+                        finished.insert(ticket, other.clone());
+                    }
+                }
             }
         }
     }

@@ -986,3 +986,38 @@ fn a_window_tells_its_device_of_a_batch_once() {
     assert_eq!(window.finish(first), Some(Ok(None)));
     assert_eq!(window.finish(second), Some(Ok(None)));
 }
+
+/// A merged read's first request keeps the device's buffer, cut to its
+/// part; each later request gets its own part, in order.
+#[test]
+fn a_merged_reads_first_part_keeps_the_devices_buffer() {
+    let mut ram = RamDisk::new("merged", 16, 512);
+    let data: Vec<u8> = (0..1536).map(|byte| (byte % 251) as u8).collect();
+    ram.write(4, &data).unwrap();
+    let (delayed, (released, _, given)) = Delayed::new(ram, 1);
+    let address = delayed.last_read_address.clone();
+    let mut window = Shared::new(Box::new(delayed)).whole();
+    // The first command holds the device; the three reads wait and join.
+    let first = window.start(write(0, 1)).unwrap();
+    let reads: Vec<u32> = [(4, 512), (5, 512), (6, 512)]
+        .into_iter()
+        .map(|(lba, bytes)| window.start(Command::Read { lba, bytes }).unwrap())
+        .collect();
+    released.set(usize::MAX);
+    assert_eq!(window.finish(first), Some(Ok(None)));
+    let parts: Vec<Vec<u8>> = reads
+        .iter()
+        .map(|&read| window.finish(read).unwrap().unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        given.borrow().last(),
+        Some(&Command::Read {
+            lba: 4,
+            bytes: 1536
+        })
+    );
+    for (index, part) in parts.iter().enumerate() {
+        assert_eq!(part.as_slice(), &data[index * 512..][..512]);
+    }
+    assert_eq!(parts[0].as_ptr() as usize, address.get());
+}
