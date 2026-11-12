@@ -148,3 +148,75 @@ fn any_cold_register_or_timer_error_retains_the_original_epoch() {
         assert_eq!(model.borrow().dropped, 0, "wait {wait}");
     }
 }
+
+/// A function a previous OS left in `state` with PME armed, its power
+/// management capability at 0x48 and two memory BARs.
+fn powered_down(asic: Asic, state: u32) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>) {
+    let (hardware, model) = cold(asic);
+    {
+        let mut m = model.borrow_mut();
+        m.config.insert(4, 1 << 20);
+        m.config.insert(0x34, 0x48);
+        m.config.insert(0x48, 0xc803_0001);
+        m.config.insert(0x4c, 0x0100 | state);
+        m.config.insert(0x10, 0xfe40_0004);
+        m.config.insert(0x18, 0xfe41_0004);
+    }
+    (hardware, model)
+}
+
+#[test]
+fn a_function_left_in_d3hot_is_brought_to_d0_with_its_bars_before_mmio() {
+    for asic in [Asic::Bcm5720, Asic::Bcm5761, Asic::Bcm5762] {
+        let (hardware, model) = powered_down(asic, 3);
+        let registers = hardware
+            .quiesce_cold()
+            .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+        let state = model.borrow();
+        // pci_power_up: PMCSR written whole as zero (D0, PME off), the
+        // D3hot recovery time waited, the soft-reset BARs written back.
+        assert_eq!(state.config[&0x4c] & 0x103, 0);
+        let at = |wanted: &Event| state.trace.iter().position(|event| event == wanted);
+        let d0 = at(&Event::ConfigWrite16(0x4c, 0)).unwrap();
+        let settled = at(&Event::Delay(10_000)).unwrap();
+        let bar = at(&Event::ConfigWrite(0x10, 0xfe40_0004)).unwrap();
+        assert!(at(&Event::ConfigWrite(0x18, 0xfe41_0004)).is_some());
+        let first_mmio = state
+            .trace
+            .iter()
+            .position(|event| matches!(event, Event::Read(..) | Event::Write(..)))
+            .unwrap();
+        assert!(d0 < settled && settled < bar && bar < first_mmio);
+        drop(state);
+        drop(registers);
+    }
+}
+
+#[test]
+fn d0_without_soft_reset_keeps_bars_and_a_refused_d0_stops_before_mmio() {
+    let (hardware, model) = powered_down(Asic::Bcm5720, 3 | 8);
+    let registers = hardware
+        .quiesce_cold()
+        .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    assert!(
+        !model
+            .borrow()
+            .trace
+            .iter()
+            .any(|event| matches!(event, Event::ConfigWrite(0x10..=0x24, _)))
+    );
+    drop(registers);
+    let (hardware, model) = powered_down(Asic::Bcm5720, 3);
+    model.borrow_mut().ignored_config_write = Some(0x4c);
+    let (error, hardware) = hardware.quiesce_cold().err().expect("still in D3hot");
+    assert_eq!(error, Error::ConfigDidNotLatch);
+    assert!(
+        !model
+            .borrow()
+            .trace
+            .iter()
+            .any(|event| matches!(event, Event::Read(..) | Event::Write(..)))
+    );
+    drop(hardware);
+    assert_eq!(model.borrow().dropped, 0);
+}

@@ -122,6 +122,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             if command & 4 != 0 {
                 return Err(Error::UnsupportedBoard);
             }
+            self.power_up()?;
             // Decode permits vendor containment; BME stays clear and inherited
             // interrupt delivery remains disabled by the original platform.
             self.regs().config_write16(4, command | 0x402)?;

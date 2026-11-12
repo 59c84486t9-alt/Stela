@@ -10,6 +10,13 @@ use crate::bus::pci::{Capabilities, capability::Transport};
 
 const PCI_STATUS_CAP_LIST: u32 = 1 << 20;
 const PCI_EXPRESS: u8 = 0x10;
+const PCI_POWER_MANAGEMENT: u8 = 1;
+/// PMCSR's PowerState field and No_Soft_Reset bit.
+const PM_STATE: u32 = 3;
+const PM_NO_SOFT_RESET: u32 = 1 << 3;
+/// PCI PM 1.2's D3hot and D2 recovery times, as `pci_power_up` waits them.
+const D3HOT_EXIT_US: u64 = 10_000;
+const D2_EXIT_US: u64 = 200;
 const GRC_MISC_CFG: u32 = 0x6804;
 const GRC_MODE: u32 = 0x6800;
 const GRC_FASTBOOT_PC: u32 = 0x6894;
@@ -66,6 +73,66 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 Err(error) => Some(Err(error)),
             })
             .unwrap_or(Err(Error::UnsupportedPcie))
+    }
+    /// `pci_power_up`, as `pci_enable_device` runs it before `tg3_init_one`
+    /// touches MMIO: a function a previous OS or firmware left in D1-D3hot
+    /// (Windows fast startup does) is brought to D0, with PME generation
+    /// off and a pending PME_Status left as it is, and the BARs a D3hot
+    /// soft reset cleared are written back. MMIO in D3hot reads all ones.
+    pub(super) fn power_up(&mut self) -> Result<(), Error> {
+        let command_status = Self::checked(self.regs().config_read32(regs::COMMAND)?)?;
+        if command_status & PCI_STATUS_CAP_LIST == 0 {
+            return Ok(());
+        }
+        let registers = self.regs();
+        let read = |offset: u16, bytes: u8| -> Result<u32, Error> {
+            let word = Self::checked(registers.config_read32(offset & !3)?)?;
+            let value = word >> ((offset & 3) * 8);
+            Ok(match bytes {
+                1 => value & 0xff,
+                2 => value & 0xffff,
+                _ => value,
+            })
+        };
+        let power = Capabilities::new(Transport(read))
+            .find_map(|entry| match entry {
+                Ok(entry) if entry.id == PCI_POWER_MANAGEMENT => Some(Ok(entry.offset)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .transpose()?;
+        let Some(power) = power else {
+            return Ok(());
+        };
+        let control = power + 4;
+        let csr = Self::checked(self.regs().config_read32(control)?)?;
+        let state = csr & PM_STATE;
+        if state == 0 {
+            return Ok(());
+        }
+        let mut bars = [0; 6];
+        for (index, bar) in bars.iter_mut().enumerate() {
+            *bar = Self::checked(
+                self.regs()
+                    .config_read32(regs::BASE_ADDRESS_0 + 4 * index as u16)?,
+            )?;
+        }
+        self.regs().config_write16(control, 0)?;
+        self.wait(match state {
+            3 => D3HOT_EXIT_US,
+            2 => D2_EXIT_US,
+            _ => 0,
+        })?;
+        if Self::checked(self.regs().config_read32(control)?)? & PM_STATE != 0 {
+            return Err(Error::ConfigDidNotLatch);
+        }
+        if state == 3 && csr & PM_NO_SOFT_RESET == 0 {
+            for (index, bar) in bars.into_iter().enumerate() {
+                self.regs()
+                    .config_write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar)?;
+            }
+        }
+        Ok(())
     }
     pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
         // The managed APE/ASF handshake is not inferred from an
