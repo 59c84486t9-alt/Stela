@@ -1325,9 +1325,7 @@ fn open_gpus(
     let heap_bytes = heap.end - heap.start;
     crate::status::begin("Starting the GPU");
     let gop = if handoff.screen.is_some() {
-        mmio.verified_framebuffer()
-            .map(Some)
-            .ok_or("the firmware framebuffer PCI source was unavailable")
+        mmio.verified_framebuffer().map(Some)
     } else {
         Ok(None)
     };
@@ -2410,28 +2408,45 @@ fn start_platform(
             }
             Err(error) => {
                 output::arguments(format_args!("HOST PCI containment unavailable: {error}\n"));
+                mmio.refuse_framebuffer(format!(
+                    "the firmware framebuffer's PCI function could not be checked because PCI \
+                     containment failed: {error}"
+                ));
                 None
             }
         }
     });
-    if let Some(screen) = handoff.screen {
-        match (&contained_pci, screen.pci_source) {
+    if let (Some(screen), Some(mmio)) = (handoff.screen, native_mmio) {
+        let refusal = match (&contained_pci, screen.pci_source) {
             (Some(pci), Some(source)) => {
                 // SAFETY: the original parked PCI fabric still excludes all
                 // competing configuration writers at this point in startup.
                 match unsafe { pci.check_framebuffer(source) } {
-                    Ok(()) => output::arguments(format_args!(
-                        "HOST GOP PCI source {} BAR{} observed before and after firmware exit\n",
-                        source.address,
-                        source.bar.index()
-                    )),
-                    Err(error) => output::arguments(format_args!(
-                        "HOST GOP PCI source {} changed or unavailable: {error:?}\n",
+                    Ok(()) => {
+                        output::arguments(format_args!(
+                            "HOST GOP PCI source {} BAR{} observed before and after firmware \
+                             exit\n",
+                            source.address,
+                            source.bar.index()
+                        ));
+                        None
+                    }
+                    Err(error) => Some(format!(
+                        "the firmware framebuffer's PCI function {} changed across firmware \
+                         exit or cannot be read ({error:?})",
                         source.address
                     )),
                 }
             }
-            _ => output::arguments(format_args!("HOST GOP PCI source unavailable\n")),
+            (Some(_), None) => Some(String::from(
+                "the firmware named no PCI function for its framebuffer",
+            )),
+            // The containment failure is kept and logged above.
+            (None, _) => None,
+        };
+        if let Some(refusal) = refusal {
+            output::arguments(format_args!("HOST GOP PCI source unavailable: {refusal}\n"));
+            mmio.refuse_framebuffer(refusal);
         }
     }
     // The remapping units, taken before any host driver starts DMA.
