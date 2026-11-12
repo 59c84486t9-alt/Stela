@@ -741,6 +741,9 @@ pub struct Devices {
 /// when a driver's per-step bounds would add up to more.
 pub const DEVICE_START_US: u64 = 30_000_000;
 
+/// Why a Wi-Fi adapter is left alone.
+const NO_WIFI_NETWORK: &str = "Wi-Fi adapter stays off: no --wifi network";
+
 /// The function a driver here claimed whose start is being accounted for,
 /// with the count of outcomes recorded before it started.
 #[derive(Default)]
@@ -751,6 +754,13 @@ impl Claimed {
         self.0 = Some((address, recorded));
     }
 
+    /// The start succeeded, whatever it recorded: a controller with no
+    /// disk, such as an NVMe controller with no active namespace, is no
+    /// failure, as Linux reports none.
+    fn started(&mut self) {
+        self.0 = None;
+    }
+
     /// Once its start has ended: a start that recorded no outcome is named
     /// a failure, so no claimed function is silently absent.
     fn settle(&mut self, recorded: usize, failures: &mut Vec<(Address, Error)>) {
@@ -759,6 +769,17 @@ impl Claimed {
         {
             failures.push((address, Error::Unrecorded));
         }
+    }
+}
+
+/// Whether the scan starts `function` through a driver here, and so must
+/// record its outcome: not a USB4 host whose software connection manager
+/// came up before the scan (`already`), which that start recorded.
+fn scan_starts(function: &crate::bus::pci::Identity, already: &[Address]) -> bool {
+    match native::Kind::of_identity(function) {
+        Some(native::Kind::Usb4) => !already.contains(&function.address),
+        Some(_) => true,
+        None => claims_identity(function),
     }
 }
 
@@ -825,6 +846,9 @@ impl Devices {
             + self.usb_failures.len()
             + self.platform_failures.len()
             + self.unsupported.len()
+            // A VMD host whose hierarchy holds no NVMe controller keeps
+            // only its owner, as Linux reports no error.
+            + self.owners.len()
     }
 
     /// Take up what an xHCI controller brought, at its start or later
@@ -1412,7 +1436,7 @@ pub unsafe fn probe_observed(
             }
             seen += 1;
             let address = function.address;
-            if claims(&function) || native::Kind::of(&function).is_some() {
+            if scan_starts(&function.identity(), &software_usb4) {
                 claimed.begin(address, recorded!());
             }
             if function.class[0] == 0x02 {
@@ -1480,11 +1504,9 @@ pub unsafe fn probe_observed(
                     // No Wi-Fi hardware is touched without a network. Other
                     // functions of this class, such as Broadcom Bluetooth,
                     // still attach.
-                    devices.unsupported.push((
-                        address,
-                        function.class,
-                        "Wi-Fi adapter stays off: no --wifi network",
-                    ));
+                    devices
+                        .unsupported
+                        .push((address, function.class, NO_WIFI_NETWORK));
                     continue;
                 }
                 if wifi.is_some() && devices.regulatory.is_none() {
@@ -1810,7 +1832,10 @@ pub unsafe fn probe_observed(
                 continue;
             };
             match result {
-                Ok(found) => devices.disks.extend(found),
+                Ok(found) => {
+                    claimed.started();
+                    devices.disks.extend(found);
+                }
                 Err(error) => devices.failures.push((address, error.into())),
             }
         }
@@ -2034,6 +2059,9 @@ unsafe fn attach_native(
         }
         native::Kind::IntelWifi => {
             let Some(wifi) = inputs.wifi else {
+                devices
+                    .unsupported
+                    .push((address, function.class, NO_WIFI_NETWORK));
                 return;
             };
             // SAFETY: as for tg3 below; the companion is this
@@ -2058,6 +2086,9 @@ unsafe fn attach_native(
         }
         native::Kind::MediatekWifi => {
             let Some(wifi) = inputs.wifi else {
+                devices
+                    .unsupported
+                    .push((address, function.class, NO_WIFI_NETWORK));
                 return;
             };
             let aspm = match native::aspm_supported(&function, inputs.bridges) {
@@ -2106,6 +2137,9 @@ unsafe fn attach_native(
         }
         native::Kind::RealtekWifi => {
             let Some(wifi) = inputs.wifi else {
+                devices
+                    .unsupported
+                    .push((address, function.class, NO_WIFI_NETWORK));
                 return;
             };
             // SAFETY: as for tg3 below.
@@ -2700,6 +2734,30 @@ mod tests {
         // Settled once only.
         claimed.settle(4, &mut failures);
         assert_eq!(failures.len(), 1);
+        // An NVMe controller with no active namespace started and found no
+        // disk: no failure, as Linux reports none.
+        claimed.begin(address(2), 4);
+        claimed.started();
+        claimed.settle(4, &mut failures);
+        assert_eq!(failures.len(), 1);
+    }
+
+    /// A USB4 host whose software connection manager came up before the
+    /// scan was recorded then; the scan neither starts nor claims it again.
+    #[test]
+    fn a_usb4_host_brought_up_before_the_scan_is_not_claimed_again() {
+        // An Intel Thunderbolt 4 host interface, as `nhi_ids` lists it.
+        let host = identity(0x00, 0, 0x8086, 0x9a1b, 0x0c_03_40);
+        assert_eq!(native::Kind::of_identity(&host), Some(native::Kind::Usb4));
+        assert!(scan_starts(&host, &[]));
+        assert!(!scan_starts(&host, &[host.address]));
+        // Every other claimed function is started by the scan.
+        let nvme = identity(0x04, 0, 0x144d, 0xa808, 0x01_08_02);
+        assert!(scan_starts(&nvme, &[nvme.address]));
+        assert!(!scan_starts(
+            &identity(0x05, 0, 0x1234, 0x5678, 0x08_80_00),
+            &[]
+        ));
     }
 
     /// The observer's first function starts before every other, its end is
