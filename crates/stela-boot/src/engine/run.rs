@@ -336,7 +336,7 @@ fn device_exits_report<H: Host>(
     // its model names counts as `model.NAME`, summed over the model's pages
     // (a gate's CALL over every connection).
     const REGISTERS: usize = 16;
-    let mut registers: Vec<(String, u64, u64, u64)> = Vec::new();
+    let mut registers: Vec<(String, step_timing::DeviceRegisterExit)> = Vec::new();
     for exit in exits.counted_registers() {
         let physical = exit.register & !step_timing::DEVICE_REGISTER_WRITE;
         let direction = if exit.register & step_timing::DEVICE_REGISTER_WRITE != 0 {
@@ -355,23 +355,31 @@ fn device_exits_report<H: Host>(
             Some(register) => format!("{name}.{register}:{direction}"),
             None => format!("{name}@{physical:#x}:{direction}"),
         };
-        match registers.iter_mut().find(|(known, ..)| *known == label) {
-            Some((_, count, ticks, waited)) => {
-                *count += exit.count;
-                *ticks += exit.ticks;
-                *waited += exit.waited;
+        match registers.iter_mut().find(|(known, _)| *known == label) {
+            Some((_, sum)) => {
+                sum.count += exit.count;
+                sum.ticks += exit.ticks;
+                sum.waited += exit.waited;
+                sum.access += exit.access;
+                sum.settle += exit.settle;
             }
-            None => registers.push((label, exit.count, exit.ticks, exit.waited)),
+            None => registers.push((label, *exit)),
         }
     }
-    registers.sort_unstable_by_key(|&(_, _, ticks, _)| core::cmp::Reverse(ticks));
-    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns");
-    for (label, count, ticks, waited) in registers.iter().take(REGISTERS) {
+    registers.sort_unstable_by_key(|(_, exit)| core::cmp::Reverse(exit.ticks));
+    // A write's time also splits into its access (the lock and the model's
+    // write) and the settle after it.
+    let mut line = String::from("PES DEVICE REGISTERS count/ns/lock_ns[/access_ns/settle_ns]");
+    for (label, exit) in registers.iter().take(REGISTERS) {
         line.push_str(&format!(
-            " {label}={count}/{}/{}",
-            nanos(*ticks),
-            lock_nanos(*waited)
+            " {label}={}/{}/{}",
+            exit.count,
+            nanos(exit.ticks),
+            lock_nanos(exit.waited)
         ));
+        if label.ends_with(":w") {
+            line.push_str(&format!("/{}/{}", nanos(exit.access), nanos(exit.settle)));
+        }
     }
     let other = exits.other_registers;
     if other.count != 0 {

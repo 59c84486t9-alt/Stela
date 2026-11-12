@@ -147,7 +147,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 } else {
                     0
                 };
-                devices.add_register(physical | write, 1, spent, waited);
+                let [access, settle, _] = written.unwrap_or_default();
+                devices.add_register(step_timing::DeviceRegisterExit {
+                    register: physical | write,
+                    count: 1,
+                    ticks: spent,
+                    waited,
+                    access,
+                    settle,
+                });
             }
             if let Some(parts) = written {
                 self.system_exits.devices.writes.add(spent, parts);
