@@ -26,29 +26,9 @@ env:
   CARGO_INCREMENTAL: "0"
   # Stela.app's sources, with their build.sh.
   APP: guest/stela-app
-  # The release body and each archive's INSTALL.txt. Plain text that also
-  # reads as Markdown.
-  ABOUT: |-
-    Stela boots unmodified Apple silicon macOS on x86-64 PCs. It is very experimental.
-
-    Requirements:
-
-    - An x86-64-v2 CPU (about 2011 or newer), UEFI with Secure Boot off, 8 GB of RAM.
-    - An NVIDIA GTX 16 or RTX 20 series GPU or newer.
-    - A USB stick of 8 GB or more.
-    - An empty GPT partition of at least 60 GB.
-    - Network access during the install, which downloads macOS.
-  INSTALL: |-
-    Install:
-
-    1. Unpack the archive for your system.
-    2. Run sudo ./stela setup (Linux, macOS) or double-click stela.exe (Windows).
-    3. Choose the USB stick, the macOS version and the Mac model, then confirm. Setup erases the USB stick.
-    4. Boot the PC from the USB stick.
-
-    To update a USB stick made with an older version, plug it in and run sudo ./stela setup update stela (Linux, macOS) or stela.exe setup update stela (Windows).
-
-    You are responsible for following Apple's software license agreement and terms of use.
+  # The release body and each archive's INSTALL.txt:
+  # plain text that also reads as Markdown, with @VERSION@ for the version.
+  NOTES: .github/release-notes.txt
 
 jobs:
   version:
@@ -328,7 +308,8 @@ jobs:
 
       - name: Package
         run: |
-          printf '%s\n' "$INSTALL" > "$ARCHIVE/INSTALL.txt"
+          # The archive's copy has no Changes heading: that section lives on the release.
+          sed -e "s/@VERSION@/${{ needs.version.outputs.version }}/g" -e '/^## Changes$/,+1d' "$NOTES" > "$ARCHIVE/INSTALL.txt"
           cp -R LICENSE NOTICE LICENSES "$ARCHIVE/"
           if [[ "$RUNNER_OS" == Windows ]]; then
             7z a -tzip -bso0 "$ARCHIVE.zip" "$ARCHIVE"
@@ -352,8 +333,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -365,42 +344,31 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          tag="v$VERSION"
           count="$(ls dist | wc -l)"
           [[ "$count" == 4 ]] || { echo "::error::expected 3 archives and the source, found $count: $(ls dist)"; exit 1; }
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
-          # The first release lists no changes.
-          previous="$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)"
-          {
-            printf '%s\n\n' "$ABOUT"
-            echo "Downloads:"
-            echo
-            echo "- Linux x86-64 (glibc 2.35 or newer): stela-$tag-linux-x86_64.tar.gz"
-            echo "- Windows x86-64: stela-$tag-windows-x86_64.zip"
-            echo "- macOS, Apple silicon and Intel: stela-$tag-macos-universal.tar.gz"
-            echo "- Source, with every submodule at its pin and Stela's patches: stela-$tag-source.tar.zst"
-            echo "- SHA256SUMS: each file's SHA-256"
-            echo
-            printf '%s\n\n' "$INSTALL"
-            echo "License: Stela's code is GPL-2.0-or-later. The boot program stela.efi links code from Linux and is GPL-2.0-only; the stela program is GPL-3.0-or-later. Each archive has LICENSE, NOTICE and LICENSES/. The source archive is the complete corresponding source of these binaries."
-            if [[ -n "$previous" ]]; then
-              total="$(git rev-list --count --no-merges "$previous..$GITHUB_REF_NAME")"
-              echo
-              echo "Changes since $previous:"
-              echo
-              git log --no-merges --format='- %s' -n 300 "$previous..$GITHUB_REF_NAME"
-              if (( total > 300 )); then
-                echo "- and $((total - 300)) earlier commits"
-              fi
-            fi
-          } > notes.txt
+          # The template's Changes section is empty: it is written by hand
+          # on the published release.
+          grep -qx '## Changes' "$NOTES" || { echo "::error::$NOTES is missing or has no Changes heading"; exit 1; }
+          sed "s/@VERSION@/$VERSION/g" "$NOTES" > notes.txt
+          if grep -n '@[A-Z_]*@' notes.txt; then
+            echo "::error::$NOTES has a placeholder other than @VERSION@"
+            exit 1
+          fi
           wc -l notes.txt
 
+      # A re-run replaces the files of a release that exists and keeps its
+      # text, so a Changes section written by hand stays.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag \
-            --title "Stela $GITHUB_REF_NAME" \
-            --notes-file notes.txt
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists: replacing its files, keeping its text"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --title "Stela $GITHUB_REF_NAME" \
+              --notes-file notes.txt
+          fi

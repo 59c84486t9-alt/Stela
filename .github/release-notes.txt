@@ -1,0 +1,29 @@
+## Install
+
+Download the archive for your system, unpack it and plug in the USB stick. Then run one of these in the unpacked folder.
+
+Make a new stick (this erases it):
+
+```
+sudo ./stela setup
+```
+
+Update an existing Stela stick to v@VERSION@:
+
+```
+sudo ./stela setup update stela
+```
+
+On Windows, open Terminal with Run as administrator and write `.\stela.exe` in place of `sudo ./stela`.
+
+Then boot the PC from the stick.
+
+## Changes
+
+## Boot log
+
+If Stela does not work, include the boot log in your report:
+
+```
+sudo ./stela setup boot-log
+```
