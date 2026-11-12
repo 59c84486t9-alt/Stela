@@ -33,8 +33,19 @@ pub(super) enum Need {
     /// The boot files: enough to prepare boot bundles and name the image
     /// on Apple's servers.
     BootFiles,
-    /// The whole image, which a full install medium holds.
+    /// The whole image, which a full install medium holds, and its boot
+    /// files, to prepare boot bundles.
     WholeImage,
+    /// The whole image for a full install medium, and no boot bundle: its
+    /// boot files are not read.
+    Pieces,
+}
+
+impl Need {
+    /// Whether it writes the whole image as a full install medium.
+    pub(super) fn whole(self) -> bool {
+        matches!(self, Self::WholeImage | Self::Pieces)
+    }
 }
 
 /// Whether `record` installs from a medium that streams the image from
@@ -55,7 +66,10 @@ pub(super) fn medium_ready(record: &Record, build: &str) -> bool {
 /// install medium of `build` right needs from the image.
 pub(super) fn need(record: &Record, build: &str, bundles: bool) -> Option<Need> {
     match medium_ready(record, build) {
-        false if !wants_remote(record) => Some(Need::WholeImage),
+        false if !wants_remote(record) => Some(match bundles {
+            true => Need::WholeImage,
+            false => Need::Pieces,
+        }),
         false => Some(Need::BootFiles),
         true => bundles.then_some(Need::BootFiles),
     }
@@ -155,7 +169,7 @@ impl Lookup<'_> {
     fn what(&self) -> &'static str {
         match self.need {
             Need::BootFiles => "its boot files",
-            Need::WholeImage => "the whole image",
+            Need::WholeImage | Need::Pieces => "the whole image",
         }
     }
 }
@@ -200,11 +214,14 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
     };
     match (environment.image_size)(lookup.build, lookup.model) {
         Ok((boot, whole)) => Ok(Source::Remote {
-            boot,
+            boot: match lookup.need {
+                Need::Pieces => 0,
+                Need::BootFiles | Need::WholeImage => boot,
+            },
             // A damaged copy of the build keeps its intact pieces.
             pieces: match lookup.need {
                 Need::BootFiles => 0,
-                Need::WholeImage => match lookup.medium {
+                Need::WholeImage | Need::Pieces => match lookup.medium {
                     Some(m) if m.build == lookup.build => medium::missing_bytes(
                         &m.volume,
                         lookup.build,
@@ -224,7 +241,7 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
             what = lookup.what(),
             only = match lookup.need {
                 Need::BootFiles => ", which downloads only its boot files, not the whole image",
-                Need::WholeImage => "",
+                Need::WholeImage | Need::Pieces => "",
             },
         ),
     }
@@ -250,7 +267,7 @@ pub(super) fn describe(source: &Source, lookup: &Lookup<'_>) -> String {
             remote_text(source, build),
             match lookup.need {
                 Need::BootFiles => "USB or this ",
-                Need::WholeImage => "",
+                Need::WholeImage | Need::Pieces => "",
             }
         ),
     }
@@ -267,8 +284,16 @@ fn remote_text(source: &Source, build: &str) -> String {
         return String::new();
     };
     let total = bytes_text(boot + pieces);
-    match pieces {
-        0 => format!(
+    match (boot, pieces) {
+        // No boot bundle is prepared: the image's pieces alone.
+        (0, _) if pieces == whole => {
+            format!("{total} from Apple: the whole macOS {build} image straight onto the USB")
+        }
+        (0, _) => format!(
+            "{total} from Apple: the pieces of the macOS {build} image this USB's copy lacks, \
+             straight onto the USB; the pieces it holds are checked and kept"
+        ),
+        (_, 0) => format!(
             "{total} of the macOS {build} image's {} from Apple: its boot files, read by range",
             bytes_text(whole)
         ),
@@ -355,7 +380,7 @@ pub(super) fn obtain(
                 // Kept, so a later command finds it.
                 Need::BootFiles => (directory, None),
                 // Only its boot files land here, until the USB holds them.
-                Need::WholeImage => {
+                Need::WholeImage | Need::Pieces => {
                     let temporary = temporary_in(&directory)?;
                     (temporary.path().to_path_buf(), Some(temporary))
                 }

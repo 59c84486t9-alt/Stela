@@ -1083,7 +1083,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         download = Some(medium::download::Download::prepare(
             image,
             command.model(),
-            &boot,
+            Some(&boot),
         )?);
         boot
     } else {

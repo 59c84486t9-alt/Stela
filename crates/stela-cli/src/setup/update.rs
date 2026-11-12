@@ -567,7 +567,7 @@ pub(super) fn update_os(
     // the user agrees: it cannot install macOS until the new copy is
     // complete.
     let replace = match need {
-        super::sources::Need::WholeImage => {
+        super::sources::Need::WholeImage | super::sources::Need::Pieces => {
             room_for_new_copy(environment, &record, &build, &source, dry_run, &mut text)?
         }
         super::sources::Need::BootFiles => None,

@@ -731,7 +731,13 @@ pub fn remote_inventory<R: Read + Seek>(
 /// The product version and build of an IPSW's restore identity for
 /// `model`, from its ZIP directory and `Restore.plist` alone.
 pub fn identity(image: &Path, model: &str) -> Result<(String, String)> {
-    let mut archive = ZipArchive::new(File::open(image)?)?;
+    identity_of(File::open(image)?, model)
+}
+
+/// [`identity`] of an IPSW read from `source`, a local file or one read by
+/// ranges, whose directory and BuildManifest alone are read.
+pub fn identity_of<R: Read + Seek>(source: R, model: &str) -> Result<(String, String)> {
+    let mut archive = ZipArchive::new(source)?;
     let recovery = partial(&archive);
     let (_, restore) = profile_manifest(&mut archive, model, recovery)?;
     Ok((restore.product_version, restore.product_build))

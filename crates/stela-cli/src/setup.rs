@@ -788,10 +788,12 @@ impl Request {
                     path: prepare::fetch_recovery(directory, build, model)?,
                     download: None,
                 }),
-                sources::Need::WholeImage => {
+                sources::Need::WholeImage | sources::Need::Pieces => {
                     let image = restore::select(&restore::catalog()?, Some(build), Some(model))?;
                     let path = directory.join("boot.ipsw");
-                    let download = medium::download::Download::prepare(image, model, &path)?;
+                    // Without a boot bundle to prepare, no boot file is read.
+                    let boot = (need == sources::Need::WholeImage).then_some(path.as_path());
+                    let download = medium::download::Download::prepare(image, model, boot)?;
                     Ok(sources::Fetched {
                         path,
                         download: Some(download),

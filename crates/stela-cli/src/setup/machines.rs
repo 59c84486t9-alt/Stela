@@ -261,7 +261,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
             record.build
         )
     })?;
-    if need == sources::Need::WholeImage {
+    if need.whole() {
         sources::check_room(environment, &next, &next.build, &source)?;
     }
     let restore: Vec<(bundle::Kind, Option<Ecid>)> =

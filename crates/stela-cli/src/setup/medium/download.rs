@@ -24,10 +24,13 @@ pub(in super::super) struct Download {
 }
 
 impl Download {
+    /// Open the catalog's image on Apple's servers, pinning its size and
+    /// entity tag, and copy its boot files to `boot` when bundles are
+    /// prepared; the catalog's build is checked either way.
     pub(in super::super) fn prepare(
         image: restore::Image,
         model: &str,
-        boot: &Path,
+        boot: Option<&Path>,
     ) -> Result<Self> {
         ensure!(
             image.sha1.is_some(),
@@ -39,9 +42,15 @@ impl Download {
             etag: source.etag().into(),
             image,
         };
-        restore::payload::trim(source, model, boot, "Downloading boot files")?;
+        let build = match boot {
+            Some(boot) => {
+                restore::payload::trim(source, model, boot, "Downloading boot files")?;
+                restore::payload::identity(boot, model)?.1
+            }
+            None => restore::payload::identity_of(source, model)?.1,
+        };
         ensure!(
-            restore::payload::identity(boot, model)?.1 == download.image.build,
+            build == download.image.build,
             "the catalog download contains a different macOS build"
         );
         Ok(download)

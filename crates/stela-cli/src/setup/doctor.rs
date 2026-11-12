@@ -784,7 +784,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             let source = sources::locate(environment, &lookup).map_err(|error| {
                 anyhow::anyhow!("repair needs the macOS {build} restore image; but {error:#}")
             })?;
-            if need == sources::Need::WholeImage {
+            if need.whole() {
                 sources::check_room(environment, &record, &build, &source)?;
             }
             Some(source)

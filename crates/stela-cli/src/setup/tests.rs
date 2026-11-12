@@ -2669,7 +2669,7 @@ fn a_new_setup_takes_an_image_this_computer_holds_instead_of_downloading() {
 }
 
 #[test]
-fn repair_of_a_short_piece_downloads_the_boot_files_and_that_piece_saying_so() {
+fn repair_of_a_short_piece_downloads_that_piece_alone_saying_so() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
@@ -2682,27 +2682,36 @@ fn repair_of_a_short_piece_downloads_the_boot_files_and_that_piece_saying_so() {
     let whole = fs::metadata(&f.ipsw).unwrap().len();
     let boot = 2_200_000_000;
     let size = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((boot, whole)) };
+    // No bundle needs preparing: the download is asked for the pieces
+    // alone, never the boot files.
+    let fetch = |_: &Path, _: &str, _: &str, need: sources::Need| -> Result<sources::Fetched> {
+        anyhow::bail!("asked for {need:?}")
+    };
     let environment = Environment {
         image_size: &size,
+        fetch_image: &fetch,
         ..environment(&f.host)
     };
-    let repair = |ipsw: Option<&Path>| {
+    let repair = |ipsw: Option<&Path>, dry_run: bool| {
         let mut request = update_request(&f, &f._dir.path().join("cache"));
         request.action = Action::Repair;
-        request.dry_run = true;
+        request.dry_run = dry_run;
         request.ipsw = ipsw.map(Path::to_path_buf);
-        request.dispatch(&environment).unwrap()
+        request.dispatch(&environment)
     };
-    let plan = repair(None);
-    let total = host::bytes_text(boot + piece.len() as u64);
+    let plan = repair(None, true).unwrap();
+    let total = host::bytes_text(piece.len() as u64);
     assert!(
         plan.contains(&format!("download {total} from Apple")),
         "{plan}"
     );
     assert!(plan.contains("this USB's copy lacks"), "{plan}");
     assert!(plan.contains("checked and kept"), "{plan}");
+    assert!(!plan.contains("boot files"), "{plan}");
+    let error = repair(None, false).unwrap_err().to_string();
+    assert!(error.contains("asked for Pieces"), "{error}");
     // From an image on this computer it writes that piece alone.
-    let plan = repair(Some(&f.ipsw));
+    let plan = repair(Some(&f.ipsw), true).unwrap();
     let piece_text = host::bytes_text(piece.len() as u64);
     assert!(plan.contains(&format!("({piece_text} to write)")), "{plan}");
 }
