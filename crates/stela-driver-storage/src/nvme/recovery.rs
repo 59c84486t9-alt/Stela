@@ -18,6 +18,8 @@ impl Controller {
     /// either leaving no admin queue to delete with. A removed controller
     /// stays failed.
     pub(super) fn reset_with(&mut self, delete: bool) {
+        // The reset empties the queues: an owed doorbell names nothing.
+        self.owed = false;
         let status = match self.registers.read32(STATUS) {
             Ok(REMOVED) => Err(removed()),
             other => other,

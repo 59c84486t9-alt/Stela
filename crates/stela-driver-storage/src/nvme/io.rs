@@ -95,8 +95,20 @@ impl Controller {
     pub(super) fn publish(
         &mut self,
         io: bool,
+        command: [u32; 16],
+        data: Data,
+    ) -> Result<u16, BlockError> {
+        self.publish_with(io, command, data, true)
+    }
+
+    /// [`Self::publish`], an I/O command's doorbell left owed unless `ring`
+    /// ([`Self::ring_submissions`]).
+    fn publish_with(
+        &mut self,
+        io: bool,
         mut command: [u32; 16],
         data: Data,
+        ring: bool,
     ) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
         loop {
@@ -122,19 +134,44 @@ impl Controller {
         queue.submissions.write_submission(base, command);
         queue.submissions.give()?;
         queue.tail = queue.next(queue.tail);
-        fence(Ordering::SeqCst);
-        let doorbell = || {
+        if !io {
+            fence(Ordering::SeqCst);
             registers.write32(
                 DOORBELLS + 2 * usize::from(queue.id) * stride,
                 u32::from(queue.tail),
-            )
-        };
-        if io {
-            parts::timed(parts::Part::Doorbell, doorbell)?;
-        } else {
-            doorbell()?;
+            )?;
+            return Ok(id);
+        }
+        self.owed = true;
+        if ring {
+            self.ring_submissions()?;
         }
         Ok(id)
+    }
+
+    /// Ring the I/O submission doorbell at the queue's tail if a command
+    /// published since it last rang, telling the controller of every one.
+    pub(super) fn ring_submissions(&mut self) -> Result<(), BlockError> {
+        if !self.owed {
+            return Ok(());
+        }
+        self.owed = false;
+        // Every entry written before the tail the controller reads.
+        fence(Ordering::SeqCst);
+        let doorbell = DOORBELLS + 2 * usize::from(self.io.id) * self.doorbell_stride;
+        let tail = u32::from(self.io.tail);
+        parts::timed(parts::Part::Doorbell, || {
+            self.registers.write32(doorbell, tail)
+        })
+    }
+
+    /// Ring an owed I/O submission doorbell; a failure fails the commands
+    /// whose doorbell it was, and the controller.
+    pub(super) fn commit(&mut self) {
+        if let Err(error) = self.ring_submissions() {
+            self.poison(error);
+            self.fail_all();
+        }
     }
 
     /// The completion at queue `io`'s head, once the controller has posted
@@ -325,6 +362,17 @@ impl Controller {
         block: usize,
         command: Command,
     ) -> Result<u32, BlockError> {
+        self.start_with(namespace, block, command, true)
+    }
+
+    /// [`Self::start`], its doorbell left owed unless `ring`.
+    pub(super) fn start_with(
+        &mut self,
+        namespace: u32,
+        block: usize,
+        command: Command,
+        ring: bool,
+    ) -> Result<u32, BlockError> {
         self.ready()?;
         let tag = self
             .tags
@@ -337,7 +385,7 @@ impl Controller {
             .pool
             .take(command_pages(&command))
             .ok_or(BlockError::Protocol("every NVMe bounce page is in use"))?;
-        self.submit(tag, namespace, block, command, 0);
+        self.submit_with(tag, namespace, block, command, 0, ring);
         Ok(tag as u32)
     }
 
@@ -380,12 +428,25 @@ impl Controller {
         command: Command,
         retries: u8,
     ) {
+        self.submit_with(tag, namespace, block, command, retries, true);
+    }
+
+    /// [`Self::submit`], its doorbell left owed unless `ring`.
+    fn submit_with(
+        &mut self,
+        tag: usize,
+        namespace: u32,
+        block: usize,
+        command: Command,
+        retries: u8,
+        ring: bool,
+    ) {
         let slot = self.io.tail;
         // A command whose deadline cannot be kept is not sent; the deadline
         // runs from its doorbell.
         let published = self.deadline(self.command_timeout_us).and_then(|_| {
             let words = self.io_command(tag, namespace, block, &command)?;
-            let id = self.publish(true, words, Data::Tag(tag))?;
+            let id = self.publish_with(true, words, Data::Tag(tag), ring)?;
             Ok((id, self.deadline(self.command_timeout_us)?))
         });
         self.tags[tag] = match published {
@@ -416,6 +477,11 @@ impl Controller {
     }
 
     fn advance_timed(&mut self, mut destination: Option<ReadDestination<'_>>) {
+        // A command whose doorbell a caller left owed must not wait for its
+        // deadline: a look at the queue rings it.
+        if self.recovery.is_none() {
+            self.commit();
+        }
         if self.fault.is_some() {
             self.fail_all();
             return;

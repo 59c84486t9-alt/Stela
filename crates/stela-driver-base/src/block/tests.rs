@@ -22,6 +22,8 @@ struct Delayed {
     /// and the finishes that reached the device.
     together: bool,
     finishes: Rc<Cell<usize>>,
+    /// The commits that reached the device ([`BlockDevice::commit`]).
+    commits: Rc<Cell<usize>>,
 }
 
 type Probes = (
@@ -45,6 +47,7 @@ impl Delayed {
             last_read_address: Default::default(),
             together: false,
             finishes: Default::default(),
+            commits: Default::default(),
         };
         (delayed, probes)
     }
@@ -94,6 +97,9 @@ impl BlockDevice for Delayed {
         self.next += 1;
         self.started.push_back((tag, command));
         Ok(tag)
+    }
+    fn commit(&mut self) {
+        self.commits.set(self.commits.get() + 1);
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         self.finishes.set(self.finishes.get() + 1);
@@ -959,4 +965,24 @@ fn a_disk_that_reaps_one_at_a_time_is_asked_for_each() {
     assert_eq!(finishes.get(), 3);
     assert_eq!(window.finished(tickets[1]), Some(Ok(None)));
     assert_eq!(window.finished(tickets[2]), Some(Ok(None)));
+}
+
+/// A window's starts with more to follow reach the device in order and tell
+/// it once, at the commit; a plain start and a look tell it at once.
+#[test]
+fn a_window_tells_its_device_of_a_batch_once() {
+    let (delayed, (released, _, given)) = Delayed::new(RamDisk::new("batch", 8, 512), 4);
+    let commits = delayed.commits.clone();
+    let mut window = Shared::new(Box::new(delayed)).whole();
+    let first = window.start_more(write(0, 1)).unwrap();
+    let second = window.start_more(write(1, 2)).unwrap();
+    assert_eq!(given.borrow().as_slice(), &[write(0, 1), write(1, 2)]);
+    assert_eq!(commits.get(), 0);
+    window.commit();
+    assert_eq!(commits.get(), 1);
+    window.start(write(2, 3)).unwrap();
+    assert_eq!(commits.get(), 2);
+    released.set(3);
+    assert_eq!(window.finish(first), Some(Ok(None)));
+    assert_eq!(window.finish(second), Some(Ok(None)));
 }

@@ -260,10 +260,14 @@ impl Staging {
                 done.push((ours, host.device.execute(command)));
                 break;
             }
-            match host.device.start(command) {
+            // The disk is told of the step's commands once, after the last.
+            match host.device.start_more(command) {
                 Ok(tag) => host.running.push((tag, ours)),
                 Err(error) => done.push((ours, Err(error))),
             }
+        }
+        if queued && started != 0 {
+            host.device.commit();
         }
         let mut queue = self.queue.lock();
         for (ours, result) in done {

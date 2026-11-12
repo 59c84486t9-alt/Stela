@@ -1094,6 +1094,18 @@ pub trait BlockDevice {
         ))
     }
 
+    /// [`Self::start`], with more commands to follow at once: the device
+    /// may leave telling its hardware of it until [`Self::commit`], so a
+    /// batch costs one notice, as Linux's `commit_rqs` does. Commands still
+    /// run in the order they were started.
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.start(command)
+    }
+
+    /// Tell the hardware of every command [`Self::start_more`] started, after
+    /// the last of a batch; every caller of `start_more` calls it.
+    fn commit(&mut self) {}
+
     /// Command `tag`'s result once the device has completed it.
     fn finish(&mut self, _tag: u32) -> Option<Finished> {
         None
@@ -1176,6 +1188,14 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         (**self).start(command)
+    }
+
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        (**self).start_more(command)
+    }
+
+    fn commit(&mut self) {
+        (**self).commit();
     }
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {

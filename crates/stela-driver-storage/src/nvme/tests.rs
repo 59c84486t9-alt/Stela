@@ -37,6 +37,7 @@ impl Fixture {
             tags: (0..DEPTH).map(|_| Tag::Free).collect(),
             recovery: None,
             signalled: false,
+            owed: false,
             max_transfer: BOUNCE_BYTES,
             max_command_bytes: MAX_COMMAND_BYTES,
             shutdown_timeout_us: 1000,
@@ -1302,4 +1303,48 @@ fn a_dead_controller_is_found_at_the_command_timeout() {
     assert_eq!(disk.finish(read), None);
     wait(disk);
     assert_eq!(disk.finish(read), Some(Err(removed())));
+}
+
+/// Commands started with more to follow share one submission doorbell,
+/// rung at the commit with the tail past the last; a look at the queue
+/// rings one a caller left owed, and a plain start rings at once.
+#[test]
+fn a_batch_of_starts_rings_the_submission_doorbell_once() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let doorbell = |disk: &Namespace| {
+        let controller = disk.controller.borrow();
+        let at = DOORBELLS + 2 * usize::from(controller.io.id) * controller.doorbell_stride;
+        controller.registers.read32(at).unwrap()
+    };
+    let first = disk
+        .start_more(Command::Read { lba: 0, bytes: 512 })
+        .unwrap();
+    let second = disk
+        .start_more(Command::Read { lba: 8, bytes: 512 })
+        .unwrap();
+    assert_eq!(doorbell(disk), 0, "owed, not rung");
+    disk.commit();
+    assert_eq!(doorbell(disk), 2, "one ring past both");
+    disk.commit();
+    assert_eq!(doorbell(disk), 2);
+    for tag in [first, second] {
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, tag);
+            post(&mut controller, id, 0);
+        }
+        assert!(matches!(disk.finish(tag), Some(Ok(Some(_)))));
+    }
+    // Left owed: the next look at the queue rings it.
+    let third = disk
+        .start_more(Command::Read { lba: 0, bytes: 512 })
+        .unwrap();
+    assert_eq!(doorbell(disk), 2);
+    assert_eq!(disk.finish(third), None);
+    assert_eq!(doorbell(disk), 3);
+    // A plain start rings at once.
+    let fourth = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    assert_eq!(doorbell(disk), 4);
+    let _ = fourth;
 }

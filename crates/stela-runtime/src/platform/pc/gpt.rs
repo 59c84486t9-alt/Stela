@@ -164,6 +164,15 @@ impl<D: BlockDevice> BlockDevice for PartitionDevice<D> {
             .start(command.within(&self.identity, self.first_lba)?)
     }
 
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.disk
+            .start_more(command.within(&self.identity, self.first_lba)?)
+    }
+
+    fn commit(&mut self) {
+        self.disk.commit();
+    }
+
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         self.disk.finish(tag)
     }

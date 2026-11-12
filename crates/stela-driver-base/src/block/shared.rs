@@ -134,8 +134,10 @@ impl Held<'_> {
 
     /// Queue `command` and start what the device has room for; its ticket.
     /// Completions are collected only when the device has no room, which
-    /// they may free: a start needs no look at them.
-    pub(super) fn submit(&mut self, command: Command) -> u32 {
+    /// they may free: a start needs no look at them. The device is told of
+    /// what started unless `more` commands follow at once, when the caller
+    /// tells it ([`Self::commit`]).
+    pub(super) fn submit(&mut self, command: Command, more: bool) -> u32 {
         let requests = self.requests();
         let ticket = requests.next;
         requests.next = requests.next.wrapping_add(1);
@@ -144,9 +146,18 @@ impl Held<'_> {
             .push_back((ticket, command, crate::Clock::ticks()));
         self.step(false);
         if !self.requests().waiting.is_empty() {
-            self.advance();
+            self.step(true);
+        }
+        if !more {
+            self.commit();
         }
         ticket
+    }
+
+    /// Tell the device of every command started since it was last told
+    /// ([`BlockDevice::commit`]).
+    pub(super) fn commit(&mut self) {
+        BlockDevice::commit(&mut **self);
     }
 
     /// Count a command `accounted` as, with `merges` requests joined into
@@ -210,6 +221,7 @@ impl Held<'_> {
     /// here, its caller waiting.
     pub(super) fn advance(&mut self) {
         self.step(true);
+        self.commit();
     }
 
     /// Start the waiting commands, collecting completions first when `reap`.
@@ -338,7 +350,8 @@ impl Held<'_> {
             }
             let accounted = command.accounted(block);
             work.starts = work.starts.saturating_add(1);
-            match self.start(command) {
+            // The device is told of the batch once its caller commits.
+            match self.start_more(command) {
                 Ok(tag) => {
                     let requests = self.requests();
                     if requests.running.is_empty() {
@@ -448,7 +461,7 @@ impl Shared {
                     device.execute(command)
                 });
             }
-            disk.submit(command)
+            disk.submit(command, false)
         };
         loop {
             if let Some(result) = self.lock().take(ticket) {
@@ -551,6 +564,20 @@ impl Window {
     }
 }
 
+impl Window {
+    /// Queue `command` on the disk; its ticket. The device is told of it at
+    /// once unless `more` follow ([`BlockDevice::commit`]).
+    fn submit(&mut self, command: Command, more: bool) -> Result<u32, BlockError> {
+        let command = command.within(&self.identity, self.first)?;
+        if !self.room() {
+            return Err(BlockError::Protocol("the disk window queue is full"));
+        }
+        let ticket = self.disk.lock().submit(command, more);
+        self.started.push(ticket);
+        Ok(ticket)
+    }
+}
+
 impl BlockDevice for Window {
     fn identity(&self) -> &Identity {
         &self.identity
@@ -624,13 +651,15 @@ impl BlockDevice for Window {
     }
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
-        let command = command.within(&self.identity, self.first)?;
-        if !self.room() {
-            return Err(BlockError::Protocol("the disk window queue is full"));
-        }
-        let ticket = self.disk.lock().submit(command);
-        self.started.push(ticket);
-        Ok(ticket)
+        self.submit(command, false)
+    }
+
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.submit(command, true)
+    }
+
+    fn commit(&mut self) {
+        self.disk.lock().commit();
     }
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {

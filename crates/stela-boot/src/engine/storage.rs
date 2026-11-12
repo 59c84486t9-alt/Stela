@@ -536,6 +536,29 @@ impl Service {
     }
 }
 
+impl Service {
+    /// Start `command` on the disk, which is told of it at once unless
+    /// `more` follow ([`BlockDevice::commit`]).
+    fn start_with(&mut self, command: Command, more: bool) -> Result<u32, BlockError> {
+        let lba = command_lba(&command);
+        let started = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            timed(DiskPart::Start, || {
+                if more {
+                    self.inner.start_more(command)
+                } else {
+                    self.inner.start(command)
+                }
+            })
+        };
+        self.running += u32::from(started.is_ok());
+        self.looked.set(staged_disk::LookGate::default());
+        // Reported with the loader's root and interrupts restored.
+        self.failed("start lba", lba, started)
+    }
+}
+
 /// The first block `command` reaches, for a report of its failure.
 fn command_lba(command: &Command) -> u64 {
     match command {
@@ -612,16 +635,15 @@ impl BlockDevice for Service {
         self.inner.room()
     }
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
-        let lba = command_lba(&command);
-        let started = {
-            // SAFETY: as in read().
-            let _root = unsafe { RestoreRoot::enter(self.root) };
-            timed(DiskPart::Start, || self.inner.start(command))
-        };
-        self.running += u32::from(started.is_ok());
-        self.looked.set(staged_disk::LookGate::default());
-        // Reported with the loader's root and interrupts restored.
-        self.failed("start lba", lba, started)
+        self.start_with(command, false)
+    }
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.start_with(command, true)
+    }
+    fn commit(&mut self) {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.commit();
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         let finished = {

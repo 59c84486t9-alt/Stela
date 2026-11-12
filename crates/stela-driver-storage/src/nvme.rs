@@ -656,6 +656,10 @@ struct Controller {
     /// The I/O completion queue raises MSI-X vector 0, which the host
     /// gave the message of its completion signal.
     signalled: bool,
+    /// I/O submissions published since the I/O submission doorbell last
+    /// rang ([`Controller::ring_submissions`]): a batch rings once, after
+    /// its last command, as Linux's `nvme_commit_rqs` does.
+    owed: bool,
     /// Maximum data payload, at most [`BOUNCE_BYTES`].
     max_transfer: usize,
     /// MDTS/host command bound used when no non-MDTS limit is supplied.
@@ -822,6 +826,7 @@ pub fn attach(
         tags: (0..DEPTH).map(|_| Tag::Free).collect(),
         recovery: None,
         signalled,
+        owed: false,
         max_transfer: BOUNCE_BYTES,
         max_command_bytes: MAX_COMMAND_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
@@ -1301,18 +1306,17 @@ impl BlockDevice for Namespace {
     /// Asynchronous events and rescans run admin commands, which wait: only
     /// while no command runs, as Linux's work items run between requests.
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
-        let controller = self.controller.clone();
-        let mut controller = controller.borrow_mut();
-        if !controller.busy() {
-            parts::timed(parts::Part::Rescan, || self.rescan(&mut controller))?;
-        } else if let Some(error) = &self.removed {
-            return Err(error.clone());
-        }
-        let command = command.within(&self.identity, 0)?;
-        let block = self.identity.block_size as usize;
-        parts::timed(parts::Part::Start, || {
-            controller.start(self.namespace, block, command)
-        })
+        self.start_with(command, true)
+    }
+
+    /// As [`Self::start`], its doorbell left to [`Self::commit`] or the
+    /// next command that rings.
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.start_with(command, false)
+    }
+
+    fn commit(&mut self) {
+        self.controller.borrow_mut().commit();
     }
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {
@@ -1342,6 +1346,26 @@ impl BlockDevice for Namespace {
             self.flush()?;
         }
         self.controller.borrow_mut().shutdown()
+    }
+}
+
+impl Namespace {
+    /// Asynchronous events and rescans run admin commands, which wait: only
+    /// while no command runs, as Linux's work items run between requests.
+    /// The doorbell rings at once when `ring`.
+    fn start_with(&mut self, command: Command, ring: bool) -> Result<u32, BlockError> {
+        let controller = self.controller.clone();
+        let mut controller = controller.borrow_mut();
+        if !controller.busy() {
+            parts::timed(parts::Part::Rescan, || self.rescan(&mut controller))?;
+        } else if let Some(error) = &self.removed {
+            return Err(error.clone());
+        }
+        let command = command.within(&self.identity, 0)?;
+        let block = self.identity.block_size as usize;
+        parts::timed(parts::Part::Start, || {
+            controller.start_with(self.namespace, block, command, ring)
+        })
     }
 }
 

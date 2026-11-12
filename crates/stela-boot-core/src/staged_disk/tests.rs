@@ -47,6 +47,10 @@ struct Disk {
     taken: Vec<&'static str>,
     /// Calls the disk saw, to tell a model's from the host side's.
     calls: usize,
+    /// The batches of starts the disk was told of ([`BlockDevice::commit`]),
+    /// and the starts not yet told of.
+    commits: usize,
+    untold: usize,
 }
 
 impl Disk {
@@ -159,6 +163,16 @@ impl BlockDevice for Device {
         disk.next += 1;
         disk.running.push((tag, command));
         Ok(tag)
+    }
+    fn start_more(&mut self, command: Command) -> Result<u32, BlockError> {
+        let tag = self.start(command)?;
+        self.disk.borrow_mut().untold += 1;
+        Ok(tag)
+    }
+    fn commit(&mut self) {
+        let mut disk = self.disk.borrow_mut();
+        disk.commits += 1;
+        disk.untold = 0;
     }
     /// A completion waits, or one would at the next finish.
     fn posted(&self) -> bool {
@@ -771,4 +785,19 @@ fn a_step_whose_time_is_spent_leaves_the_rest_to_the_next() {
     for tag in tags {
         assert!(model.finish(tag).unwrap().is_ok());
     }
+}
+
+/// A step gives the host disk its commands in order and tells it of them
+/// once, after the last; a step that starts none tells it nothing.
+#[test]
+fn a_step_tells_the_host_disk_of_its_commands_once() {
+    let (mut model, worker, disk) = staged(8);
+    model.start(write(1, 1)).unwrap();
+    model.start(write(2, 2)).unwrap();
+    model.start(Command::Flush).unwrap();
+    assert_eq!(stepped(&worker).started, 3);
+    assert_eq!(disk.borrow().taken, ["write", "write", "flush"]);
+    assert_eq!((disk.borrow().commits, disk.borrow().untold), (1, 0));
+    assert_eq!(stepped(&worker).started, 0);
+    assert_eq!(disk.borrow().commits, 1);
 }
