@@ -66,6 +66,7 @@ fn poisoned_output_refuses_to_rewrite_the_active_dma_buffer() {
             queued: None,
             notify_queued: None,
             connected: None,
+            rx_dropped: 0,
             location: "poisoned model CDC".into(),
         };
         assert!(net.transmit(&[1, 2, 3]).is_err());
@@ -479,12 +480,21 @@ fn ncm_binding_negotiates_before_alt_setting_and_moves_real_transfer_blocks() {
         let mut block = b"NCMH\x0c\x00\x00\x00\x40\x00\x10\x00\x00\x00\x00\x00NCM0\x10\x00\x00\x00\x22\x00\x1e\x00\x00\x00\x00\x00\x00\x00".to_vec();
         block.extend_from_slice(&frame);
         assert_eq!(model.borrow().outgoing, [block.clone(), Vec::new()]);
-        model.borrow_mut().push_acl(block);
-        assert_eq!(link.receive().unwrap(), Some(frame));
+        model.borrow_mut().push_acl(block.clone());
+        assert_eq!(link.receive().unwrap(), Some(frame.clone()));
         assert_eq!(link.receive().unwrap(), None);
         // The next transfer is malformed and is dropped whole.
         model.borrow_mut().push_acl(b"NCMX".to_vec());
         assert_eq!(link.receive().unwrap(), None);
+        // usbnet's rx_complete: a STALLed transfer is counted and dropped
+        // once its endpoint is reset, and the link keeps receiving.
+        model.borrow_mut().halt_transfer = Some(5);
+        assert_eq!(link.receive().unwrap(), None);
+        model.borrow_mut().halt_transfer = None;
+        model.borrow_mut().push_acl(block);
+        let received = (0..2).find_map(|_| link.receive().unwrap());
+        assert_eq!(received, Some(frame));
+        assert_eq!(link.rx_dropped(), 2);
         for connected in [false, true] {
             model
                 .borrow_mut()

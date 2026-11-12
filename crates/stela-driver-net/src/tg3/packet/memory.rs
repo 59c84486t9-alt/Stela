@@ -204,8 +204,6 @@ impl Memory {
             || slot >= self.geometry.rx
             || !self.active_rx[slot]
             || kind & RX_INVALID_RING_FLAGS != 0
-            || kind & RX_END == 0
-            || !(4..=RX_BYTES).contains(&length)
         {
             return Err(Error::RingCorrupt);
         }
@@ -217,11 +215,17 @@ impl Memory {
                 .sync_for_cpu(slot * BUFFER..(slot + 1) * BUFFER)?;
         }
         self.active_rx[slot] = false;
-        let length = length - 4; // device includes the Ethernet FCS.
-        if error & RX_ERRORS != 0 || kind & RX_ERROR != 0 || !(HEADER..=MAX_FRAME).contains(&length)
+        // A damaged frame in a slot this driver offered is dropped and its
+        // slot reoffered, as `tg3_rx` does; only a return naming no offered
+        // slot means the ring itself is corrupt.
+        if error & RX_ERRORS != 0
+            || kind & (RX_ERROR | RX_END) != RX_END
+            || !(4..=RX_BYTES).contains(&length)
+            || !(HEADER..=MAX_FRAME).contains(&(length - 4))
         {
             return Ok((slot, false));
         }
+        let length = length - 4; // device includes the Ethernet FCS.
         let source = self.buffers[RX_DATA].cpu.address(slot * BUFFER, length)?;
         frame
             .try_reserve(length.saturating_sub(frame.len()))

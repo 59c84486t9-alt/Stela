@@ -41,6 +41,7 @@ pub struct Packet<R: Registers, D: Delay> {
     state: State,
     failure: Option<Error>,
     mbuf_low_water_events: u64,
+    rx_dropped: u64,
     tx_producer: usize,
     tx_consumer: usize,
     rx_producer: usize,
@@ -96,6 +97,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             state: State::Building,
             failure: None,
             mbuf_low_water_events: 0,
+            rx_dropped: 0,
             tx_producer: 0,
             tx_consumer: 0,
             rx_producer: Geometry::of(super::Asic::Bcm5720).rx - 1,
@@ -197,6 +199,11 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     /// or acknowledgement observations remain in `failure`. Saturates at u64::MAX.
     pub fn mbuf_low_water_events(&self) -> u64 {
         self.mbuf_low_water_events
+    }
+    /// Received frames dropped as damaged (CRC, alignment, length or
+    /// fragment errors), as Linux counts them in `rx_errors`. Saturates.
+    pub fn rx_dropped(&self) -> u64 {
+        self.rx_dropped
     }
     fn fault(&mut self, error: Error) -> Error {
         self.failure.get_or_insert(error);
@@ -397,8 +404,10 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             if frame {
                 return Ok(true);
             }
+            self.rx_dropped = self.rx_dropped.saturating_add(1);
         }
-        Err(Error::RingCorrupt)
+        // A whole pass of damaged frames: the rest wait for the next call.
+        Ok(false)
     }
     /// Runs one receive; `Ok(true)` leaves the frame in `self.received`.
     fn receive_checked(&mut self) -> Result<bool, LinkError> {

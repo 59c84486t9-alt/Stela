@@ -192,10 +192,18 @@ pub struct UsbNet {
     queued: Option<TransferTicket>,
     notify_queued: Option<TransferTicket>,
     connected: Option<bool>,
+    /// Receive transfers that failed, blocks that did not decode and frames
+    /// no Ethernet link carries, dropped as usbnet counts them in
+    /// `rx_errors`.
+    rx_dropped: u64,
     pub location: String,
 }
 
 impl UsbNet {
+    /// Receive transfers, blocks and frames dropped as damaged. Saturates.
+    pub fn rx_dropped(&self) -> u64 {
+        self.rx_dropped
+    }
     pub(super) fn new(
         controller: Shared,
         device: &Device,
@@ -327,6 +335,7 @@ impl UsbNet {
             queued: None,
             notify_queued: None,
             connected: None,
+            rx_dropped: 0,
             location: format!("{} ({})", device.location, device.name()),
         })
     }
@@ -443,23 +452,34 @@ impl Link for UsbNet {
         self.queued = None;
         let bytes = match result {
             Ok(bytes) => &self.receive.bytes()[..bytes],
-            Err(error) => {
-                let _ = c.clear(&input);
-                return Err(link_error(error));
+            Err(_) => {
+                // usbnet's rx_complete: a failed transfer is counted and
+                // dropped once its endpoint is reset; an endpoint that
+                // cannot be reset is a dead device.
+                c.clear(&input).map_err(link_error)?;
+                self.rx_dropped = self.rx_dropped.saturating_add(1);
+                return Ok(None);
             }
         };
         // A malformed block, like an oversized frame, is dropped as a NIC
         // drops a frame that fails its checks.
         let frames = match self.framing {
-            Framing::Ecm => alloc::vec![bytes],
-            Framing::Ncm(..) => ntb::decode(bytes).unwrap_or_default(),
+            Framing::Ecm => Some(alloc::vec![bytes]),
+            Framing::Ncm(..) => ntb::decode(bytes).ok(),
         };
-        self.pending.extend(
-            frames
-                .into_iter()
-                .filter(|frame| !frame.is_empty() && frame.len() <= MAX_FRAME)
-                .map(<[u8]>::to_vec),
-        );
+        let Some(frames) = frames else {
+            self.rx_dropped = self.rx_dropped.saturating_add(1);
+            return Ok(None);
+        };
+        for frame in frames {
+            // An empty transfer is the zero-length packet that ends a frame
+            // of whole packets, not a damaged frame.
+            if frame.len() > MAX_FRAME {
+                self.rx_dropped = self.rx_dropped.saturating_add(1);
+            } else if !frame.is_empty() {
+                self.pending.push_back(frame.to_vec());
+            }
+        }
         Ok(self.pending.pop_front())
     }
 }

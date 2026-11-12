@@ -233,10 +233,17 @@ pub struct UsbEthernet {
     /// Why the chip runs without its firmware patch: the file was missing
     /// or failed validation, and r8152 then starts the chip unpatched.
     pub firmware_skipped: Option<firmware::Error>,
+    /// Receive transfers that failed and aggregates that did not decode,
+    /// dropped as r8152 and the ASIX drivers count them in `rx_errors`.
+    rx_dropped: u64,
     pub location: String,
 }
 
 impl UsbEthernet {
+    /// Receive transfers and aggregates dropped as damaged. Saturates.
+    pub fn rx_dropped(&self) -> u64 {
+        self.rx_dropped
+    }
     pub fn driver(&self) -> &'static str {
         match self.chip {
             Backend::Realtek(_) => "usb-rtl815x",
@@ -342,6 +349,7 @@ impl UsbEthernet {
             stopped: false,
             firmware,
             firmware_skipped,
+            rx_dropped: 0,
             location: format!("{} {family}", device.location),
         })
     }
@@ -471,9 +479,14 @@ impl Link for UsbEthernet {
         self.queued = None;
         let actual = match result {
             Ok(bytes) => bytes,
-            Err(error) => {
+            Err(_) => {
+                // A failed transfer (a STALL, babble or transaction error)
+                // is counted and dropped once its endpoint is reset, as
+                // r8152 and usbnet resubmit; an endpoint that cannot be
+                // reset is a dead device.
                 c.clear(&endpoint).map_err(link_error)?;
-                return Err(link_error(error));
+                self.rx_dropped = self.rx_dropped.saturating_add(1);
+                return Ok(None);
             }
         };
         if actual > self.receive.len() {
@@ -482,11 +495,12 @@ impl Link for UsbEthernet {
             ));
         }
         fence(Ordering::Acquire);
-        self.pending.extend(
-            self.chip
-                .decode(&self.receive.bytes()[..actual])
-                .map_err(|why| LinkError::Adapter(why.into()))?,
-        );
+        // An aggregate that fails its checks is dropped whole, as a NIC
+        // drops a frame that fails its own.
+        match self.chip.decode(&self.receive.bytes()[..actual]) {
+            Ok(frames) => self.pending.extend(frames),
+            Err(_) => self.rx_dropped = self.rx_dropped.saturating_add(1),
+        }
         Ok(self.pending.pop_front())
     }
 }

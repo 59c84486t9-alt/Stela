@@ -529,9 +529,25 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
         aggregate[24..84].fill(0x5a);
         aggregate[88..92].copy_from_slice(&64u32.to_le_bytes());
         aggregate[112..172].fill(0x6a);
-        model.borrow_mut().push_event(aggregate);
+        model.borrow_mut().push_event(aggregate.clone());
         assert_eq!(link.receive().unwrap(), Some(vec![0x5a; 60]));
         assert_eq!(link.receive().unwrap(), Some(vec![0x6a; 60]));
+        assert_eq!(link.receive().unwrap(), None);
+        // r8152's rx_bottom and read_bulk_callback: an aggregate that fails
+        // its checks and a STALLed transfer are counted and dropped, and
+        // the link keeps receiving.
+        let mut runt = aggregate.clone();
+        runt[..4].copy_from_slice(&5u32.to_le_bytes());
+        model.borrow_mut().push_event(runt);
+        assert_eq!(link.receive().unwrap(), None);
+        model.borrow_mut().halt_transfer = Some(3);
+        assert_eq!(link.receive().unwrap(), None);
+        model.borrow_mut().halt_transfer = None;
+        model.borrow_mut().push_event(aggregate);
+        let received = (0..2).find_map(|_| link.receive().unwrap());
+        assert_eq!(received, Some(vec![0x5a; 60]));
+        assert_eq!(link.receive().unwrap(), Some(vec![0x6a; 60]));
+        assert_eq!(link.rx_dropped(), 2);
         assert_eq!(link.receive().unwrap(), None);
         match scenario {
             0 => {

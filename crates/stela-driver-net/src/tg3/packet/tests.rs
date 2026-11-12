@@ -1103,12 +1103,22 @@ fn corrupted_rx_is_dropped_and_invalid_opaque_poison_keeps_owners() {
     let (mut packet, pages, domain, peer) = attach();
     peer.lock().unwrap().receive(&[0x12; 60], 0x10000, &domain);
     assert_eq!(packet.receive().unwrap(), None);
-    peer.lock().unwrap().receive(&[0x34; 60], 0, &domain);
+    assert_eq!(packet.rx_dropped(), 1);
     let returns = {
         let p = peer.lock().unwrap();
         (u64::from(p.sram[&0x200]) << 32) | u64::from(p.sram[&0x204])
     };
-    domain.store(returns + 32 + 28, &0x20001u32.to_le_bytes());
+    // A runt or a frame without its end flag in an offered slot is dropped
+    // and its slot reoffered, as tg3_rx does; the next good frame arrives.
+    peer.lock().unwrap().receive(&[0x21; 60], 0, &domain);
+    domain.store(returns + 32 + 8, &3u32.to_le_bytes());
+    peer.lock().unwrap().receive(&[0x22; 60], 0, &domain);
+    domain.store(returns + 64 + 12, &0u32.to_le_bytes());
+    peer.lock().unwrap().receive(&[0x23; 60], 0, &domain);
+    assert_eq!(packet.receive().unwrap(), Some(vec![0x23; 60]));
+    assert_eq!((packet.rx_dropped(), packet.failure()), (3, None));
+    peer.lock().unwrap().receive(&[0x34; 60], 0, &domain);
+    domain.store(returns + 4 * 32 + 28, &0x20001u32.to_le_bytes());
     let mut reused = vec![9; 60];
     assert!(packet.receive_reusing(&mut reused).is_err());
     assert_eq!(reused, vec![9; 60]);
