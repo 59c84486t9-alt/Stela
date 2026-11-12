@@ -180,6 +180,25 @@ fn exit_transition_costs() {
         let ns = time(&mut machine, 1, part);
         std::println!("EXITS part={name} ns={ns}");
     }
+    // The memory-management words a kernel exits on most, at EL1.
+    let words: [(&str, Round); 2] = [
+        ("tlbi-vale1is", |machine| {
+            machine.cpu.state.x[8] = 0x4_0000;
+            machine.cpu.pc = USER;
+            exit(machine, 0xd508_83a8);
+        }),
+        ("msr-ttbr0", |machine| {
+            let ttbr0 = machine.cpu.read(SystemRegister::TTBR0_EL1);
+            machine.cpu.state.x[0] = ttbr0 ^ 1 << 48;
+            machine.cpu.pc = USER;
+            exit(machine, 0xd518_2000);
+            machine.current_variant(false, false);
+        }),
+    ];
+    for (name, word) in words {
+        let ns = time(&mut machine, 1, word);
+        std::println!("EXITS word={name} ns={ns}");
+    }
     // A direct exit's whole round trip through the run loop.
     let mut machine = branches();
     let ns = time(&mut machine, 2, direct_round);

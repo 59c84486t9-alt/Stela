@@ -41,43 +41,50 @@ pub fn window(address: u64, size: u64, window: u64) -> (u64, u64) {
 }
 
 /// The leaves one half of a shadow was filled from since it was last
-/// emptied.
+/// emptied, and the global ones apart, each by its own extent: a TLBI by VA
+/// of another ASID reaches only those of a kept half ([`Kept::invalidate`]),
+/// and a process's lower half holds few (XNU's commpage).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extents {
+    every: Leaves,
+    /// The global leaves, all in `large`: past [`LARGE_LEAVES`] of them
+    /// their visits fall back to every leaf's.
+    global: Leaves,
+    /// A non-global translation was filled.
+    private: bool,
+}
+
+/// Leaves recorded by their extents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Leaves {
     /// log2 of the largest leaf of at most [`SMALL`] bytes, 0 for none.
     small: u32,
     /// The larger leaves' first and last bytes, sorted and distinct.
     large: Vec<(u64, u64)>,
     /// More than [`LARGE_LEAVES`] large leaves were filled.
     overflow: bool,
-    /// A non-global translation was filled.
-    private: bool,
 }
 
-impl Extents {
-    pub const fn new() -> Self {
+impl Leaves {
+    const fn new() -> Self {
         Self {
             small: 0,
             large: Vec::new(),
             overflow: false,
-            private: false,
         }
     }
 
-    /// The half was emptied.
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.small = 0;
         self.large.clear();
         self.overflow = false;
-        self.private = false;
     }
 
-    /// A fill at `address` from a leaf of `size` bytes, global or not.
-    pub fn record(&mut self, address: u64, size: u64, global: bool) {
-        self.private |= !global;
-        let (first, last) = leaf(address, size);
+    /// Record the leaf from `first` to `last`, by its size alone if it is
+    /// of at most `small` bytes.
+    fn record(&mut self, first: u64, last: u64, small: u64) {
         let bytes = last - first + 1;
-        if bytes <= SMALL {
+        if bytes <= small {
             self.small = self.small.max(bytes.trailing_zeros());
             return;
         }
@@ -90,22 +97,8 @@ impl Extents {
         }
     }
 
-    /// The half holds a non-global translation, which another ASID would
-    /// not use.
-    pub fn private(&self) -> bool {
-        self.private
-    }
-
-    /// Visit the ranges within `bounds` (this half's addresses) that hold
-    /// every page this half maps from an entry `reach` removes. Forget the
-    /// large leaves among them as the caller unmaps them. Return `false`
-    /// without visiting a range when the whole half must go.
-    pub fn visit_ranges(
-        &mut self,
-        reach: Reach,
-        bounds: (u64, u64),
-        mut visit: impl FnMut(u64, u64),
-    ) -> bool {
+    /// [`Extents::visit_ranges`] over these leaves.
+    fn visit(&mut self, reach: Reach, bounds: (u64, u64), mut visit: impl FnMut(u64, u64)) -> bool {
         let (first, last) = match reach {
             Reach::Nothing => return true,
             Reach::All => return false,
@@ -132,6 +125,68 @@ impl Extents {
             !overlaps
         });
         true
+    }
+}
+
+impl Extents {
+    pub const fn new() -> Self {
+        Self {
+            every: Leaves::new(),
+            global: Leaves::new(),
+            private: false,
+        }
+    }
+
+    /// The half was emptied.
+    pub fn clear(&mut self) {
+        self.every.clear();
+        self.global.clear();
+        self.private = false;
+    }
+
+    /// A fill at `address` from a leaf of `size` bytes, global or not.
+    pub fn record(&mut self, address: u64, size: u64, global: bool) {
+        self.private |= !global;
+        let (first, last) = leaf(address, size);
+        self.every.record(first, last, SMALL);
+        if global {
+            self.global.record(first, last, 0);
+        }
+    }
+
+    /// The half holds a non-global translation, which another ASID would
+    /// not use.
+    pub fn private(&self) -> bool {
+        self.private
+    }
+
+    /// Visit the ranges within `bounds` (this half's addresses) that hold
+    /// every page this half maps from an entry `reach` removes. Forget the
+    /// large leaves among them as the caller unmaps them. Return `false`
+    /// without visiting a range when the whole half must go.
+    pub fn visit_ranges(
+        &mut self,
+        reach: Reach,
+        bounds: (u64, u64),
+        visit: impl FnMut(u64, u64),
+    ) -> bool {
+        self.every.visit(reach, bounds, visit)
+    }
+
+    /// [`Self::visit_ranges`] for the pages this half maps from global
+    /// entries `reach` removes: what a TLBI by VA of another ASID removes.
+    /// A global leaf visited here stays among every leaf's, which a later
+    /// TLBI of the half's own ASID visits again.
+    pub fn visit_global_ranges(
+        &mut self,
+        reach: Reach,
+        bounds: (u64, u64),
+        visit: impl FnMut(u64, u64),
+    ) -> bool {
+        if self.global.overflow {
+            return self.every.visit(reach, bounds, visit);
+        }
+        self.global.visit(reach, bounds, visit)
     }
 }
 
@@ -256,33 +311,47 @@ impl Kept {
     }
 
     /// Apply a TLBI that removes `everywhere` to the kept halves within
-    /// `bounds`: `unmap(value, first, last)` unmaps a range under the root
-    /// entry `value`, whose top-level entries each map `1 << entry_bits`
-    /// bytes. A half whose extents are unknown for the TLBI's addresses, or
-    /// that a TLBI of non-global or all entries reaches, is dropped. Returns
-    /// the halves dropped.
+    /// `bounds`, whose contexts share the TCR `tcr` outside the lower
+    /// half's own fields: `unmap(value, first, last)` unmaps a range under
+    /// the root entry `value`, whose top-level entries each map
+    /// `1 << entry_bits` bytes. A TLBI by VA of an ASID reaches the global
+    /// pages of a half that may hold no entry of that ASID
+    /// ([`same_asid`]), and every page at its addresses of one that may.
+    /// A half whose extents are unknown for the TLBI's addresses, or that a
+    /// TLBI of non-global or all entries reaches, is dropped. Returns the
+    /// halves dropped.
     pub fn invalidate(
         &mut self,
         everywhere: Everywhere,
+        tcr: u64,
         bounds: (u64, u64),
         entry_bits: u32,
         mut unmap: impl FnMut(u64, u64, u64),
     ) -> usize {
-        let reach = match everywhere {
-            Everywhere::Addresses(reach) => reach,
-            Everywhere::NonGlobal(_) | Everywhere::All => Reach::All,
+        let (reach, asid) = match everywhere {
+            Everywhere::Addresses(reach) => (reach, None),
+            Everywhere::AsidAddresses(reach, asid) => (reach, Some(asid)),
+            Everywhere::NonGlobal(_) | Everywhere::All => (Reach::All, None),
         };
         let before = self.halves.len();
         self.halves.retain_mut(|half| {
-            half.extents.visit_ranges(reach, bounds, |first, last| {
-                for &(_, entry, value) in &half.entries {
+            let entries = &half.entries;
+            let visit = |first: u64, last: u64| {
+                for &(_, entry, value) in entries {
                     let start = (entry as u64) << entry_bits;
                     let end = start | ((1 << entry_bits) - 1);
                     if first <= end && start <= last {
                         unmap(value, first.max(start), last.min(end));
                     }
                 }
-            })
+            };
+            let other = asid
+                .is_some_and(|asid| half.extents.private() && !same_asid(half.key.0, tcr, asid));
+            if other {
+                half.extents.visit_global_ranges(reach, bounds, visit)
+            } else {
+                half.extents.visit_ranges(reach, bounds, visit)
+            }
         });
         before - self.halves.len()
     }
@@ -367,7 +436,10 @@ mod tests {
         extents.record(block + 0x12_3456, 1 << 25, true);
         extents.record(block + 0x45_6789, 1 << 25, false);
         assert!(extents.private());
-        assert_eq!(extents.large, alloc::vec![(block, block + (1 << 25) - 1)]);
+        assert_eq!(
+            extents.every.large,
+            alloc::vec![(block, block + (1 << 25) - 1)]
+        );
         // A page of the block drops its 16 KiB neighbourhood and the block,
         // which is then forgotten.
         assert_eq!(
@@ -377,7 +449,7 @@ mod tests {
                 (block, block + (1 << 25) - 1)
             ])
         );
-        assert!(extents.large.is_empty());
+        assert!(extents.every.large.is_empty());
         // Ranges clamp to the half; other halves and inverted ranges reach
         // nothing; All drops the half.
         assert_eq!(
@@ -485,6 +557,7 @@ mod tests {
         let reach = Reach::Containing(0x1_0000_5000);
         let dropped = kept.invalidate(
             Everywhere::Addresses(reach),
+            0,
             LOWER,
             39,
             |value, first, last| unmapped.push((value, first, last)),
@@ -495,13 +568,13 @@ mod tests {
         unmapped.clear();
         let upper = Everywhere::Addresses(Reach::Containing(0xffff_fe00_0000_0000));
         assert_eq!(
-            kept.invalidate(upper, LOWER, 39, |v, f, l| unmapped.push((v, f, l))),
+            kept.invalidate(upper, 0, LOWER, 39, |v, f, l| unmapped.push((v, f, l))),
             0
         );
         assert!(unmapped.is_empty());
         // A TLBI of an ASID's or of every entry drops the kept halves.
         assert_eq!(
-            kept.invalidate(Everywhere::NonGlobal(1), LOWER, 39, |_, _, _| {}),
+            kept.invalidate(Everywhere::NonGlobal(1), 0, LOWER, 39, |_, _, _| {}),
             1
         );
         assert!(kept.is_empty());
@@ -544,6 +617,115 @@ mod tests {
         fill(&mut kept);
         assert_eq!(kept.drop_asid(9, TCR_A1), 2);
         assert_eq!(held(&kept), [7]);
+    }
+
+    /// A TLBI by VA of an ASID unmaps only the global pages of a kept half
+    /// of another ASID, and every page at its address of a half of its own
+    /// ASID, of a half without non-global entries and, with TCR.A1 = 1 or
+    /// 8-bit ASIDs that agree, of a half that may be of it.
+    #[test]
+    fn a_tlbi_by_va_of_an_asid_unmaps_only_global_pages_of_other_asids_halves() {
+        const TCR_A1: u64 = 1 << 22;
+        const TCR_AS: u64 = 1 << 36;
+        // A process's page at 0x1_0000_4000 and a global 16 KiB page (a
+        // commpage) at 0xf_ffff_c000; a 32 MiB global block at 2 GiB.
+        let key = |asid: u64| (asid << 48 | 0x8000_0000, 0x10);
+        let mut process = Extents::new();
+        process.record(0x1_0000_4000, 1 << 14, false);
+        process.record(0xf_ffff_c000, 1 << 14, true);
+        process.record(0x8000_0000, 1 << 25, true);
+        let mut shared = Extents::new();
+        shared.record(0x2_0000_0000, 1 << 14, true);
+        let fill = || {
+            let mut kept = Kept::new();
+            for (asid, extents) in [(5, &process), (6, &process), (7, &shared)] {
+                kept.switch(
+                    key(asid),
+                    alloc::vec![(0x1000, 0, asid)],
+                    extents.clone(),
+                    key(0),
+                );
+            }
+            kept
+        };
+        let unmapped = |kept: &mut Kept, everywhere, tcr| {
+            let mut unmapped = Vec::new();
+            let dropped = kept.invalidate(everywhere, tcr, LOWER, 39, |value, first, last| {
+                unmapped.push((value, first, last));
+            });
+            assert_eq!(dropped, 0);
+            unmapped.sort_unstable();
+            unmapped
+        };
+        let page = Reach::Containing(0x1_0000_5000);
+        // ASID 5's page: its half's neighbourhood, and the global-only
+        // half's; ASID 6's half holds no global page there.
+        let mut kept = fill();
+        assert_eq!(
+            unmapped(&mut kept, Everywhere::AsidAddresses(page, 5), 0),
+            [
+                (5, 0x1_0000_4000, 0x1_0000_7fff),
+                (7, 0x1_0000_4000, 0x1_0000_7fff)
+            ]
+        );
+        // The commpage's address reaches every half.
+        let commpage = Reach::Containing(0xf_ffff_d000);
+        assert_eq!(
+            unmapped(&mut kept, Everywhere::AsidAddresses(commpage, 5), 0)
+                .iter()
+                .map(|&(value, ..)| value)
+                .collect::<Vec<_>>(),
+            [5, 6, 7]
+        );
+        // A page of the global block reaches the block alone in another
+        // ASID's half, which forgets it from its global leaves, and the
+        // page's neighbourhood besides in the others.
+        let block = Reach::Containing(0x8000_4000);
+        assert_eq!(
+            unmapped(&mut kept, Everywhere::AsidAddresses(block, 5), 0),
+            [
+                (5, 0x8000_0000, 0x8000_0000 + (1 << 25) - 1),
+                (5, 0x8000_4000, 0x8000_7fff),
+                (6, 0x8000_0000, 0x8000_0000 + (1 << 25) - 1),
+                (7, 0x8000_4000, 0x8000_7fff),
+            ]
+        );
+        assert!(
+            unmapped(&mut kept, Everywhere::AsidAddresses(block, 5), 0)
+                .iter()
+                .all(|&(value, ..)| value != 6)
+        );
+        // Without an ASID, every half's neighbourhood goes.
+        assert_eq!(
+            unmapped(&mut fill(), Everywhere::Addresses(page), 0).len(),
+            3
+        );
+        // 8-bit ASIDs ignore the TLBI's high byte; 16-bit ones do not.
+        assert_eq!(
+            unmapped(&mut fill(), Everywhere::AsidAddresses(page, 0x106), 0).len(),
+            2
+        );
+        assert_eq!(
+            unmapped(&mut fill(), Everywhere::AsidAddresses(page, 0x106), TCR_AS).len(),
+            1
+        );
+        // TTBR1 names the ASID: every half may hold it.
+        assert_eq!(
+            unmapped(&mut fill(), Everywhere::AsidAddresses(page, 9), TCR_A1).len(),
+            3
+        );
+        // Past the global leaves it records, a half of another ASID visits
+        // every leaf's ranges again.
+        let mut many = process.clone();
+        for n in 0..=LARGE_LEAVES as u64 {
+            many.record(0x10_0000_0000 + (n << 14), 1 << 14, true);
+        }
+        let mut kept = Kept::new();
+        kept.switch(key(6), alloc::vec![(0x1000, 0, 6)], many, key(0));
+        assert_eq!(
+            unmapped(&mut kept, Everywhere::AsidAddresses(page, 5), 0),
+            [(6, 0x1_0000_4000, 0x1_0000_7fff)]
+        );
     }
 
     #[test]

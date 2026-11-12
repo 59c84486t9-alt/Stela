@@ -78,7 +78,7 @@ fn covers(tlbi: Tlbi, context: Context, entry: Entry) -> bool {
 }
 
 #[test]
-fn everywhere_names_va_forms_by_address_of_any_regime_or_asid() {
+fn everywhere_names_va_forms_by_address_of_any_regime_and_their_asid() {
     let everywhere = |kind, regime, operand| {
         Scope::new(&tlbi(kind, regime, TlbiLevel::Any, operand), HOST).everywhere()
     };
@@ -87,9 +87,25 @@ fn everywhere_names_va_forms_by_address_of_any_regime_or_asid() {
         everywhere(
             TlbiKind::VA,
             Named::EL10,
-            9 << 48 | 0xffff_fe00_0000_4000 >> 12
+            9 << 48 | (0xffff_fe00_0000_4000 >> 12) & ((1 << 44) - 1)
         ),
-        Everywhere::Addresses(Reach::Containing(0xffff_fe00_0000_4000))
+        Everywhere::AsidAddresses(Reach::Containing(0xffff_fe00_0000_4000), 9)
+    );
+    // VAAE1 of every ASID, and VAE2 without E2H, a regime without ASIDs:
+    // the address alone.
+    assert_eq!(
+        everywhere(TlbiKind::VAA, Named::EL10, 9 << 48 | 0x4000 >> 12),
+        Everywhere::Addresses(Reach::Containing(0x4000))
+    );
+    let el2 = tlbi(
+        TlbiKind::VA,
+        Named::EL2,
+        TlbiLevel::Any,
+        9 << 48 | 0x4000 >> 12,
+    );
+    assert_eq!(
+        Scope::new(&el2, Context { e2h: false, ..HOST }).everywhere(),
+        Everywhere::Addresses(Reach::Containing(0x4000))
     );
     assert_eq!(
         everywhere(TlbiKind::VAA, Named::EL2, 0x4000 >> 12),

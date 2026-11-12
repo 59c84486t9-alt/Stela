@@ -4504,11 +4504,11 @@ fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
         [
             (
                 Reach::Containing(high),
-                Everywhere::Addresses(Reach::Containing(high))
+                Everywhere::AsidAddresses(Reach::Containing(high), 3)
             ),
             (Reach::Nothing, Everywhere::NonGlobal(3)),
             (Reach::All, Everywhere::NonGlobal(0)),
-            (range, Everywhere::Addresses(range)),
+            (range, Everywhere::AsidAddresses(range, 0)),
             (Reach::All, Everywhere::All),
         ]
     );

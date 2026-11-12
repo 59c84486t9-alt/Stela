@@ -339,6 +339,13 @@ pub enum Everywhere {
     /// context: the VA forms ([`Reach::Containing`] or
     /// [`Reach::Overlapping`]), or [`Reach::Nothing`].
     Addresses(Reach),
+    /// Of the entries whose input range holds these VAs, the global ones and
+    /// the non-global ones of the ASID named, whatever their regime: the VA
+    /// forms that name an ASID (Arm `TLBIMatch`). The ASID compares as the
+    /// TCR of its regime has it (`shadow::same_asid`). In another regime
+    /// the TLBI removes nothing, so this is a superset there too; a cache
+    /// that cannot tell an entry's ASID treats it as [`Self::Addresses`].
+    AsidAddresses(Reach, u16),
     /// The non-global entries of the ASID named (TLBI ASIDE1): a global
     /// entry or a non-global entry of another ASID stays (Arm `TLBIMatch`).
     NonGlobal(u16),
@@ -353,18 +360,24 @@ pub(in crate::machine) fn canonical(address: u64) -> u64 {
 
 impl Scope {
     /// What this TLBI removes from a cache that keeps every context's
-    /// translations ([`Everywhere`]): for the VA forms, of any regime or
-    /// ASID, the entries at their address or range; for ASIDE1, the
-    /// non-global entries; for the other forms, everything.
+    /// translations ([`Everywhere`]): for the VA forms, of any regime, the
+    /// entries at their address or range, global or of the ASID they name
+    /// in a regime with ASIDs; for ASIDE1, the non-global entries; for the
+    /// other forms, everything.
     pub fn everywhere(self) -> Everywhere {
         if !self.valid {
             return Everywhere::Addresses(Reach::Nothing);
         }
+        let asid = (self.regime != Regime::El2).then_some(self.asid);
+        let addresses = |reach| match asid {
+            Some(asid) => Everywhere::AsidAddresses(reach, asid),
+            None => Everywhere::Addresses(reach),
+        };
         match self.kind {
-            TlbiKind::VA | TlbiKind::VAA => {
-                Everywhere::Addresses(Reach::Containing(canonical(self.address)))
-            }
-            TlbiKind::RVA | TlbiKind::RVAA => Everywhere::Addresses(self.overlapping()),
+            TlbiKind::VA => addresses(Reach::Containing(canonical(self.address))),
+            TlbiKind::VAA => Everywhere::Addresses(Reach::Containing(canonical(self.address))),
+            TlbiKind::RVA => addresses(self.overlapping()),
+            TlbiKind::RVAA => Everywhere::Addresses(self.overlapping()),
             TlbiKind::ASID => Everywhere::NonGlobal(self.asid),
             _ => Everywhere::All,
         }

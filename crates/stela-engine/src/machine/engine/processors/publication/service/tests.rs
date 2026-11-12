@@ -304,7 +304,7 @@ fn effects_require_assigned_host_and_receipt_before_close_or_release() {
     for (effect, expected) in [
         (HostEffect::InvalidateTranslations, "invalidate"),
         (
-            HostEffect::InvalidateReach(Reach::All, Everywhere::All),
+            HostEffect::InvalidateReach(Box::new((Reach::All, Everywhere::All))),
             "reach",
         ),
         (HostEffect::IsolatePredictions, "isolate"),

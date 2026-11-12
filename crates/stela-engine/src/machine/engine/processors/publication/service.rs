@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub enum HostEffect {
     Regime(Box<Regime>),
     InvalidateTranslations,
-    InvalidateReach(Reach, Everywhere),
+    InvalidateReach(Box<(Reach, Everywhere)>),
     IsolatePredictions,
     CodeInvalidated(Option<u64>),
     ArmTimer(Option<u64>),
@@ -322,9 +322,7 @@ impl WorkerOwner {
         match &command.effect {
             HostEffect::Regime(regime) => host.set_regime(regime),
             HostEffect::InvalidateTranslations => host.invalidate_translations(),
-            HostEffect::InvalidateReach(reach, everywhere) => {
-                host.invalidate_reach(*reach, *everywhere)
-            }
+            HostEffect::InvalidateReach(reach) => host.invalidate_reach(reach.0, reach.1),
             HostEffect::IsolatePredictions => host.isolate_predictions(),
             HostEffect::CodeInvalidated(page) => host.code_invalidated(*page),
             HostEffect::ArmTimer(deadline) => host.arm_timer(*deadline),

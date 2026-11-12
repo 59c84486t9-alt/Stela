@@ -494,7 +494,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) {
         self.mirrors.close_code_page();
         match everywhere {
-            mmu::tlbi::Everywhere::Addresses(addresses) => {
+            mmu::tlbi::Everywhere::Addresses(addresses)
+            | mmu::tlbi::Everywhere::AsidAddresses(addresses, _) => {
                 // Canonical memory's kept TLBs refresh on the generation.
                 if self.canonical_memory_serves() {
                     self.advance_translation_generation();

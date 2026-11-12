@@ -397,7 +397,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     }
     fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach, everywhere: mmu::tlbi::Everywhere) {
         if self.source_service() {
-            self.effect(HostEffect::InvalidateReach(reach, everywhere));
+            self.effect(HostEffect::InvalidateReach(alloc::boxed::Box::new((
+                reach, everywhere,
+            ))));
         } else {
             self.local.invalidate_reach(reach, everywhere);
         }

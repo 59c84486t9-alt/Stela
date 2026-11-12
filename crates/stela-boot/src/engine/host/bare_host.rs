@@ -584,11 +584,13 @@ impl Host for BareHost<'_> {
                 .map_or(mmu::shadow::UNKNOWN_ASIDS, |regime| regime.controls.tcr);
             let dropped = match everywhere {
                 Everywhere::NonGlobal(asid) => state.kept.drop_asid(asid, tcr),
-                _ => state
-                    .kept
-                    .invalidate(everywhere, bounds, entry_bits, |entry, first, last| {
-                        tables::unmap_under(pool, entry, first, last)
-                    }),
+                _ => state.kept.invalidate(
+                    everywhere,
+                    tcr,
+                    bounds,
+                    entry_bits,
+                    |entry, first, last| tables::unmap_under(pool, entry, first, last),
+                ),
             };
             state.kept_dropped += dropped as u64;
         }
