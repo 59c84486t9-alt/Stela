@@ -4795,6 +4795,14 @@
     "reason": "host timing measurement; run on request"
   },
   {
+    "package": "stela-compiler",
+    "test": "decode_costs_over_distinct_pages",
+    "source": "crates/stela-compiler/src/wkdm/codec.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
     "package": "stela-engine",
     "test": "segment_lookup_costs",
     "source": "crates/stela-engine/src/translations/pack.rs",

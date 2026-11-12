@@ -297,6 +297,14 @@ pub fn decompress_into(data: &[u8], out: &mut [u8; PAGE_BYTES]) -> bool {
     }
     let mut dictionary = [0u32; DICTIONARY_ENTRIES];
     let (mut whole, mut indices, mut low) = (WHOLE_START, 0, 0);
+    // Every word reads its candidates and selects by its tag with masks,
+    // so no branch depends on the data: a 4-way branch per word on real
+    // pages mispredicts about half the time. Reads past a section's end
+    // (its counter at the next section's start, or the stream's end) are
+    // clamped into the stream and masked out; the counts checked above keep
+    // every selected read inside its section.
+    let last = end - 1;
+    let read = |at: usize| u32::from_le_bytes(stream[at.min(last)]);
     let (words, _) = out.as_chunks_mut::<WORD_BYTES>();
     let (groups, _) = words.as_chunks_mut::<TAGS_PER_WORD>();
     for (group, words) in groups.iter_mut().enumerate() {
@@ -306,29 +314,29 @@ pub fn decompress_into(data: &[u8], out: &mut [u8; PAGE_BYTES]) -> bool {
             continue;
         }
         for (slot, out) in words.iter_mut().enumerate() {
-            let word = match Tag::from_bits(tags >> tag_shift(slot)) {
-                Tag::Zero => 0,
-                Tag::Whole => {
-                    let word = at(whole);
-                    whole += 1;
-                    dictionary[index(word)] = word;
-                    word
-                }
-                kind @ (Tag::Exact | Tag::Partial) => {
-                    let entry = (at(indices_start + indices / INDICES_PER_WORD)
-                        >> index_shift(indices)) as usize
-                        % DICTIONARY_ENTRIES;
-                    indices += 1;
-                    let mut word = dictionary[entry];
-                    if kind == Tag::Partial {
-                        let bits = at(low_start + low / LOW_PER_WORD) >> low_shift(low) & LOW_MASK;
-                        low += 1;
-                        word = word & !LOW_MASK | bits;
-                        dictionary[entry] = word;
-                    }
-                    word
-                }
-            };
+            let tag = Tag::from_bits(tags >> tag_shift(slot));
+            let is_whole = u32::from(tag == Tag::Whole);
+            let is_partial = u32::from(tag == Tag::Partial);
+            let is_exact = u32::from(tag == Tag::Exact);
+            let whole_word = read(whole);
+            let entry = (read(indices_start + indices / INDICES_PER_WORD) >> index_shift(indices))
+                as usize
+                % DICTIONARY_ENTRIES;
+            let bits = read(low_start + low / LOW_PER_WORD) >> low_shift(low) & LOW_MASK;
+            let held = dictionary[entry];
+            let partial = held & !LOW_MASK | bits;
+            let word = whole_word & is_whole.wrapping_neg()
+                | held & is_exact.wrapping_neg()
+                | partial & is_partial.wrapping_neg();
+            // A whole word takes its own entry, a partial one its index's;
+            // the others write their index's entry back unchanged.
+            let changed = (is_whole | is_partial).wrapping_neg();
+            let own = (is_whole as usize).wrapping_neg();
+            let slot = index(whole_word) & own | entry & !own;
+            dictionary[slot] = word & changed | held & !changed;
+            whole += is_whole as usize;
+            indices += (is_partial | is_exact) as usize;
+            low += is_partial as usize;
             *out = word.to_le_bytes();
         }
     }
@@ -761,6 +769,62 @@ mod tests {
         std::println!(
             "WKdm ns/page: compress {slow} -> {fast}, decompress {slow_d} -> {fast_d}, \
              population {bytewise} -> {counted}"
+        );
+    }
+
+    /// Every word a pick, independently, of the kinds kernel pages mix:
+    /// zero, small counts, pointers into a few regions (partial and exact
+    /// dictionary hits), repeats of recent words and noise.
+    fn mixed_page(seed: u64) -> Box<[u8; PAGE_BYTES]> {
+        let mut next = noise(seed);
+        let mut recent = [0u32; 8];
+        let values: Vec<u32> = (0..PAGE_WORDS)
+            .map(|i| {
+                let word = match next() % 16 {
+                    0..=5 => 0,
+                    6 | 7 => next() % 64,
+                    8..=10 => 0xfffffe00u32.wrapping_add((next() % 4) << 20 | (next() & 0xfff)),
+                    11 | 12 => recent[(next() % 8) as usize],
+                    13 => 0x4000_0000 | next() & 0x3ff,
+                    _ => next(),
+                };
+                recent[i % 8] = word;
+                word
+            })
+            .collect();
+        page_of(|i| values[i])
+    }
+
+    /// Decode cost over pages that differ, each once a round, so no branch
+    /// history repeats as decoding one page again and again lets it.
+    #[test]
+    #[ignore = "manual: opt-in"]
+    fn decode_costs_over_distinct_pages() {
+        let data: Vec<Vec<u8>> = (1..=256)
+            .filter_map(|seed| match compress(&mixed_page(seed)) {
+                Compressed::Data(data) => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert!(data.len() > 200, "{}", data.len());
+        let mut out = Box::new([0u8; PAGE_BYTES]);
+        let mut time = |data: &[Vec<u8>], rounds: usize| {
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                for data in data {
+                    assert!(decompress_into(core::hint::black_box(data), &mut out));
+                    core::hint::black_box(&out);
+                }
+            }
+            start.elapsed().as_nanos() / (rounds * data.len()) as u128
+        };
+        let distinct = time(&data, 20);
+        let repeated = time(&data[..1], 20 * data.len());
+        let bytes: usize = data.iter().map(Vec::len).sum::<usize>() / data.len();
+        std::println!(
+            "WKdm decode ns/page: distinct {distinct}, one page repeated {repeated} \
+             ({} pages, {bytes} bytes each)",
+            data.len()
         );
     }
 
