@@ -18,8 +18,13 @@
 //! the same side of 2^-14 as the exact quotient, and the Half result,
 //! tininess and inexact status are the exact quotient's in every rounding
 //! mode. The quotient raises host status, so the caller's MXCSR is saved
-//! and restored around it; a zero divisor gives an infinity or NaN, which
-//! takes the helper as an overflow.
+//! and restored around it.
+//!
+//! A zero divisor never reaches the quotient: its lanes divide 0 by 1.0
+//! (an exact +0 with no status) and then take Arm's result, the infinity
+//! signed by both inputs with DZC for a nonzero dividend, the default NaN
+//! with IOC for a zero one (under AH, whose default NaN is negative, a 0/0
+//! lane takes the helper).
 //!
 //! A scalar form computes its one lane in the low group, whose other lanes
 //! are set to 0 and 1.0 (the left and right inputs), which complete
@@ -37,6 +42,7 @@
 //! flushes tiny results and subnormal inputs) and AH (tininess after
 //! rounding) send lanes with a subnormal input or a tiny nonzero result to
 //! the helper, and so do NaN and infinite inputs, overflow and enabled traps.
+//! A zero divisor under FZ16 is a true zero, as subnormal inputs exit.
 use super::super::super::numerical::{Condition, branch, jump, resolve, test_control};
 use super::super::super::{Host, packed};
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Unary, Vex};
@@ -44,14 +50,14 @@ use crate::{
     GuestAddress, GuestState, TargetCpu,
     aarch64::{
         floating::{
-            BinaryOperation, FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_ROUNDING_MASK,
-            FPCR_ROUNDING_SHIFT, INEXACT,
+            BinaryOperation, DIVIDE_BY_ZERO, FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16,
+            FPCR_ROUNDING_MASK, FPCR_ROUNDING_SHIFT, INEXACT, INVALID,
         },
         simd::arithmetic::{Inputs, Operand, Shape},
     },
     block::ExitKind,
 };
-use Gpr::{R8, R9, R10, Rax, Rcx, Rsp};
+use Gpr::{R8, R9, R10, R11, Rax, Rcx, Rsp};
 use alloc::vec::Vec;
 
 /// The Half inputs, as `half::prepare_inputs` leaves them, and the result.
@@ -75,6 +81,9 @@ const FLIP: u8 = 12;
 const NEAREST: u8 = 13;
 const POSITIVE: u8 = 14;
 const NEGATIVE: u8 = 15;
+/// A quotient's zero-divisor lanes: Arm's result words there, zero
+/// elsewhere (FLIP is unused by division).
+const SPECIAL: u8 = FLIP;
 
 const FPSR_UNDERFLOW: u32 = 1 << 3;
 const HALF_EXPONENT_FIELD: u16 = 0x7c00;
@@ -96,6 +105,11 @@ const OVERFLOW_SHIFT: u8 = 8;
 /// The low Half lane of a qword, and 1.0 in its other three lanes.
 const HALF_LANE: i32 = 0xffff;
 const ONES_ABOVE: u64 = 0x3c00_3c00_3c00_0000;
+/// Half +inf, the default NaN and 1.0.
+const HALF_INFINITY: u16 = 0x7c00;
+const HALF_DEFAULT_NAN: u16 = 0x7e00;
+const HALF_ONE: u16 = 0x3c00;
+const HALF_SIGN: u16 = 0x8000;
 /// The aligned stack slot holding the caller's MXCSR around a quotient.
 const MXCSR_SLOT_BYTES: i8 = 16;
 
@@ -145,6 +159,10 @@ fn right_variable(code: &mut Code, d: u8, a: u8, b: u8) {
 /// `d = a << b` per qword (VPSLLVQ).
 fn left_variable(code: &mut Code, d: u8, a: u8, b: u8) {
     ymm(code, Map::M0f38, 0x47, true, d, a, b);
+}
+/// `d = a == b` per word (VPCMPEQW).
+fn equal_w(code: &mut Code, d: u8, a: u8, b: u8) {
+    ymm(code, Map::M0f, 0x75, false, d, a, b);
 }
 fn ones(code: &mut Code, d: u8) {
     equal_q(code, d, d, d);
@@ -266,6 +284,65 @@ fn guard_inputs(code: &mut Code, active: u32, helper: &mut Vec<usize>) {
     helper.push(branch(code, Condition::NotZero));
     let end = code.len();
     resolve(code, ordinary, end);
+}
+
+/// A quotient's zero divisors: SPECIAL = Arm's result words in those lanes
+/// (zero elsewhere), LEFT and RIGHT = 0 and 1.0 there, and R11D = their
+/// fresh DZC and IOC. A 0/0 lane under AH branches to `helper`. Clobbers
+/// XMM2 to XMM6, EAX and ECX.
+fn zero_divisors(code: &mut Code, active: u32, helper: &mut Vec<usize>) {
+    let word = |value: u16| u32::from(value) * 0x0001_0001;
+    let constant = |code: &mut Code, d: u8, value: u16| {
+        super::super::super::precision::dword_constant(code, d, word(value));
+    };
+    // T2 = zero divisors; T5 = 0/0 lanes; T3 = x/0 lanes.
+    constant(code, T6, HALF_MAGNITUDE);
+    zero(code, T4);
+    and(code, T2, RIGHT, T6);
+    equal_w(code, T2, T2, T4);
+    and(code, T3, LEFT, T6);
+    equal_w(code, T3, T3, T4);
+    and(code, T5, T3, T2);
+    and_not(code, T3, T3, T2);
+    code.asm().alu(Alu::Xor, Size::Dword, R11, R11);
+    Host::ByteSignMask.register(code, 0, T5, TargetCpu::Baseline);
+    code.asm()
+        .alu_imm32(Alu::And, Size::Dword, Rax, active as i32);
+    let valid = branch(code, Condition::Zero);
+    test_control(code, FPCR_AH);
+    helper.push(branch(code, Condition::NotZero));
+    code.asm()
+        .alu_imm8(Alu::Or, Size::Dword, R11, INVALID as i8);
+    let end = code.len();
+    resolve(code, valid, end);
+    Host::ByteSignMask.register(code, 0, T3, TargetCpu::Baseline);
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Size::Dword, Rcx, Rcx);
+    asm.alu_imm32(Alu::And, Size::Dword, Rax, active as i32);
+    asm.setcc(Cond::Ne, Rcx);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Dword,
+        Rcx,
+        DIVIDE_BY_ZERO.trailing_zeros() as u8,
+    );
+    asm.alu(Alu::Or, Size::Dword, R11, Rcx);
+    // SPECIAL = (sign | inf) in x/0 lanes, the default NaN in 0/0 lanes.
+    xor(code, SPECIAL, LEFT, RIGHT);
+    constant(code, T6, HALF_SIGN);
+    and(code, SPECIAL, SPECIAL, T6);
+    constant(code, T6, HALF_INFINITY);
+    or(code, SPECIAL, SPECIAL, T6);
+    and(code, SPECIAL, SPECIAL, T3);
+    constant(code, T6, HALF_DEFAULT_NAN);
+    and(code, T6, T6, T5);
+    or(code, SPECIAL, SPECIAL, T6);
+    // 0 / 1.0 in the zero-divisor lanes.
+    and_not(code, LEFT, T2, LEFT);
+    and_not(code, RIGHT, T2, RIGHT);
+    constant(code, T6, HALF_ONE);
+    and(code, T6, T6, T2);
+    or(code, RIGHT, RIGHT, T6);
 }
 
 /// One group of four lanes: the low (`upper` false) or high qword of LEFT
@@ -450,7 +527,12 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         asm.alu(Alu::Or, Size::Qword, Rax, Rcx);
         asm.movq_to_xmm(RIGHT, Rax);
     }
-    guard_inputs(code, if wide { 0xffff } else { 0xff }, &mut helper);
+    let active = if wide { 0xffff } else { 0xff };
+    guard_inputs(code, active, &mut helper);
+    let divide = operand.operation == BinaryOperation::Divide;
+    if divide {
+        zero_divisors(code, active, &mut helper);
+    }
     let flip = matches!(
         operand.operation,
         BinaryOperation::Add | BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference
@@ -460,7 +542,6 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     asm.alu(Alu::Xor, Size::Dword, R8, R8);
     asm.alu(Alu::Xor, Size::Dword, R9, R9);
     asm.alu(Alu::Xor, Size::Dword, R10, R10);
-    let divide = operand.operation == BinaryOperation::Divide;
     if divide {
         let mut asm = code.asm();
         asm.alu_imm8(Alu::Sub, Size::Qword, Rsp, MXCSR_SLOT_BYTES);
@@ -474,6 +555,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         let mut asm = code.asm();
         asm.ldmxcsr(Mem::base(Rsp, 0));
         asm.alu_imm8(Alu::Add, Size::Qword, Rsp, MXCSR_SLOT_BYTES);
+        // The zero-divisor lanes' quotients are +0.
+        or(code, RESULT, RESULT, SPECIAL);
     }
     code.asm().vzeroupper();
     code.asm()
@@ -507,6 +590,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         FPSR_UNDERFLOW.trailing_zeros() as u8,
     );
     asm.alu(Alu::Or, Size::Dword, Rax, Rcx);
+    if divide {
+        asm.alu(Alu::Or, Size::Dword, Rax, R11);
+    }
     asm.alu(
         Alu::Or,
         Size::Dword,

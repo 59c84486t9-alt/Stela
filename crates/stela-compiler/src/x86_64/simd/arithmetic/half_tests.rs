@@ -8,7 +8,7 @@ use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
         BinaryOperation, FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_NEP,
-        FPCR_ROUNDING_SHIFT, Format, INEXACT, evaluate,
+        FPCR_ROUNDING_SHIFT, Format, INEXACT, OVERFLOW, evaluate,
     },
     block::{BlockProfile, CompilationPlan},
     x86_64::native::run,
@@ -221,8 +221,8 @@ fn finite_half(random: &mut u64, partner: Option<u64>) -> u64 {
 /// vector lane inline under each rounding mode, including subnormal inputs,
 /// exact cancellation, inexact quotients and tiny or subnormal results, with
 /// Arm's results and status, a scalar result alone or, under FPCR.NEP, in
-/// Vn's other bits; FZ16, AH, overflow, a zero divisor and NaN or infinite
-/// inputs exit or match.
+/// Vn's other bits, and a zero divisor (±inf with DZC, 0/0 the default NaN
+/// with IOC); FZ16, AH, overflow and NaN or infinite inputs exit or match.
 #[test]
 fn packed_half_arithmetic_completes_every_finite_lane_inline() {
     const PACKED_FORMS: &[(u32, BinaryOperation, usize, Pairing)] = &[
@@ -370,9 +370,11 @@ fn packed_half_arithmetic_completes_every_finite_lane_inline() {
                             .iter()
                             .zip(&outcomes)
                             .all(|(&(left, right), outcome)| {
+                                // Only overflow exits: finite inputs raise IOC and
+                                // DZC only for a zero divisor, which completes.
                                 finite(left)
                                     && finite(right)
-                                    && outcome.as_ref().unwrap().exceptions & 0b111 == 0
+                                    && outcome.as_ref().unwrap().exceptions & OVERFLOW == 0
                             });
                     if exit == PC.0 {
                         assert_eq!(actual, initial, "{word:08x} {operands:x?} {fpcr:#x}");
@@ -408,4 +410,82 @@ fn packed_half_arithmetic_completes_every_finite_lane_inline() {
         }
     }
     assert!(inline > 50_000 && exits > 0, "{inline} {exits}");
+}
+
+/// FDIV of 8H, 4H and H with zero divisors completes inline on the packed
+/// recipe: x/0 is the infinity signed by both inputs with DZC, 0/0 the
+/// default NaN with IOC, beside ordinary quotients; under AH a 0/0 lane
+/// exits (its default NaN is negative) and x/0 still completes.
+#[test]
+fn packed_half_division_by_zero_completes_inline() {
+    for target in targets() {
+        if !(target.supports(TargetCpu::Avx2)
+            && target.supports(TargetCpu::F16c)
+            && !crate::x86_64::asm::vector_extensions::half_supported(target))
+        {
+            continue;
+        }
+        for (base, lanes) in [(0x6e40_3c00, 8), (0x2e40_3c00, 4), (0x1ee0_1800, 1)] {
+            let code = compile(base | M << 16 | N << 5 | D, target);
+            // (dividend, divisor) cycles; lane 0 varies across cases.
+            let pairs: [(u64, u64); 8] = [
+                (0x3c00, 0x0000),
+                (0xc500, 0x0000),
+                (0x4248, 0x8000),
+                (0x0001, 0x0000),
+                (0x0000, 0x8000),
+                (0x8000, 0x0000),
+                (0x4000, 0x3c00),
+                (0x3c00, 0x4200),
+            ];
+            for start in 0..8 {
+                for fpcr in [0, 3 << FPCR_ROUNDING_SHIFT, FPCR_FZ16, FPCR_DN, FPCR_AH] {
+                    let operands: Vec<(u64, u64)> =
+                        (0..lanes).map(|lane| pairs[(start + lane) % 8]).collect();
+                    let mut initial = GuestState {
+                        fpcr,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = RETURN;
+                    for (lane, &(left, right)) in operands.iter().enumerate() {
+                        initial.v[N as usize][lane / 4] |= left << (16 * (lane % 4));
+                        initial.v[M as usize][lane / 4] |= right << (16 * (lane % 4));
+                    }
+                    initial.v[D as usize] = [u64::MAX, u64::MAX];
+                    let mut actual = initial.clone();
+                    let exit = run(&code, &mut actual);
+                    let invalid = operands
+                        .iter()
+                        .any(|&(left, right)| left & 0x7fff == 0 && right & 0x7fff == 0);
+                    // The subnormal dividend exits under FZ16 and AH.
+                    let subnormal = operands.iter().any(|&(left, _)| left == 1);
+                    let exits = fpcr & FPCR_AH != 0 && invalid
+                        || fpcr & (FPCR_AH | FPCR_FZ16) != 0 && subnormal;
+                    if exits {
+                        assert_eq!(exit, PC.0, "{base:08x} {operands:x?} {fpcr:#x}");
+                        assert_eq!(actual, initial);
+                        continue;
+                    }
+                    assert_eq!(
+                        exit, RETURN,
+                        "{base:08x} {operands:x?} {fpcr:#x} {target:?}"
+                    );
+                    let mut expected = initial.clone();
+                    let mut result = [0u64; 2];
+                    for (lane, &(left, right)) in operands.iter().enumerate() {
+                        let outcome =
+                            evaluate(Format::Half, BinaryOperation::Divide, fpcr, left, right)
+                                .unwrap();
+                        expected.fpsr |= outcome.exceptions;
+                        result[lane / 4] |= outcome.bits << (16 * (lane % 4));
+                    }
+                    expected.v[D as usize] = result;
+                    assert_eq!(
+                        actual, expected,
+                        "{base:08x} {operands:x?} {fpcr:#x} {target:?}"
+                    );
+                }
+            }
+        }
+    }
 }
