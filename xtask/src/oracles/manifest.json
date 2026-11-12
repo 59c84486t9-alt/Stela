@@ -4772,6 +4772,22 @@
   },
   {
     "package": "stela-engine",
+    "test": "density_dump",
+    "source": "crates/stela-engine/src/machine/engine/density.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host instruction density measurement over a block sample; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "chain_dump",
+    "source": "crates/stela-engine/src/machine/engine/density.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host instruction density measurement over a block sample; run on request"
+  },
+  {
+    "package": "stela-engine",
     "test": "exit_transition_cold_costs",
     "source": "crates/stela-engine/src/machine/engine/tests/exits.rs",
     "kind": "manual",
