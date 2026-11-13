@@ -188,6 +188,9 @@ pub(super) struct Taken {
     segment: u16,
     own: Address,
     claims: Option<RefCell<Vec<(u16, bool)>>>,
+    /// Requesters intentionally left at the table's default blocked DTE even
+    /// when other functions on this unit need the shared DMA window.
+    blocked_requesters: Vec<u16>,
     requesters: RefCell<Vec<u16>>,
 }
 
@@ -334,6 +337,7 @@ pub(super) unsafe fn take(
     requesters: &[initial::Requester],
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
+    fixed_dma_requesters: &[Address],
     inactive_firmware_units: Option<&InactiveFirmwareUnits>,
     tsc_hz: u64,
     physical_bits: u8,
@@ -495,7 +499,7 @@ pub(super) unsafe fn take(
                 continue;
             }
         };
-        let claims = if mode == Mode::Blocked {
+        let (claims, blocked_requesters) = if mode == Mode::Blocked {
             // Publish no shared window. Retain the real complete stopped
             // cohort and verify each original DTE before the unit-wide drain.
             let checked = requesters
@@ -514,15 +518,37 @@ pub(super) unsafe fn take(
                 "HOST IOMMU AMD-Vi unit {base:#x} blocked and drained {} initial requesters\n",
                 requesters.len()
             ));
-            Some(RefCell::new(
-                requesters.iter().map(|&rid| (rid, false)).collect(),
-            ))
+            (
+                Some(RefCell::new(
+                    requesters.iter().map(|&rid| (rid, false)).collect(),
+                )),
+                Vec::new(),
+            )
         } else {
+            // Keep the LPC bridge's immutable bus-master requester blocked.
+            // The other functions on this unit may still need the physical
+            // DMA window used by Stela's storage and USB drivers.
+            let blocked_requesters: Vec<u16> = fixed_dma_requesters
+                .iter()
+                .filter(|address| address.segment == segment)
+                .map(|address| super::requester(*address))
+                .filter(|rid| requesters.contains(rid))
+                .collect();
+            let window_requesters: Vec<u16> = requesters
+                .iter()
+                .copied()
+                .filter(|rid| !blocked_requesters.contains(rid))
+                .collect();
+            if window_requesters.is_empty() {
+                left(base, &"the DMA window has no requesters after fixed masters were blocked");
+                outcome.uncertain |= !retire(unit);
+                continue;
+            }
             let mut window = vec![drivers.clone()];
             window.extend(
                 reserved
                     .iter()
-                    .filter(|(rid, _)| requesters.contains(rid))
+                    .filter(|(rid, _)| window_requesters.contains(rid))
                     .map(|(_, range)| range.clone()),
             );
             let Some(ranges) = window
@@ -537,25 +563,37 @@ pub(super) unsafe fn take(
                 outcome.uncertain |= !retire(unit);
                 continue;
             };
-            // SAFETY: forwarded: the requesters DMA only to the drivers' region
-            // and their reserved regions until they attach.
-            if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
+            // SAFETY: forwarded: window requesters DMA only to the drivers'
+            // region and their reserved regions; fixed LPC masters remain
+            // blocked by their default DTE and are checked immediately below.
+            if let Err(error) = unsafe { unit.window(&window_requesters, ranges) } {
+                left(base, &error);
+                outcome.uncertain |= !retire(unit);
+                continue;
+            }
+            let checked = blocked_requesters.iter().try_for_each(|&rid| {
+                unit.admit_requester(rid)?;
+                unit.check_blocked_requester(rid).map_err(Error::Dma)
+            });
+            if let Err(error) = checked {
                 left(base, &error);
                 outcome.uncertain |= !retire(unit);
                 continue;
             }
             output::arguments(format_args!(
-                "HOST IOMMU AMD-Vi unit {base:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters\n",
+                "HOST IOMMU AMD-Vi unit {base:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters; {} remain blocked\n",
                 window.len() - 1,
-                requesters.len()
+                window_requesters.len(),
+                blocked_requesters.len()
             ));
-            None
+            (None, blocked_requesters)
         };
         outcome.units.push(Taken {
             unit: Rc::new(RefCell::new(unit)),
             segment,
             own,
             claims,
+            blocked_requesters,
             requesters: RefCell::new(requesters),
         });
     }
@@ -609,6 +647,12 @@ impl Taken {
 
     pub(super) fn covers(&self, segment: u16, rid: u16) -> bool {
         self.segment == segment && self.requesters.borrow().contains(&rid)
+    }
+
+    pub(super) fn blocks(&self, segment: u16, rid: u16) -> bool {
+        self.segment == segment
+            && self.requesters.borrow().contains(&rid)
+            && (self.claims.is_some() || self.blocked_requesters.contains(&rid))
     }
 
     /// Whether its requesters started in the drivers' window rather than

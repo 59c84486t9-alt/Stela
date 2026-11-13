@@ -26,6 +26,7 @@ use stela_drivers::{
 pub(crate) struct ContainedPci<'a> {
     source: &'a Source,
     functions: usize,
+    fixed_dma_requesters: Vec<Address>,
 }
 
 impl<'a> ContainedPci<'a> {
@@ -35,6 +36,12 @@ impl<'a> ContainedPci<'a> {
 
     pub(crate) fn functions(&self) -> usize {
         self.functions
+    }
+
+    /// PCI functions whose read-only Bus Master bit needs a blocked IOMMU
+    /// entry before the host GPU or another driver may start.
+    pub(crate) fn fixed_dma_requesters(&self) -> &[Address] {
+        &self.fixed_dma_requesters
     }
 
     /// Original populated bridge routes in upstream-first order.
@@ -1021,10 +1028,22 @@ impl Source {
         let Cohort::Incomplete(fabric) = &mut *cohort else {
             unreachable!("exclusive containment owns the incomplete fabric");
         };
+        let mut fixed_dma_requesters = Vec::new();
+        fixed_dma_requesters
+            .try_reserve(fabric.slots.len())
+            .map_err(|_| Error::Exhausted)?;
+        fixed_dma_requesters.extend(
+            fabric
+                .slots
+                .iter()
+                .filter(|slot| slot.plan.requires_dma_block())
+                .map(|slot| slot.address),
+        );
         *cohort = Cohort::Parked(core::mem::take(fabric));
         Ok(ContainedPci {
             source: self,
             functions: count,
+            fixed_dma_requesters,
         })
     }
 

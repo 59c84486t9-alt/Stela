@@ -541,10 +541,12 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
     /// physical address.
     ///
     /// # Safety
-    /// `requesters` is the complete original set of present covered PCI
-    /// requesters. Each DMAs only to `ranges` until it attaches, and each
-    /// range is memory the platform admits for device DMA and keeps for the
-    /// boot. Later arrivals stay stopped until `admit_requester` accepts them.
+    /// `requesters` is the original set of present covered PCI requesters
+    /// allowed into this window. Each listed requester DMAs only to `ranges`
+    /// until it attaches, and each range is memory the platform admits for
+    /// device DMA and keeps for the boot. Omitted requesters retain the
+    /// default blocked DTE. Later arrivals stay stopped until
+    /// `admit_requester` accepts them.
     pub unsafe fn window(
         &mut self,
         requesters: &[u16],
@@ -655,9 +657,17 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         self.drain_posted_writes()
     }
 
-    /// Observe the original cold blocked entries without any unit command.
+    /// Observe a requester's original blocked entries without any unit
+    /// command, including on a unit whose other requesters have a DMA window.
     pub fn check_blocked_requester(&self, rid: u16) -> Result<(), DmaError> {
-        if self.window.is_some() || self.active.borrow().contains(&rid) {
+        let group = self.group(rid);
+        if self.active.borrow().contains(&rid)
+            || self.window.as_ref().is_some_and(|window| {
+                group
+                    .iter()
+                    .any(|member| window.requesters.contains(member))
+            })
+        {
             return Err(DmaError::IommuUnavailable);
         }
         self.check_health().map_err(invalidation_error)?;

@@ -179,6 +179,9 @@ impl Remappers {
         }
         let rid = requester(address);
         match self.amd(address.segment, rid) {
+            Ok(Some(taken)) if taken.blocks(address.segment, rid) => {
+                return Access::Blocked;
+            }
             Ok(Some(taken)) if taken.windowed() && taken.covers(address.segment, rid) => {
                 return Access::Window;
             }
@@ -194,6 +197,14 @@ impl Remappers {
             Ok(None) => Access::Untranslated,
             Err(_) => Access::Blocked,
         }
+    }
+
+    /// Whether AMD-Vi has a uniquely selected, covered, verified blocked DTE
+    /// for a fixed bus-master requester. An unresolved route is not proof.
+    pub(super) fn amd_blocked_requester(&self, address: Address) -> bool {
+        let rid = requester(address);
+        self.amd(address.segment, rid)
+            .is_ok_and(|taken| taken.is_some_and(|unit| unit.blocks(address.segment, rid)))
     }
 
     pub(super) const fn none() -> Self {
@@ -226,6 +237,7 @@ impl Remappers {
         root: u64,
         drivers: Range<u64>,
         pci: &native_mmio::ContainedPci<'static>,
+        fixed_dma_requesters: &[Address],
         inactive_firmware_units: &InactiveFirmwareUnits,
         tsc_hz: u64,
     ) -> Self {
@@ -348,6 +360,7 @@ impl Remappers {
                     &requesters,
                     &drivers,
                     mmio,
+                    fixed_dma_requesters,
                     dmar.is_none().then_some(inactive_firmware_units),
                     tsc_hz,
                     physical_bits(),

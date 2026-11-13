@@ -13,6 +13,10 @@ use core::cell::RefCell;
 
 /// The class and subclass of a host bridge.
 const HOST_BRIDGE: u32 = 0x0600;
+const ISA_BRIDGE: u32 = 0x0601;
+const AMD_VENDOR: u16 = 0x1022;
+const AMD_FCH_LPC: u16 = 0x790e;
+const ASUS_G513QR_SUBSYSTEM: u32 = 0x1602_1043;
 
 #[derive(Clone, Copy)]
 struct Control {
@@ -23,8 +27,10 @@ struct Control {
     /// regs::command_optional_bits); every other bit must read back exactly.
     optional: u16,
     /// Bits of `original` that `disabled` clears and hardware may hold set:
-    /// only the Bus Master bit of a root-bus host bridge.
+    /// the Bus Master bit of a root-bus host bridge or AMD FCH LPC bridge.
     hardwired: u16,
+    /// A hardwired AMD FCH LPC Bus Master bit needs an IOMMU-blocked DTE.
+    requires_dma_block: bool,
 }
 
 /// This plan describes PCI-level controls only. It conveys no physical
@@ -50,12 +56,17 @@ impl Plan {
         // INTx Disable is asked of every function and required of those with
         // an INTx pin; Bus Master is cleared on all of them and must read
         // back clear, except on a host bridge on a root bus (the root
-        // complex's own function): Intel's hard-wire its Bus Master bit set,
-        // and Linux never writes it. There a set bit that stays set is the
-        // hardware's, and the seal proves it ([`Plan::seal`]). A function
-        // of that class behind a downstream port is contained like any other.
+        // complex's own function) and the AMD FCH LPC bridge whose Bus Master
+        // bit is fixed set. The latter requires a separately verified blocked
+        // IOMMU requester before any host device or macOS starts. A function
+        // of either class behind a downstream port is contained like any other.
+        let identity = read(0, 4)?;
         let class = read(regs::CLASS_REVISION, 4)? >> 8;
-        let hardwired = if root_bus && class >> 8 == HOST_BRIDGE {
+        let amd_fch_lpc = identity as u16 == AMD_VENDOR
+            && (identity >> 16) as u16 == AMD_FCH_LPC
+            && class >> 8 == ISA_BRIDGE
+            && read(0x2c, 4)? == ASUS_G513QR_SUBSYSTEM;
+        let hardwired = if root_bus && (class >> 8 == HOST_BRIDGE || amd_fch_lpc) {
             command & regs::COMMAND_MASTER
         } else {
             0
@@ -68,6 +79,7 @@ impl Plan {
             regs::command_optional_bits(pin),
         )?;
         plan.0[0].hardwired = hardwired;
+        plan.0[0].requires_dma_block = amd_fch_lpc && hardwired != 0;
 
         let mut express = false;
         let mut seen = 0u32;
@@ -160,6 +172,7 @@ impl Plan {
             disabled,
             optional,
             hardwired: 0,
+            requires_dma_block: false,
         });
         Ok(())
     }
@@ -172,6 +185,12 @@ impl Plan {
                     && control.original != control.disabled
                     && u32::from(control.disabled) == value
             })
+    }
+
+    /// The AMD FCH LPC bridge's fixed Bus Master bit needs a blocked IOMMU
+    /// requester before macOS or a host driver may proceed.
+    pub fn requires_dma_block(&self) -> bool {
+        self.0.iter().any(|control| control.requires_dma_block)
     }
 
     /// Preflight every old control before issuing any write to this function.
@@ -218,8 +237,9 @@ impl Plan {
     /// Acknowledge a contained function: its controls read back stopped,
     /// then its Bus Master bit is sealed. A clear bit is sealed as clear.
     /// A set bit is accepted only where this plan lets hardware hold it
-    /// (a root-bus host bridge whose bit was set) and only once the seal
-    /// proves it hard-wired; anything else is refused.
+    /// (a root-bus host bridge or the AMD FCH LPC bridge) and only once the
+    /// seal proves it hard-wired; the caller separately verifies the LPC
+    /// requester's DMA block.
     pub fn seal(&self, config: &mut impl MasterSeal) -> Result<(), ConfigError> {
         self.check_disabled(|offset| config.read16(offset))?;
         let hardwired = self.0.iter().find(|control| {
@@ -243,9 +263,9 @@ pub trait MasterSeal: ConfigSpace {
     fn seal_bus_master(&mut self) -> Result<(), ConfigError>;
     /// Seal a function whose Bus Master bit hardware holds set, proven
     /// by writing the plan's stopped COMMAND, `disabled`, again
-    /// ([`hardwired_master`]): it cannot be cleared, and a function that
-    /// is the root complex's own masters no DMA through it, so it is left
-    /// as Linux leaves it. A bit that clears is sealed as clear instead.
+    /// ([`hardwired_master`]). Callers must independently prove that this
+    /// hardwired master cannot issue uncontained DMA. A bit that clears is
+    /// sealed as clear instead.
     fn seal_hardwired_bus_master(&mut self, disabled: u16) -> Result<(), ConfigError>;
 }
 

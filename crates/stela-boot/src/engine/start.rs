@@ -2479,12 +2479,28 @@ fn start_platform(
                 handoff.root,
                 storage.dma.clone(),
                 pci,
+                pci.fixed_dma_requesters(),
                 &handoff.inactive_firmware_units,
                 handoff.tsc_hz,
             )
         },
         _ => remapping::Remappers::none(),
     };
+    if let Some(pci) = &contained_pci {
+        for &address in pci.fixed_dma_requesters() {
+            if !remappers.amd_blocked_requester(address) {
+                output::arguments(format_args!(
+                    "HOST PCI fixed bus master {address} has no verified blocked AMD-Vi requester; refusing device startup\n"
+                ));
+                output::fatal(format_args!(
+                    "the AMD FCH LPC bridge keeps bus mastering enabled, and Stela could not prove its DMA is blocked"
+                ));
+            }
+            output::arguments(format_args!(
+                "HOST PCI fixed bus master {address} verified blocked by the IOMMU\n"
+            ));
+        }
+    }
     // The IOAPICs are the operating system's after ExitBootServices, as
     // every OS takes them: firmware and SMM program no routes at runtime.
     if let Some(pci) = &contained_pci {
