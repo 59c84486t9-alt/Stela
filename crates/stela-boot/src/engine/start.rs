@@ -2469,6 +2469,33 @@ fn start_platform(
             mmio.refuse_framebuffer(refusal);
         }
     }
+    // A native display engine may still scan out the verified GOP frame after
+    // ExitBootServices. Give only that exact requester a read-only DMA lease
+    // for its visible pixels; the AMD-Vi takeover needs it to keep the panel
+    // alive while Stela binds the discrete GPU.
+    let firmware_framebuffer = handoff.screen.and_then(|screen| {
+        let source = screen.pci_source?;
+        let verified = contained_pci
+            .as_ref()?
+            .source()
+            .verified_framebuffer()
+            .ok()?;
+        if source.address != verified.address {
+            return None;
+        }
+        let frame_bytes = screen.frame_bytes();
+        let bytes = if screen.flip.is_some() {
+            frame_bytes.checked_mul(2)?
+        } else {
+            frame_bytes
+        };
+        if bytes == 0 || bytes > screen.bytes {
+            return None;
+        }
+        let start = screen.base as u64;
+        let end = start.checked_add(bytes as u64)?;
+        Some((source.address, start..end))
+    });
     // The remapping units, taken before any host driver starts DMA.
     let mut remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
@@ -2480,6 +2507,7 @@ fn start_platform(
                 storage.dma.clone(),
                 pci,
                 pci.fixed_dma_requesters(),
+                firmware_framebuffer,
                 &handoff.inactive_firmware_units,
                 handoff.tsc_hz,
             )

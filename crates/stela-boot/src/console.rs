@@ -244,7 +244,7 @@ impl Framebuffer {
     }
 
     /// The bytes of one frame in video memory.
-    fn frame_bytes(&self) -> usize {
+    pub(crate) fn frame_bytes(&self) -> usize {
         self.stride * self.height * BYTES_PER_PIXEL
     }
 

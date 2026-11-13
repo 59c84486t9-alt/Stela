@@ -2,7 +2,7 @@
 //! own PCI function. The units are process local; the boot processor, which
 //! runs the host drivers, owns them, and their domains refuse other
 //! processors and interrupt handlers.
-use super::{CLAIMED_DISPLAYS, InactiveFirmwareUnits};
+use super::InactiveFirmwareUnits;
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
@@ -136,6 +136,7 @@ unsafe impl ColdPlatform for Platform {
 /// and firmware reserved regions. The window never maps it for the CPU.
 struct Borrowed {
     pages: Vec<u64>,
+    cache: CacheAttribute,
 }
 
 // SAFETY: the pages are kept for the boot by their owner (the loader's DMA
@@ -152,18 +153,22 @@ unsafe impl PageBacking for Borrowed {
         12
     }
     fn cache_attribute(&self) -> CacheAttribute {
-        CacheAttribute::WriteBack
+        self.cache
     }
 }
 
-fn borrowed(range: &Range<u64>, physical_bits: u8) -> Option<DmaPages> {
+fn borrowed(
+    range: &Range<u64>,
+    physical_bits: u8,
+    cache: CacheAttribute,
+) -> Option<DmaPages> {
     let range = remapping::window_range(range, physical_bits)?;
     let count = usize::try_from((range.end - range.start) / PAGE).ok()?;
     let bytes = count.checked_mul(PAGE as usize)?;
     let mut pages = Vec::new();
     pages.try_reserve_exact(count).ok()?;
     pages.extend(range.step_by(PAGE as usize));
-    PinnedPages::new(Box::new(Borrowed { pages }), bytes, PAGE as usize)
+    PinnedPages::new(Box::new(Borrowed { pages, cache }), bytes, PAGE as usize)
         .ok()
         .map(DmaPages::from)
 }
@@ -338,6 +343,8 @@ pub(super) unsafe fn take(
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
     fixed_dma_requesters: &[Address],
+    claimed_displays: &[u16],
+    firmware_framebuffer: Option<&(Address, Range<u64>)>,
     inactive_firmware_units: Option<&InactiveFirmwareUnits>,
     tsc_hz: u64,
     physical_bits: u8,
@@ -441,7 +448,7 @@ pub(super) unsafe fn take(
             })
             .collect();
         let held: Vec<u16> = reserved.iter().map(|(rid, _)| *rid).collect();
-        let decision = remapping::decide(&covered, &held, present, CLAIMED_DISPLAYS);
+        let decision = remapping::decide(&covered, &held, present, claimed_displays);
         cold.push(Cold {
             unit,
             segment: id.segment,
@@ -453,10 +460,21 @@ pub(super) unsafe fn take(
     }
     let candidates: Vec<Candidate> = cold
         .iter()
-        .map(|unit| Candidate {
-            segment: unit.segment,
-            decision: unit.decision.clone(),
-            blockable,
+        .map(|unit| {
+            let needs_scanout = firmware_framebuffer.is_some_and(|(address, _)| {
+                address.segment == unit.segment
+                    && unit
+                        .decision
+                        .as_ref()
+                        .is_ok_and(|rids| rids.contains(&super::requester(*address)))
+            });
+            Candidate {
+                segment: unit.segment,
+                decision: unit.decision.clone(),
+                // Keep the GOP's requester in a read-only window so its
+                // display engine can continue scanning out the firmware frame.
+                blockable: blockable && !needs_scanout,
+            }
         })
         .collect();
     // The units' own functions are not requesters any unit must cover.
@@ -551,9 +569,12 @@ pub(super) unsafe fn take(
                     .filter(|(rid, _)| window_requesters.contains(rid))
                     .map(|(_, range)| range.clone()),
             );
-            let Some(ranges) = window
+            let Some(mut ranges) = window
                 .iter()
-                .map(|range| borrowed(range, physical_bits))
+                .map(|range| {
+                    borrowed(range, physical_bits, CacheAttribute::WriteBack)
+                        .map(|pages| (pages, Direction::Bidirectional))
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 left(
@@ -563,10 +584,29 @@ pub(super) unsafe fn take(
                 outcome.uncertain |= !retire(unit);
                 continue;
             };
+            let framebuffer_range = firmware_framebuffer
+                .filter(|(address, _)| {
+                    address.segment == segment
+                        && requesters.contains(&super::requester(*address))
+                })
+                .map(|(_, range)| range.clone());
+            if let Some(range) = &framebuffer_range {
+                let Some(pages) = borrowed(range, physical_bits, CacheAttribute::WriteCombining)
+                else {
+                    left(base, &"the GOP framebuffer is outside the AMD-Vi address window");
+                    outcome.uncertain |= !retire(unit);
+                    continue;
+                };
+                // The firmware display engine only reads scanout pixels; keep
+                // this mapping read-only while Stela writes through the CPU.
+                ranges.push((pages, Direction::ToDevice));
+            }
             // SAFETY: forwarded: window requesters DMA only to the drivers'
-            // region and their reserved regions; fixed LPC masters remain
-            // blocked by their default DTE and are checked immediately below.
-            if let Err(error) = unsafe { unit.window(&window_requesters, ranges) } {
+            // region and their reserved regions; the verified GOP frame is
+            // read-only; fixed LPC masters remain blocked by their default DTE.
+            if let Err(error) = unsafe {
+                unit.window_with_permissions(&window_requesters, ranges)
+            } {
                 left(base, &error);
                 outcome.uncertain |= !retire(unit);
                 continue;
@@ -581,10 +621,11 @@ pub(super) unsafe fn take(
                 continue;
             }
             output::arguments(format_args!(
-                "HOST IOMMU AMD-Vi unit {base:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters; {} remain blocked\n",
+                "HOST IOMMU AMD-Vi unit {base:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters; {} remain blocked; GOP scanout={}\n",
                 window.len() - 1,
                 window_requesters.len(),
-                blocked_requesters.len()
+                blocked_requesters.len(),
+                framebuffer_range.is_some()
             ));
             (None, blocked_requesters)
         };

@@ -58,6 +58,7 @@ fn physical_bits() -> u8 {
 
 /// The display functions whose driver maps their unit's reserved regions.
 const CLAIMED_DISPLAYS: &[u16] = &[];
+const NVIDIA_VENDOR: u16 = 0x10de;
 
 struct Taken {
     descriptor: usize,
@@ -238,6 +239,7 @@ impl Remappers {
         drivers: Range<u64>,
         pci: &native_mmio::ContainedPci<'static>,
         fixed_dma_requesters: &[Address],
+        firmware_framebuffer: Option<(Address, Range<u64>)>,
         inactive_firmware_units: &InactiveFirmwareUnits,
         tsc_hz: u64,
     ) -> Self {
@@ -348,6 +350,30 @@ impl Remappers {
                 })
             })
             .collect();
+        // A GPU Stela attempts to bind starts behind the DMA window. Keep
+        // its display function eligible for takeover. The firmware GOP owner
+        // is also eligible, but only with the read-only framebuffer lease
+        // constructed by start_platform.
+        let gop = firmware_framebuffer.as_ref().map(|(address, _)| *address);
+        let mut amd_claimed_displays = Vec::new();
+        for (segment, present) in &inventories {
+            for function in present.iter().filter(|function| function.display()) {
+                let at = address(*segment, function.rid);
+                let vendor = identities
+                    .iter()
+                    .find(|(identity, _)| *identity == at)
+                    .map(|(_, identity)| identity.0);
+                if vendor == Some(NVIDIA_VENDOR) || gop == Some(at) {
+                    if amd_claimed_displays.try_reserve(1).is_err() {
+                        output::arguments(format_args!(
+                            "HOST IOMMU AMD-Vi display inventory could not be retained\n"
+                        ));
+                        return remappers;
+                    }
+                    amd_claimed_displays.push(function.rid);
+                }
+            }
+        }
         // Whether a unit was left in a state no proof covers: partly
         // programmed, or not stopped after the policy refused it.
         let mut uncertain = false;
@@ -361,6 +387,8 @@ impl Remappers {
                     &drivers,
                     mmio,
                     fixed_dma_requesters,
+                    &amd_claimed_displays,
+                    firmware_framebuffer.as_ref(),
                     dmar.is_none().then_some(inactive_firmware_units),
                     tsc_hz,
                     physical_bits(),

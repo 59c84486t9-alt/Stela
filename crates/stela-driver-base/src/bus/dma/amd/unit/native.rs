@@ -552,6 +552,25 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         requesters: &[u16],
         ranges: Vec<DmaPages>,
     ) -> Result<(), Error> {
+        let ranges = ranges
+            .into_iter()
+            .map(|pages| (pages, Direction::Bidirectional))
+            .collect();
+        // SAFETY: forwarded; the legacy window maps every range both ways.
+        unsafe { self.window_with_permissions(requesters, ranges) }
+    }
+
+    /// Give `requesters`, with their aliases, a one-to-one window whose
+    /// ranges carry per-range DMA permissions.
+    ///
+    /// # Safety
+    /// As for [`Self::window`], and each listed requester may only access each
+    /// range in its declared direction until it attaches.
+    pub unsafe fn window_with_permissions(
+        &mut self,
+        requesters: &[u16],
+        ranges: Vec<(DmaPages, Direction)>,
+    ) -> Result<(), Error> {
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
         }
@@ -572,7 +591,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         }
         let mut end = 0u64;
         let mut leaves = 0usize;
-        for pages in &ranges {
+        for (pages, _) in &ranges {
             let size = 1u64 << pages.page_shift();
             let first = *pages.physical_pages().first().ok_or(Error::Mapping)?;
             if pages
@@ -618,12 +637,11 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             )
         }
         .map_err(Error::Translation)?;
-        for range in ranges {
+        for (range, direction) in ranges {
             let address = range.physical_pages()[0];
             // SAFETY: a fresh tree no device walks yet; each range maps at
             // its own address, and the ranges are the caller's.
-            unsafe { tree.map(address, range, Direction::Bidirectional) }
-                .map_err(Error::Translation)?;
+            unsafe { tree.map(address, range, direction) }.map_err(Error::Translation)?;
         }
         let root = tree.root_for_publication().map_err(Error::Translation)?;
         for &rid in &covered {
