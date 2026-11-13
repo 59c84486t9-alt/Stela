@@ -2517,11 +2517,12 @@ fn start_platform(
     if let Some(pci) = &contained_pci {
         for &address in pci.fixed_dma_requesters() {
             if !remappers.amd_blocked_requester(address) {
+                let detail = remappers.amd_blocked_requester_detail(address);
                 output::arguments(format_args!(
-                    "HOST PCI fixed bus master {address} has no verified blocked AMD-Vi requester; refusing device startup\n"
+                    "HOST PCI fixed bus master {address} has no verified blocked AMD-Vi requester ({detail}); refusing device startup\n"
                 ));
                 output::fatal(format_args!(
-                    "the AMD FCH LPC bridge keeps bus mastering enabled, and Stela could not prove its DMA is blocked"
+                    "the AMD FCH LPC bridge keeps bus mastering enabled, and Stela could not prove its DMA is blocked: {detail}"
                 ));
             }
             output::arguments(format_args!(

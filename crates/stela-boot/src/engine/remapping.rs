@@ -31,7 +31,7 @@ use crate::{
     },
     native_mmio, output,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::ops::Range;
 use stela_boot_core::remapping::{
     self, Present,
@@ -127,6 +127,7 @@ pub(super) struct Remappers {
     initial_lines: Option<native_mmio::InitialPciLines>,
     requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
+    amd_refusal: Option<String>,
     amd_fabric: Option<&'static native_mmio::Source>,
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
@@ -208,6 +209,23 @@ impl Remappers {
             .is_ok_and(|taken| taken.is_some_and(|unit| unit.blocks(address.segment, rid)))
     }
 
+    /// Why a fixed requester lacks a verified AMD-Vi blocked entry.
+    pub(super) fn amd_blocked_requester_detail(&self, address: Address) -> String {
+        let rid = requester(address);
+        match self.amd(address.segment, rid) {
+            Err(error) => alloc::format!("AMD-Vi route is ambiguous: {error:?}"),
+            Ok(Some(unit)) if unit.windowed() => String::from(
+                "AMD-Vi took the routing unit in window mode, but this requester is not in its blocked set",
+            ),
+            Ok(Some(_)) => String::from(
+                "AMD-Vi took a unit for this requester, but its blocked state was not recorded",
+            ),
+            Ok(None) => self.amd_refusal.clone().unwrap_or_else(|| {
+                String::from("no AMD-Vi unit was taken that routes this requester")
+            }),
+        }
+    }
+
     pub(super) const fn none() -> Self {
         Self {
             taken: Vec::new(),
@@ -215,6 +233,7 @@ impl Remappers {
             initial_lines: None,
             requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
+            amd_refusal: None,
             amd_fabric: None,
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
             topology: core::cell::RefCell::new(Vec::new()),
@@ -395,6 +414,7 @@ impl Remappers {
                 )
             };
             remappers.amd = outcome.units;
+            remappers.amd_refusal = outcome.refusal;
             uncertain |= outcome.uncertain;
             let blocked = outcome.fabric;
             if blocked == Some(true) {

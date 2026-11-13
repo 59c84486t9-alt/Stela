@@ -307,6 +307,9 @@ pub(super) struct Outcome {
     /// Whether a unit was left in a state no proof covers: it went cold and
     /// then did not stop.
     pub(super) uncertain: bool,
+    /// The first reason an AMD-Vi unit was not taken, retained for a concise
+    /// on-screen explanation if a fixed bus master cannot be proven blocked.
+    pub(super) refusal: Option<alloc::string::String>,
 }
 
 /// A unit brought up cold, whose coverage the policy now decides on.
@@ -353,10 +356,12 @@ pub(super) unsafe fn take(
         units: Vec::new(),
         fabric: None,
         uncertain: false,
+        refusal: None,
     };
     let ivrs = match Ivrs::parse(table, MAXIMUM_BLOCKS) {
         Ok(ivrs) => ivrs,
         Err(error) => {
+            outcome.refusal = Some(format!("IVRS unreadable: {error:?}"));
             output::arguments(format_args!(
                 "UNSUPPORTED host IVRS unreadable ({error:?}): host DMA stays untranslated\n"
             ));
@@ -367,7 +372,11 @@ pub(super) unsafe fn take(
     // Requesters may start blocked only from a proven firmware state and
     // with no reserved region a requester still uses.
     let blockable = units_off && ivrs.memory_definitions().next().is_none();
-    let left = |base: u64, why: &dyn core::fmt::Debug| {
+    let mut refusal = None;
+    let mut left = |base: u64, why: &dyn core::fmt::Debug| {
+        if refusal.is_none() {
+            refusal = Some(format!("unit {base:#x}: {why:?}"));
+        }
         output::arguments(format_args!(
             "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {why:?}\n"
         ));
@@ -382,6 +391,7 @@ pub(super) unsafe fn take(
             .iter()
             .find(|(segment, _)| *segment == id.segment)
         else {
+            left(base, &"an AMD-Vi unit has no matching PCI segment");
             continue;
         };
         let address = Address {
@@ -655,6 +665,8 @@ pub(super) unsafe fn take(
         });
     let started_blocked = taken.iter().any(|unit| unit.claims.is_some());
     outcome.fabric = started_blocked.then_some(complete);
+    drop(left);
+    outcome.refusal = refusal;
     outcome
 }
 
