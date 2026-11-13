@@ -2899,7 +2899,20 @@ fn start_devices(
             }
             host_usb = Some(usb);
             // The guest's controller hangs off the hub of its keyboard.
-            host_bluetooth = host_controller.filter(|_| options.input);
+            host_bluetooth = if options.input {
+                host_controller
+            } else {
+                // Dropping the selected USB HCI closes it and cancels any
+                // outstanding xHCI transfers, so keep that teardown under the
+                // loader root and host-driver lock just like its polling.
+                if host_controller.is_some() {
+                    // SAFETY: the root captured by storage::open maps this
+                    // controller; this boot-start path runs on the BSP.
+                    let _root = unsafe { storage::RestoreRoot::enter(handoff.root) };
+                    drop(host_controller);
+                }
+                None
+            };
             // With no adapter started, the screen names each one found and
             // why it stayed off, before the steps that need one say so.
             if links.devices.is_empty() && (wants_network || options.guest_network) {
