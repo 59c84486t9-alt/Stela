@@ -714,7 +714,7 @@ fn xhci_diagnostic() -> impl core::fmt::Display {
                 Some(read) => write!(
                     formatter,
                     "xhci={:04x}:{:02x}:{:02x}.{} bar0={:#x} cpu={:#x} offset={:#x} \\
-                     read_cr3={:#x} line={} reads={}",
+                     read_cr3={:#x} loader_root={:#x} line={} reads={}",
                     read.segment,
                     read.bus,
                     read.device,
@@ -723,6 +723,7 @@ fn xhci_diagnostic() -> impl core::fmt::Display {
                     read.cpu_address,
                     read.offset,
                     read.cr3,
+                    read.loader_root,
                     read.caller_line,
                     read.reads
                 ),

@@ -347,6 +347,8 @@ pub struct DiagnosticRead {
     pub offset: u64,
     /// CR3 in effect when this BAR read was issued.
     pub cr3: u64,
+    /// Loader root supplied by the boot engine for this diagnostic run.
+    pub loader_root: u64,
     /// `xhci.rs` source line that requested this read.
     pub caller_line: u64,
     /// Number of native BAR reads issued since boot.
@@ -361,6 +363,7 @@ static DIAGNOSTIC_BAR: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_CPU: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_OFFSET: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_CR3: AtomicU64 = AtomicU64::new(0);
+static DIAGNOSTIC_LOADER_ROOT: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_CALLER_LINE: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTIC_READS: AtomicU64 = AtomicU64::new(0);
 
@@ -375,9 +378,15 @@ pub fn diagnostic_read() -> Option<DiagnosticRead> {
         cpu_address: DIAGNOSTIC_CPU.load(Ordering::Relaxed),
         offset: DIAGNOSTIC_OFFSET.load(Ordering::Relaxed),
         cr3: DIAGNOSTIC_CR3.load(Ordering::Relaxed),
+        loader_root: DIAGNOSTIC_LOADER_ROOT.load(Ordering::Relaxed),
         caller_line: DIAGNOSTIC_CALLER_LINE.load(Ordering::Relaxed),
         reads: DIAGNOSTIC_READS.load(Ordering::Relaxed),
     })
+}
+
+/// Record the loader root whose identity mapping contains the native device BARs.
+pub fn diagnostic_loader_root(root: u64) {
+    DIAGNOSTIC_LOADER_ROOT.store(root, Ordering::Relaxed);
 }
 
 impl Registers for Bar {
