@@ -15,8 +15,10 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+mod bounded;
 mod layers;
 mod shared;
+pub use bounded::{Bounded, ReadBound};
 #[cfg(any(test, feature = "ram-disk"))]
 pub use layers::RamDisk;
 pub use layers::{Ahead, ReadAhead, Runs, Volatile};

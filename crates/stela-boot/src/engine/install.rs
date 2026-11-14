@@ -15,7 +15,7 @@ use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, format, vec::Vec};
 use stela_contracts::refuse;
-use stela_drivers::block::BlockDevice;
+use stela_drivers::block::{BlockDevice, Bounded, ReadBound};
 use uefi::proto::media::file::Directory;
 use {
     stela_formats::payload::Layout, stela_formats::payload::PayloadError,
@@ -30,6 +30,16 @@ use {
 pub(super) struct Medium {
     joined: Joined<Bytes<Box<dyn BlockDevice>>>,
     reported: bool,
+    /// The bound of the partition's reads ([`Bounded`]).
+    bound: ReadBound,
+}
+
+impl Medium {
+    /// The bound the restore host sets on the partition's reads once it
+    /// serves on a PE whose guest waits meanwhile.
+    pub(super) fn read_bound(&self) -> ReadBound {
+        self.bound.clone()
+    }
 }
 
 impl ReadAt for Medium {
@@ -126,6 +136,12 @@ pub(super) fn open(
     let read_limit = features
         .max_read_transfer
         .map_or(features.max_transfer, |limit| limit.get());
+    // The restore host reads the pieces in service turns, and the USB may
+    // hold a read behind its own slow writes (the logs, the translation
+    // store) for seconds: once bounded, a read waits for it only briefly.
+    let partition = Bounded::new(partition);
+    let bound = partition.bound();
+    let partition: Box<dyn BlockDevice> = Box::new(partition);
     let mut volume = Fat32::open(Bytes::new(partition))
         .map_err(|error| refuse!("install medium: {error}", %error))?;
     let directory = directory.replace('\\', "/");
@@ -140,6 +156,7 @@ pub(super) fn open(
         .map(|joined| Medium {
             joined: joined.with_two_block_reads(read_limit, sector_bytes),
             reported: false,
+            bound,
         })
         .map_err(|error| refuse!("install medium: {error}", %error))
 }

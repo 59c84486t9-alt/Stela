@@ -602,7 +602,8 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
             crate::status::begin("Finding the macOS install files on the USB");
             let opened = install::open(partition, &manifest, directory, hashes)?;
             crate::status::done("");
-            Ok(restore::Source::new(opened))
+            let bound = opened.read_bound();
+            Ok(restore::Source::bounded(opened, bound))
         })),
         (None, None) if remote_image => Some(restore::inventory(handoff).and_then(|manifest| {
             let network = match &host_network {

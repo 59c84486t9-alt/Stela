@@ -783,6 +783,87 @@ fn a_sequential_reader_finds_the_chunks_read_ahead_in_memory() {
     assert_eq!((block[0], reads.get()), (3, 1));
 }
 
+/// A disk whose block `n` holds byte `n`.
+fn numbered(blocks: u64) -> RamDisk {
+    let mut ram = RamDisk::new("b", blocks, 512);
+    for (index, byte) in ram.bytes.iter_mut().enumerate() {
+        *byte = (index / 512) as u8;
+    }
+    ram
+}
+
+/// A bounded read of a disk held by a slow command waits only its bound,
+/// leaves its command queued, and takes its result when asked again; it
+/// never reads the disk where it asks.
+#[test]
+fn a_bounded_read_waits_only_its_bound_and_takes_its_command_later() {
+    let _clock = crate::test_clock::virtualize();
+    let (delayed, (released, reads, given)) = Delayed::new(numbered(16), 2);
+    let mut device = Bounded::new(Box::new(delayed));
+    let bound = device.bound();
+    let mut block = [0; 1024];
+    // Unbounded, a read waits for the disk where it asks, as before.
+    device.read(1, &mut block).unwrap();
+    assert_eq!((block[0], block[512], reads.get()), (1, 2, 1));
+    bound.set(10_000);
+    assert_eq!(device.read(3, &mut block), Err(BlockError::Timeout));
+    assert!(bound.blocked(), "a read past its bound is blocked");
+    assert!(!bound.blocked(), "asking clears it");
+    assert_eq!(given.borrow().len(), 1, "one queued read");
+    assert_eq!(device.read(3, &mut block), Err(BlockError::Timeout));
+    assert_eq!(given.borrow().len(), 1, "asked again, the same read waits");
+    assert!(bound.blocked());
+    released.set(usize::MAX);
+    device.read(3, &mut block).unwrap();
+    assert_eq!((block[0], block[512]), (3, 4));
+    assert_eq!((reads.get(), given.borrow().len()), (1, 1));
+    assert!(!bound.blocked());
+}
+
+/// A read the device completed while its caller asked for another is kept
+/// for its own caller, and a failed read is a failure, not a blocked one.
+#[test]
+fn a_bounded_device_keeps_a_finished_read_and_reports_failures() {
+    let _clock = crate::test_clock::virtualize();
+    let (delayed, (released, reads, given)) = Delayed::new(numbered(16), 4);
+    let mut device = Bounded::new(Box::new(delayed));
+    let bound = device.bound();
+    bound.set(1_000);
+    let mut block = [0; 512];
+    assert_eq!(device.read(5, &mut block), Err(BlockError::Timeout));
+    released.set(1);
+    assert_eq!(device.read(6, &mut block), Err(BlockError::Timeout));
+    assert!(bound.blocked());
+    released.set(usize::MAX);
+    device.read(5, &mut block).unwrap();
+    assert_eq!(block[0], 5);
+    device.read(6, &mut block).unwrap();
+    assert_eq!(block[0], 6);
+    assert_eq!((reads.get(), given.borrow().len()), (0, 2));
+    let error = device.read(16, &mut block).unwrap_err();
+    assert!(matches!(error, BlockError::OutOfRange { .. }), "{error:?}");
+    assert!(!bound.blocked());
+}
+
+/// A read-ahead over a bounded device reads a miss as a bounded queued
+/// read, so a slow disk fails it as blocked instead of holding its caller.
+#[test]
+fn a_read_ahead_over_a_bounded_device_never_waits_past_the_bound() {
+    let _clock = crate::test_clock::virtualize();
+    let (delayed, (released, reads, _)) = Delayed::new(numbered(16), 4);
+    let device = Bounded::new(Box::new(delayed));
+    let bound = device.bound();
+    bound.set(1_000);
+    let ahead = Ahead::new(ReadAhead::new(Box::new(device), 1024, 2));
+    let mut reader = ahead.clone();
+    let mut block = [0; 512];
+    assert_eq!(reader.read(0, &mut block), Err(BlockError::Timeout));
+    assert!(bound.blocked());
+    released.set(usize::MAX);
+    reader.read(0, &mut block).unwrap();
+    assert_eq!((block[0], reads.get()), (0, 0));
+}
+
 /// Owners on different processors at once each reach the disk whole:
 /// one guest's storage on a PE, another's store on the boot processor.
 #[test]
