@@ -18,6 +18,49 @@ fn report_ecam_conflict(line: core::fmt::Arguments<'_>) {
     }
 }
 
+/// Log the MCFG windows and the root bridges' bus grants the census works
+/// from, once per boot, so a refusal can be read against them.
+fn report_ecam_geometry(windows: &[EcamWindow], roots: &[stela_boot_core::ecam::RootWindow]) {
+    use core::fmt::Write;
+    static REPORTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if REPORTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut line = alloc::string::String::from("HOST PCI ECAM");
+    for (at, window) in windows.iter().enumerate() {
+        let _ = write!(
+            line,
+            "{} {:04x}:{:02x}-{:02x} at {:#x}",
+            if at == 0 { "" } else { "," },
+            window.segment,
+            window.start_bus,
+            window.end_bus,
+            window.base
+        );
+    }
+    if windows.is_empty() {
+        line.push_str(" none");
+    }
+    line.push_str("; root bridge buses");
+    let mut grants = 0;
+    for root in roots.iter().filter(|root| root.space == 2) {
+        let _ = write!(
+            line,
+            "{} {:04x}:{:02x}-{:02x}",
+            if grants == 0 { "" } else { "," },
+            root.segment,
+            root.minimum,
+            root.maximum
+        );
+        grants += 1;
+    }
+    if grants == 0 {
+        line.push_str(" none");
+    }
+    line.push('\n');
+    crate::output::arguments(format_args!("{line}"));
+}
+
 /// Log a census oddity that leaves the segment usable, the first time
 /// each kind is seen this boot.
 fn report_oddity(oddity: census::Oddity, address: Address) {
@@ -257,29 +300,45 @@ impl Source {
         body: impl FnOnce(&[EcamWindow], &mut ConfigInventory<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         let wire = self.platform.wire();
-        let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
-        if windows.is_empty() {
+        let mcfg = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
+        report_ecam_geometry(&mcfg, wire.roots());
+        if mcfg.is_empty() {
             return Err(Error::Unavailable.into());
         }
         let bits = self.platform.space.physical_bits;
-        let original = EcamInventory::validate(&windows, bits)?;
+        let original = EcamInventory::validate(&mcfg, bits)?;
         let windows = original.root_windows(wire.roots())?;
         let geometry = EcamInventory::validate(&windows, bits)?;
-        for (index, window) in windows.iter().enumerate() {
-            for bus in window.start_bus..=window.end_bus {
-                let (_, span) = geometry.subset(index, bus..=bus, wire.roots())?;
-                if let Some((start, end, kind)) = wire.memory_conflict(span.start(), span.end()) {
-                    report_ecam_conflict(format_args!(
-                        "HOST PCI configuration space of bus {:04x}:{bus:02x} at {:#x} lies in \
-                         the firmware memory map's {} at {start:#x}-{end:#x}; it must be \
-                         reserved or MMIO, so Stela does not map it\n",
-                        window.segment,
-                        span.start(),
-                        stela_boot_core::firmware_map::kind_name(kind),
-                    ));
-                    return Err(Error::OutsideResource.into());
-                }
-            }
+        // Only the buses a root bridge grants are mapped and checked.
+        for granted in &windows {
+            let entries = wire.memory().iter().map(|r| (r.start, r.end, r.kind));
+            let Some(conflict) = stela_boot_core::ecam::memory_conflict(*granted, bits, entries)?
+            else {
+                continue;
+            };
+            let (start, end, kind) = conflict.entry;
+            let window = mcfg
+                .iter()
+                .find(|window| {
+                    window.segment == granted.segment
+                        && (window.start_bus..=window.end_bus).contains(&conflict.bus)
+                })
+                .unwrap_or(granted);
+            report_ecam_conflict(format_args!(
+                "HOST PCI configuration space of bus {:04x}:{:02x} at {:#x}, in the MCFG \
+                 window {:04x}:{:02x}-{:02x} at {:#x}, lies in the firmware memory map's {} at \
+                 {start:#x}-{end:#x}; Stela maps ECAM only where the map reserves it, marks it \
+                 MMIO or lists nothing, so PCI containment is off\n",
+                granted.segment,
+                conflict.bus,
+                conflict.span.start(),
+                window.segment,
+                window.start_bus,
+                window.end_bus,
+                window.base,
+                stela_boot_core::firmware_map::kind_name(kind),
+            ));
+            return Err(Error::OutsideResource.into());
         }
         let mut reader = ConfigInventory {
             source: self,
@@ -309,8 +368,9 @@ impl Source {
     /// Read an AML PCI operation through a scoped UC map without lending a
     /// writable address or letting the provider change the physical function.
     /// A bridge whose forwarding is restored is read through the owner that
-    /// keeps its page. A bus of an MCFG window that no root bridge forwards
-    /// reads all ones, as the root complex completes such a request.
+    /// keeps its page. A bus no root bridge forwards reads all ones, as the
+    /// root complex completes such a request
+    /// (`stela_boot_core::ecam::ends_at_root_complex`).
     pub(crate) fn read_firmware_config(
         &self,
         address: Address,
@@ -327,11 +387,7 @@ impl Source {
         }
         let wire = self.platform.wire();
         let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
-        if windows.iter().any(|window| {
-            window.segment == address.segment
-                && (window.start_bus..=window.end_bus).contains(&address.bus)
-        }) && !stela_boot_core::ecam::root_decodes(wire.roots(), address.segment, address.bus)
-        {
+        if stela_boot_core::ecam::ends_at_root_complex(&windows, wire.roots(), address, offset) {
             return Ok(u32::MAX >> (32 - u32::from(width) * 8));
         }
         if let Some(value) = self.read_forwarding_bridge(address, offset, width) {

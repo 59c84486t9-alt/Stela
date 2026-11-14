@@ -100,6 +100,74 @@ pub fn root_decodes(roots: &[RootWindow], segment: u16, bus: u8) -> bool {
     })
 }
 
+/// Whether a configuration read of `offset` at `address` ends at the root
+/// complex, which completes it with all ones: no root bridge forwards the
+/// bus, and the request still leaves the processor. That is the case for a
+/// bus of an MCFG window, and, on segment 0 below register 0x100, for any
+/// bus, which the type 1 mechanism reaches without ECAM. Linux reads such a
+/// register through `raw_pci_read` that way. A segment no root bridge
+/// describes says nothing about the decode, so outside the MCFG windows its
+/// reads are not answered.
+pub fn ends_at_root_complex(
+    windows: &[EcamWindow],
+    roots: &[RootWindow],
+    address: Address,
+    offset: u16,
+) -> bool {
+    if root_decodes(roots, address.segment, address.bus) {
+        return false;
+    }
+    let windowed = windows.iter().any(|window| {
+        window.segment == address.segment
+            && (window.start_bus..=window.end_bus).contains(&address.bus)
+    });
+    let type1 = address.segment == 0
+        && offset < 0x100
+        && roots
+            .iter()
+            .any(|root| root.segment == 0 && root.buses().is_some());
+    windowed || type1
+}
+
+/// A bus of an ECAM window whose configuration space a memory map entry
+/// that is not left to devices overlaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryConflict {
+    pub bus: u8,
+    /// The bus's configuration space.
+    pub span: PhysicalSpan,
+    /// The entry, as (start, end, kind).
+    pub entry: (u64, u64, u32),
+}
+
+/// The first bus of `window` whose configuration space overlaps a memory
+/// map entry (start, end, kind) that is not reserved or MMIO
+/// (`firmware_map::leaves_to_devices`). Only the window's own buses count,
+/// as Linux sizes an MCFG window from its bus range; a range no entry
+/// covers is no conflict.
+pub fn memory_conflict(
+    window: EcamWindow,
+    bits: u8,
+    entries: impl IntoIterator<Item = (u64, u64, u32)> + Clone,
+) -> Result<Option<MemoryConflict>, Error> {
+    for bus in window.start_bus..=window.end_bus {
+        let span = physical(
+            EcamWindow {
+                start_bus: bus,
+                end_bus: bus,
+                ..window
+            },
+            bits,
+        )?;
+        if let Some(entry) =
+            crate::firmware_map::first_conflict(entries.clone(), span.start(), span.end())
+        {
+            return Ok(Some(MemoryConflict { bus, span, entry }));
+        }
+    }
+    Ok(None)
+}
+
 /// Borrowed immutable descriptions whose COMPLETE original MCFG windows were
 /// checked before any subset is selected. This remains descriptive metadata;
 /// only Source joins its captured bytes/owner and mints a reservation.
@@ -333,6 +401,77 @@ mod tests {
             ..root(0, 0x40, 0x7f)
         };
         assert!(!root_decodes(&[memory], 0, 0x40));
+    }
+
+    #[test]
+    fn a_bus_no_root_bridge_forwards_reads_all_ones_where_the_request_leaves_the_processor() {
+        let at = |segment, bus| Address {
+            segment,
+            bus,
+            device: 0,
+            function: 0,
+        };
+        // MCFG names buses 0-0x7f; the root bridge forwards 0-0x7e.
+        let windows = [window(0xe000_0000, 0, 0, 0x7f)];
+        let roots = [parent(0, 0x7e)];
+        assert!(!ends_at_root_complex(&windows, &roots, at(0, 0), 0x19));
+        assert!(ends_at_root_complex(&windows, &roots, at(0, 0x7f), 0x100));
+        // Bus 0xff is in no window: the type 1 mechanism reaches its
+        // header, extended registers need ECAM.
+        assert!(ends_at_root_complex(&windows, &roots, at(0, 0xff), 0x19));
+        assert!(ends_at_root_complex(&windows, &roots, at(0, 0xff), 0xff));
+        assert!(!ends_at_root_complex(&windows, &roots, at(0, 0xff), 0x100));
+        // No type 1 mechanism beyond segment 0, and no answer without a
+        // root bridge on the segment.
+        assert!(!ends_at_root_complex(&windows, &roots, at(1, 0xff), 0x19));
+        assert!(!ends_at_root_complex(&windows, &[], at(0, 0xff), 0x19));
+    }
+
+    #[test]
+    fn an_ecam_window_needs_reserved_mmio_or_unlisted_memory_under_each_bus() {
+        use crate::firmware_map::{MMIO, RESERVED};
+        const RAM: u32 = 7;
+        let full = window(0xe000_0000, 0, 0, 0xff);
+        let end = 0xf000_0000;
+        // The firmware's map leaves the window out: a hole.
+        let hole = [(0, 0x8000_0000, RAM), (0x1_0000_0000, 0x2_0000_0000, RAM)];
+        assert_eq!(memory_conflict(full, 48, hole), Ok(None));
+        // An MMIO or a reserved entry over the window.
+        for kind in [MMIO, RESERVED] {
+            assert_eq!(
+                memory_conflict(full, 48, [(0xe000_0000, end, kind)]),
+                Ok(None)
+            );
+        }
+        // RAM over bus 0x80 refuses at that bus.
+        let ram = [(0xe000_0000, 0xe800_0000, MMIO), (0xe800_0000, end, RAM)];
+        assert_eq!(
+            memory_conflict(full, 48, ram),
+            Ok(Some(MemoryConflict {
+                bus: 0x80,
+                span: PhysicalSpan::new(0xe800_0000, 1 << 20).unwrap(),
+                entry: (0xe800_0000, end, RAM),
+            }))
+        );
+        // A window of 64 buses ends at 0xe400_0000: RAM right after it is
+        // no conflict, RAM in its last bus is.
+        let short = window(0xe000_0000, 0, 0, 0x3f);
+        assert_eq!(
+            memory_conflict(short, 48, [(0xe400_0000, end, RAM)]),
+            Ok(None)
+        );
+        assert_eq!(
+            memory_conflict(short, 48, [(0xe3ff_f000, end, RAM)])
+                .unwrap()
+                .map(|conflict| conflict.bus),
+            Some(0x3f)
+        );
+        // A window that starts at bus 0x10 begins 16 MiB above its base.
+        let late = window(0xe000_0000, 0, 0x10, 0x1f);
+        assert_eq!(
+            memory_conflict(late, 48, [(0xe000_0000, 0xe100_0000, RAM)]),
+            Ok(None)
+        );
     }
 
     #[test]
