@@ -18,9 +18,13 @@ use crate::{
     block::BlockError,
     bus::{
         dma::{DmaAllocator, DmaBuffer},
+        irq::MsiMessage,
         mmio::Mmio,
         pci::Function,
-        virtio::{AVAIL, DESCRIPTOR_WRITE, DeviceStatus, Modern, STOP_RESET_US, USED, VENDOR},
+        virtio::{
+            AVAIL, DESCRIPTOR_WRITE, DeviceStatus, Modern, STOP_RESET_US, USED, VENDOR,
+            retarget_msix,
+        },
     },
 };
 use alloc::{format, vec::Vec};
@@ -179,6 +183,8 @@ pub struct VirtioNet {
     pub location: alloc::string::String,
     /// Whether the device sends the handoff's completion signal.
     signalled: bool,
+    /// Its MSI-X entry, for [`Link::retarget`].
+    msix: Option<Mmio>,
 }
 
 impl VirtioNet {
@@ -201,6 +207,7 @@ impl VirtioNet {
         let receive = Queue::new(&transport, handoff, RECEIVE, dma)?;
         let transmit = Queue::new(&transport, handoff, TRANSMIT, dma)?;
         let signalled = transport.signals();
+        let msix = transport.msix_entry().filter(|_| signalled);
         let device = transport.device;
         let mac = Mac(core::array::from_fn(|n| device.read8(CONFIG_MAC + n)));
         let mut net = Self {
@@ -215,6 +222,7 @@ impl VirtioNet {
             clock: handoff.clock,
             location: format!("{}", function.address),
             signalled,
+            msix,
         };
         transport.ready();
         net.receive.prime_receive();
@@ -315,6 +323,16 @@ impl Link for VirtioNet {
         self.signalled
     }
 
+    fn retarget(&mut self, message: MsiMessage) -> bool {
+        match self.msix.as_ref() {
+            Some(entry) => {
+                retarget_msix(entry, message);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.receive_frame(<[u8]>::to_vec)
     }
@@ -383,6 +401,7 @@ mod tests {
                     },
                     location: "fixture".into(),
                     signalled: false,
+                    msix: None,
                 },
                 _registers: registers,
                 _memory: memory,

@@ -1328,6 +1328,17 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
     // they are stale diagnostics, not coherent source-state receipts.
     hub.set_source_observations(options.profile);
     gpu::set_hub(hub.clone(), boot_processor);
+    // The guest network's receive signal goes, once the guest's link is up,
+    // to the last PE's core: macOS runs the lower PEs first and leaves the
+    // last one mostly waiting, so it takes the interrupt at once, where the
+    // boot PE takes it only between its slices.
+    if let Some(binding) = worker_bindings.iter().max_by_key(|binding| binding.pe)
+        && let Some(&selected) = capture.selected.get(binding.worker.0)
+        && let Some(processor) = capture.processors.get(selected as usize)
+        && binding.worker.0 != 0
+    {
+        network::set_receive_core(processor.apic_id);
+    }
     let devices = parallel::Board::new(devices, hub.clone());
     let settings = parallel::Settings {
         traces: options.traces.clone(),
@@ -2893,6 +2904,9 @@ fn start_devices(
             let bsp = native_processors.expect("validated native roster");
             let bsp_apic = bsp.processors[bsp.selected[0] as usize].apic_id;
             storage_handoff.completion = host::completion_signal(bsp_apic);
+            // Frames reaching a host network adapter make the host's service
+            // due on a vector of their own (`host::network_signal`).
+            storage_handoff.network = host::network_signal(bsp_apic);
             // A disk step given up to another core's hold wakes it too.
             storage::ring_owed_steps_at(bsp_apic);
             #[cfg(feature = "diagnostics")]

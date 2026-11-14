@@ -108,6 +108,7 @@ impl Storage {
         self.present.then(|| stela_drivers::Handoff {
             firmware: None,
             completion: None,
+            network: None,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()

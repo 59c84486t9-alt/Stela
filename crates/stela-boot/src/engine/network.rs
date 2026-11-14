@@ -178,6 +178,11 @@ impl Link for RootLink {
     fn signals(&self) -> bool {
         self.device.signals()
     }
+    fn retarget(&mut self, message: stela_drivers::bus::irq::MsiMessage) -> bool {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.device.retarget(message)
+    }
     fn carrier_wait_us(&self) -> u64 {
         self.device.carrier_wait_us()
     }
@@ -622,6 +627,21 @@ pub struct GuestNetwork {
     /// full, sent first at the next turn; the guest's own queue holds the
     /// rest meanwhile.
     unsent: alloc::collections::VecDeque<Vec<u8>>,
+    /// Whether the adapter's receive signal was pointed at
+    /// [`set_receive_core`]'s core, which the first link up does.
+    retargeted: bool,
+}
+
+/// The APIC ID of the core the guest network's receive signal goes to once
+/// the guest's link is up ([`set_receive_core`]); none past 254.
+static RECEIVE_CORE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Send the guest network's receive signal (`host::network_signal`) to the
+/// core with APIC ID `apic` from the guest's first link up: by then every PE
+/// runs, and a core whose PE mostly waits serves the frames at once, where
+/// the boot PE takes the signal only between its slices.
+pub(super) fn set_receive_core(apic: u64) {
+    RECEIVE_CORE.store(apic, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Frames read from the host adapter in one service turn at most, outside
@@ -653,6 +673,7 @@ impl GuestNetwork {
             refused: false,
             received: alloc::collections::VecDeque::new(),
             unsent: alloc::collections::VecDeque::new(),
+            retargeted: false,
         })
     }
 
@@ -665,6 +686,22 @@ impl GuestNetwork {
         let up = status.is_some_and(|(up, _)| up);
         if let Some((_, counters)) = status {
             self.counters = counters;
+        }
+        if up && !self.retargeted {
+            self.retargeted = true;
+            let apic = RECEIVE_CORE.load(core::sync::atomic::Ordering::Relaxed);
+            if let Some(message) = super::host::network_signal(apic) {
+                let moved = self.link.retarget(message);
+                output::arguments(format_args!(
+                    "GUEST NETWORK receive signal {} processor apic={apic:#x} vector={:#x}\n",
+                    if moved {
+                        "moved to"
+                    } else {
+                        "stays: no MSI-X entry for"
+                    },
+                    super::interrupts::NETWORK_VECTOR
+                ));
+            }
         }
         if self.up != Some(up) {
             self.up = Some(up);

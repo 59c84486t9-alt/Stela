@@ -177,6 +177,7 @@ fn earliest_attach_provider_callback_unwind_retains_original_function_and_timer(
         clock: clock(),
         firmware: None,
         completion: None,
+        network: None,
     };
     let mut dma = TestRegion::new(128 * 1024 * 8);
     assert!(

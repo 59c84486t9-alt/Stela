@@ -101,6 +101,20 @@ pub struct Modern {
     signalled: u32,
     /// Set when the device answered a vector write with [`NO_VECTOR`].
     refused: Cell<bool>,
+    /// The MSI-X table entry [`Self::signal`] programmed, for
+    /// [`retarget_msix`].
+    msix: Option<Mmio>,
+}
+
+/// Point the MSI-X table entry `entry` at `message`, masked meanwhile (PCI
+/// 3.0 section 6.8.2.9): an event the device has while it is masked stays
+/// pending and goes once it is unmasked, to the new address.
+pub fn retarget_msix(entry: &Mmio, message: MsiMessage) {
+    entry.write32(12, 1);
+    entry.write32(0, message.address as u32);
+    entry.write32(4, (message.address >> 32) as u32);
+    entry.write32(8, message.data);
+    entry.write32(12, 0);
 }
 
 impl Modern {
@@ -166,6 +180,7 @@ impl Modern {
             vector: NO_VECTOR,
             signalled: 0,
             refused: Cell::new(false),
+            msix: None,
         })
     }
 
@@ -197,10 +212,16 @@ impl Modern {
             Ok(())
         })?;
         self.vector = 0;
+        self.msix = Some(table);
         self.signalled = queues.iter().fold(0, |mask, &queue| {
             mask | 1u32.checked_shl(queue.into()).unwrap_or(0)
         });
         Ok(())
+    }
+
+    /// The MSI-X table entry [`Self::signal`] programmed, if any.
+    pub fn msix_entry(&self) -> Option<Mmio> {
+        self.msix
     }
 
     /// Whether the device sends [`Self::signal`]'s message for every event
@@ -319,6 +340,7 @@ mod tests {
             vector,
             signalled: 0,
             refused: Cell::new(false),
+            msix: None,
         }
     }
 
@@ -373,5 +395,26 @@ mod tests {
             assert_eq!(transport.common.read16(CONFIG_VECTOR), vector);
             assert_eq!(transport.signals(), signals);
         }
+    }
+
+    /// A retargeted MSI-X entry holds the new message and ends unmasked.
+    #[test]
+    fn retargeting_rewrites_the_msix_entry_and_unmasks_it() {
+        let mut memory = [0u64; 2];
+        // SAFETY: `memory` outlives the entry.
+        let entry = unsafe { Mmio::new(memory.as_mut_ptr() as u64, MSIX_ENTRY_BYTES as usize) };
+        entry.write32(0, 0xfee0_0000);
+        entry.write32(8, 0x62);
+        retarget_msix(
+            &entry,
+            MsiMessage {
+                address: 0x1_fee0_3000,
+                data: 0x63,
+            },
+        );
+        assert_eq!(entry.read32(0), 0xfee0_3000);
+        assert_eq!(entry.read32(4), 1);
+        assert_eq!(entry.read32(8), 0x63);
+        assert_eq!(entry.read32(12), 0);
     }
 }

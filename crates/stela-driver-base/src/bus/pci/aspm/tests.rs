@@ -231,6 +231,7 @@ fn unmapped_or_overlapping_segment_windows_are_not_scanned() {
     let mut handoff = Handoff {
         firmware: None,
         completion: None,
+        network: None,
         ecam: vec![window],
         mapped: vec![window.range()],
         dma: 0..0,

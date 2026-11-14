@@ -415,6 +415,7 @@ fn missing_msix_table_refuses_without_enabling_msi() {
     let handoff = crate::Handoff {
         firmware: None,
         completion: None,
+        network: None,
         ecam: Vec::new(),
         mapped: Vec::new(),
         dma: 0..0,

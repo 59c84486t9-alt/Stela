@@ -163,6 +163,11 @@ pub trait Link {
     fn due_us(&self) -> Option<u64> {
         None
     }
+    /// Send the signal [`Self::signals`] describes as `message` from now
+    /// on: whether the adapter could.
+    fn retarget(&mut self, _message: bus::irq::MsiMessage) -> bool {
+        false
+    }
 }
 
 mod timing;

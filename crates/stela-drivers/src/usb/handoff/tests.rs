@@ -447,6 +447,7 @@ fn early_ehci_handoff_takes_the_semaphore_and_clears_the_smis() {
         clock: clock(),
         firmware: None,
         completion: None,
+        network: None,
     };
     // SAFETY: BAR0 is the page above, which nothing else reaches.
     let handed = unsafe {

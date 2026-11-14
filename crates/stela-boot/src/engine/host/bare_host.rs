@@ -770,7 +770,11 @@ impl Host for BareHost<'_> {
     }
 
     fn host_work_due(&mut self) -> bool {
-        super::super::storage::signalled()
+        // Frames a host network adapter signalled (`network_interrupt`): the
+        // service moves them now rather than at its next tick, about 4 ms
+        // on. Taken either way, as a disk's due service moves them too.
+        let frames = super::take_network_signal();
+        super::super::storage::signalled() || frames
     }
 
     fn report(&mut self, event: &stela_engine::machine::Event) {

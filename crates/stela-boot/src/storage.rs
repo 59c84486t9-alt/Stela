@@ -440,6 +440,7 @@ pub fn discover() -> Result<Handoff> {
     Ok(Handoff {
         firmware: None,
         completion: None,
+        network: None,
         ecam,
         mapped,
         dma: dma..dma + (pages * crate::paging::PAGE) as u64,

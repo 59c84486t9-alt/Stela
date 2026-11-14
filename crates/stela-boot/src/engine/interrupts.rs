@@ -20,6 +20,11 @@ pub(crate) const SHOOTDOWN_VECTOR: u8 = 0x61;
 /// A host device's completion signal (`host::completion_signal`): a
 /// doorbell that also counts the signals apart from other cores' doorbells.
 pub(crate) const SIGNAL_VECTOR: u8 = 0x62;
+/// A host network adapter's frames arrived (`host::network_signal`): a
+/// doorbell that also makes the host's service due (`network::signalled`).
+/// Apart from [`SIGNAL_VECTOR`], so a disk does not look for completions
+/// each time a frame comes.
+pub(crate) const NETWORK_VECTOR: u8 = 0x63;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
 const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
@@ -344,7 +349,7 @@ vectors!(
     64 none,
     80 none, 81 none, 82 none, 83 none, 84 none, 85 none, 86 none, 87 none,
     88 none, 89 none, 90 none, 91 none, 92 none, 93 none, 94 none, 95 none,
-    96 none, 97 none, 98 none, 255 none,
+    96 none, 97 none, 98 none, 99 none, 255 none,
 );
 
 /// Whether the table gives `vector` a stub, and so a gate: an interrupt on
@@ -364,6 +369,7 @@ const _: () = assert!(
         && has_stub(NATIVE_WAKE_VECTOR)
         && has_stub(SHOOTDOWN_VECTOR)
         && has_stub(SIGNAL_VECTOR)
+        && has_stub(NETWORK_VECTOR)
         && has_stub(SPURIOUS_VECTOR)
 );
 
@@ -554,6 +560,7 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SIGNAL_VECTOR => host::signal_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),
+        NETWORK_VECTOR => host::network_interrupt(),
         SPURIOUS_VECTOR => host::spurious_interrupt(),
         vector @ 32.. => host::stray_interrupt(vector),
         _ => fatal(frame),
