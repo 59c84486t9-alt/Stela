@@ -106,7 +106,9 @@ impl AhciDisk {
             0 => u32::MAX,
             speed => (1 << speed) - 1,
         };
-        let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
+        // sata_link_hardreset and sata_link_resume: SPD kept, Partial and
+        // Slumber refused (IPM 3) until the link power policy is set.
+        let control = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED;
         minimum.wait_after(COMRESET_HOLD_US, || {
             port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
             port.read32(PORT_SATA_CONTROL);

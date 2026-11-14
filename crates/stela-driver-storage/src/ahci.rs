@@ -220,7 +220,9 @@ const ERR_INVALID: u32 = 1 << 7;
 /// SStatus.DET: a device is present and Phy communication is established.
 const DEVICE_PRESENT: u32 = 3;
 const SATA_STATUS_DETECTION: u32 = 0xf;
-/// SControl.DET: perform interface initialization (COMRESET).
+/// SControl.DET, whose value 1 performs interface initialization
+/// (COMRESET).
+#[cfg(test)]
 const SATA_CONTROL_DETECTION: u32 = 0xf;
 const SATA_CONTROL_RESET: u32 = 1;
 /// `sata_link_hardreset`: keep SPD, disable partial and slumber, then
@@ -1283,7 +1285,7 @@ fn debounce(
 }
 
 /// A port's link reset ([`AhciDisk::link_ports`]): PxCMD before the port
-/// stopped, the SPD limit and SControl without DET.
+/// stopped, the SPD limit and the SControl that releases COMRESET.
 pub(super) struct Link {
     command: u32,
     speed_limit: u32,

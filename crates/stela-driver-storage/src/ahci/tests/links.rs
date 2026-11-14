@@ -96,3 +96,20 @@ fn a_timing_failure_during_the_shared_settle_fails_every_port() {
     assert!(links.iter().all(|link| link.is_err()));
     assert!(control.ready().is_err());
 }
+
+#[test]
+fn the_first_link_reset_refuses_partial_and_slumber_and_keeps_the_speed_limit() {
+    // Reference: sata_link_hardreset writes (SControl & 0x0f0) | 0x301,
+    // sata_link_resume (SControl & 0x0f0) | 0x300, whatever IPM the
+    // firmware left.
+    let _clock = crate::test_clock::virtualize();
+    let control = Control::model(Rc::new(MinimumModel::default()));
+    let port = Link::new(&[]);
+    port.registers.borrow_mut()[PORT_SATA_CONTROL / 4] = 0x020;
+    let clock = Clock {
+        ticks_per_microsecond: 1,
+    };
+    let links = AhciDisk::link_ports(&[&port], 0, clock, &control);
+    assert!(matches!(links[0], Ok(Some(_))));
+    assert_eq!(port.writes_to(PORT_SATA_CONTROL), [0x321, 0x320]);
+}
