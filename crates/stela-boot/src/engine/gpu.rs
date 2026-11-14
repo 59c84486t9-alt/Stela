@@ -1146,7 +1146,15 @@ fn claim(
         Some(gpu::cold::Reset::SecondaryBus) => output::arguments(format_args!(
             "GPU {address}: no function-local reset; reset through its bridge's secondary bus\n"
         )),
-        Some(gpu::cold::Reset::Function(_)) => {}
+        Some(gpu::cold::Reset::Function(method)) => {
+            let name = match method {
+                stela_drivers::bus::pci::ResetMethod::FunctionLevel => "Function Level Reset",
+                stela_drivers::bus::pci::ResetMethod::PowerManagement => {
+                    "a D3hot to D0 power state reset"
+                }
+            };
+            output::arguments(format_args!("GPU {address}: reset by {name}\n"));
+        }
     }
     // SAFETY: both original owners transfer into this retained function
     // lifetime before Linux probe. Only the temporary UC observation is retired.
