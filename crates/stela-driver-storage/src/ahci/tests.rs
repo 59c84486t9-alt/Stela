@@ -313,6 +313,7 @@ impl Fixture {
                 ticks_per_microsecond: 1000,
             },
             command_timeout_us: 1000,
+            timeout_steps: [0; INTERNAL_TIMEOUTS_US.len()],
             fault: None,
             flush: Some(ATA_FLUSH_CACHE_EXT),
             errors: ErrorRing::default(),

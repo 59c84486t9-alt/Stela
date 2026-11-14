@@ -289,3 +289,120 @@ fn an_expired_command_is_named_with_the_registers_it_ended_with() {
         "{line}"
     );
 }
+
+/// A disk whose first IDENTIFY is answered with `page`, with production
+/// command timeouts.
+fn starting() -> (Fixture, crate::test_clock::Guard) {
+    let (mut fixture, clock) = recovering(identify_page("S1", 1024));
+    fixture.disk.command_timeout_us = COMMAND_TIMEOUT_US;
+    let page = identify_page("S1", 1024);
+    fixture.disk.bounce.bytes_mut()[..512].copy_from_slice(&page);
+    (fixture, clock)
+}
+
+#[test]
+fn internal_commands_take_linux_timeouts_and_wait_longer_after_one_expired() {
+    // Reference: ata_eh_cmd_timeout_table, ata_internal_cmd_timeout and
+    // ata_internal_cmd_timed_out.
+    let (mut fixture, _clock) = starting();
+    let disk = &mut fixture.disk;
+    for (command, timeouts) in [
+        (
+            ATA_IDENTIFY,
+            [5_000_000, 10_000_000, 30_000_000, 30_000_000],
+        ),
+        (
+            ATA_SET_FEATURES,
+            [5_000_000, 10_000_000, 10_000_000, 10_000_000],
+        ),
+        (ATA_READ_LOG_DMA_EXT, [15_000_000; 4]),
+        (ATA_STANDBY_IMMEDIATE, [15_000_000; 4]),
+        (ATA_REQUEST_SENSE_DATA_EXT, [5_000_000; 4]),
+    ] {
+        for timeout in timeouts {
+            assert_eq!(disk.internal_timeout_us(command), timeout, "{command:#x}");
+            disk.internal_timed_out(command);
+        }
+    }
+    // READ LOG EXT shares its class with READ LOG DMA EXT.
+    assert_eq!(disk.internal_timeout_us(ATA_READ_LOG_EXT), 15_000_000);
+    // Never longer than a block command's.
+    disk.command_timeout_us = 1_000;
+    assert_eq!(disk.internal_timeout_us(ATA_IDENTIFY), 1_000);
+    // Each error handling run starts again at the first.
+    disk.command_timeout_us = COMMAND_TIMEOUT_US;
+    let link = Link::new(&[]);
+    let mut failure = Failure::new(BlockError::Timeout);
+    disk.recover(&link, &mut failure, false).unwrap();
+    assert_eq!(disk.internal_timeout_us(ATA_IDENTIFY), 5_000_000);
+    assert_eq!(disk.internal_timeout_us(ATA_SET_FEATURES), 5_000_000);
+}
+
+#[test]
+fn a_first_identify_the_disk_drops_is_retried_after_a_hard_reset() {
+    // Reference: ata_eh_recover with ata_dev_read_id and
+    // ata_eh_handle_dev_fail; ata_eh_identify_timeouts.
+    let (mut fixture, _clock) = starting();
+    let clock = fixture.disk.clock;
+    let start = clock.try_start().unwrap();
+    let link = Link::new(&[Fault::Timeout]);
+    let found = fixture.disk.first_identify(&link).unwrap();
+    assert_eq!(found.serial, "S1");
+    assert_eq!(link.issued.get(), 2);
+    // The dropped IDENTIFY cost its first timeout, 5 s, then a hard reset.
+    let took = clock.try_elapsed_us(start).unwrap();
+    assert!((5_000_000..6_000_000).contains(&took), "{took}");
+    let controls: Vec<u32> = link
+        .writes_to(PORT_SATA_CONTROL)
+        .iter()
+        .map(|control| control & 0xf0f)
+        .collect();
+    assert_eq!(controls, [0x301, 0x300]);
+    // The next IDENTIFY in this run would wait 10 s.
+    assert_eq!(fixture.disk.internal_timeout_us(ATA_IDENTIFY), 10_000_000);
+}
+
+#[test]
+fn a_first_identify_that_never_completes_fails_after_three_tries_naming_its_wait() {
+    let (mut fixture, _clock) = starting();
+    let clock = fixture.disk.clock;
+    let start = clock.try_start().unwrap();
+    let link = Link::new(&[Fault::Timeout; 3]);
+    let Err(error) = fixture.disk.first_identify(&link) else {
+        panic!("a disk that never answers is refused");
+    };
+    assert_eq!(link.issued.get(), 3);
+    // 5, 10 and 30 s, the last try at a lower link speed.
+    let took = clock.try_elapsed_us(start).unwrap();
+    assert!((45_000_000..47_000_000).contains(&took), "{took}");
+    assert_eq!(fixture.disk.speed_limit, 0b1);
+    let BlockError::Expired(expired) = &error else {
+        panic!("{error:?}");
+    };
+    assert!((30_000_000..30_100_000).contains(&expired.waited_us));
+    assert_eq!(expired.registers[0], ("PxCI", 1));
+    assert_eq!(expired.registers[2], ("PxTFD", 0xd0));
+    let line = alloc::format!("{error}");
+    assert!(
+        line.starts_with(
+            "ATA IDENTIFY DEVICE (0xec), waiting for its PxCI bit to clear: not done after 30"
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains("; PxCI=0x1 PxSACT=0x0 PxTFD=0xd0 PxSSTS="),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_first_identify_the_disk_refuses_is_not_retried() {
+    let (mut fixture, _clock) = starting();
+    let link = Link::new(&[Fault::TaskFile(0x0451)]);
+    assert!(matches!(
+        fixture.disk.first_identify(&link),
+        Err(BlockError::Device { .. })
+    ));
+    assert_eq!(link.issued.get(), 1);
+    assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
+}

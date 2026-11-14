@@ -56,6 +56,7 @@ impl AhciDisk {
     /// speed-down; when a reset is due, hard reset the
     /// link (one try per `ata_eh_reset_timeouts` entry) and revalidate the
     /// disk, up to `ATA_EH_DEV_TRIES` times. An error disables the disk.
+    /// Each run starts its internal commands at their first timeouts.
     pub(super) fn recover(
         &mut self,
         port: &impl CommandPort,
@@ -63,6 +64,7 @@ impl AhciDisk {
         io: bool,
     ) -> Result<(), BlockError> {
         self.minimum.check()?;
+        self.timeout_steps = [0; INTERNAL_TIMEOUTS_US.len()];
         if !failure.frozen {
             stop_engine(port, self.clock)?;
             start_engine(port);
@@ -115,24 +117,7 @@ impl AhciDisk {
         loop {
             self.minimum.ready()?;
             if reset {
-                let mut online = None;
-                for timeout in RESET_TIMEOUTS_US {
-                    match self.hardreset(port, timeout, hotplug) {
-                        Ok(present) => {
-                            online = Some(present);
-                            break;
-                        }
-                        Err(error) => {
-                            self.minimum.ready()?;
-                            last = error;
-                        }
-                    }
-                }
-                match online {
-                    None => return Err(last),
-                    Some(false) => return Err(DETACHED),
-                    Some(true) => {}
-                }
+                self.reset(port, hotplug, last.clone())?;
             }
             reset = true;
             // ata_eh_revalidate_and_attach wakes a power-saving link first;
@@ -167,6 +152,58 @@ impl AhciDisk {
             }
             last = error;
             hotplug = false;
+        }
+    }
+
+    /// `ata_eh_reset`: a hard reset, one try per `ata_eh_reset_timeouts`
+    /// entry, the last failure's error, `last` before any, once all fail;
+    /// [`DETACHED`] when no ATA disk is online after it.
+    pub(super) fn reset(
+        &mut self,
+        port: &impl CommandPort,
+        hotplug: bool,
+        mut last: BlockError,
+    ) -> Result<(), BlockError> {
+        for timeout in RESET_TIMEOUTS_US {
+            match self.hardreset(port, timeout, hotplug) {
+                Ok(true) => return Ok(()),
+                Ok(false) => return Err(DETACHED),
+                Err(error) => {
+                    self.minimum.ready()?;
+                    last = error;
+                }
+            }
+        }
+        Err(last)
+    }
+
+    /// Linux `ata_dev_read_id` at probe, under `ata_eh_recover`: a first
+    /// IDENTIFY that fails other than by the disk's refusal costs a try
+    /// (`ata_eh_handle_dev_fail`), the last one at a lower link speed, and
+    /// the next try follows a hard reset; a timed-out one waits longer
+    /// ([`Self::internal_timeout_us`]). The IDENTIFY data once read.
+    pub(super) fn first_identify(
+        &mut self,
+        port: &impl CommandPort,
+    ) -> Result<Identified, BlockError> {
+        let mut tries = DEVICE_TRIES;
+        loop {
+            let buffer = self.bounce.bus_address();
+            let bytes = ATA_SECTOR_BYTES as usize;
+            let error = match self.internal(port, ATA_IDENTIFY, 0, 0, bytes, buffer) {
+                Ok(()) => return identify(self.bounce.bytes()),
+                Err(failure) if failure.refused() => return Err(failure.error),
+                Err(failure) => failure.error,
+            };
+            self.minimum.ready()?;
+            tries -= 1;
+            if tries == 0 {
+                return Err(error);
+            }
+            if tries == 1 {
+                self.lower_speed_limit(port);
+            }
+            self.reset(port, false, error)?;
         }
     }
 

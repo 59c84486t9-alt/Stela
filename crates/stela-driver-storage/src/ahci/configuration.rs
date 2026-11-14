@@ -216,6 +216,7 @@ impl AhciDisk {
                 },
                 clock,
                 command_timeout_us: COMMAND_TIMEOUT_US,
+                timeout_steps: [0; INTERNAL_TIMEOUTS_US.len()],
                 fault: None,
                 flush: None,
                 errors: ErrorRing::default(),
@@ -249,10 +250,7 @@ impl AhciDisk {
             });
             let disk = kept.get_mut().disk.as_mut().expect("same initialized disk");
             let port = disk.port;
-            let buffer = disk.bounce.bus_address();
-            disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
-                .map_err(|failure| failure.error)?;
-            let found = identify(disk.bounce.bytes())?;
+            let found = disk.first_identify(&port)?;
             if found.quirks & quirks::DISABLE != 0 {
                 stop_port(&port, clock)?;
                 return Err(BlockError::Unsupported("SATA device libata disables"));

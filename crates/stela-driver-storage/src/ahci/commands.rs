@@ -253,6 +253,7 @@ impl AhciDisk {
                     write: issue.write,
                     buffer: None,
                 },
+                self.command_timeout_us,
             ) {
                 Ok(started) => {
                     issue.launched = Some(started);
@@ -366,8 +367,30 @@ impl AhciDisk {
         Err(failure)
     }
 
-    /// Issue the command once in slot 0, the port running nothing else, and
-    /// wait for its completion or error.
+    /// Linux `ata_internal_cmd_timeout`: an internal command's timeout in
+    /// this error handling run, never longer than a block command's.
+    pub(super) fn internal_timeout_us(&self, command: u8) -> u64 {
+        let timeout = match internal_class(command) {
+            Some(class) => INTERNAL_TIMEOUTS_US[class].1[usize::from(self.timeout_steps[class])],
+            None => INTERNAL_DEFAULT_TIMEOUT_US,
+        };
+        timeout.min(self.command_timeout_us)
+    }
+
+    /// Linux `ata_internal_cmd_timed_out`: the class's next command waits
+    /// for the next timeout, the last one staying.
+    pub(super) fn internal_timed_out(&mut self, command: u8) {
+        if let Some(class) = internal_class(command) {
+            let step = &mut self.timeout_steps[class];
+            if usize::from(*step) + 1 < INTERNAL_TIMEOUTS_US[class].1.len() {
+                *step += 1;
+            }
+        }
+    }
+
+    /// Issue the internal command once in slot 0, the port running nothing
+    /// else, and wait for its completion or error, at most its
+    /// [`Self::internal_timeout_us`].
     #[expect(
         clippy::result_large_err,
         reason = "Return complete typed command failure and recovery context without allocation on the failure path."
@@ -377,19 +400,28 @@ impl AhciDisk {
         port: &impl CommandPort,
         request: AtaRequest,
     ) -> Result<(), Failure> {
-        let launched = self.launch(port, 0, true, request)?;
+        let command = request.command;
+        let timeout_us = self.internal_timeout_us(command);
+        let launched = self.launch(port, 0, true, request, timeout_us)?;
         loop {
             self.minimum.ready().map_err(Failure::new)?;
             if let Some(seen) = self.look(port, &[&launched]) {
-                return seen.failure.map_or(Ok(()), Err);
+                let Some(failure) = seen.failure else {
+                    return Ok(());
+                };
+                if failure.mask & ERR_TIMEOUT != 0 {
+                    self.internal_timed_out(command);
+                }
+                return Err(failure);
             }
             crate::waiting();
             core::hint::spin_loop();
         }
     }
 
-    /// Issue the command once in `slot`; `alone` when the port runs no
-    /// other command, whose interrupts and ending FIS marks it may clear.
+    /// Issue the command once in `slot`, to complete within `timeout_us`;
+    /// `alone` when the port runs no other command, whose interrupts and
+    /// ending FIS marks it may clear.
     #[expect(
         clippy::result_large_err,
         reason = "Return complete typed command failure and recovery context without allocation on the failure path."
@@ -400,6 +432,7 @@ impl AhciDisk {
         slot: usize,
         alone: bool,
         request: AtaRequest,
+        timeout_us: u64,
     ) -> Result<Launched, Failure> {
         self.ready().map_err(Failure::new)?;
         let AtaRequest {
@@ -481,7 +514,7 @@ impl AhciDisk {
         fence(Ordering::SeqCst);
         let deadline = self
             .clock
-            .try_deadline(self.command_timeout_us)
+            .try_deadline(timeout_us)
             .map_err(|_| Failure::new(BlockError::Timeout))?;
         // ahci_qc_issue: a queued command is active in PxSACT until the
         // disk's Set Device Bits FIS clears it.
@@ -794,6 +827,13 @@ impl AhciDisk {
             true,
         )
     }
+}
+
+/// The [`INTERNAL_TIMEOUTS_US`] class of an internal command.
+fn internal_class(command: u8) -> Option<usize> {
+    INTERNAL_TIMEOUTS_US
+        .iter()
+        .position(|(commands, _)| commands.contains(&command))
 }
 
 /// What a command's expired wait is reported as: the command, and the

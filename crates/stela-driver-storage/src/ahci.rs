@@ -447,6 +447,21 @@ const STOP_FIS_TIMEOUT_US: u64 = 1_000_000;
 const COMRESET_HOLD_US: u64 = 1_000;
 const SPIN_UP_TIMEOUT_US: u64 = 10_000_000;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
+/// Linux `ata_eh_cmd_timeout_table` for the internal commands issued here:
+/// each class's timeouts, the next one taken after a timeout
+/// (`ata_internal_cmd_timed_out`). Another command gets
+/// [`INTERNAL_DEFAULT_TIMEOUT_US`].
+const INTERNAL_TIMEOUTS_US: [(&[u8], &[u64]); 4] = [
+    (&[ATA_IDENTIFY], &[5_000_000, 10_000_000, 30_000_000]),
+    (
+        &[ATA_READ_LOG_EXT, ATA_READ_LOG_DMA_EXT],
+        &[15_000_000, 15_000_000],
+    ),
+    (&[ATA_SET_FEATURES], &[5_000_000, 10_000_000]),
+    (&[ATA_STANDBY_IMMEDIATE], &[15_000_000]),
+];
+/// `ATA_EH_CMD_DFL_TIMEOUT`.
+const INTERNAL_DEFAULT_TIMEOUT_US: u64 = 5_000_000;
 /// `ata_eh_reset_timeouts`: one hardreset per entry.
 const RESET_TIMEOUTS_US: [u64; 4] = [10_000_000, 10_000_000, 35_000_000, 5_000_000];
 /// `ATA_EH_DEV_TRIES`: revalidations before the disk is disabled.
@@ -510,6 +525,9 @@ pub struct AhciDisk {
     identity: Identity,
     clock: Clock,
     command_timeout_us: u64,
+    /// `ehc->cmd_timeout_idx`: per [`INTERNAL_TIMEOUTS_US`] class, the
+    /// timeout an internal command takes in this error handling run.
+    timeout_steps: [u8; INTERNAL_TIMEOUTS_US.len()],
     /// Set when error handling cannot recover the disk, as libata disables
     /// it. The queue, FIS and bounce allocations remain reserved for this boot.
     fault: Option<BlockError>,
