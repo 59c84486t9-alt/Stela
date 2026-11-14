@@ -42,7 +42,9 @@
 //! The descriptor datapath and Stela integration are independent Rust code.
 //! This is not a match for the I217/I218/I219 integrated PHYs.
 //!
-//! DMA allocations live until reboot, including after a transmit timeout;
+//! Drop stops the controller and hands it back to manageability firmware;
+//! DMA allocations live until reboot when the stop is not observed,
+//! including after a transmit timeout;
 //! a descriptor is never reused until the device writes its done bit.
 pub mod pch;
 
@@ -60,8 +62,13 @@ use crate::{
     },
     registers,
 };
-use alloc::{format, string::String, vec::Vec};
-use core::sync::atomic::{Ordering, fence};
+use alloc::{format, rc::Rc, string::String, vec::Vec};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{Ordering, fence},
+    task::Poll,
+};
+use stela_driver_base::stepped::{Allowance, Stepped, block_on};
 
 const VENDOR: u16 = 0x8086;
 const DEVICE: u16 = 0x10d3;
@@ -205,8 +212,26 @@ const TX_REPORT: u32 = 1 << 27;
 const MASTER_WAIT_US: u64 = 160_000;
 const RESET_WAIT_US: u64 = 20_000;
 const OWNERSHIP_WAIT_US: u64 = 200_000;
+/// The bounds a stop at drop waits within: it can run inside a processor's
+/// exit, which must end well inside half a second. Linux's own: 800 master
+/// polls 100 us apart, and MDIO ownership in ten 2 ms tries.
+const STOP_WAITS: Waits = Waits {
+    master_us: 80_000,
+    ownership_us: 20_000,
+    phy_configuration: false,
+};
+/// After receive and transmit are disabled, for frames in flight (Linux
+/// `e1000e_down`).
+const STOP_SETTLE_US: u64 = 10_000;
 const MDIC_WAIT_US: u64 = 20_000;
+/// A PHY reset's completion, polled every millisecond for at least this.
 const PHY_WAIT_US: u64 = 500_000;
+const PHY_POLL_US: u64 = 1_000;
+/// Each link poll's share of waiting for a PHY check or reset under way:
+/// up to this, plus the one piece that crosses it.
+const STEP_US: u64 = 40_000;
+/// The longest piece of one bounded wait in stepped work.
+const PIECE_US: u64 = 10_000;
 /// Linux runs the e1000e watchdog every two seconds.
 const WATCHDOG_US: u64 = 2_000_000;
 /// Copper inter-packet gaps: IPGT 8, IPGR1 8, IPGR2 6.
@@ -261,15 +286,248 @@ impl Timer for crate::timing::Timing {
     }
 }
 
-fn ownership(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> {
-    if clock.wait(OWNERSHIP_WAIT_US, || {
-        device.write(EXTCNF_CTRL, device.read(EXTCNF_CTRL) | MDIO_OWN);
-        device.read(EXTCNF_CTRL) & MDIO_OWN != 0
-    }) {
+/// How long a reset waits for the bus master and MDIO ownership, and
+/// whether it waits for the PHY's configuration after the NVM load.
+struct Waits {
+    master_us: u64,
+    ownership_us: u64,
+    phy_configuration: bool,
+}
+
+/// What an attachment and a reinitialization wait.
+const START_WAITS: Waits = Waits {
+    master_us: MASTER_WAIT_US,
+    ownership_us: OWNERSHIP_WAIT_US,
+    phy_configuration: true,
+};
+
+/// The reset and PHY sequences over one register interface and clock. Given
+/// a per-step wait share ([`Self::sliced`]), they run as stepped work: each
+/// bounded wait goes in pieces of at most [`PIECE_US`], and a step ends once
+/// its share is spent, keeping the same overall bounds.
+struct Hardware<'a, R, T> {
+    device: &'a R,
+    clock: &'a T,
+    slice: Option<&'a Allowance>,
+}
+
+impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
+    fn new(device: &'a R, clock: &'a T) -> Self {
+        Self {
+            device,
+            clock,
+            slice: None,
+        }
+    }
+
+    fn sliced(self, slice: &'a Allowance) -> Self {
+        Self {
+            slice: Some(slice),
+            ..self
+        }
+    }
+
+    /// At least `us` microseconds, in pieces when stepped.
+    async fn delay(&self, us: u64) -> Result<(), BlockError> {
+        let Some(slice) = self.slice else {
+            return self.clock.delay(us);
+        };
+        let mut left = us;
+        while left != 0 {
+            let piece = left.min(PIECE_US);
+            self.clock.delay(piece)?;
+            slice.spent(piece).await;
+            left -= piece;
+        }
         Ok(())
-    } else {
+    }
+
+    /// [`Timer::wait`], in pieces when stepped.
+    async fn wait(&self, us: u64, mut ready: impl FnMut() -> bool) -> bool {
+        let Some(slice) = self.slice else {
+            return self.clock.wait(us, ready);
+        };
+        let mut left = us;
+        loop {
+            let piece = left.min(PIECE_US);
+            if self.clock.wait(piece, &mut ready) {
+                return true;
+            }
+            left -= piece;
+            if left == 0 {
+                return false;
+            }
+            slice.spent(piece).await;
+        }
+    }
+
+    async fn ownership(&self, wait_us: u64) -> Result<(), BlockError> {
+        let device = self.device;
+        if self
+            .wait(wait_us, || {
+                device.write(EXTCNF_CTRL, device.read(EXTCNF_CTRL) | MDIO_OWN);
+                device.read(EXTCNF_CTRL) & MDIO_OWN != 0
+            })
+            .await
+        {
+            Ok(())
+        } else {
+            release(device);
+            Err(BlockError::Timeout)
+        }
+    }
+
+    async fn reset(&self, waits: &Waits) -> Result<(), BlockError> {
+        let device = self.device;
+        device.write(IMC, u32::MAX);
+        device.write(RCTL, 0);
+        device.write(TCTL, device.read(TCTL) & !TCTL_EN);
+        device.write(CTRL, device.read(CTRL) | CTRL_MASTER_DISABLE);
+        if !self
+            .wait(waits.master_us, || device.read(STATUS) & STATUS_MASTER == 0)
+            .await
+        {
+            return Err(BlockError::Timeout);
+        }
+        device.read(STATUS); // flush posted PCIe writes before the settle time
+        self.delay(MASTER_SETTLE_US).await?;
+        self.ownership(waits.ownership_us).await?;
+        device.write(CTRL, device.read(CTRL) | CTRL_RST);
+        let reset_done = self
+            .wait(RESET_WAIT_US, || device.read(CTRL) & CTRL_RST == 0)
+            .await;
         release(device);
-        Err(BlockError::Timeout)
+        if !reset_done
+            || !self
+                .wait(RESET_WAIT_US, || device.read(EECD) & EECD_AUTO_RD != 0)
+                .await
+        {
+            return Err(BlockError::Timeout);
+        }
+        if waits.phy_configuration {
+            self.delay(PHY_CONFIGURATION_US).await?;
+        }
+        device.write(IMC, u32::MAX);
+        device.read(ICR);
+        Ok(())
+    }
+
+    /// Linux `e1000e_down`'s register sequence: receive, then transmit, off,
+    /// 10 ms for frames in flight, then `e1000_reset_hw_82571`'s bus master
+    /// drain and MAC reset. Only a completed reset proves the controller
+    /// writes no ring. Every wait fits a processor's exit ([`STOP_WAITS`]);
+    /// the PHY is not waited for, as nothing configures it after a stop.
+    async fn stop(&self) -> Result<(), BlockError> {
+        let device = self.device;
+        device.write(RCTL, device.read(RCTL) & !RCTL_EN);
+        device.write(TCTL, device.read(TCTL) & !TCTL_EN);
+        device.read(STATUS);
+        self.delay(STOP_SETTLE_US).await?;
+        self.reset(&STOP_WAITS).await
+    }
+
+    async fn mdic(&self, register: u16, data: Option<u16>) -> Result<u16, BlockError> {
+        let device = self.device;
+        let command = MDIC_PHY
+            | (u32::from(register) << 16)
+            | data.map_or(MDIC_READ, |data| MDIC_WRITE | u32::from(data));
+        device.write(MDIC, command);
+        if !self
+            .wait(MDIC_WAIT_US, || device.read(MDIC) & MDIC_READY != 0)
+            .await
+        {
+            return Err(BlockError::Timeout);
+        }
+        let result = device.read(MDIC);
+        if result & MDIC_ERROR != 0 || result & MDIC_REGISTER != command & MDIC_REGISTER {
+            return Err(BlockError::Device { status: result });
+        }
+        Ok(result as u16)
+    }
+
+    async fn reset_phy(&self) -> Result<(), BlockError> {
+        let control = self.mdic(PHY_CONTROL, None).await?;
+        self.mdic(PHY_CONTROL, Some(control | PHY_RESET)).await?;
+        // Each poll is an MDIO read with its own bounded wait, so the polls
+        // are counted delays rather than one wait.
+        let mut waited = 0;
+        loop {
+            match self.mdic(PHY_CONTROL, None).await {
+                Ok(value) if value & PHY_RESET != 0 => {}
+                last => return last.map(|_| ()),
+            }
+            if waited >= PHY_WAIT_US {
+                return Err(BlockError::Timeout);
+            }
+            self.delay(PHY_POLL_US).await?;
+            waited += PHY_POLL_US;
+        }
+    }
+
+    async fn configure_phy(&self) -> Result<(), BlockError> {
+        self.ownership(OWNERSHIP_WAIT_US).await?;
+        let result = self.configure_owned_phy().await;
+        release(self.device);
+        result
+    }
+
+    async fn configure_owned_phy(&self) -> Result<(), BlockError> {
+        self.mdic(PHY_PAGE, Some(0)).await?;
+        let id = u32::from(self.mdic(PHY_ID1, None).await?) << 16
+            | u32::from(self.mdic(PHY_ID2, None).await?);
+        if id != PHY_BM_REV2 {
+            return Err(BlockError::Unsupported("82574L with an unknown PHY"));
+        }
+        let mut specific = self.mdic(PHY_SPECIFIC, None).await?;
+        specific = (specific | PHY_AUTO_MDIX) & !PHY_POLARITY_DISABLE;
+        self.mdic(PHY_SPECIFIC, Some(specific & !PHY_DOWNSHIFT))
+            .await?;
+        self.reset_phy().await?;
+        self.mdic(PHY_SPECIFIC, Some(specific | PHY_DOWNSHIFT))
+            .await?;
+        self.mdic(PHY_BIAS1, Some(PHY_BIAS1_VALUE)).await?;
+        self.mdic(PHY_BIAS2, Some(PHY_BIAS2_VALUE)).await?;
+        self.reset_phy().await?;
+        self.mdic(PHY_ADVERTISE, Some(PHY_ADVERTISE_10_100)).await?;
+        let gigabit = self.mdic(PHY_GIGABIT, None).await?;
+        self.mdic(
+            PHY_GIGABIT,
+            Some((gigabit & !PHY_GIGABIT_FIELDS) | PHY_GIGABIT_FULL),
+        )
+        .await?;
+        let control = self.mdic(PHY_CONTROL, None).await?;
+        self.mdic(
+            PHY_CONTROL,
+            Some(
+                (control & !(PHY_RESET | PHY_LOOPBACK | PHY_POWERDOWN | PHY_ISOLATE))
+                    | PHY_AUTONEG
+                    | PHY_RESTART,
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Whether the BM PHY has hung: its receive error counter and
+    /// 1000BASE-T idle error count both saturated (Linux
+    /// `e1000_check_phy_82574`). A failed MDIO read is not a hang.
+    async fn phy_hung(&self) -> bool {
+        if self.ownership(OWNERSHIP_WAIT_US).await.is_err() {
+            return false;
+        }
+        let hung = self.mdic(PHY_RECEIVE_ERRORS, None).await == Ok(u16::MAX)
+            && self
+                .mdic(PHY_GIGABIT_STATUS, None)
+                .await
+                .is_ok_and(|status| status & PHY_IDLE_ERRORS == PHY_IDLE_ERRORS);
+        release(self.device);
+        hung
+    }
+
+    /// Linux's reset task's hardware part: the MAC reset, then the PHY.
+    async fn reinitialize(&self) -> Result<(), BlockError> {
+        self.reset(&START_WAITS).await?;
+        self.configure_phy().await
     }
 }
 
@@ -278,104 +536,22 @@ fn release(device: &impl Registers) {
 }
 
 fn reset(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> {
-    device.write(IMC, u32::MAX);
-    device.write(RCTL, 0);
-    device.write(TCTL, device.read(TCTL) & !TCTL_EN);
-    device.write(CTRL, device.read(CTRL) | CTRL_MASTER_DISABLE);
-    if !clock.wait(MASTER_WAIT_US, || device.read(STATUS) & STATUS_MASTER == 0) {
-        return Err(BlockError::Timeout);
-    }
-    device.read(STATUS); // flush posted PCIe writes before the settle time
-    clock.delay(MASTER_SETTLE_US)?;
-    ownership(device, clock)?;
-    device.write(CTRL, device.read(CTRL) | CTRL_RST);
-    let reset_done = clock.wait(RESET_WAIT_US, || device.read(CTRL) & CTRL_RST == 0);
-    release(device);
-    if !reset_done || !clock.wait(RESET_WAIT_US, || device.read(EECD) & EECD_AUTO_RD != 0) {
-        return Err(BlockError::Timeout);
-    }
-    clock.delay(PHY_CONFIGURATION_US)?;
-    device.write(IMC, u32::MAX);
-    device.read(ICR);
-    Ok(())
+    block_on(Hardware::new(device, clock).reset(&START_WAITS))
 }
 
-fn mdic(
-    device: &impl Registers,
-    clock: &impl Timer,
-    register: u16,
-    data: Option<u16>,
-) -> Result<u16, BlockError> {
-    let command = MDIC_PHY
-        | (u32::from(register) << 16)
-        | data.map_or(MDIC_READ, |data| MDIC_WRITE | u32::from(data));
-    device.write(MDIC, command);
-    if !clock.wait(MDIC_WAIT_US, || device.read(MDIC) & MDIC_READY != 0) {
-        return Err(BlockError::Timeout);
-    }
-    let result = device.read(MDIC);
-    if result & MDIC_ERROR != 0 || result & MDIC_REGISTER != command & MDIC_REGISTER {
-        return Err(BlockError::Device { status: result });
-    }
-    Ok(result as u16)
+/// [`Hardware::stop`], run to completion.
+fn stop(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> {
+    block_on(Hardware::new(device, clock).stop())
 }
 
-fn reset_phy(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> {
-    let control = mdic(device, clock, PHY_CONTROL, None)?;
-    mdic(device, clock, PHY_CONTROL, Some(control | PHY_RESET))?;
-    let mut last = Ok(0);
-    if !clock.wait(PHY_WAIT_US, || {
-        last = mdic(device, clock, PHY_CONTROL, None);
-        match &last {
-            Ok(value) => value & PHY_RESET == 0,
-            Err(_) => true,
-        }
-    }) {
-        return Err(BlockError::Timeout);
-    }
-    last.map(|_| ())
+/// `e1000e_release_hw_control`: hand the controller back to manageability
+/// firmware once the driver no longer owns it.
+fn release_control(device: &impl Registers) {
+    device.write(CTRL_EXT, device.read(CTRL_EXT) & !CTRL_EXT_DRIVER);
 }
 
 fn configure_phy(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> {
-    ownership(device, clock)?;
-    let result = (|| {
-        mdic(device, clock, PHY_PAGE, Some(0))?;
-        let id = u32::from(mdic(device, clock, PHY_ID1, None)?) << 16
-            | u32::from(mdic(device, clock, PHY_ID2, None)?);
-        if id != PHY_BM_REV2 {
-            return Err(BlockError::Unsupported("82574L with an unknown PHY"));
-        }
-        let mut specific = mdic(device, clock, PHY_SPECIFIC, None)?;
-        specific = (specific | PHY_AUTO_MDIX) & !PHY_POLARITY_DISABLE;
-        mdic(device, clock, PHY_SPECIFIC, Some(specific & !PHY_DOWNSHIFT))?;
-        reset_phy(device, clock)?;
-        mdic(device, clock, PHY_SPECIFIC, Some(specific | PHY_DOWNSHIFT))?;
-        mdic(device, clock, PHY_BIAS1, Some(PHY_BIAS1_VALUE))?;
-        mdic(device, clock, PHY_BIAS2, Some(PHY_BIAS2_VALUE))?;
-        reset_phy(device, clock)?;
-        mdic(device, clock, PHY_ADVERTISE, Some(PHY_ADVERTISE_10_100))?;
-        let gigabit = mdic(device, clock, PHY_GIGABIT, None)?;
-        mdic(
-            device,
-            clock,
-            PHY_GIGABIT,
-            Some((gigabit & !PHY_GIGABIT_FIELDS) | PHY_GIGABIT_FULL),
-        )?;
-        let control = mdic(device, clock, PHY_CONTROL, None)?;
-        mdic(
-            device,
-            clock,
-            PHY_CONTROL,
-            Some(
-                (control & !(PHY_RESET | PHY_LOOPBACK | PHY_POWERDOWN | PHY_ISOLATE))
-                    | PHY_AUTONEG
-                    | PHY_RESTART,
-            ),
-        )?;
-        Ok(())
-    })();
-    release(device);
-    result
+    block_on(Hardware::new(device, clock).configure_phy())
 }
 
 fn station(low: u32, high: u32) -> Option<Mac> {
@@ -385,26 +561,17 @@ fn station(low: u32, high: u32) -> Option<Mac> {
     (high & RAH_VALID != 0 && mac.0 != [0; 6] && !mac.is_multicast()).then_some(mac)
 }
 
-/// Whether the BM PHY has hung: its receive error counter and 1000BASE-T
-/// idle error count both saturated (Linux `e1000_check_phy_82574`). A
-/// failed MDIO read is not a hang.
+#[cfg(test)]
 fn phy_hung(device: &impl Registers, clock: &impl Timer) -> bool {
-    if ownership(device, clock).is_err() {
-        return false;
-    }
-    let hung = mdic(device, clock, PHY_RECEIVE_ERRORS, None) == Ok(u16::MAX)
-        && mdic(device, clock, PHY_GIGABIT_STATUS, None)
-            .is_ok_and(|status| status & PHY_IDLE_ERRORS == PHY_IDLE_ERRORS);
-    release(device);
-    hung
+    block_on(Hardware::new(device, clock).phy_hung())
 }
 
 /// The 82574L owns these buffers until reboot. Polling never waits for a
 /// cable to be connected; [`Link::carrier`] reports autonegotiation's result.
 pub struct E1000e {
     device: Mmio,
-    receive: Ring,
-    transmit: Ring,
+    receive: ManuallyDrop<Ring>,
+    transmit: ManuallyDrop<Ring>,
     dropping_receive: bool,
     mac: Mac,
     clock: crate::timing::Timing,
@@ -418,6 +585,23 @@ pub struct E1000e {
     pub location: String,
     /// Whether MSI-X vector 0 sends the handoff's completion signal.
     signalled: bool,
+    /// The watchdog's PHY check or reset under way.
+    work: Option<Work>,
+}
+
+/// What a watchdog job found.
+enum Outcome {
+    Hung(bool),
+    Reinitialized(Result<(), BlockError>),
+}
+
+/// Linux's watchdog PHY check or reset task, run a step per link poll so no
+/// poll holds the processor for its waits (MDIO ownership, the PHY resets).
+struct Work {
+    task: Stepped<'static, Outcome>,
+    slice: Rc<Allowance>,
+    /// A reset: the rings are untouched and the carrier down until it ends.
+    resetting: bool,
 }
 
 impl E1000e {
@@ -473,8 +657,8 @@ impl E1000e {
         configure_phy(&device, &clock)?;
         let mut net = Self {
             device,
-            receive: Ring::new(dma)?,
-            transmit: Ring::new(dma)?,
+            receive: ManuallyDrop::new(Ring::new(dma)?),
+            transmit: ManuallyDrop::new(Ring::new(dma)?),
             dropping_receive: false,
             mac,
             clock,
@@ -484,6 +668,7 @@ impl E1000e {
             timing_failure: None,
             location: format!("{} Intel 82574L", function.address),
             signalled,
+            work: None,
         };
         net.start();
         Ok(net)
@@ -491,10 +676,18 @@ impl E1000e {
 
     /// Linux's watchdog, driven by link polls: discard transmit work the
     /// link took down with it, and reinitialize after two PHY hang reports
-    /// in a row. Returns the carrier.
+    /// in a row. Returns the carrier, down while a reset runs.
     fn watchdog(&mut self) -> Result<bool, LinkError> {
         if let Some(error) = &self.timing_failure {
             return Err(LinkError::Pci(error.clone()));
+        }
+        if let Some(outcome) = self.advance()
+            && self.finish(outcome)?
+        {
+            return Ok(false);
+        }
+        if self.resetting() {
+            return Ok(false);
         }
         let status = self.device.read32(STATUS);
         self.faulted |= status == u32::MAX;
@@ -509,19 +702,74 @@ impl E1000e {
             self.flush_transmit();
         }
         let now = self.clock.now_us();
-        if now >= self.watchdog_at {
+        if self.work.is_none() && now >= self.watchdog_at {
             self.watchdog_at = now.saturating_add(WATCHDOG_US);
-            self.phy_hangs = match phy_hung(&self.device, &self.clock) {
-                true => self.phy_hangs + 1,
-                false => 0,
-            };
-            if self.phy_hangs > 1 {
-                self.phy_hangs = 0;
-                self.reinitialize()?;
+            if let Some(outcome) = self.begin(false)
+                && self.finish(outcome)?
+            {
                 return Ok(false);
             }
         }
         Ok(carrier)
+    }
+
+    /// Start a watchdog job and take its first step: its outcome if that
+    /// completed it, otherwise `None` with the rest left for later polls.
+    fn begin(&mut self, reinitialize: bool) -> Option<Outcome> {
+        let (device, clock) = (self.device, self.clock.clone());
+        let slice = Rc::new(Allowance::new(STEP_US));
+        let shared = slice.clone();
+        let mut task = Stepped::new(async move {
+            let hardware = Hardware::new(&device, &clock).sliced(&shared);
+            match reinitialize {
+                true => Outcome::Reinitialized(hardware.reinitialize().await),
+                false => Outcome::Hung(hardware.phy_hung().await),
+            }
+        });
+        match task.step() {
+            Poll::Ready(outcome) => Some(outcome),
+            Poll::Pending => {
+                self.work = Some(Work {
+                    task,
+                    slice,
+                    resetting: reinitialize,
+                });
+                None
+            }
+        }
+    }
+
+    /// One step of the job under way, if any: its outcome once it ends.
+    fn advance(&mut self) -> Option<Outcome> {
+        let work = self.work.as_mut()?;
+        work.slice.refill();
+        let Poll::Ready(outcome) = work.task.step() else {
+            return None;
+        };
+        self.work = None;
+        Some(outcome)
+    }
+
+    fn resetting(&self) -> bool {
+        self.work.as_ref().is_some_and(|work| work.resetting)
+    }
+
+    /// Act on a finished job: count PHY hang reports, starting a reset on
+    /// the second in a row, or bring the rings back after a reset. Whether
+    /// a reset started or ended.
+    fn finish(&mut self, outcome: Outcome) -> Result<bool, LinkError> {
+        match outcome {
+            Outcome::Hung(hung) => {
+                self.phy_hangs = if hung { self.phy_hangs + 1 } else { 0 };
+                if self.phy_hangs > 1 {
+                    self.phy_hangs = 0;
+                    self.reinitialize()?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Outcome::Reinitialized(result) => self.reinitialized(result).map(|()| true),
+        }
     }
 
     /// Stop transmit, discard every queued descriptor and start again
@@ -535,8 +783,20 @@ impl E1000e {
         self.device.write32(TCTL, control);
     }
 
-    /// Linux's reset task: reset the MAC and PHY and bring the rings back.
+    /// Linux's reset task: reset the MAC and PHY, then bring the rings
+    /// back. It runs in steps ([`Work`]): this call takes the first.
     fn reinitialize(&mut self) -> Result<(), LinkError> {
+        if let Some(error) = &self.timing_failure {
+            return Err(LinkError::Pci(error.clone()));
+        }
+        match self.begin(true) {
+            Some(outcome) => self.finish(outcome).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    /// The rings back after a completed reset, or its failure reported.
+    fn reinitialized(&mut self, prepared: Result<(), BlockError>) -> Result<(), LinkError> {
         let failed = |error: BlockError| {
             if matches!(error, BlockError::PciPower(_)) {
                 return LinkError::Pci(error);
@@ -546,11 +806,6 @@ impl E1000e {
                 self.location
             ))
         };
-        if let Some(error) = &self.timing_failure {
-            return Err(LinkError::Pci(error.clone()));
-        }
-        let prepared = reset(&self.device, &self.clock)
-            .and_then(|()| configure_phy(&self.device, &self.clock));
         if let Err(error) = prepared {
             if matches!(error, BlockError::PciPower(_)) {
                 self.timing_failure = Some(error.clone());
@@ -659,6 +914,32 @@ fn transmitted(descriptors: &DmaBuffer, base: usize) -> bool {
     descriptors.read::<u8>(base + 12) & TX_DONE != 0
 }
 
+impl Drop for E1000e {
+    /// Linux `e1000e_down` then `e1000e_release_hw_control`. The rings are
+    /// freed only once the controller verifiably stopped; otherwise they
+    /// stay allocated. A lost function, or one whose minimum delays
+    /// failed, gets no register access.
+    ///
+    /// This drives the controller's registers, so the owner drops it where
+    /// its MMIO window is mapped; anywhere else the first read faults.
+    fn drop(&mut self) {
+        // A PHY check or reset under way ends here; the stop resets the MAC.
+        self.work = None;
+        if self.faulted || self.timing_failure.is_some() || self.device.read32(STATUS) == u32::MAX {
+            return;
+        }
+        if stop(&self.device, &self.clock).is_ok() {
+            release_control(&self.device);
+            // SAFETY: the completed MAC reset stopped every descriptor and
+            // buffer access, and neither ring is used after this.
+            unsafe {
+                ManuallyDrop::drop(&mut self.receive);
+                ManuallyDrop::drop(&mut self.transmit);
+            }
+        }
+    }
+}
+
 impl Link for E1000e {
     fn mac(&self) -> Mac {
         self.mac
@@ -673,11 +954,8 @@ impl Link for E1000e {
         if !self.watchdog()? {
             return Err(LinkError::NoCarrier);
         }
-        if !self.transmit.free(self.clock.nominal(), transmitted) {
-            return Err(LinkError::Adapter(format!(
-                "{} transmit ring stalled",
-                self.location
-            )));
+        if !self.transmit.free(transmitted) {
+            return Err(LinkError::Busy);
         }
         let index = self.transmit.advance();
         let length = frame.len().max(MIN_FRAME);
@@ -722,6 +1000,14 @@ impl E1000e {
     ) -> Result<Option<T>, LinkError> {
         if let Some(error) = &self.timing_failure {
             return Err(LinkError::Pci(error.clone()));
+        }
+        if self.resetting() {
+            if let Some(outcome) = self.advance() {
+                self.finish(outcome)?;
+            }
+            if self.resetting() {
+                return Ok(None);
+            }
         }
         // Bound processing even if a device continually supplies bad frames.
         for _ in 0..DESCRIPTORS {

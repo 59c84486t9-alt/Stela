@@ -576,6 +576,17 @@ impl Snapshot {
     /// intended source image before sharing RAM or Stela metadata. Initial
     /// offline installation may establish this equality; TSC_ADJUST is separate.
     pub fn same_memory_types(&self, other: &Self) -> Result<(), CapabilityRefusal> {
+        use crate::memory_types::amd;
+        // What the installation writes of a register: all of it, but for
+        // the legacy hole's DRAM routing, which stays each processor's own.
+        let raw = self.amd_fixed_raw;
+        let installed = move |msr: &Msr| {
+            if raw && amd::legacy_hole(msr.index) {
+                (msr.index, msr.value & !amd::FIXED_ROUTING)
+            } else {
+                (msr.index, msr.value)
+            }
+        };
         fn memory(index: u32) -> bool {
             index == 0xfe
                 || index == 0x2ff
@@ -598,7 +609,8 @@ impl Snapshot {
             || !left
                 .iter()
                 .filter(|msr| memory(msr.index))
-                .eq(right.iter().filter(|msr| memory(msr.index)))
+                .map(installed)
+                .eq(right.iter().filter(|msr| memory(msr.index)).map(installed))
             || !left.iter().any(|msr| msr.index == 0xfe)
             || !left.iter().any(|msr| msr.index == 0x2ff)
         {
@@ -619,6 +631,56 @@ pub enum Refusal {
     DuplicateThreadLocation,
     MixedTopologyVersions,
     InvalidAssignment,
+}
+
+/// Whether two listed processors share one package, core and thread while
+/// every APIC ID is distinct: firmware that fills no usable coordinates.
+pub fn locations_collide(processors: &[Processor]) -> bool {
+    bootstrap_index(processors) == Err(Refusal::DuplicateThreadLocation)
+}
+
+/// The two APIC ID shifts [`place_by_apic_id`] takes, for an AMD processor
+/// without CPUID leaf 0xb, such as family 17h models 00h to 0fh, from
+/// leaves 8000_0008h (ECX) and 8000_001Eh (EBX) as Linux's
+/// `topology_amd.c` reads them: the threads of a core give the thread bits,
+/// and ApicIdCoreIdSize, or the processor count where it is zero, the bits
+/// of thread and core together.
+pub fn amd_apic_id_shifts(size_ecx: u32, unit_ebx: u32) -> (u32, u32) {
+    let bits = |count: u32| count.next_power_of_two().trailing_zeros();
+    let thread = bits((unit_ebx >> 8 & 0xff) + 1);
+    let core = match size_ecx >> 12 & 0xf {
+        0 => bits((size_ecx & 0xff) + 1),
+        size => size,
+    };
+    (thread, core.max(thread))
+}
+
+/// Place every processor by its APIC ID, as Linux does, for firmware whose
+/// coordinates [`locations_collide`]. `shifts` are CPUID leaf 0xb's two
+/// level shifts from the bootstrap processor: the bits of an APIC ID that
+/// name the thread, and those that name the thread and the core. Without
+/// them every APIC ID is a core of its own. The records become the
+/// three-level kind, which these coordinates are.
+pub fn place_by_apic_id(processors: &mut [Processor], shifts: Option<(u32, u32)>) {
+    let shifts = shifts.filter(|&(thread, core)| thread <= core && core < 32);
+    for processor in processors {
+        let id = processor.apic_id;
+        let (package, core, thread) = match shifts {
+            Some((thread, core)) => (
+                id >> core,
+                (id >> thread) & ((1 << (core - thread)) - 1),
+                id & ((1 << thread) - 1),
+            ),
+            None => (0, id, 0),
+        };
+        processor.location = Location {
+            package: package as u32,
+            core: core as u32,
+            ..Location::default()
+        };
+        processor.thread = thread as u32;
+        processor.topology_version = 1;
+    }
 }
 
 fn bootstrap_index(processors: &[Processor]) -> Result<usize, Refusal> {

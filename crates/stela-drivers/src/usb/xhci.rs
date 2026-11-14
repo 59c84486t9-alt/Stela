@@ -61,7 +61,7 @@ use crate::{
 use alloc::{boxed::Box, format, rc::Rc, string::String, vec, vec::Vec};
 use core::{
     cell::RefCell,
-    sync::atomic::{AtomicU64, Ordering, fence},
+    sync::atomic::{Ordering, fence},
 };
 
 mod bind;
@@ -244,12 +244,28 @@ pub fn explain(error: &BlockError) -> String {
         17 => "parameter error",
         19 => "context state error",
         20 => "no ping response",
+        21 => "event ring full",
         22 => "incompatible device",
         26 => "stopped",
         36 => "split transaction error",
         _ => "error",
     };
     format!("{name} (xHCI completion code {status})")
+}
+
+/// The log line for a device or unit at `location` that did not start with
+/// `error`. A reader with no card or disc in it has not failed.
+pub fn failure_line(location: &str, error: &BlockError) -> String {
+    use crate::block::Sense;
+    match error {
+        BlockError::Sense(sense)
+            if matches!(sense.key, Sense::NOT_READY | Sense::UNIT_ATTENTION)
+                && sense.asc == Sense::MEDIUM_NOT_PRESENT =>
+        {
+            format!("USB EMPTY {location}: no card or disc in the reader\n")
+        }
+        _ => format!("USB FAILED {location}: {}\n", explain(error)),
+    }
 }
 
 /// Port speed IDs (the default Protocol Speed IDs, xHCI 7.2.2.1.1).
@@ -278,7 +294,9 @@ const ABORT_US: u64 = 5_000_000;
 const RING_STOP_US: u64 = 2_000_000;
 const CONTROL_US: u64 = 5_000_000;
 const PORT_RESET_US: u64 = 500_000;
-const RESET_RECOVERY_US: u64 = 10_000;
+/// Linux `hub_port_reset`: 10 ms of reset recovery and 40 ms more, as the
+/// hub path here waits.
+const RESET_RECOVERY_US: u64 = 50_000;
 /// A newly powered port's settle time before its first sample.
 const PORT_POWER_US: u64 = 20_000;
 /// Linux `hub_port_debounce`: a connection counts once it stays the same
@@ -293,7 +311,8 @@ const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
 const CONNECT_SETTLE_US: u64 = 500_000;
 /// Linux `PORT_INIT_TRIES`: resets and enumerations a port gets.
 const PORT_INIT_TRIES: usize = 4;
-const ADDRESS_RECOVERY_US: u64 = 2_000;
+/// Linux `hub_port_init`: `msleep(10)` after SET_ADDRESS.
+const ADDRESS_RECOVERY_US: u64 = 10_000;
 
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
@@ -313,7 +332,6 @@ pub(crate) const LANGUAGE_EN_US: u16 = 0x0409;
 
 /// Register access, so the controller logic runs against a model in tests.
 pub trait Registers {
-    #[track_caller]
     fn read32(&mut self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
     /// A 64-bit register, as two 32-bit writes, low half first (5.1).
@@ -331,90 +349,10 @@ pub trait Registers {
 struct Bar {
     mmio: Mmio,
     bytes: usize,
-    address: crate::bus::pci::Address,
-    physical_base: u64,
-}
-
-/// Last native xHCI BAR read, retained for fatal page-fault reports.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DiagnosticRead {
-    pub segment: u64,
-    pub bus: u64,
-    pub device: u64,
-    pub function: u64,
-    pub physical_base: u64,
-    pub cpu_address: u64,
-    pub offset: u64,
-    /// CR3 in effect when this BAR read was issued.
-    pub cr3: u64,
-    /// Loader root supplied by the boot engine for this diagnostic run.
-    pub loader_root: u64,
-    /// `xhci.rs` source line that requested this read.
-    pub caller_line: u64,
-    /// Number of native BAR reads issued since boot.
-    pub reads: u64,
-}
-
-static DIAGNOSTIC_SEGMENT: AtomicU64 = AtomicU64::new(u64::MAX);
-static DIAGNOSTIC_BUS: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_DEVICE: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_FUNCTION: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_BAR: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_CPU: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_OFFSET: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_CR3: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_LOADER_ROOT: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_CALLER_LINE: AtomicU64 = AtomicU64::new(0);
-static DIAGNOSTIC_READS: AtomicU64 = AtomicU64::new(0);
-
-pub fn diagnostic_read() -> Option<DiagnosticRead> {
-    let segment = DIAGNOSTIC_SEGMENT.load(Ordering::Relaxed);
-    (segment != u64::MAX).then(|| DiagnosticRead {
-        segment,
-        bus: DIAGNOSTIC_BUS.load(Ordering::Relaxed),
-        device: DIAGNOSTIC_DEVICE.load(Ordering::Relaxed),
-        function: DIAGNOSTIC_FUNCTION.load(Ordering::Relaxed),
-        physical_base: DIAGNOSTIC_BAR.load(Ordering::Relaxed),
-        cpu_address: DIAGNOSTIC_CPU.load(Ordering::Relaxed),
-        offset: DIAGNOSTIC_OFFSET.load(Ordering::Relaxed),
-        cr3: DIAGNOSTIC_CR3.load(Ordering::Relaxed),
-        loader_root: DIAGNOSTIC_LOADER_ROOT.load(Ordering::Relaxed),
-        caller_line: DIAGNOSTIC_CALLER_LINE.load(Ordering::Relaxed),
-        reads: DIAGNOSTIC_READS.load(Ordering::Relaxed),
-    })
-}
-
-/// Record the loader root whose identity mapping contains the native device BARs.
-pub fn diagnostic_loader_root(root: u64) {
-    DIAGNOSTIC_LOADER_ROOT.store(root, Ordering::Relaxed);
 }
 
 impl Registers for Bar {
-    #[track_caller]
     fn read32(&mut self, offset: usize) -> u32 {
-        let current_cr3: u64;
-        // SAFETY: reading the current page-table root has no side effects.
-        unsafe {
-            core::arch::asm!(
-                "mov {}, cr3",
-                out(reg) current_cr3,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-        let address = self.mmio.address(offset);
-        DIAGNOSTIC_SEGMENT.store(u64::from(self.address.segment), Ordering::Relaxed);
-        DIAGNOSTIC_BUS.store(u64::from(self.address.bus), Ordering::Relaxed);
-        DIAGNOSTIC_DEVICE.store(u64::from(self.address.device), Ordering::Relaxed);
-        DIAGNOSTIC_FUNCTION.store(u64::from(self.address.function), Ordering::Relaxed);
-        DIAGNOSTIC_BAR.store(self.physical_base, Ordering::Relaxed);
-        DIAGNOSTIC_CPU.store(address as u64, Ordering::Relaxed);
-        DIAGNOSTIC_OFFSET.store(offset as u64, Ordering::Relaxed);
-        DIAGNOSTIC_CR3.store(current_cr3, Ordering::Relaxed);
-        DIAGNOSTIC_CALLER_LINE.store(
-            u64::from(core::panic::Location::caller().line()),
-            Ordering::Relaxed,
-        );
-        DIAGNOSTIC_READS.fetch_add(1, Ordering::Relaxed);
         self.mmio.read32(offset)
     }
     fn write32(&mut self, offset: usize, value: u32) {
@@ -541,9 +479,15 @@ pub struct Controller {
     pending: Vec<Event>,
     /// USBSTS once the controller reported a fatal error.
     error: Option<u32>,
+    /// When the root ports were last seen powered after the controller's
+    /// reset: the connect settle time runs from here, so a controller whose
+    /// devices are enumerated later has already spent it.
+    settle_from: Option<u64>,
     /// An unacknowledged command still owns its ring entry. Never wrap/reuse
     /// that entry or mutate command-dependent DMA without a controller reset.
     command_poisoned: bool,
+    /// What the controller was doing when it first stopped answering.
+    death: Option<Death>,
     /// Linux CMD_RING_STATE_ABORTED: an abort got no Command Ring Stopped
     /// event, so the ring is not rung until a command times out.
     command_ring_stopped: bool,
@@ -842,7 +786,9 @@ impl Controller {
             slots,
             pending: Vec::new(),
             error: None,
+            settle_from: None,
             command_poisoned: false,
+            death: None,
             command_ring_stopped: false,
             unpublished: 0,
             signalled: false,
@@ -1108,6 +1054,23 @@ impl Controller {
         let result = self.minimum.wait_us(microseconds);
         self.minimum_status(result)
     }
+    /// Start a minimum interval the caller polls with
+    /// [`Self::minimum_elapsed`]; `None` where the timer keeps none.
+    pub(in crate::usb) fn begin_minimum(
+        &mut self,
+        microseconds: u64,
+    ) -> Result<Option<Box<dyn crate::bus::pci::power::Interval>>, BlockError> {
+        let result = self.minimum.begin_interval(microseconds);
+        self.minimum_status(result)
+    }
+    /// Whether a [`Self::begin_minimum`] interval has passed; never waits.
+    pub(in crate::usb) fn minimum_elapsed(
+        &mut self,
+        interval: &dyn crate::bus::pci::power::Interval,
+    ) -> Result<bool, BlockError> {
+        let result = self.minimum.interval_elapsed(interval);
+        self.minimum_status(result)
+    }
 
     /// Before any new command-dependent DMA mutation or doorbell. A late
     /// completion cannot establish a new command generation or undo poison.
@@ -1149,6 +1112,20 @@ impl Controller {
 
     /// Linux xhci_halt and xhci_hc_died: no further command or transfer.
     fn died(&mut self) {
+        if self.death.is_none() {
+            let (command, phase, restarts) = self
+                .outstanding
+                .as_ref()
+                .map_or((0, "none", 0), command::Outstanding::state);
+            self.death = Some(Death {
+                command,
+                phase,
+                restarts,
+                usbcmd: self.registers.read32(self.operational + USBCMD),
+                usbsts: self.registers.read32(self.operational + USBSTS),
+                crcr: self.registers.read32(self.operational + CRCR),
+            });
+        }
         self.command_poisoned = true;
         self.hardware = hardware::State::Died;
         let _ = hardware::halt(&mut *self.registers, self.clock, self.operational, HALT_US);
@@ -1248,6 +1225,52 @@ pub struct Found {
     /// How long each root port took to debounce, reset and enumerate.
     pub probes: Vec<PortProbe>,
 }
+/// What an xHCI controller was doing when it stopped answering commands:
+/// the command left unanswered and the registers read before the halt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Death {
+    /// The unanswered command TRB's control word: type in bits 10 to 15,
+    /// endpoint in 16 to 20, slot in 24 to 31. Zero when none was out.
+    pub command: u32,
+    /// How far the command's timeout handling had gone.
+    pub phase: &'static str,
+    /// Times the stopped command ring was restarted for it.
+    pub restarts: u8,
+    pub usbcmd: u32,
+    pub usbsts: u32,
+    /// CRCR's low half, of which only Command Ring Running reads back.
+    pub crcr: u32,
+}
+
+impl core::fmt::Display for Death {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "unanswered command type {} slot {} endpoint {} ({}, {} ring restarts), \
+             USBCMD {:#x} USBSTS {:#x} CRCR {:#x}",
+            self.command >> 10 & 0x3f,
+            self.command >> 24,
+            self.command >> 16 & 0x1f,
+            self.phase,
+            self.restarts,
+            self.usbcmd,
+            self.usbsts,
+            self.crcr
+        )
+    }
+}
+
+impl Found {
+    /// What the controller that died while its devices started was doing.
+    pub fn controller_death(&self) -> Option<Death> {
+        self.hosts.iter().find_map(Host::death)
+    }
+
+    /// Whether the controller died while its devices started.
+    pub fn controller_died(&self) -> bool {
+        self.hosts.iter().any(Host::died)
+    }
+}
 
 /// Starts the controller at `function`, enumerates its devices and binds
 /// the class drivers.
@@ -1273,6 +1296,20 @@ pub fn attach_with_provider(
         .map_err(renesas::Error::transport)
 }
 
+/// [`attach_with_provider`] up to the running controller with its root
+/// ports powered, for a caller that starts other devices while the ports
+/// settle and calls [`Started::finish`] afterwards.
+pub fn begin_with_provider(
+    function: &mut Function,
+    handoff: &Handoff,
+    dma: &mut dyn DmaAllocator,
+    firmware: &dyn crate::firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Started, BlockError> {
+    begin_with_firmware_diagnostics(function, handoff, dma, firmware, minimum)
+        .map_err(renesas::Error::transport)
+}
+
 /// Attach with the original exact-target firmware and controller errors. The
 /// compatibility entry point keeps its BlockError signature; callers that
 /// need provider diagnostics can use this additive boundary directly.
@@ -1283,6 +1320,21 @@ pub fn attach_with_firmware_diagnostics(
     firmware: &dyn crate::firmware::Provider,
     minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, renesas::Error> {
+    Ok(
+        begin_with_firmware_diagnostics(function, handoff, dma, firmware, minimum)?
+            .finish(dma, firmware),
+    )
+}
+
+/// [`attach_with_firmware_diagnostics`] up to the running controller with
+/// its root ports powered: [`Started::finish`] enumerates its devices.
+pub fn begin_with_firmware_diagnostics(
+    function: &mut Function,
+    handoff: &Handoff,
+    dma: &mut dyn DmaAllocator,
+    firmware: &dyn crate::firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Started, renesas::Error> {
     let minimum = Minimum::retain(minimum);
     minimum.check()?;
     clock_ready(handoff.clock)?;
@@ -1302,10 +1354,6 @@ pub fn attach_with_firmware_diagnostics(
     let registers = Bar {
         mmio: registers(handoff, bars[0], 0, bytes)?,
         bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
-        address: function.address,
-        physical_base: bars[0]
-            .and_then(|bar| bar.memory())
-            .map_or(0, |range| range.start),
     };
     function.enable_polled()?;
     // xhci_try_enable_msi: MSI-X, otherwise MSI, for interrupter 0.
@@ -1318,23 +1366,29 @@ pub fn attach_with_firmware_diagnostics(
         "xhci {:04x}:{:02x}:{:02x}.{}",
         address.segment, address.bus, address.device, address.function
     );
-    let mut found = start_with_policies(
+    let mut controller = Controller::with_hardware_profile(
         Box::new(registers),
         handoff.clock,
         dma,
         location,
-        firmware,
         hardware::Policy {
             streams: stream_policy,
             dma: dma_profile,
             quirks,
         },
-        signalled,
         || quirks::after_reset(function, handoff.clock),
         minimum,
     )?;
-    found.controller_firmware = controller_firmware;
-    Ok(found)
+    if signalled {
+        controller.signal();
+    }
+    // Powered now, so the ports settle while the caller starts other
+    // devices; an error here is found again, and reported, by `finish`.
+    let _ = controller.power_roots();
+    Ok(Started {
+        controller,
+        controller_firmware,
+    })
 }
 
 /// Starts the controller behind `registers`, enumerates its devices and
@@ -1406,20 +1460,50 @@ fn start_with_policies(
     if signal {
         controller.signal();
     }
-    // The policy came from this same PCI function before BAR access,
-    // and applies only to the controller reset just completed above. No public
-    // raw-register caller can supply a guessed PCI identity or enable streams.
-    let mut found = Found::default();
-    let devices = controller.enumerate_timed(dma, &mut found.failures, &mut found.probes);
-    let shared: Shared = Rc::new(RefCell::new(controller));
-    for device in &devices {
-        bind_with_provider(&shared, device.clone(), dma, &mut found, firmware);
+    Ok(Started {
+        controller,
+        controller_firmware: None,
     }
-    found
-        .hosts
-        .push(Host::new(shared, &devices, dma, &mut found.failures));
-    found.devices = devices;
-    Ok(found)
+    .finish(dma, firmware))
+}
+
+/// A controller that is reset and running with its root ports powered,
+/// whose devices are not enumerated yet. Its ports' connect settle time
+/// runs from its start, so the wait overlaps whatever the caller does
+/// before [`Started::finish`], as Linux's hub threads settle in parallel.
+pub struct Started {
+    controller: Controller,
+    controller_firmware: Option<renesas::Receipt>,
+}
+
+impl Started {
+    /// Enumerate the controller's devices and bind the class drivers.
+    pub fn finish(
+        self,
+        dma: &mut dyn DmaAllocator,
+        firmware: &dyn crate::firmware::Provider,
+    ) -> Found {
+        let Self {
+            mut controller,
+            controller_firmware,
+        } = self;
+        // The policy came from this same PCI function before BAR access,
+        // and applies only to the controller reset just completed. No public
+        // raw-register caller can supply a guessed PCI identity or enable
+        // streams.
+        let mut found = Found::default();
+        let devices = controller.enumerate_timed(dma, &mut found.failures, &mut found.probes);
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        for device in &devices {
+            bind_with_provider(&shared, device.clone(), dma, &mut found, firmware);
+        }
+        found
+            .hosts
+            .push(Host::new(shared, &devices, dma, &mut found.failures));
+        found.devices = devices;
+        found.controller_firmware = controller_firmware;
+        found
+    }
 }
 
 #[cfg(test)]
@@ -1427,6 +1511,22 @@ mod tests {
     use super::model::*;
     use super::*;
     use crate::bus::dma::TestRegion;
+
+    #[test]
+    fn an_empty_reader_is_not_logged_as_a_failure() {
+        let sense = |key, asc| BlockError::Sense(crate::block::Sense { key, asc, ascq: 0 });
+        assert_eq!(
+            failure_line("port 3 LUN 0", &sense(2, 0x3a)),
+            "USB EMPTY port 3 LUN 0: no card or disc in the reader\n"
+        );
+        assert!(
+            failure_line("port 3 LUN 0", &sense(2, 4)).starts_with("USB FAILED port 3 LUN 0: ")
+        );
+        assert_eq!(
+            failure_line("port 3", &BlockError::Device { status: 21 }),
+            "USB FAILED port 3: event ring full (xHCI completion code 21)\n"
+        );
+    }
 
     #[test]
     fn quiet_drains_read_usbsts_only_every_64th_or_with_events_like_xhci_irq() {
@@ -1676,7 +1776,16 @@ mod tests {
         assert_eq!(stuck(&mut c, AbortReply::Ignored), Err(BlockError::Timeout));
         assert!(c.command_poisoned);
         assert!(matches!(c.hardware, hardware::State::Died));
+        // The death names the command left unanswered and where its
+        // handling stood, and a later failure does not replace it.
+        let death = c.death.unwrap();
+        assert_eq!(death.command >> 10 & 0x3f, EVALUATE_CONTEXT);
+        assert_eq!((death.command >> 24, death.phase), (1, "aborting"));
+        assert!(alloc::format!("{death}").starts_with(&alloc::format!(
+            "unanswered command type {EVALUATE_CONTEXT} slot 1 endpoint 0 (aborting, "
+        )));
         assert!(c.command(0, 0, EVALUATE_CONTEXT << 10 | 1 << 24).is_err());
+        assert_eq!(c.death, Some(death));
     }
 
     #[test]
@@ -1704,4 +1813,3 @@ mod tests {
         assert_eq!(model.borrow().seen.len(), count);
     }
 }
-

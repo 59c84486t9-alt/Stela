@@ -19,7 +19,10 @@ use crate::Refusal;
 use crate::Result;
 use crate::output;
 use alloc::{format, rc::Rc, string::String, sync::Arc, vec::Vec};
-use core::{cell::RefCell, mem::ManuallyDrop};
+use core::{
+    cell::{Cell, RefCell},
+    mem::ManuallyDrop,
+};
 use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
@@ -39,7 +42,7 @@ pub const RELAY_BUFFER: usize = 1 << 20;
 /// No adapter a native driver runs: what to connect, as the screen says it.
 const NO_ADAPTER: &str = "No supported network adapter. Connect wired Ethernet: most Intel and Realtek adapters, Aquantia adapters, Broadcom's BCM5720, BCM5761 and BCM5762, or a Realtek or ASIX USB adapter.";
 /// What the screen says when DHCP gives the first adapter no lease.
-const NO_LEASE: &str = "No automatic network address. Connect Ethernet to a network with DHCPv4 or IPv6 router advertisements, or set an address with `stela setup configure --ipv4 ADDRESS/PREFIX --usb USB` on another computer. Stateful DHCPv6 is unsupported.";
+const NO_LEASE: &str = "No automatic network address. Connect Ethernet to a network with DHCPv4 or IPv6 router advertisements, or set an address with `stela settings --ipv4 ADDRESS/PREFIX` on another computer. Stateful DHCPv6 is unsupported.";
 
 /// The host's network adapters and the loader root they are reached in.
 /// Adapters left in it are dropped in that root.
@@ -57,12 +60,12 @@ impl Drop for Links {
     }
 }
 
-/// Run `release` in the loader's root, the only root that maps the
-/// adapters' registers and DMA pages: dropping an adapter can drive its
-/// device (`Igc` stops its controller), and outside that root its first
-/// register access faults. A processor already inside the host drivers
+/// Run `release` in the loader's root, the only root that maps the host
+/// devices' registers and DMA pages: dropping a device can drive it (`Igc`
+/// stops its controller, a USB Bluetooth controller closes its endpoints),
+/// and outside that root its first register access faults. A processor already inside the host drivers
 /// (`storage::open`'s probe) is in that root and holds their lock.
-fn in_loader_root(root: u64, release: impl FnOnce()) {
+pub(super) fn in_loader_root(root: u64, release: impl FnOnce()) {
     let _root = (!super::storage::host_drivers_held_here()).then(|| {
         // SAFETY: the loader root `storage::open` captured, which maps the
         // adapters; the processor's pinned record is active, as for every
@@ -76,6 +79,22 @@ struct RootLink {
     /// Dropped only in the loader's root ([`in_loader_root`]).
     device: ManuallyDrop<Adapter>,
     root: u64,
+    frames: Rc<Frames>,
+}
+
+/// The frames an adapter took and gave, for the log line of an attempt that
+/// got no address: an adapter with a link that received nothing is told
+/// apart from a network that never answered.
+#[derive(Default)]
+struct Frames {
+    sent: Cell<u64>,
+    received: Cell<u64>,
+}
+
+impl Frames {
+    fn count(cell: &Cell<u64>) {
+        cell.set(cell.get().saturating_add(1));
+    }
 }
 
 impl RootLink {
@@ -83,7 +102,39 @@ impl RootLink {
         Self {
             device: ManuallyDrop::new(device),
             root,
+            frames: Rc::default(),
         }
+    }
+
+    /// Send `frame` inside the host drivers.
+    fn send(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+        self.device
+            .transmit(frame)
+            .inspect(|()| Frames::count(&self.frames.sent))
+    }
+
+    /// The adapter's next frame, inside the host drivers.
+    fn arrived(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        self.device.receive().inspect(|frame| {
+            if frame.is_some() {
+                Frames::count(&self.frames.received);
+            }
+        })
+    }
+
+    /// [`Link::transmit`] for a service turn, which does not wait for the
+    /// host drivers' lock: `None` while another processor is inside them.
+    fn transmit_now(&mut self, frame: &[u8]) -> Option<Result<(), LinkError>> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::try_enter(self.root) }?;
+        Some(self.send(frame))
+    }
+
+    /// [`Link::receive`] for a service turn, as [`Self::transmit_now`].
+    fn receive_now(&mut self) -> Option<Result<Option<Vec<u8>>, LinkError>> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::try_enter(self.root) }?;
+        Some(self.arrived())
     }
 }
 
@@ -108,17 +159,21 @@ impl Link for RootLink {
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.device.transmit(frame)
+        self.send(frame)
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.device.receive()
+        self.arrived()
     }
     fn receive_reusing(&mut self, frame: &mut Vec<u8>) -> Result<bool, LinkError> {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.device.receive_reusing(frame)
+        self.device.receive_reusing(frame).inspect(|&received| {
+            if received {
+                Frames::count(&self.frames.received);
+            }
+        })
     }
     fn signals(&self) -> bool {
         self.device.signals()
@@ -188,6 +243,7 @@ impl HostNetwork {
             let driver = link.device.driver();
             let wireless = link.device.wireless();
             let location = String::from(link.device.location());
+            let frames = Rc::clone(&link.frames);
             output::arguments(format_args!(
                 "NETWORK candidate driver={driver} adapter={location} mac={}\n",
                 link.mac()
@@ -233,7 +289,11 @@ impl HostNetwork {
                     });
                 }
                 Err(error) => {
-                    output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
+                    output::arguments(format_args!(
+                        "NETWORK adapter {location} failed: {error}; frames sent={} received={}\n",
+                        frames.sent.get(),
+                        frames.received.get()
+                    ));
                     failures.push(match error {
                         stela_runtime::net::NetError::NoCarrier => {
                             stela_drivers::probe::no_link(&location, wireless)
@@ -558,6 +618,10 @@ pub struct GuestNetwork {
     /// Frames read from the host adapter that the guest's receive queue
     /// had no room for yet, delivered first at the next turn.
     received: alloc::collections::VecDeque<Vec<u8>>,
+    /// Frames the guest sent that found the host adapter's transmit ring
+    /// full, sent first at the next turn; the guest's own queue holds the
+    /// rest meanwhile.
+    unsent: alloc::collections::VecDeque<Vec<u8>>,
 }
 
 /// Frames read from the host adapter in one service turn at most, outside
@@ -588,6 +652,7 @@ impl GuestNetwork {
             counters: Default::default(),
             refused: false,
             received: alloc::collections::VecDeque::new(),
+            unsent: alloc::collections::VecDeque::new(),
         })
     }
 
@@ -636,12 +701,19 @@ impl GuestNetwork {
     /// Read frames from the host adapter while the guest's receive queue
     /// had `room` and nothing read earlier still waits, without the devices'
     /// lock: the adapter's MMIO and DMA can wait milliseconds on the host.
+    /// While another processor is inside the host drivers the frames wait
+    /// in the adapter's ring for the next turn: a turn does not wait for
+    /// the drivers' lock, which can be held for longer than a PE's exit
+    /// may take.
     pub fn receive(&mut self, room: bool) {
         if !room || !self.received.is_empty() {
             return;
         }
         while self.received.len() < RECEIVE_BURST {
-            match self.link.receive() {
+            let Some(received) = self.link.receive_now() else {
+                break;
+            };
+            match received {
                 Ok(Some(frame)) => self.received.push_back(frame),
                 Ok(None) => break,
                 Err(error) => {
@@ -666,19 +738,30 @@ impl GuestNetwork {
     }
 
     /// The frames the guest queued, taken from its devices, for
-    /// [`Self::transmit`] to send without them.
-    pub fn queued(devices: &mut AppleDevices) -> Vec<Vec<u8>> {
+    /// [`Self::transmit`] to send without them. None while frames a full
+    /// host ring refused still wait: the guest's queue holds the rest.
+    pub fn queued(&self, devices: &mut AppleDevices) -> Vec<Vec<u8>> {
+        if !self.unsent.is_empty() {
+            return Vec::new();
+        }
         core::iter::from_fn(|| devices.network_take()).collect()
     }
 
-    /// Send in queue order and return the last frame's reusable storage.
+    /// Send in queue order and return the last sent frame's reusable
+    /// storage. A full host ring keeps that frame and the ones after it for
+    /// the next turn, as Linux requeues a `NETDEV_TX_BUSY` frame, and so
+    /// does another processor inside the host drivers, whose lock a turn
+    /// does not wait for.
     pub fn transmit(&mut self, frames: Vec<Vec<u8>>) -> Option<Vec<u8>> {
+        self.unsent.extend(frames);
         let mut reusable = None;
-        for frame in frames {
-            if let Err(error) = self.link.transmit(&frame) {
-                self.refuse(error.into());
+        while let Some(frame) = self.unsent.front() {
+            match self.link.transmit_now(frame) {
+                Some(Ok(())) => {}
+                None | Some(Err(LinkError::Busy)) => break,
+                Some(Err(error)) => self.refuse(error.into()),
             }
-            reusable = Some(frame);
+            reusable = self.unsent.pop_front();
         }
         reusable
     }

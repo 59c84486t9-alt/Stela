@@ -177,16 +177,21 @@ impl Controller {
                 Ok(())
             }
             Some(Recovery::Enabling(deadline)) => {
-                if status & FATAL != 0 {
-                    return Err(BlockError::Device { status });
-                }
+                // As Linux `nvme_wait_ready`: CSTS.RDY alone ends the wait.
+                // A CSTS.CFS still set then stands ([`Self::fails`]); one
+                // set at the timeout is the error reported.
+                let fatal = status & FATAL != 0;
                 if status & READY == 0 {
-                    if deadline.passed() {
-                        return Err(BlockError::Timeout);
+                    if !deadline.passed() {
+                        self.recovery = Some(Recovery::Enabling(deadline));
+                        return Ok(());
                     }
-                    self.recovery = Some(Recovery::Enabling(deadline));
-                    return Ok(());
+                    if fatal {
+                        return Err(BlockError::Device { status });
+                    }
+                    return Err(BlockError::Timeout);
                 }
+                self.fatal_standing = fatal;
                 self.bring_up(Step::Identify, Vec::new())
             }
             Some(Recovery::Admin {
@@ -197,7 +202,7 @@ impl Controller {
             }) => {
                 let Some((_, code)) = self.admin_completion(Some((id, true)))? else {
                     if deadline.passed() {
-                        return Err(BlockError::Timeout);
+                        return Err(BlockError::Timeout.at(step.name()));
                     }
                     self.recovery = Some(Recovery::Admin {
                         step,
@@ -216,8 +221,14 @@ impl Controller {
                     (Step::HostMemory, code) => self.host_memory_answered(code == 0),
                     // A refused feature is only logged.
                     (Step::HostOptions | Step::Apst | Step::Events, _) => {}
+                    // Every controller grants at least one queue pair. After
+                    // a refusal Linux creates no I/O queue; here the queue's
+                    // creation is still tried, and reports its own refusal.
+                    (Step::QueueCount, _) => {}
                     (Step::CreateCompletion | Step::CreateSubmission, 0) => {}
-                    (_, status) => return Err(BlockError::Device { status }),
+                    (step, status) => {
+                        return Err(BlockError::Device { status }.at(step.name()));
+                    }
                 }
                 let next = STEPS.iter().position(|each| *each == step).unwrap() + 1;
                 match STEPS.get(next) {
@@ -242,6 +253,7 @@ impl Controller {
                     None => None,
                 },
                 Step::HostMemory => self.host_memory_command()?,
+                Step::QueueCount => Some(self.queue_count_command()),
                 Step::CreateCompletion => Some(self.create_queue(false)?),
                 Step::CreateSubmission => {
                     self.io.submissions.publish();

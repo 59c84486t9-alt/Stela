@@ -6,15 +6,14 @@ use alloc::vec::Vec;
 use core::{
     ffi::c_void,
     mem::{offset_of, size_of},
+    ops::Range,
     ptr::{self, NonNull},
 };
 use uefi::{
     Handle, Status,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
     proto::{
-        ProtocolPointer,
-        device_path::{DevicePath, DeviceSubType, DeviceType},
-        unsafe_protocol,
+        ProtocolPointer, console::gop::GraphicsOutput, device_path::DevicePath, unsafe_protocol,
     },
 };
 
@@ -85,7 +84,9 @@ impl core::fmt::Display for Error {
     }
 }
 pub use stela_boot_core::firmware_pci::BarRegion;
-use stela_boot_core::firmware_pci::{DescriptorError, FramebufferBar, decode_qword};
+use stela_boot_core::firmware_pci::{
+    DescriptorError, FramebufferBar, decode_qword, names_pci_function, sole,
+};
 
 /// Original GOP association copied while both firmware protocols are live.
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +109,9 @@ fn get_protocol<P: ProtocolPointer + ?Sized>(handle: Handle) -> uefi::Result<Sco
     }
 }
 
+/// The PCI function a GOP `handle` names: the handle itself, or the
+/// function of the last PCI node of its device path, which the GOP may sit
+/// below on a child output handle.
 fn gop_pci(handle: Handle) -> Option<ScopedProtocol<PciIo>> {
     if let Ok(pci) = get_protocol(handle) {
         return Some(pci);
@@ -118,34 +122,97 @@ fn gop_pci(handle: Handle) -> Option<ScopedProtocol<PciIo>> {
     }
     let mut remaining = &*path;
     let controller = boot::locate_device_path::<PciIo>(&mut remaining).ok()?;
-    // GOP may be on a child framebuffer/output path of the PCI controller.
-    // An unconsumed PCI node means the returned handle is only an ancestor.
-    if !remaining
+    let nodes = path
         .node_iter()
-        .all(|node| match (node.device_type(), node.sub_type()) {
-            (DeviceType::ACPI, DeviceSubType::ACPI_ADR) => {
-                node.length() >= 8 && node.length().is_multiple_of(4)
-            }
-            (DeviceType::HARDWARE, DeviceSubType::HARDWARE_CONTROLLER) => node.length() == 8,
-            _ => false,
-        })
-    {
+        .map(|node| (node.device_type().0, node.sub_type().0));
+    if !names_pci_function(nodes, remaining.node_iter().count()) {
         return None;
     }
     get_protocol(controller).ok()
 }
 
+/// Which PCI function's memory BAR holds the firmware screen.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ScreenOwner {
+    /// Firmware left no screen.
+    NoScreen,
+    /// This function, checked before and after firmware exit.
+    Function(FramebufferSource),
+    /// No function was found: the firmware screen stops before any GPU
+    /// starts, so no screen writer can race a GPU's BAR changes.
+    Unknown,
+}
+
+/// The firmware screen at `base` for `bytes`, when one display-class
+/// function's BAR holds it. Tried in order: the function the active GOP
+/// `handle` names, those every other GOP handle names, then every
+/// display-class function by its BARs, as when GOP sits on a console
+/// splitter's virtual handle or firmware gives it no device path. Only a
+/// pool buffer firmware kept is an error; a function that cannot be read is
+/// logged and skipped.
 pub(crate) fn framebuffer_source(
     handle: Handle,
     base: u64,
     bytes: u64,
 ) -> Result<Option<FramebufferSource>, Error> {
-    let Some(mut pci) = gop_pci(handle) else {
-        return Ok(None);
-    };
-    let address = pci.address()?;
-    let header = pci.read_header()?;
     let end = base.checked_add(bytes).ok_or(Error::DescriptorRange)?;
+    let screen = base..end;
+    let gops = boot::find_handles::<GraphicsOutput>().unwrap_or_default();
+    let named = core::iter::once(handle).chain(gops.into_iter().filter(|other| *other != handle));
+    for candidate in named {
+        if let Some(mut pci) = gop_pci(candidate)
+            && let Some(source) = display_source(&mut pci, &screen)?
+        {
+            return Ok(Some(source));
+        }
+    }
+    let mut matched = Vec::new();
+    for candidate in boot::find_handles::<PciIo>().unwrap_or_default() {
+        if let Ok(mut pci) = get_protocol::<PciIo>(candidate)
+            && let Some(source) = display_source(&mut pci, &screen)?
+        {
+            matched.try_reserve(1).map_err(|_| Error::Allocation)?;
+            matched.push(source);
+        }
+    }
+    let source = sole(matched);
+    if let Some(source) = source {
+        crate::output::arguments(format_args!(
+            "GOP PCI source {} found by its BAR{} holding the screen\n",
+            source.address,
+            source.bar.index()
+        ));
+    }
+    Ok(source)
+}
+
+/// `pci`'s BAR holding `screen`, when it is a display-class function.
+fn display_source(
+    pci: &mut PciIo,
+    screen: &Range<u64>,
+) -> Result<Option<FramebufferSource>, Error> {
+    match observe_display(pci, screen) {
+        Err(error @ Error::Release(_)) => Err(error),
+        Err(error) => {
+            crate::output::arguments(format_args!(
+                "GOP PCI source observation skipped a function: {error}\n"
+            ));
+            Ok(None)
+        }
+        Ok(source) => Ok(source),
+    }
+}
+
+fn observe_display(
+    pci: &mut PciIo,
+    screen: &Range<u64>,
+) -> Result<Option<FramebufferSource>, Error> {
+    let header = pci.read_header()?;
+    // Only display-class functions own a firmware screen.
+    if header[0x0b] != 3 {
+        return Ok(None);
+    }
+    let address = pci.address()?;
     let mut bars = Vec::new();
     bars.try_reserve_exact(6).map_err(|_| Error::Allocation)?;
     for index in 0..6 {
@@ -163,7 +230,7 @@ pub(crate) fn framebuffer_source(
             };
             Some((*index, region))
         }),
-        base..end,
+        screen.clone(),
     )
     .map(|bar| FramebufferSource { address, bar }))
 }
@@ -523,6 +590,25 @@ pub(crate) fn disk_location(handle: Handle) -> Option<alloc::string::String> {
     Some(alloc::format!("{address} {}", plain_nodes(&below)))
 }
 
+/// The class code (configuration bytes 0x0b, 0x0a, 0x09) of the PCI
+/// function `handle` is: `None` when it is no PCI function, `Some(None)`
+/// when its configuration cannot be read.
+pub(crate) fn function_class(handle: Handle) -> Option<Option<u32>> {
+    let mut io = get_protocol::<PciIo>(handle).ok()?;
+    let mut bytes = [0u8; 4];
+    // Width0=EfiPciIoWidthUint8, the revision and class bytes at 0x08.
+    // SAFETY: live boot protocol and bounded writable local output.
+    let read = status(unsafe {
+        (io.config_read)(&mut *io, 0, 0x08, bytes.len(), bytes.as_mut_ptr().cast())
+    });
+    Some(read.ok().map(|()| u32::from_le_bytes(bytes) >> 8))
+}
+
+/// The PCI address of the function `handle` is.
+pub(crate) fn function_address(handle: Handle) -> Option<Address> {
+    get_protocol::<PciIo>(handle).ok()?.address().ok()
+}
+
 /// The identity of the PCI controller the disk behind `handle` hangs from,
 /// as its configuration header gives it.
 pub(crate) fn disk_controller(handle: Handle) -> Option<stela_drivers::bus::pci::Identity> {
@@ -560,4 +646,68 @@ fn plain_nodes(text: &str) -> alloc::string::String {
         }
     }
     kept.join("/")
+}
+
+/// xHCI register reads through the firmware's protocol, which reaches the
+/// BAR whatever the firmware's page tables map.
+struct XhciBar<'a>(&'a mut PciIo);
+
+impl stela_boot_core::usb_legacy::Dwords for XhciBar<'_> {
+    fn read32(&mut self, offset: usize) -> u32 {
+        let mut value = u32::MAX;
+        // SAFETY: live boot protocol; EfiPciIoWidthUint32 (2) reads one
+        // dword of BAR 0 into the writable local. A refused read leaves
+        // all ones, which every reader takes as absent registers.
+        let _ =
+            unsafe { (self.0.mem_read)(self.0, 2, 0, offset as u64, 1, (&raw mut value).cast()) };
+        value
+    }
+    // The firmware still drives the controller: nothing is written here.
+    fn write32(&mut self, _: usize, _: u32) {}
+}
+
+/// Each xHCI controller the firmware decodes, with the physical address of
+/// its USB Legacy Support capability, for
+/// [`stela_boot_core::usb_legacy::take`] once the firmware has exited. A
+/// controller without the capability, or one whose registers the firmware
+/// does not place in memory, is left out.
+pub(crate) fn xhci_legacy_capabilities() -> Vec<(Address, u64)> {
+    const XHCI_CLASS: [u8; 3] = [0x30, 0x03, 0x0c];
+    const COMMAND_MEMORY: u8 = 1 << 1;
+    let mut found = Vec::new();
+    let Ok(handles) = boot::find_handles::<PciIo>() else {
+        return found;
+    };
+    for handle in handles {
+        let Ok(mut io) = get_protocol::<PciIo>(handle) else {
+            continue;
+        };
+        let (Ok(address), Ok(header)) = (io.address(), io.read_header()) else {
+            continue;
+        };
+        if header[0x09..0x0c] != XHCI_CLASS || header[0x04] & COMMAND_MEMORY == 0 {
+            continue;
+        }
+        // A memory resource (type 0) the processor reaches without
+        // translation: the address read after the exit is then the one the
+        // firmware's own driver used.
+        let Some(window) = io.bar_regions(0).ok().and_then(|regions| {
+            regions
+                .into_iter()
+                .find(|region| region.resource_type == 0 && region.translation == 0)
+                .map(|region| region.host)
+        }) else {
+            continue;
+        };
+        let Ok(bytes) = usize::try_from(window.end.saturating_sub(window.start)) else {
+            continue;
+        };
+        if window.start == 0 {
+            continue;
+        }
+        if let Some(at) = stela_boot_core::usb_legacy::find(&mut XhciBar(&mut io), bytes) {
+            found.push((address, window.start + at as u64));
+        }
+    }
+    found
 }

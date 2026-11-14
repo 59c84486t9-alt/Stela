@@ -60,6 +60,8 @@ struct Pages {
     drops: Arc<AtomicUsize>,
     allocated: Cell<usize>,
     fail_after: Option<usize>,
+    /// The physical end of each constrained allocation.
+    below: core::cell::RefCell<Vec<u64>>,
 }
 impl PageSource for Pages {
     fn allocate(
@@ -91,6 +93,18 @@ impl PageSource for Pages {
             bytes,
             alignment,
         )
+    }
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        cache: CacheAttribute,
+        end: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        self.below.borrow_mut().push(end);
+        let base = self.next.get();
+        assert!(base + bytes.div_ceil(4096) as u64 * 4096 <= end);
+        self.allocate(bytes, alignment, cache)
     }
 }
 /// Device-completed ranges the CPU may take back, as the furthest end
@@ -143,10 +157,16 @@ struct Domain {
     defer: AtomicBool,
     drains: AtomicUsize,
     drained: AtomicBool,
+    /// The address limit each mapping was asked for, by its IOVA.
+    limits: Mutex<BTreeMap<u64, u64>>,
+    /// Report an identity domain, whose pages must meet the limits.
+    passthrough: AtomicBool,
 }
 impl Domain {
     fn new(peer: Arc<Mutex<Device>>) -> Self {
         Self {
+            limits: Mutex::new(BTreeMap::new()),
+            passthrough: AtomicBool::new(false),
             peer,
             maps: Mutex::new(BTreeMap::new()),
             next: AtomicUsize::new(0),
@@ -221,6 +241,13 @@ impl Domain {
 }
 // SAFETY: independently authored synchronous symbolic remapper; no native use.
 unsafe impl DmaDomain for Domain {
+    fn kind(&self) -> crate::bus::dma::mapping::DomainKind {
+        if self.passthrough.load(Ordering::Relaxed) {
+            crate::bus::dma::mapping::DomainKind::Passthrough
+        } else {
+            crate::bus::dma::mapping::DomainKind::Isolated
+        }
+    }
     unsafe fn map(
         &self,
         pages: &DmaPages,
@@ -228,8 +255,14 @@ unsafe impl DmaDomain for Domain {
         limit: u64,
     ) -> Result<DomainMapping, DmaError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let address = 0x2_0000_0000 + id as u64 * 0x100_0000;
+        // A remapper places a limited mapping below its limit.
+        let address = if limit < 0x2_0000_0000 {
+            0x1000_0000 + id as u64 * 0x100_0000
+        } else {
+            0x2_0000_0000 + id as u64 * 0x100_0000
+        };
         assert!(address + pages.bytes() as u64 <= limit);
+        self.limits.lock().unwrap().insert(address, limit);
         assert_ne!(address, pages.as_single().unwrap().physical_pages()[0]);
         let cpu = pages
             .as_single()
@@ -376,6 +409,13 @@ struct Device {
     dsp_select: u16,
     command: Option<u32>,
     busy: bool,
+    /// Further reads each MDIO command stays busy for.
+    mdio_slow: usize,
+    /// The APE firmware never takes a posted event.
+    ape_busy: bool,
+    /// Another NVRAM user holds the software arbitration lock.
+    nvram_held: bool,
+    slow_left: usize,
     tx: usize,
     rx: usize,
     ret: usize,
@@ -515,14 +555,24 @@ impl Device {
             return Err(Error::Access);
         }
         let value = match at {
-            0x84 => self
-                .sram
-                .get(&self.mac.get(&0x7c).copied().unwrap_or(0))
-                .copied()
-                .unwrap_or(0),
+            0x84 => {
+                let window = self.mac.get(&0x7c).copied().unwrap_or(0);
+                match self.sram.get(&window) {
+                    Some(value) => *value,
+                    // The bootcode publishes its PHY's ID registers.
+                    None if window == 0xb74 => {
+                        u32::from(self.phy_read(2)) << 16 | u32::from(self.phy_read(3))
+                    }
+                    None => 0,
+                }
+            }
             0x44c => {
                 if self.busy {
-                    self.busy = false;
+                    if self.slow_left > 0 {
+                        self.slow_left -= 1;
+                    } else {
+                        self.busy = false;
+                    }
                     self.command.unwrap()
                 } else if let Some(command) = self.command {
                     let at = ((command >> 16) & 31) as u8;
@@ -589,7 +639,7 @@ impl Device {
         self.require_bits(
             0x4800,
             0x1800_0000,
-            if self.is_5761() {
+            if self.is_legacy() {
                 0x0800_0000
             } else {
                 0x1800_0000
@@ -599,6 +649,8 @@ impl Device {
             self.require_5762_dma();
         } else if self.is_5761() {
             self.require_5761_dma();
+        } else if self.is_5784() {
+            self.require_5784_dma();
         }
         if matches!(path, DmaPath::Tx | DmaPath::Rx) {
             let mode = match self.phy[&0x19] & 0x700 {
@@ -609,11 +661,14 @@ impl Device {
             };
             self.require_bits(0x400, 14, mode);
             assert_eq!(self.phy[&4] & 0x1ff, 0x1e1);
-            assert_eq!(self.phy[&9] & 0x300, 0x200, "no 1000half advertisement");
+            if !crate::tg3::ten_hundred_only((self.config[&0] >> 16) as u16) {
+                assert_eq!(self.phy[&9] & 0x300, 0x200, "no 1000half advertisement");
+            }
         }
         match path {
             DmaPath::Status => {
-                self.require_bits(0x3c00, 0x187, if self.is_5761() { 0x102 } else { 0x106 });
+                let attention = !(self.is_legacy() || self.is_5719() || self.is_57765());
+                self.require_bits(0x3c00, 0x187, if attention { 0x106 } else { 0x102 });
                 self.require_bits(0x4c00, 3, 2); // host status needs write DMA.
             }
             DmaPath::Tx => {
@@ -622,8 +677,8 @@ impl Device {
                 self.require_bits(0x45c, 0x103, 0x102); // TX, A0 MBUF lockup fix.
                 self.require_bits(0x6800, 0x20000, 0x20000); // host send BDs.
                 self.require_bits(0x4800, 3, 2); // read DMA.
-                if self.config[&0] == 0x165f_14e4 {
-                    self.require_bits(0x4900, 4, 4); // BCM5720 RDMA FIFO overflow fix.
+                if matches!(self.config[&0], 0x165f_14e4 | 0x1657_14e4) {
+                    self.require_bits(0x4900, 4, 4); // BCM5719/5720 RDMA FIFO overflow fix.
                     self.require_bits(0x4910, 0xf0000, 0xf0000); // 4K BD/LSO boundaries.
                 }
                 for at in [0x1400, 0x1800, 0xc00, 0x1000, 0x1c00] {
@@ -633,9 +688,13 @@ impl Device {
             DmaPath::Rx => {
                 self.require_bits(0x4400, 3, 2);
                 self.require_bits(0x400, 0xc0_0000, 0xc0_0000); // RX/frame engines.
-                self.require_bits(0x468, 0x403, 0x402); // RX and intact VLAN bytes.
+                // RX, with raw VLAN tags unless ASF has the MAC strip them.
+                let asf = self.sram.get(&0xb58).copied().unwrap_or(0) & 0x80 != 0;
+                let keep = if asf { 0 } else { 0x400 };
+                self.require_bits(0x468, 0x403, 0x2 | keep);
                 self.require_bits(0x4c00, 3, 2);
-                self.require_bits(0x2400, 0x10003, if self.is_5761() { 2 } else { 0x10002 });
+                let large = !(self.is_legacy() || self.is_57765());
+                self.require_bits(0x2400, 0x10003, if large { 0x10002 } else { 2 });
                 for at in [0x2c00, 0x2000, 0x2800, 0x3000] {
                     self.require_bits(at, 3, 2);
                 }
@@ -712,8 +771,10 @@ impl Device {
         if self.match_receive_filter && !self.accepts_destination(frame) {
             return;
         }
-        let (rx_count, ret_count, flags) = if self.is_5761() {
+        let (rx_count, ret_count, flags) = if self.is_legacy() {
             (512, 512, 512 << 16)
+        } else if self.is_57765() {
+            (512, 1024, (512 << 16) | (1536 << 2))
         } else {
             (2048, 4096, (2048 << 16) | (1536 << 2))
         };
@@ -886,8 +947,10 @@ unsafe impl Registers for Reg {
                 p.publish_attention(&self.domain);
             }
             0x44c => {
-                let expected_phy = if p.config[&0] == 0x1687_14e4 {
+                let expected_phy = if p.config[&0] == 0x1687_14e4 || p.is_57765() {
                     1
+                } else if p.is_5717() {
+                    ((p.sram[&0xe00] >> 29) & 1) + 1
                 } else {
                     ((p.sram[&0xe00] >> 30) + 1) & 31
                 };
@@ -898,9 +961,12 @@ unsafe impl Registers for Reg {
                 );
                 p.command = Some(value);
                 p.busy = true;
+                p.slow_left = p.mdio_slow;
             }
             0x7020 if value == 2 => {
-                p.mac.insert(at, 0x202);
+                if !p.nvram_held {
+                    p.mac.insert(at, 0x202);
+                }
             }
             0x7000 => {
                 let address = p.mac.get(&0x700c).copied().unwrap_or(0);
@@ -941,8 +1007,16 @@ unsafe impl Registers for Reg {
         let mut p = self.peer.lock().unwrap();
         if (0x8400..0x8420).contains(&at) || (0x2c..0x4c).contains(&at) {
             p.ape.insert(at + 0x20, value);
+        } else if (0x8420..0x8440).contains(&at) || (0x4c..0x6c).contains(&at) {
+            p.ape.insert(at, 0); // Writing the owner's bit releases the grant.
+        } else if at == 0x0c {
+            // Running APE firmware takes the posted event.
+            if !p.ape_busy {
+                let status = p.ape.get(&0x4300).copied().unwrap_or(0);
+                p.ape.insert(0x4300, status & !0x8000_0000);
+            }
         } else {
-            p.ape.insert(at, 0);
+            p.ape.insert(at, value);
         }
         Ok(())
     }
@@ -955,6 +1029,7 @@ fn parts() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
         drops: Arc::new(AtomicUsize::new(0)),
         allocated: Cell::new(0),
         fail_after: None,
+        below: core::cell::RefCell::new(Vec::new()),
     };
     (
         // SAFETY: original register/domain/timer owners of this isolated peer.
@@ -1063,7 +1138,16 @@ fn only_real_completed_tx_slots_can_be_reused_and_full_is_recoverable() {
     for _ in 0..511 {
         packet.transmit(&[0xa5; 60]).unwrap();
     }
-    assert!(packet.transmit(&[0xb6; 60]).is_err());
+    // A full ring refuses the frame as busy at once: no producer index
+    // moves and the caller keeps the frame for a later turn.
+    let before = peer.lock().unwrap().access.len();
+    assert_eq!(packet.transmit(&[0xb6; 60]), Err(LinkError::Busy));
+    assert!(
+        peer.lock().unwrap().access[before..]
+            .iter()
+            .all(|&(write, at, _)| !(write && at == 0x304))
+    );
+    assert_eq!(packet.tx_producer, 511);
     assert_eq!(packet.failure(), None);
     {
         let mut p = peer.lock().unwrap();
@@ -1795,18 +1879,25 @@ fn fatal_flow_observed_during_low_water_ack_is_never_discarded() {
     assert!(packet.retire().is_ok());
 }
 
+mod bcm5717;
+mod bcm5719;
 mod bcm5761;
 mod bcm5761_power;
 mod bcm5762;
+mod bcm57765;
+mod bcm57766;
+mod bcm5784;
 mod phy_link;
 mod phy_power;
 mod rdma_mode;
 mod restart;
+mod stepped;
 
 mod timing;
 
 mod clkreq;
 
+mod management;
 mod receive_filter;
 
 mod attachment;

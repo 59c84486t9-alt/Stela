@@ -7,13 +7,15 @@
 //! [`terminate`] reaches. Between engine slices [`flush_due`] stores the
 //! machine state's log every [`MACHINE_FLUSH_SECONDS`], as ext4 commits its
 //! journal, and the USB's, slow flash the guest waits on, only every
-//! [`USB_FLUSH_SECONDS`]. The screen shows the curated
+//! [`USB_FLUSH_SECONDS`]. A stop while the USB's log is not kept, as between
+//! the end of the firmware's boot services and the start of Stela's own
+//! driver for the stick, leaves the record's newest lines in the PC's
+//! firmware instead ([`crate::stop_record`]). The screen shows the curated
 //! steps of [`status`](crate::status) instead, and a fatal error or panic, which
 //! reach it before the console exists through the firmware's.
 use crate::{console, serial::Serial};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
-    arch::asm,
     cell::RefCell,
     convert::Infallible,
     fmt::{self, Write},
@@ -24,7 +26,7 @@ use stela_drivers::block::{BlockDevice, BlockError, Submission};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
 mod terminal;
-pub(crate) use terminal::{Callers, panic, print_stack_at};
+pub(crate) use terminal::{Callers, Code, panic, print_stack_at};
 
 /// One engine-wide value. The mount runs on one processor and its handlers
 /// only print; every access is a `try_borrow`, so output that arrives while
@@ -42,12 +44,20 @@ unsafe impl<T> Sync for Global<T> {}
 /// processor itself, interrupted or failing inside a write.
 static WRITING: AtomicBool = AtomicBool::new(false);
 const WRITING_WAIT_MICROS: u64 = 250_000;
+/// How long a log store that may not wait ([`flush_due`]) waits for the
+/// record: the copy of its new bytes goes to the next store instead.
+const STORE_COPY_WAIT_MICROS: u64 = 1000;
 /// Spins to wait while the counter's rate is not known yet.
 const WRITING_WAIT_SPINS: u64 = 1 << 22;
 
 /// Run `f` while no other processor writes the record; `None` when the
 /// wait ran out.
 fn exclusive<R>(f: impl FnOnce() -> R) -> Option<R> {
+    exclusive_within(WRITING_WAIT_MICROS, f)
+}
+
+/// [`exclusive`], waiting `micros` at most.
+fn exclusive_within<R>(micros: u64, f: impl FnOnce() -> R) -> Option<R> {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     let started = rdtsc();
     let mut spins = 0u64;
@@ -58,7 +68,7 @@ fn exclusive<R>(f: impl FnOnce() -> R) -> Option<R> {
         spins += 1;
         let waited = match hz {
             0 => spins >= WRITING_WAIT_SPINS,
-            hz => rdtsc().wrapping_sub(started) >= hz / 1_000_000 * WRITING_WAIT_MICROS,
+            hz => rdtsc().wrapping_sub(started) >= hz / 1_000_000 * micros,
         };
         if waited {
             return None;
@@ -618,9 +628,54 @@ pub fn leave_boot_services() {
     unqueue_serial();
     flush_log();
     with_sinks(true, |sinks| {
-        sinks.retain(|sink| sink.kind != Log::Firmware)
+        let firmware = |sink: &Sink| sink.kind == Log::Firmware;
+        if let Some(stored) = sinks
+            .iter()
+            .filter(|sink| firmware(sink))
+            .map(|sink| sink.stored)
+            .max()
+        {
+            UNKEPT_FROM.store(stored, Ordering::Relaxed);
+        }
+        sinks.retain(|sink| !firmware(sink))
     });
     disable_firmware_console();
+}
+
+/// The record's position after the last byte the firmware's log file took
+/// before it closed: later lines are on the stick only once Stela's own
+/// drivers write the log on, and a stop before that keeps them in the
+/// firmware ([`keep_stop_record`]).
+static UNKEPT_FROM: AtomicU64 = AtomicU64::new(0);
+
+/// Leave the newest lines in the PC's firmware (`stop_record::keep`), for
+/// the next start to copy into the log and to say this one stopped: those
+/// the USB's log does not hold, or a stop's inside the host drivers, whose
+/// screen may be dead; whether the firmware holds them. The lines end with the stop's reason, which
+/// the caller has printed; `reason` stands for them where the record
+/// cannot be read, as in a stop raised while a line was being written.
+fn keep_stop_record(reason: Option<&str>) -> bool {
+    use stela_boot_core::stop_record::TEXT_BYTES;
+    crate::stop_record::keep(|lines| {
+        let _ = exclusive(|| {
+            let Ok(record) = RECORD.0.try_borrow() else {
+                return;
+            };
+            // One byte more than the record holds, which says whether its
+            // first byte starts a line.
+            let newest = record.pushed().saturating_sub(TEXT_BYTES as u64 + 1);
+            let from = UNKEPT_FROM.load(Ordering::Relaxed).max(newest);
+            let Ok(_) = record.copy_since(from, |bytes| {
+                lines.push(bytes);
+                Ok::<_, Infallible>(())
+            });
+        });
+        if let Some(reason) = reason.filter(|_| lines.text().is_empty()) {
+            for part in ["STELA FATAL ", reason, "\n"] {
+                lines.push(part.as_bytes());
+            }
+        }
+    })
 }
 
 /// The relocated engine has its own statics, not the loader image's updated
@@ -776,11 +831,20 @@ pub fn advance_logs() {
 
 /// A log store is in progress ([`advance_logs`]).
 static STORING: AtomicBool = AtomicBool::new(false);
+/// The last store that waited could not reach the logs: this processor is
+/// inside the host drivers, or another holds the logs. A stop that finds
+/// it set has lines the USB's log does not hold ([`stopped_text`]).
+static UNSTORED: AtomicBool = AtomicBool::new(false);
 
 fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
     // The interrupted driver call holds the disks' lock and may be partway
-    // through a request of its own.
+    // through a request of its own. The GPU's start holds it outside every
+    // storage driver's call and stores the USB's log itself, which a stop
+    // there waits for: no other log is open then.
     if crate::engine::inside_host_drivers() {
+        if wait && crate::engine::store_usb_log_in_gpu_start() {
+            return;
+        }
         static SAID: AtomicBool = AtomicBool::new(false);
         // The device start stores the USB's log itself between devices.
         if !crate::engine::starting_host_devices() && !SAID.swap(true, Ordering::Relaxed) {
@@ -788,17 +852,25 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
                 "BOOT LOG not stored: this processor stopped inside the host drivers\n"
             ));
         }
+        if wait {
+            UNSTORED.store(true, Ordering::Relaxed);
+        }
         return;
     }
     let mut failed = Vec::new();
-    with_sinks(false, |sinks| {
+    let reached = with_sinks(false, |sinks| {
         // A log whose store is in progress takes new bytes at its next one.
         let is_due = |sink: &Sink| !sink.writer.storing() && due(sink);
         // Take the record's new bytes while no processor adds to it, then
         // store them without holding the others' output up. Polling in-flight
         // writes needs neither the record nor a list of sinks to prepare.
         if sinks.iter().any(&is_due) {
-            let _ = exclusive(|| {
+            let bound = if wait {
+                WRITING_WAIT_MICROS
+            } else {
+                STORE_COPY_WAIT_MICROS
+            };
+            let _ = exclusive_within(bound, || {
                 let Ok(record) = RECORD.0.try_borrow() else {
                     return;
                 };
@@ -827,6 +899,9 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
             Ordering::Release,
         );
     });
+    if wait {
+        UNSTORED.store(reached.is_none(), Ordering::Relaxed);
+    }
     for (kind, error) in failed {
         log_lost(kind, error);
     }
@@ -914,11 +989,9 @@ pub(crate) fn early_fatal(message: &str) -> ! {
 
 fn halt(code: u32) -> ! {
     debug_exit(code);
-    loop {
-        // SAFETY: native mount termination runs at CPL0; after the debug-exit
-        // attempt no task resumes, so maskable interrupts remain disabled.
-        unsafe { asm!("cli", "hlt", options(nostack)) };
-    }
+    // After the debug-exit attempt no task resumes; the stop answers only
+    // the PC's power button.
+    crate::stop::wait()
 }
 
 /// Show `message` as the reason the mount stopped: as a failed step on
@@ -938,15 +1011,25 @@ fn stopped(message: &str, next: &dyn Fn() -> &'static str) {
 
 /// What a stopped boot tells the user to do next: where its log is, and how
 /// to read it on another computer.
-pub const STOPPED: &str = "Stela stopped. Its log is on this USB: on another computer, `stela \
-    setup boot-log --output log.txt` saves it; include that file in a report. Turn the PC off to \
-    try again.";
+pub const STOPPED: &str = "Stela stopped. Its log is on this USB: on another computer, plug in \
+    this USB and run `stela log`, which saves it to log.txt; include that file in a report. Turn \
+    the PC off to try again; Ctrl+Alt+Delete on a laptop's own keyboard restarts it.";
 
-/// What a stop before the engine writes the USB's log again tells the
-/// user: the screen is all that is kept of this part of the run.
+/// What a stop whose last lines the USB's log does not hold, as one before
+/// the engine writes the log again, tells the user once the PC's firmware
+/// holds them ([`keep_stop_record`]): another start of Stela on this PC
+/// moves them into the log.
+pub const STOPPED_RECORDED: &str = "Stela stopped before it could write this part of its log \
+    to the USB. This PC keeps its last lines: start Stela on this PC once more, which copies them \
+    into the log on this USB. Then, on another computer, plug in this USB and run `stela log`, \
+    which saves it to log.txt; include that file in a report. Turn the PC off to try again; \
+    Ctrl+Alt+Delete on a laptop's own keyboard restarts it.";
+
+/// What such a stop tells the user when the firmware did not take the
+/// lines: the screen is all that is kept of this part of the run.
 pub const STOPPED_UNLOGGED: &str = "Stela stopped before it could write this part of its log \
     to the USB: this screen is the only record of it. Take a photo of it for a report. Turn the \
-    PC off to try again.";
+    PC off to try again; Ctrl+Alt+Delete on a laptop's own keyboard restarts it.";
 
 /// Whether the USB's log is open and none of its stores failed this boot.
 /// Never waits: a stop raised inside a log store finds the logs held, and
@@ -961,12 +1044,23 @@ pub fn usb_log_kept() -> bool {
     .unwrap_or(false)
 }
 
-/// [`STOPPED`] while the USB's log is kept ([`usb_log_kept`]), else
-/// [`STOPPED_UNLOGGED`]: a log that was closed as lost is never claimed.
-/// Read after the last store, so a store that fails then counts.
+/// [`STOPPED`] while the USB's log is kept ([`usb_log_kept`]) and took the
+/// last store: a log that was closed as lost is never claimed, nor one a
+/// stop inside the host drivers could not store its last lines in. Else
+/// those lines go to the PC's firmware here, once a boot, and the text says
+/// whether it holds them: [`STOPPED_RECORDED`], or [`STOPPED_UNLOGGED`].
+/// Called only as the boot stops, after the last store, so a store that
+/// fails then counts.
 pub fn stopped_text() -> &'static str {
-    if usb_log_kept() {
+    stop_advice(None)
+}
+
+/// [`stopped_text`] for a stop whose reason is `reason`.
+fn stop_advice(reason: Option<&str>) -> &'static str {
+    if usb_log_kept() && !UNSTORED.load(Ordering::Relaxed) {
         STOPPED
+    } else if keep_stop_record(reason) {
+        STOPPED_RECORDED
     } else {
         STOPPED_UNLOGGED
     }
@@ -978,12 +1072,24 @@ pub fn fatal(message: impl core::fmt::Display) -> ! {
     // The reason reaches the port before any later step can stop for good.
     unqueue_serial();
     crate::engine::stop_gpus_for_fatal();
+    // Inside the host drivers no store goes through them, or only the USB's
+    // log the GPU's start drives. The lines go to the stick where they can
+    // and to the PC's firmware in any case, before the screen is drawn: the
+    // start's reset of the GPU may have left none, and the next start then
+    // shows that this one stopped, and why (`stop_record::carry`).
+    if crate::engine::inside_host_drivers() {
+        flush_log();
+        keep_stop_record(Some(&message));
+    }
     // The reason is on the screen before the last store, which may be what
     // fails, and the advice after it says whether the log was kept.
     stopped(&message, &|| {
         flush_log();
-        stopped_text()
+        stop_advice(Some(&message))
     });
+    // A stop with no screen of Stela's own leaves its record too.
+    flush_log();
+    stop_advice(Some(&message));
     terminate(0x11)
 }
 

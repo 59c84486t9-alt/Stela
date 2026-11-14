@@ -1,5 +1,5 @@
 //! Validate the captured PCI bus tree before a source can assign its slots.
-use super::RootWindow;
+use super::{RootWindow, census};
 use alloc::vec::Vec;
 use stela_drivers::bus::pci::Address;
 
@@ -28,6 +28,12 @@ pub enum Error {
     DuplicateSecondary(Address),
     OverlappingBridges(Address),
     MissingParent(Address),
+    /// A function with a CardBus or unknown header has Bus Master set or
+    /// asserts INTx, so it cannot be left undriven.
+    ActiveUnsupportedHeader(Address),
+    /// A function reading vendor ID 0000 has Bus Master set or asserts
+    /// INTx, so it cannot be treated as absent.
+    ActiveWithoutVendor(Address),
 }
 
 struct Route {
@@ -51,6 +57,22 @@ fn root(roots: &[RootWindow], address: Address) -> Result<usize, Error> {
     Ok(root)
 }
 
+/// The secondary bus a bridge at `address` forwards to, from its Type 1 bus
+/// dword, or None when firmware assigned it no buses. Whether functions
+/// sit there does not matter: an empty port forwards as well.
+pub fn secondary_bus(address: Address, buses: u32) -> Option<u8> {
+    let [_, secondary, subordinate, _] = buses.to_le_bytes();
+    (secondary > address.bus && subordinate >= secondary).then_some(secondary)
+}
+
+/// Whether turning on forwarding through `bridge`, which forwards to
+/// `secondary`, lets DMA from `address` through: the bridge itself and each
+/// function on its secondary bus. A bridge on that bus whose own forwarding
+/// is off still holds back the buses below it.
+pub fn exposed_by(bridge: Address, secondary: u8, address: Address) -> bool {
+    address == bridge || (address.segment == bridge.segment && address.bus == secondary)
+}
+
 /// Return the direct parent of every function in BDF order. An occupied
 /// subordinate bus must be the exact secondary bus of its immediate bridge.
 /// The rest of a subordinate range can be unpopulated.
@@ -70,16 +92,14 @@ pub fn resolve(
         let Some(buses) = function.bridge_buses else {
             continue;
         };
-        let [primary, secondary, subordinate, _] = buses.to_le_bytes();
-        if secondary == 0 && subordinate == 0 {
-            continue;
-        }
+        // As in Linux, the primary field routes nothing and is not checked.
+        let (secondary, subordinate) = match census::route(address.bus, buses) {
+            census::Route::Unconfigured => continue,
+            census::Route::Forwards { buses, .. } => (*buses.start(), *buses.end()),
+            census::Route::Invalid => return Err(Error::InvalidBridge(address)),
+        };
         let grant = roots[root].buses().expect("validated root bus grant");
-        if primary != address.bus
-            || secondary <= primary
-            || secondary > subordinate
-            || !grant.contains(&subordinate)
-        {
+        if !grant.contains(&subordinate) {
             return Err(Error::InvalidBridge(address));
         }
         routes.try_reserve(1).map_err(|_| Error::Exhausted)?;
@@ -172,6 +192,36 @@ mod tests {
     }
 
     #[test]
+    fn empty_ports_forward_and_unassigned_bridges_do_not() {
+        let port = node(4, 8, Some((6, 6)));
+        assert_eq!(
+            secondary_bus(port.address, port.bridge_buses.unwrap()),
+            Some(6)
+        );
+        let unassigned = node(4, 9, Some((0, 0)));
+        assert_eq!(
+            secondary_bus(unassigned.address, unassigned.bridge_buses.unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_bridge_exposes_itself_and_its_secondary_bus_only() {
+        let bridge = node(2, 1, Some((5, 7))).address;
+        assert!(exposed_by(bridge, 5, bridge));
+        assert!(exposed_by(bridge, 5, node(5, 3, None).address));
+        // Below a closed bridge on bus 5, beside it, and its parent bus.
+        assert!(!exposed_by(bridge, 5, node(6, 0, None).address));
+        assert!(!exposed_by(bridge, 5, node(2, 2, None).address));
+        assert!(!exposed_by(bridge, 5, node(0, 1, None).address));
+        let other_segment = Address {
+            segment: 1,
+            ..node(5, 3, None).address
+        };
+        assert!(!exposed_by(bridge, 5, other_segment));
+    }
+
+    #[test]
     fn nested_bridges_own_only_their_direct_secondary_bus() {
         let upstream = node(0, 1, Some((2, 8)));
         let downstream = node(2, 1, Some((5, 7)));
@@ -208,6 +258,25 @@ mod tests {
         assert_eq!(
             resolve(&[root(0, 4), root(5, 9)], &[cross_root]),
             Err(Error::InvalidBridge(cross_root.address))
+        );
+    }
+
+    #[test]
+    fn a_wrong_primary_bus_field_keeps_the_bridge_route() {
+        let mut upstream = node(0, 1, Some((2, 8)));
+        upstream.bridge_buses = upstream.bridge_buses.map(|buses| buses & !0xff | 0x07);
+        let endpoint = node(2, 0, None);
+        assert_eq!(
+            resolve(&[root(0, 9)], &[upstream, endpoint]).unwrap(),
+            [
+                (upstream.address, Parent::Root(0)),
+                (endpoint.address, Parent::Bridge(upstream.address)),
+            ]
+        );
+        let backwards = node(3, 1, Some((3, 4)));
+        assert_eq!(
+            resolve(&[root(0, 9)], &[backwards]),
+            Err(Error::InvalidBridge(backwards.address))
         );
     }
 }

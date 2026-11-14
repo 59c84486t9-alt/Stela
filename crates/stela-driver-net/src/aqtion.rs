@@ -31,15 +31,24 @@ pub enum Error {
     PciCapability(crate::bus::pci::CapabilityError),
     Pci(crate::block::BlockError),
     Unsupported(&'static str),
-    Timeout { register: usize },
+    Timeout {
+        register: usize,
+    },
     Removed,
-    Firmware { status: u32 },
+    Firmware {
+        status: u32,
+    },
     Dma(DmaError),
     Memory(MemoryError),
     Mapping(owned::Error),
-    Readback { register: usize, observed: u32 },
+    Readback {
+        register: usize,
+        observed: u32,
+    },
     RingHead(u32),
     Stopped,
+    /// The transmit ring is full; the frame was not taken.
+    Busy,
 }
 
 /// A plain account for the boot log and screen.
@@ -69,6 +78,7 @@ impl core::fmt::Display for Error {
             }
             Self::RingHead(_) => f.write_str("a descriptor ring head is out of range"),
             Self::Stopped => f.write_str("it is stopped"),
+            Self::Busy => f.write_str("its transmit ring is full"),
         }
     }
 }
@@ -181,10 +191,15 @@ unsafe impl Registers for MappedRegisters {
     }
 }
 pub use crate::bus::pci::power::Timer;
+/// The register polls of a stop at drop share this budget: the drop can
+/// run inside a processor's exit, which must end well inside half a second.
+pub(crate) const STOP_BUDGET_US: u64 = 200_000;
 struct Hardware<R, T> {
     registers: R,
     timer: T,
     reset_ownership: Cell<firmware::ResetOwnership>,
+    /// What polls may still wait in all, when bounded ([`STOP_BUDGET_US`]).
+    budget: Cell<Option<u64>>,
 }
 impl<R: Registers, T: Timer> Hardware<R, T> {
     fn check_timing(&self) -> Result<()> {
@@ -233,6 +248,12 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             let word = self.read(register)?;
             if ready(word) {
                 return Ok(word);
+            }
+            if let Some(left) = self.budget.get() {
+                let left = left
+                    .checked_sub(interval)
+                    .ok_or(Error::Timeout { register })?;
+                self.budget.set(Some(left));
             }
             self.delay(interval)?;
         }
@@ -448,6 +469,21 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         self.state = State::Stopped;
         Ok(())
     }
+    /// [`Self::stop`] with every register poll drawn from one budget of
+    /// `microseconds`, for a stop inside a processor's exit. A function that
+    /// left the bus reads all ones and gets no write.
+    pub(crate) fn stop_within(&mut self, microseconds: u64) -> Result<()> {
+        let Some(function) = self.function.as_mut() else {
+            return Err(Error::Stopped);
+        };
+        if function.config().read16(4)? == u16::MAX {
+            return Err(Error::Removed);
+        }
+        self.hw().budget.set(Some(microseconds));
+        let result = self.stop();
+        self.hw().budget.set(None);
+        result
+    }
     /// Stop/drain the real queue epoch before requesting PCI D3hot. The
     /// configuration owner and DMA domain remain held for ordinary resume.
     pub fn suspend(&mut self) -> Result<()> {
@@ -482,12 +518,12 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
             return Err(Error::Stopped);
         }
         let result = self.hw().link(self.profile, self.firmware.unwrap());
+        // Link loss leaves frames still in the transmit ring to the
+        // hardware, as Linux's aq_nic_update_link_status only takes the
+        // carrier down: their descriptors stay owned until the head passes
+        // them, and a restart's firmware reset never runs in a link poll.
         if result.is_err() {
             self.state = State::Faulted;
-        } else if result == Ok(false) && self.tx_head != self.tx_tail {
-            // Link loss can strand hardware TX descriptors. Retire the
-            // engine epoch before reusing their bytes; failures keep it held.
-            self.restart()?;
         }
         result
     }
@@ -512,17 +548,8 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
     fn send(&mut self, frame: &[u8]) -> Result<()> {
         self.tx_reap()?;
         let next = (self.tx_tail + 1) % COUNT;
-        for _ in 0..2000 {
-            if next != self.tx_head {
-                break;
-            }
-            self.hw().delay(100)?;
-            self.tx_reap()?;
-        }
         if next == self.tx_head {
-            return Err(Error::Timeout {
-                register: registers::TX_HEAD.address,
-            });
+            return Err(Error::Busy);
         }
         self.memory
             .as_mut()
@@ -579,7 +606,11 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Link for Aqtion<R, T, C> {
             return Err(LinkError::NoCarrier);
         }
         self.send(frame)
-            .inspect_err(|_| self.state = State::Faulted)
+            .inspect_err(|error| {
+                if *error != Error::Busy {
+                    self.state = State::Faulted;
+                }
+            })
             .map_err(adapter)
     }
     fn receive(&mut self) -> core::result::Result<Option<Vec<u8>>, LinkError> {
@@ -602,6 +633,7 @@ fn adapter(error: Error) -> LinkError {
             LinkError::Pci(crate::block::BlockError::PciCapability(error))
         }
         Error::Pci(error) => LinkError::Pci(error),
+        Error::Busy => LinkError::Busy,
         error => LinkError::Adapter(format!("AQtion: {error:?}")),
     }
 }

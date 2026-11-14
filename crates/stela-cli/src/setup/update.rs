@@ -12,7 +12,7 @@
 //!   (`stela_loader::boot_bundle::REVISION`) than theirs, the update prepares
 //!   the active build's restore bundles for every machine again (while the
 //!   setup has the build's install medium) at the new schema and revision,
-//!   from `--ipsw` or `--fetch`; this makes it an update even with the same
+//!   from `--ipsw` or a download; this makes it an update even with the same
 //!   `stela.efi`. The cache store's spare is prepared before activating it:
 //!   its new translator takes that spare. Repeating an already-installed
 //!   update replenishes a consumed spare without replacing EFI or boot
@@ -102,12 +102,14 @@ pub(super) fn ready(record: &Record, usb: &Path) -> Result<()> {
 
 /// Image sources and write policy for a Stela update.
 pub(super) struct UpdateOptions<'a> {
-    /// The USB, as `--usb` named it.
+    /// The stick, as STICK named it.
     pub(super) usb: &'a Path,
     pub(super) image_path: &'a Path,
     pub(super) ipsw: Option<&'a Path>,
     pub(super) download_dir: Option<&'a Path>,
     pub(super) dry_run: bool,
+    /// `--yes`: put an older Stela on a stick without asking.
+    pub(super) yes: bool,
 }
 
 /// Replace `stela.efi` with `image_path`, preparing bundles of its schema
@@ -123,12 +125,17 @@ pub(super) fn update_stela(
         ipsw,
         download_dir,
         dry_run,
+        yes,
     } = options;
     let image = read_efi(environment, image_path)?;
     check_firmware_support(&record.esp, &image)?;
     let to = version_id(&image);
     let to_generation = environment.generation();
     ready(&record, usb)?;
+    // A dry run asks nothing; it only says what would change.
+    if !dry_run {
+        super::release::allow_older(environment, &record, yes, "put the older Stela on it")?;
+    }
     let from_generation = record.generation();
     // Restore bundles of the new generation for every machine of the active
     // build while it has an install medium. Where their restore image comes
@@ -173,11 +180,7 @@ pub(super) fn update_stela(
     let from = fs::read(esp.join(LOADER_PATH)).map_or("none".into(), |image| version_id(&image));
     let mut text = String::new();
     writeln!(text, "Stela update on {}:", esp.display())?;
-    text.push_str(&super::doctor::device_skips(
-        &esp,
-        "stela setup update stela",
-        dry_run,
-    )?);
+    text.push_str(&super::doctor::device_skips(&esp, "stela update", dry_run)?);
     text.push_str(&super::fdr::prepare(&record, true)?);
     // The firmware the last boot asked for and the USB lacks, which every
     // update that changes something adds.
@@ -191,7 +194,10 @@ pub(super) fn update_stela(
         }
         // An update stopped after its loader went in: the record still names
         // the previous version, or the bundles and media it replaced.
-        if record.stela_version.as_deref() != Some(to.as_str()) || record.has_leftovers() {
+        if record.stela_version.as_deref() != Some(to.as_str())
+            || record.release.as_deref() != Some(super::release::CURRENT)
+            || record.has_leftovers()
+        {
             writeln!(
                 text,
                 "  stela.efi      version {to} is installed; its update is finished"
@@ -407,6 +413,7 @@ pub(super) fn update_stela(
 fn activate(record: &mut Record, to: String) -> Result<()> {
     publish(record)?;
     record.stela_version = Some(to);
+    record.release = Some(super::release::CURRENT.into());
     write_record(&record.esp.clone(), record)?;
     prune(record)?;
     if let Some(store) = &record.translations {
@@ -425,7 +432,7 @@ fn room_for_new_copy(
     record: &Record,
     build: &str,
     source: &super::sources::Source,
-    dry_run: bool,
+    (dry_run, yes): (bool, bool),
     text: &mut String,
 ) -> Result<Option<super::medium::Medium>> {
     let Err(error) = super::sources::check_room(environment, record, build, source) else {
@@ -459,20 +466,22 @@ fn room_for_new_copy(
         return Ok(Some(old));
     }
     let question = format!(
-        "This USB has room for one copy of macOS only. Updating to macOS {build} first removes \
-         macOS {from}'s copy ({}, {size}). Until the new copy is complete, this USB cannot \
-         install macOS; a macOS already installed keeps starting, and running this update again \
-         continues it. Remove macOS {from}'s copy and continue?",
+        "This stick has room for one copy of macOS only. Switching to macOS {build} first removes \
+         macOS {from}'s copy ({}, {size}). Until the new copy is complete, this stick cannot \
+         install macOS; a macOS already installed keeps starting, and `stela repair` continues \
+         the switch. Remove macOS {from}'s copy and continue?",
         directory.display()
     );
-    match (environment.ask)(&question) {
-        Some(true) => Ok(Some(old)),
-        Some(false) => bail!("macOS {from}'s copy was kept, and nothing was changed"),
-        None => bail!(
-            "{error:#} Or run this on a terminal: it offers to remove macOS {from}'s copy ({size}) \
-             first, which makes room."
+    super::consent(
+        environment,
+        yes,
+        &question,
+        &format!(
+            "{error:#} The stick has room for one copy of macOS: switching to macOS {build} first \
+             removes macOS {from}'s copy ({size})"
         ),
-    }
+    )?;
+    Ok(Some(old))
 }
 
 /// Image source and write policy for a macOS update.
@@ -480,10 +489,12 @@ pub(super) struct OsOptions<'a> {
     pub(super) usb: &'a Path,
     /// The new build's image; its build is the new one.
     pub(super) ipsw: Option<&'a Path>,
-    /// The new build without `ipsw` (`--build`).
+    /// The new build without `ipsw` (`--macos`).
     pub(super) build: &'a str,
     pub(super) download_dir: Option<&'a Path>,
     pub(super) dry_run: bool,
+    /// `--yes`: remove the old copy for room without asking.
+    pub(super) yes: bool,
 }
 
 /// Add the new build's install medium and every machine's restore bundles,
@@ -499,6 +510,7 @@ pub(super) fn update_os(
         build,
         download_dir,
         dry_run,
+        yes,
     } = options;
     // Everything that can refuse the update comes before any download.
     check_bundle_revision(environment, &record)?;
@@ -572,11 +584,26 @@ pub(super) fn update_os(
     // the user agrees: it cannot install macOS until the new copy is
     // complete.
     let replace = match need {
-        super::sources::Need::WholeImage | super::sources::Need::Pieces => {
-            room_for_new_copy(environment, &record, &build, &source, dry_run, &mut text)?
-        }
+        super::sources::Need::WholeImage | super::sources::Need::Pieces => room_for_new_copy(
+            environment,
+            &record,
+            &build,
+            &source,
+            (dry_run, yes),
+            &mut text,
+        )?,
         super::sources::Need::BootFiles => None,
     };
+    // `--macos` names the download, so only a terminal run asks first.
+    if !dry_run {
+        super::consent_download(
+            environment,
+            yes,
+            true,
+            super::sources::download_bytes(&source),
+            &format!("macOS {build}"),
+        )?;
+    }
     // A dry run reads and downloads nothing to prepare its plan, and plans
     // no copy that needs the old one's room.
     let obtained = match dry_run && (!source.is_local() || replace.is_some()) {

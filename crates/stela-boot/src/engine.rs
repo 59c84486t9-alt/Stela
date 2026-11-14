@@ -872,8 +872,8 @@ fn show_reset(otherwise: &str, action: &str, hold: u64) {
     output::flush_log();
     if output::usb_log_kept() {
         crate::status::info(
-            "Its full log is on this USB: on another computer, `stela setup boot-log --output \
-             log.txt` saves it.",
+            "Its full log is on this USB: on another computer, plug in this USB and run `stela \
+             log`, which saves it to log.txt.",
         );
     }
     crate::status::countdown(action, hold);
@@ -1377,6 +1377,23 @@ pub(crate) fn inside_host_drivers() -> bool {
 /// the USB's log itself between two devices.
 pub(crate) fn starting_host_devices() -> bool {
     storage::starting_devices_here()
+}
+
+/// Store the USB's log from inside the GPU's start, which holds the host
+/// drivers' lock outside every storage driver's call; whether this
+/// processor is where that can be done (`storage::store_usb_log_in_gpu_start`).
+pub(crate) fn store_usb_log_in_gpu_start() -> bool {
+    storage::store_usb_log_in_gpu_start()
+}
+
+/// Run a stop's firmware call in the loader's root `root`
+/// (`storage::at_stop_in_loader_root`).
+///
+/// # Safety
+/// As for `storage::at_stop_in_loader_root`.
+pub(crate) unsafe fn in_loader_root_at_stop<T>(root: u64, call: impl FnOnce() -> T) -> T {
+    // SAFETY: the caller's.
+    unsafe { storage::at_stop_in_loader_root(root, call) }
 }
 
 /// Unload the GPUs' firmware before a fatal stop, where one can

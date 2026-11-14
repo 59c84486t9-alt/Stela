@@ -4,17 +4,20 @@
 //! back while the guest's queues have room. The rest wait in the host
 //! controller, as they would for a host that reads slowly.
 //!
-//! A host with no healthy controller gets the controller model
-//! (`stela_soc::usb::hci::model`) behind the same function: a controller
-//! with no radio, reported once as `BLUETOOTH PLATFORM Modeled`. bluetoothd
-//! then brings it up and idles instead of restarting for a missing chip.
+//! The guest is given no controller yet (`start`): macOS has not configured
+//! its USB one in any run, with a host controller or with the controller
+//! model (`stela_soc::usb::hci::model`), and its Setup waits for bluetoothd.
 //!
 //! One controller serves the guest; others are reported and left idle. A
 //! controller that fails is reported once, and the guest's commands then get
 //! no answer, as from a controller that stopped responding.
 //!
 //! The controllers' registers and DMA pages are reached through the loader's
-//! identity root, so each exchange runs in it (`storage::RestoreRoot`).
+//! identity root, so each exchange runs in it (`storage::RestoreRoot`). An
+//! exchange does not wait for the host drivers' lock, which another
+//! processor can hold for longer than a PE's exit may take: while it is
+//! busy the guest's packets wait here and the controller's in the
+//! controller, for the next service turn.
 use super::{output, storage::RestoreRoot};
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
 use stela_drivers::{
@@ -52,9 +55,22 @@ pub struct HostBluetooth {
     unknown: Vec<u16>,
 }
 
+/// The controller is dropped in the loader's root. An install runs without
+/// host input and drops the controller it found right after the device
+/// start; a USB controller's drop closes its endpoints through the xHCI,
+/// whose registers only that root maps.
+impl Drop for HostBluetooth {
+    fn drop(&mut self) {
+        let controller = core::mem::replace(
+            &mut self.controller,
+            Controller::Modeled { installed: false },
+        );
+        super::network::in_loader_root(self.root, || drop(controller));
+    }
+}
+
 impl HostBluetooth {
-    /// The first controller `usb` and `pcie` hold that initialized, or the
-    /// model without one.
+    /// The first controller `usb` and `pcie` hold that initialized.
     pub fn first(usb: Vec<UsbHci>, pcie: Vec<PcieHci>, root: u64) -> Option<Self> {
         let usb = usb.into_iter().filter_map(|hci| {
             let healthy = matches!(hci.initialization(), Some(Ok(_)) | None);
@@ -73,21 +89,7 @@ impl HostBluetooth {
             _ => None,
         });
         let mut healthy = usb.chain(pcie);
-        let Some((controller, location)) = healthy.next() else {
-            output::arguments(format_args!(
-                "BLUETOOTH PLATFORM Modeled: no host controller; the guest's controller \
-                 has no radio and finds nothing in range\n"
-            ));
-            return Some(Self {
-                controller: Controller::Modeled { installed: false },
-                location: String::from("model"),
-                root,
-                waiting: VecDeque::new(),
-                up: None,
-                failed: false,
-                unknown: Vec::new(),
-            });
-        };
+        let (controller, location) = healthy.next()?;
         output::arguments(format_args!("BLUETOOTH guest uses {location}\n"));
         for (_, unused) in healthy {
             output::arguments(format_args!("BLUETOOTH unused {unused}\n"));
@@ -165,7 +167,9 @@ impl HostBluetooth {
         self.waiting.extend(packets);
         // SAFETY: the loader root `storage::open` captured, which maps the
         // controllers' registers and DMA pages for the whole run.
-        let _root = unsafe { RestoreRoot::enter(self.root) };
+        let Some(_root) = (unsafe { RestoreRoot::try_enter(self.root) }) else {
+            return;
+        };
         while let Some(packet) = self.waiting.front() {
             let sent = match (&mut self.controller, packet) {
                 (Controller::Usb(hci), Outbound::Command(bytes)) => hci
@@ -219,7 +223,9 @@ impl HostBluetooth {
             return Vec::new();
         }
         // SAFETY: as in `transmit`.
-        let _root = unsafe { RestoreRoot::enter(self.root) };
+        let Some(_root) = (unsafe { RestoreRoot::try_enter(self.root) }) else {
+            return Vec::new();
+        };
         let received = match &mut self.controller {
             Controller::Modeled { .. } => Ok(Vec::new()),
             Controller::Usb(hci) => hci.poll().map_err(|error| alloc::format!("{error}")),

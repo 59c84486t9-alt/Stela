@@ -32,7 +32,8 @@
 //! disable in `alx_reset_pcie`; this polled driver leaves the command
 //! register to the PCI owner, which enables memory decoding and bus
 //! mastering. Jumbo frames, Wake-on-LAN and suspend are outside this port.
-//! DMA buffers live until reboot.
+//! Drop halts the controller as `__alx_stop` does; DMA buffers live until
+//! reboot when that MAC reset is not observed.
 use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
 use crate::{
     Handoff,
@@ -46,7 +47,10 @@ use crate::{
     timing::Timing,
 };
 use alloc::{format, string::String, vec::Vec};
-use core::sync::atomic::{Ordering, fence};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{Ordering, fence},
+};
 
 mod hardware;
 mod registers;
@@ -68,7 +72,6 @@ const REGISTER_BYTES: u64 = 0x2000;
 const LINK_POLL_US: u64 = 10_000;
 /// `ALX_RX_ALLOC_THRESH`: cleaned receive slots handed back at once.
 const RX_ALLOC_THRESH: usize = 32;
-const TRANSMIT_WAIT_US: u64 = 100_000;
 const DESCRIPTOR: usize = 16;
 const RFD: usize = 8;
 const FCS: usize = 4;
@@ -179,7 +182,7 @@ struct Sampling {
 
 pub struct Alx<R: Registers = Mmio> {
     hardware: Hardware<R>,
-    queues: Queues,
+    queues: ManuallyDrop<Queues>,
     mac: Mac,
     /// `pcie_get_readrq() >> 8` once the read request size is corrected,
     /// which later configurations read.
@@ -287,7 +290,7 @@ impl<R: Registers> Alx<R> {
         let queues = Queues::new(dma)?;
         let mut alx = Self {
             hardware,
-            queues,
+            queues: ManuallyDrop::new(queues),
             mac,
             read_request: read_request.max(DEV_CTRL_MAXRRS_MIN),
             sampling: Sampling::default(),
@@ -402,6 +405,28 @@ impl<R: Registers> Alx<R> {
     }
 }
 
+impl<R: Registers> Drop for Alx<R> {
+    /// Linux `__alx_stop`: `alx_halt` ([`Alx::stop`]), then
+    /// `alx_free_rings`, only once the MAC and DMA reset completed;
+    /// otherwise the rings stay allocated. The reset's waits stay under
+    /// 2 ms, inside a processor's exit. A function that left the bus reads
+    /// all ones and gets no write.
+    ///
+    /// This drives the controller's registers, so the owner drops it where
+    /// its MMIO window is mapped; anywhere else the first read faults.
+    fn drop(&mut self) {
+        if self.hardware.registers.read32(MASTER) == u32::MAX {
+            return;
+        }
+        if self.stop().is_ok() {
+            // SAFETY: the completed MAC and DMA reset stopped every
+            // descriptor and buffer access, and the rings are not used
+            // after this.
+            unsafe { ManuallyDrop::drop(&mut self.queues) };
+        }
+    }
+}
+
 impl<R: Registers> Link for Alx<R> {
     fn mac(&self) -> Mac {
         self.mac
@@ -419,17 +444,7 @@ impl<R: Registers> Link for Alx<R> {
         }
         self.reclaim();
         if self.queues.transmit_available() == 0 {
-            let clock = self.hardware.timer.nominal();
-            let waited = clock.wait(TRANSMIT_WAIT_US, || {
-                self.reclaim();
-                self.queues.transmit_available() != 0
-            });
-            if !waited {
-                return Err(LinkError::Adapter(format!(
-                    "{} transmit ring stalled",
-                    self.location
-                )));
-            }
+            return Err(LinkError::Busy);
         }
         let index = self.queues.tx_write;
         let length = frame.len().max(MIN_FRAME);

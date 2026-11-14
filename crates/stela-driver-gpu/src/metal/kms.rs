@@ -19,6 +19,12 @@
 //! [`Display::flush`] on the boot processor. A flip the engine has not
 //! finished answers `EBUSY` and stays queued for the next flush; a newer
 //! frame meanwhile replaces the queued one in the same hidden buffer.
+//!
+//! Hot-plug: a connector's state as the driver last detected it, which its
+//! hot-plug interrupt keeps current, is read with no probe ([`detected`]).
+//! An output that returns after it was seen disconnected gets its mode set
+//! again ([`Display::watch`]), as Linux's fbdev helper does on a hot-plug
+//! event.
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ops::Range;
@@ -38,6 +44,8 @@ const PAGE_FLIP: u32 = request::<PageFlip>(0xb0);
 const CREATE_DUMB: u32 = request::<CreateDumb>(0xb2);
 const MAP_DUMB: u32 = request::<MapDumb>(0xb3);
 const ADD_FB2: u32 = request::<FramebufferCommand>(0xb8);
+const REMOVE_FB: u32 = request::<u32>(0xaf);
+const DESTROY_DUMB: u32 = request::<DestroyDumb>(0xb4);
 
 /// `DRM_MODE_CONNECTED`.
 const CONNECTED: u32 = 1;
@@ -141,6 +149,13 @@ struct CreateDumb {
     size: u64,
 }
 
+/// `struct drm_mode_destroy_dumb`.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+struct DestroyDumb {
+    handle: u32,
+}
+
 /// `struct drm_mode_map_dumb`.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -207,6 +222,8 @@ pub unsafe trait Drm {
     fn control(&mut self, request: u32, argument: *mut c_void) -> i64;
     /// Maps `bytes` at `offset`, what `MAP_DUMB` answered.
     fn map(&mut self, offset: u64, bytes: usize) -> Option<NonNull<u8>>;
+    /// Removes the mapping of `bytes` that [`Drm::map`] gave at `pixels`.
+    fn unmap(&mut self, pixels: NonNull<u8>, bytes: usize);
     /// Whether a request made now completes without waiting for another
     /// processor. A display queues what it cannot request now.
     fn immediate(&self) -> bool;
@@ -218,6 +235,9 @@ struct Buffer {
     framebuffer: u32,
     pixels: NonNull<u8>,
     pitch: usize,
+    /// The dumb buffer's handle and mapped bytes, to give it back.
+    handle: u32,
+    bytes: usize,
 }
 
 /// The output a [`Display`] runs.
@@ -241,6 +261,22 @@ pub struct Display<D> {
     queued: bool,
     /// The row a producer fills before it is copied to video memory.
     row: Vec<u8>,
+    /// The connector and mode the controller runs.
+    connector: u32,
+    mode: ModeInfo,
+    /// The connector was last read disconnected ([`Self::watch`]).
+    lost: bool,
+}
+
+/// What [`Display::watch`] read of the output's connector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watched {
+    /// As at the last read.
+    Unchanged,
+    /// Disconnected since the last read.
+    Lost,
+    /// Connected again, and its mode set again.
+    Restored,
 }
 
 // SAFETY: the buffers' mappings go with the display, which one PE uses at a
@@ -307,6 +343,107 @@ struct Output {
     size_mm: [u32; 2],
     modes: Vec<ModeInfo>,
     encoders: Vec<u32>,
+    /// `DRM_MODE_CONNECTOR_*` and the connector's number among its kind.
+    kind: u32,
+    index: u32,
+}
+
+/// One connector as the driver reports it, for the report of a GPU whose
+/// display was not taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    kind: u32,
+    index: u32,
+    /// Whether the driver detected a display on it.
+    pub connected: bool,
+    /// How many modes and encoders it lists.
+    pub modes: usize,
+    pub encoders: usize,
+}
+
+impl core::fmt::Display for Seen {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Linux's `drm_connector_enum_list` names.
+        const KINDS: [&str; 21] = [
+            "Unknown",
+            "VGA",
+            "DVI-I",
+            "DVI-D",
+            "DVI-A",
+            "Composite",
+            "SVIDEO",
+            "LVDS",
+            "Component",
+            "DIN",
+            "DP",
+            "HDMI-A",
+            "HDMI-B",
+            "TV",
+            "eDP",
+            "Virtual",
+            "DSI",
+            "DPI",
+            "Writeback",
+            "SPI",
+            "USB",
+        ];
+        let kind = KINDS.get(self.kind as usize).copied().unwrap_or(KINDS[0]);
+        let state = match self.connected {
+            true => "connected",
+            false => "not connected",
+        };
+        write!(
+            f,
+            "{kind}-{} {state} modes={} encoders={}",
+            self.index, self.modes, self.encoders
+        )
+    }
+}
+
+/// Every connector of `drm`, each detected anew as Linux's forced probe does.
+pub fn survey<D: Drm>(drm: &mut D) -> Result<Vec<Seen>, Error> {
+    let (_, connectors) = resources(drm)?;
+    connectors
+        .iter()
+        .map(|&id| {
+            output(drm, id).map(|found| Seen {
+                kind: found.kind,
+                index: found.index,
+                connected: found.connected,
+                modes: found.modes.len(),
+                encoders: found.encoders.len(),
+            })
+        })
+        .collect()
+}
+
+/// Whether connector `id` has a display as the driver last detected it.
+/// Linux probes a connector only for a request that lists no modes
+/// (`drm_mode_getconnector`), so this one has room for one mode, which
+/// Linux fills only when it is the whole list.
+fn detected_on<D: Drm>(drm: &mut D, id: u32) -> Result<bool, Error> {
+    let mut mode = ModeInfo::default();
+    let mut connector = Connector {
+        id,
+        modes: ptr::from_mut(&mut mode) as u64,
+        mode_count: 1,
+        ..Connector::default()
+    };
+    call(drm, GET_CONNECTOR, &mut connector)?;
+    Ok(connector.connection == CONNECTED)
+}
+
+/// Whether any connector of `drm` has a display as its driver last
+/// detected it, with no probe: cheap enough to ask often, and current where
+/// hot-plug interrupts arrive.
+pub fn detected<D: Drm>(drm: &mut D) -> Result<bool, Error> {
+    let (_, connectors) = resources(drm)?;
+    for id in connectors {
+        if detected_on(drm, id)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn output<D: Drm>(drm: &mut D, id: u32) -> Result<Output, Error> {
@@ -339,6 +476,8 @@ fn output<D: Drm>(drm: &mut D, id: u32) -> Result<Output, Error> {
             size_mm: described.size_mm,
             modes,
             encoders,
+            kind: described.kind,
+            index: described.kind_id,
         });
     }
     Err(Error::Changed)
@@ -364,18 +503,59 @@ fn controller<D: Drm>(drm: &mut D, encoders: &[u32], crtcs: &[u32]) -> Result<Op
     Ok(None)
 }
 
-/// The mode of `wanted` size, else the preferred one, else the first.
-fn choose(modes: &[ModeInfo], wanted: (u32, u32)) -> Option<ModeInfo> {
-    let size = |mode: &&ModeInfo| (u32::from(mode.hdisplay), u32::from(mode.vdisplay));
-    modes
-        .iter()
-        .find(|mode| size(mode) == wanted)
-        .or_else(|| modes.iter().find(|mode| mode.kind & PREFERRED != 0))
-        .or(modes.first())
-        .copied()
+/// Whether whoever shows the output's picture to the guest can describe a
+/// mode of this width and height at this refresh in millihertz.
+pub type Fits<'a> = &'a dyn Fn(u32, u32, u32) -> bool;
+
+/// Which of an output's modes to take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wanted {
+    /// The monitor's own preferred mode, its native one, else a mode of
+    /// this size: for a display taken before the guest's mode is set. A
+    /// firmware often shows a 3840x2160 panel in 1920x1080.
+    Native((u32, u32)),
+    /// A mode of this size, else the preferred one: the guest's mode is
+    /// set, and only that size is shown.
+    Size((u32, u32)),
 }
 
-/// One buffer of the mode's size, with its framebuffer and mapping.
+/// The mode [`Wanted`] names that `fits`, else its second choice if that
+/// fits, else the first that does. Linux lists an output's preferred mode
+/// first and then the faster of each size first, so a size's mode is its
+/// fastest the guest can be told of. A monitor's fastest mode may not fit,
+/// as 2560x1440 at 180 Hz. With no mode that fits, the same choice among
+/// all of them.
+fn choose(modes: &[ModeInfo], wanted: Wanted, fits: Fits<'_>) -> Option<ModeInfo> {
+    let size = |mode: &ModeInfo| (u32::from(mode.hdisplay), u32::from(mode.vdisplay));
+    let pick = |fits: Fits<'_>| {
+        let fitting = |mode: &&ModeInfo| {
+            let (width, height) = size(mode);
+            fits(width, height, refresh(mode))
+        };
+        let sized = |wanted: (u32, u32)| {
+            modes
+                .iter()
+                .filter(fitting)
+                .find(|mode| size(mode) == wanted)
+        };
+        // The fastest fitting mode of the preferred mode's size.
+        let preferred = || {
+            let native = modes.iter().find(|mode| mode.kind & PREFERRED != 0)?;
+            sized(size(native))
+        };
+        match wanted {
+            Wanted::Native(otherwise) => preferred().or_else(|| sized(otherwise)),
+            Wanted::Size(wanted) => sized(wanted).or_else(preferred),
+        }
+        .or_else(|| modes.iter().find(fitting))
+        .copied()
+    };
+    pick(fits).or_else(|| pick(&|_, _, _| true))
+}
+
+/// One buffer of the mode's size, with its framebuffer and mapping. A
+/// buffer that cannot be finished is given back: a display that is not
+/// taken is looked for again, and each look would keep its buffers.
 fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<Buffer, Error> {
     let mut dumb = CreateDumb {
         width,
@@ -384,6 +564,23 @@ fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<Buffer, Error>
         ..CreateDumb::default()
     };
     call(drm, CREATE_DUMB, &mut dumb)?;
+    let mut framebuffer = None;
+    let finished = finish(drm, width, height, &dumb, &mut framebuffer);
+    if finished.is_err() {
+        release(drm, dumb.handle, framebuffer, None);
+    }
+    finished
+}
+
+/// The framebuffer and mapping of the dumb buffer `dumb`; `framebuffer` is
+/// the one made, for [`buffer`] to give back when a later request fails.
+fn finish<D: Drm>(
+    drm: &mut D,
+    width: u32,
+    height: u32,
+    dumb: &CreateDumb,
+    made: &mut Option<u32>,
+) -> Result<Buffer, Error> {
     let row = width
         .checked_mul(BYTES_PER_PIXEL)
         .ok_or(Error::InvalidBuffer)?;
@@ -404,6 +601,7 @@ fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<Buffer, Error>
     framebuffer.handles[0] = dumb.handle;
     framebuffer.pitches[0] = dumb.pitch;
     call(drm, ADD_FB2, &mut framebuffer)?;
+    *made = Some(framebuffer.id);
     let mut map = MapDumb {
         handle: dumb.handle,
         ..MapDumb::default()
@@ -417,7 +615,39 @@ fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<Buffer, Error>
         framebuffer: framebuffer.id,
         pixels,
         pitch: dumb.pitch as usize,
+        handle: dumb.handle,
+        bytes,
     })
+}
+
+/// [`release`] each of `buffers`, none of which the controller shows.
+fn release_all<D: Drm>(drm: &mut D, buffers: &[Buffer]) {
+    for buffer in buffers {
+        release(
+            drm,
+            buffer.handle,
+            Some(buffer.framebuffer),
+            Some((buffer.pixels, buffer.bytes)),
+        );
+    }
+}
+
+/// Give a dumb buffer back: its mapping, its framebuffer and the buffer
+/// itself, in the order Linux needs. A refusal leaves what it names with
+/// the node, whose close frees it.
+fn release<D: Drm>(
+    drm: &mut D,
+    handle: u32,
+    framebuffer: Option<u32>,
+    mapping: Option<(NonNull<u8>, usize)>,
+) {
+    if let Some((pixels, bytes)) = mapping {
+        drm.unmap(pixels, bytes);
+    }
+    if let Some(mut id) = framebuffer {
+        let _ = call(drm, REMOVE_FB, &mut id);
+    }
+    let _ = call(drm, DESTROY_DUMB, &mut DestroyDumb { handle });
 }
 
 fn resources<D: Drm>(drm: &mut D) -> Result<(Vec<u32>, Vec<u32>), Error> {
@@ -449,11 +679,17 @@ fn resources<D: Drm>(drm: &mut D) -> Result<(Vec<u32>, Vec<u32>), Error> {
 impl<D: Drm> Display<D> {
     /// Takes the first connected output of `drm`, showing a black frame in
     /// the mode of `wanted` pixels if it has one, as the firmware's did.
-    pub fn take(mut drm: D, wanted: (u32, u32)) -> Result<Self, Error> {
+    pub fn take(drm: D, wanted: (u32, u32)) -> Result<Self, Error> {
+        Self::take_fitting(drm, Wanted::Size(wanted), &|_, _, _| true)
+    }
+
+    /// [`Self::take`] in the mode [`Wanted`] names that `fits`, where the
+    /// output has one.
+    pub fn take_fitting(mut drm: D, wanted: Wanted, fits: Fits<'_>) -> Result<Self, Error> {
         let (crtcs, connectors) = resources(&mut drm)?;
         for &id in &connectors {
             let found = output(&mut drm, id)?;
-            let Some(mode) = choose(&found.modes, wanted).filter(|_| found.connected) else {
+            let Some(mode) = choose(&found.modes, wanted, fits).filter(|_| found.connected) else {
                 continue;
             };
             if let Some(crtc) = controller(&mut drm, &found.encoders, &crtcs)? {
@@ -470,33 +706,86 @@ impl<D: Drm> Display<D> {
 
     fn run(mut drm: D, crtc: u32, connector: u32, mode: ModeInfo) -> Result<Self, Error> {
         let (width, height) = (u32::from(mode.hdisplay), u32::from(mode.vdisplay));
-        let front = buffer(&mut drm, width, height)?;
-        let back = buffer(&mut drm, width, height)?;
-        let spare = buffer(&mut drm, width, height)?;
-        let mut connectors = connector;
-        let mut set = Crtc {
-            connectors: ptr::from_mut(&mut connectors) as u64,
-            connector_count: 1,
-            id: crtc,
-            framebuffer: front.framebuffer,
-            mode_valid: 1,
-            mode,
-            ..Crtc::default()
+        let mut made = Vec::new();
+        for _ in 0..3 {
+            match buffer(&mut drm, width, height) {
+                Ok(buffer) => made.push(buffer),
+                Err(error) => {
+                    release_all(&mut drm, &made);
+                    return Err(error);
+                }
+            }
+        }
+        let Ok(buffers) = <[Buffer; 3]>::try_from(made) else {
+            return Err(Error::Allocation);
         };
-        call(&mut drm, SET_CRTC, &mut set)?;
-        Ok(Self {
+        let mut display = Self {
             drm,
             crtc,
             width,
             height,
             refresh: refresh(&mode),
             size_mm: None,
-            buffers: [front, back, spare],
+            buffers,
             // Each buffer holds black, and the front the console's text.
             stale: [0..height as usize, 0..height as usize, 0..height as usize],
             queued: false,
             row: Vec::new(),
-        })
+            connector,
+            mode,
+            lost: false,
+        };
+        if let Err(error) = display.set_mode() {
+            release_all(&mut display.drm, &display.buffers);
+            return Err(error);
+        }
+        Ok(display)
+    }
+
+    /// Run the controller in the mode on the connector, showing the buffer
+    /// on screen.
+    fn set_mode(&mut self) -> Result<(), Error> {
+        let mut connectors = self.connector;
+        let mut set = Crtc {
+            connectors: ptr::from_mut(&mut connectors) as u64,
+            connector_count: 1,
+            id: self.crtc,
+            framebuffer: self.buffers[0].framebuffer,
+            mode_valid: 1,
+            mode: self.mode,
+            ..Crtc::default()
+        };
+        call(&mut self.drm, SET_CRTC, &mut set)
+    }
+
+    /// Read the output's connector as the driver last detected it, with no
+    /// probe, where a request completes now. Once it is connected again
+    /// after a read found it disconnected, the controller is turned off and
+    /// set again on the buffer on screen: a full mode set, which trains a
+    /// DisplayPort link anew, where an unchanged one would change nothing.
+    /// A refused mode set leaves it lost, to be tried at the next read.
+    pub fn watch(&mut self) -> Result<Watched, Error> {
+        if !self.drm.immediate() {
+            return Ok(Watched::Unchanged);
+        }
+        let connected = detected_on(&mut self.drm, self.connector)?;
+        match (connected, self.lost) {
+            (false, false) => {
+                self.lost = true;
+                Ok(Watched::Lost)
+            }
+            (true, true) => {
+                let mut off = Crtc {
+                    id: self.crtc,
+                    ..Crtc::default()
+                };
+                call(&mut self.drm, SET_CRTC, &mut off)?;
+                self.set_mode()?;
+                self.lost = false;
+                Ok(Watched::Restored)
+            }
+            _ => Ok(Watched::Unchanged),
+        }
     }
 
     /// Pixels across and down.

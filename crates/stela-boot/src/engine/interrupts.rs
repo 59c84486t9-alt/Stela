@@ -623,42 +623,6 @@ pub(crate) unsafe fn observe_descriptors() -> Descriptors {
 }
 
 /// Report an x86 exception that is a Stela failure, never a guest event.
-#[repr(u8)]
-#[derive(Clone, Copy)]
-pub(crate) enum DiagnosticStage {
-    Boot,
-    PciContainment,
-    DeviceServices,
-    DeviceProbe,
-    GpuMmioWindow,
-    GpuClock,
-    GpuFramebuffer,
-    GpuPciClaim,
-    GpuOpen,
-}
-
-static DIAGNOSTIC_STAGE: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(DiagnosticStage::Boot as u8);
-
-pub(crate) fn diagnostic_stage(stage: DiagnosticStage) {
-    DIAGNOSTIC_STAGE.store(stage as u8, core::sync::atomic::Ordering::Relaxed);
-}
-
-fn diagnostic_stage_name() -> &'static str {
-    match DIAGNOSTIC_STAGE.load(core::sync::atomic::Ordering::Relaxed) {
-        1 => "pci-containment",
-        2 => "device-services",
-        3 => "device-probe",
-        4 => "gpu-mmio-window",
-        5 => "gpu-clock",
-        6 => "gpu-framebuffer",
-        7 => "gpu-pci-claim",
-        8 => "gpu-open",
-        _ => "boot",
-    }
-}
-
-/// Report an x86 exception that is a Stela failure, never a guest event.
 pub fn fatal(frame: &Frame) -> ! {
     report(frame);
     // Linux's minimum-deadline callbacks stop on `ud2` after recording why.
@@ -691,47 +655,16 @@ pub fn fatal(frame: &Frame) -> ! {
     };
     output::fatal(format_args!(
         "unexpected x86 exception in the system engine: vector={} error={:#x} rip={:#x} \
-         (image+{:#x}) cr2={:#x} cr3={:#x} rax={:#x} rdx={:#x} \
-         stage={} drivers={drivers} {} stack={callers}",
+         (image+{:#x}) code={} rax={:#x} cr2={:#x} cr3={:#x} drivers={drivers} stack={callers}",
         frame.vector,
         frame.error,
         frame.rip,
         frame.rip.wrapping_sub(&raw const __ImageBase as u64),
-        cr2(),
-        cr3(),
+        output::Code::at(frame.rip),
         frame.rax,
-        frame.rdx,
-        diagnostic_stage_name(),
-        xhci_diagnostic()
+        cr2(),
+        cr3()
     ))
-}
-
-fn xhci_diagnostic() -> impl core::fmt::Display {
-    struct Context(Option<stela_drivers::usb::xhci::DiagnosticRead>);
-    impl core::fmt::Display for Context {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            match self.0 {
-                Some(read) => write!(
-                    formatter,
-                    "xhci={:04x}:{:02x}:{:02x}.{} bar0={:#x} cpu={:#x} offset={:#x} \\
-                     read_cr3={:#x} loader_root={:#x} line={} reads={}",
-                    read.segment,
-                    read.bus,
-                    read.device,
-                    read.function,
-                    read.physical_base,
-                    read.cpu_address,
-                    read.offset,
-                    read.cr3,
-                    read.loader_root,
-                    read.caller_line,
-                    read.reads
-                ),
-                None => formatter.write_str("xhci=none"),
-            }
-        }
-    }
-    Context(stela_drivers::usb::xhci::diagnostic_read())
 }
 
 /// Print an x86 exception's detail, straight to the port: whatever raised it
@@ -740,17 +673,12 @@ pub fn report(frame: &Frame) {
     use core::fmt::Write;
     let _ = writeln!(
         crate::serial::Serial,
-        "x86 exception vector={} error={:#x} rip={:#x} rsp={:#x} cr2={:#x} rflags={:#x} \
-         rax={:#x} rdx={:#x} stage={}",
+        "x86 exception vector={} error={:#x} rip={:#x} rsp={:#x} cr2={:#x} rflags={:#x}",
         frame.vector,
         frame.error,
         frame.rip,
         frame.rsp,
         cr2(),
-        frame.rflags,
-        frame.rax,
-        frame.rdx,
-        diagnostic_stage_name()
+        frame.rflags
     );
 }
-

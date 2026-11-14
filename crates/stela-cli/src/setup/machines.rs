@@ -80,8 +80,8 @@ pub(super) fn machine_ecid(options: EcidOptions, notes: &mut Vec<String>) -> Res
         (None, Some(recorded)) => Ok(recorded),
         (None, None) if sep_provisioned && !new_ecid => bail!(
             "this disk's machine state holds an earlier Stela machine's SEP state, which is \
-             bound to that machine's ECID. Pass that ECID with --ecid (`stela setup status` of \
-             its old USB, or its `state backup` file, shows it), or --new-ecid to start a new \
+             bound to that machine's ECID. Pass that ECID with --ecid (`stela status` of \
+             its old stick, or its `state backup` file, shows it), or --new-ecid to start a new \
              machine, which orphans its LocalPolicy and SEP state."
         ),
         (None, None) => {
@@ -370,8 +370,8 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         let install = record.install(Some(name))?.clone();
         ensure!(
             record.installs.len() > 1,
-            "install \"{name}\" is this setup's only one; {} removes the setup",
-            super::fix(&command.usb, "uninstall")
+            "install \"{name}\" is this setup's only one; to remove it, {}",
+            super::START_OVER
         );
         record.installs.retain(|i| i.name != *name);
         if record.default_install.as_deref() == Some(name.as_str()) {
@@ -429,7 +429,10 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
     if let Some(ssid) = &command.wifi {
         let network = super::wifi::Network {
             ssid: ssid.clone(),
-            country: command.wifi_country.clone(),
+            country: command
+                .wifi_country
+                .clone()
+                .or_else(environment.wifi_country),
         };
         writeln!(text, "  {}", super::wifi::describe(&network, &record.esp))?;
         record.wifi = Some(network);

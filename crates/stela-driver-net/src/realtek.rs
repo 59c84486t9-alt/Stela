@@ -53,8 +53,11 @@
 //! and jumbo frames are
 //! outside this slice. This is not a whole-family hardware validation.
 //!
-//! DMA buffers live until reboot even on startup/transmit errors. OWN is the
-//! sole ownership transfer; timed-out transmit slots are never overwritten.
+//! Drop stops the chip and resets its MAC, as rtl8169_down does; DASH
+//! firmware is not told the driver stopped (its EP/FP stop waits seconds).
+//! DMA buffers live until reboot when that reset is not observed, and on
+//! startup/transmit errors. OWN is the sole ownership transfer; timed-out
+//! transmit slots are never overwritten.
 
 use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
 use crate::{
@@ -70,6 +73,7 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use core::{
     fmt,
+    mem::ManuallyDrop,
     sync::atomic::{Ordering, fence},
 };
 mod firmware;
@@ -243,8 +247,8 @@ impl fmt::Display for Warning {
 pub struct Realtek {
     device: Mmio,
     clock: crate::timing::Timing,
-    receive: Ring,
-    transmit: Ring,
+    receive: ManuallyDrop<Ring>,
+    transmit: ManuallyDrop<Ring>,
     mac: Mac,
     link: RuntimeLink,
     revision: Revision,
@@ -302,9 +306,14 @@ impl Realtek {
         let device = map_registers(handoff, bar, 0, 256)?;
         function.enable_polled()?;
         let txconfig = device.read32(TX_CONFIG);
+        // A window panics on an access past its length, so each read goes
+        // through one that covers it: the extended identity word, then
+        // every register the detected revision's start and runtime reach.
+        let device = widen(handoff, bar, device, identity_aperture(txconfig))?;
         let revision = detect_revision(&device, txconfig, |bytes| {
             map_registers(handoff, bar, 0, bytes).map(|_| ())
         })?;
+        let device = widen(handoff, bar, device, register_aperture(revision))?;
         admit_revision(function.device, pcie_link_control, revision)?;
         if tbi_mode(revision, device.read8(PHY_STATUS)) {
             return Err(BlockError::Unsupported("Realtek TBI/fiber mode").into());
@@ -348,8 +357,8 @@ impl Realtek {
         let mut net = Self {
             device,
             clock,
-            receive: Ring::new(dma, revision.version >= 18)?,
-            transmit: Ring::new(dma, revision.version >= 18)?,
+            receive: ManuallyDrop::new(Ring::new(dma, revision.version >= 18)?),
+            transmit: ManuallyDrop::new(Ring::new(dma, revision.version >= 18)?),
             mac,
             link: RuntimeLink::default(),
             revision,
@@ -532,6 +541,31 @@ fn admit_revision(device: u16, pcie_control: Option<u16>, revision: Revision) ->
     Ok(())
 }
 
+/// The registers the identity reads span: the first 256 bytes, and through
+/// the extended word where TxConfig says the chip has one.
+fn identity_aperture(txconfig: u32) -> u64 {
+    if revision::needs_extended(txconfig) {
+        EXTENDED_REGISTER_BYTES
+    } else {
+        256
+    }
+}
+
+/// `device`, or a window of `bytes` over the same BAR when it is shorter.
+/// The BAR must cover and map the wider range.
+fn widen(
+    handoff: &Handoff,
+    bar: Option<pci::Bar>,
+    device: Mmio,
+    bytes: u64,
+) -> Result<Mmio, BlockError> {
+    if bytes <= device.len() as u64 {
+        return Ok(device);
+    }
+    map_registers(handoff, bar, 0, bytes)
+}
+
+/// The registers a revision's start and runtime span.
 fn register_aperture(revision: Revision) -> u64 {
     if revision.nbase() {
         NBASE_REGISTER_BYTES
@@ -718,6 +752,29 @@ fn station(low: u32, high: u32) -> Option<Mac> {
     let mac = Mac([a[0], a[1], a[2], a[3], b[0], b[1]]);
     (!mac.is_multicast() && mac.0 != [0; 6]).then_some(mac)
 }
+/// RxConfig's FIFO, DMA and fetch bits per MAC version, from Linux
+/// `rtl_init_rxcfg`, without its `RX_MULTI_EN` (bit 14).
+///
+/// Linux sets that bit on versions 18..24, 34..38 and 40..53. It lets the
+/// chip fetch several receive descriptors at once, and Linux gives each
+/// descriptor its own 16 KiB buffer, where this driver packs its buffers
+/// 2 KiB apart in one allocation. With this layout an RTL8168H (version 46)
+/// with the bit set wrote frames into the buffers of other descriptors: the
+/// descriptors it returned were complete and error-free, but their own
+/// buffers stayed zero, so every frame arrived empty. With the bit clear it
+/// received every frame. The bit is only a fetch optimization, so it stays
+/// clear on every version rather than on that one.
+fn receive_config(version: u8) -> u32 {
+    match version {
+        2..=17 => RX_FIFO_THRESHOLD | RX_DMA_BURST,
+        40..=53 => RX_128_INTERRUPTS | RX_DMA_BURST | RX_EARLY_OFF,
+        61 => RX_FETCH_8125 | RX_DMA_BURST,
+        // Bit 11 is RX_PAUSE_SLOT_ON on these: the same bit as RX_EARLY_OFF.
+        63..=66 | 70 => RX_FETCH_8125 | RX_DMA_BURST | RX_EARLY_OFF,
+        _ => RX_128_INTERRUPTS | RX_DMA_BURST,
+    }
+}
+
 fn publish<R: Registers, T: Timer>(
     hw: &Hardware<'_, R, T>,
     rx: &Ring,
@@ -762,19 +819,8 @@ fn publish<R: Registers, T: Timer>(
     r.read8(COMMAND);
     fence(Ordering::SeqCst);
     r.write8(COMMAND, ENABLE);
-    // Linux `rtl_init_rxcfg`, per MAC version.
-    let rxconfig = match revision.version {
-        2..=17 => RX_FIFO_THRESHOLD | RX_DMA_BURST,
-        25 | 26 | 28 | 31 | 32 | 33 => RX_128_INTERRUPTS | RX_DMA_BURST,
-        40 | 42 | 44 | 46 | 51 | 52 => {
-            RX_128_INTERRUPTS | RX_MULTI_ENABLE | RX_DMA_BURST | RX_EARLY_OFF
-        }
-        61 => RX_FETCH_8125 | RX_DMA_BURST,
-        63..=66 | 70 => RX_FETCH_8125 | RX_DMA_BURST | RX_EARLY_OFF,
-        _ => RX_128_INTERRUPTS | RX_MULTI_ENABLE | RX_DMA_BURST,
-    };
     // No promiscuous, error, runt or VLAN-stripping acceptance.
-    r.write32(RX_CONFIG, rxconfig | RX_ACCEPT);
+    r.write32(RX_CONFIG, receive_config(revision.version) | RX_ACCEPT);
     r.write32(MAR0, u32::MAX);
     r.write32(MAR0 + 4, u32::MAX);
     let auto_fifo = match (34..=52).contains(&revision.version) {
@@ -792,6 +838,30 @@ fn publish<R: Registers, T: Timer>(
     }
     Ok(())
 }
+impl Drop for Realtek {
+    /// Linux `rtl8169_down`'s register sequence ([`Hardware::stop`]). The
+    /// rings are freed only once the MAC reset completed; otherwise they
+    /// stay allocated. A function that left the bus reads all ones and
+    /// gets no write.
+    ///
+    /// This drives the controller's registers, so the owner drops it where
+    /// its MMIO window is mapped; anywhere else the first read faults.
+    fn drop(&mut self) {
+        if self.device.read32(TX_CONFIG) == u32::MAX {
+            return;
+        }
+        let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
+        if hardware.stop().is_ok() {
+            // SAFETY: the completed MAC reset stopped every descriptor and
+            // buffer access, and neither ring is used after this.
+            unsafe {
+                ManuallyDrop::drop(&mut self.receive);
+                ManuallyDrop::drop(&mut self.transmit);
+            }
+        }
+    }
+}
+
 impl Link for Realtek {
     fn mac(&self) -> Mac {
         self.mac
@@ -806,12 +876,8 @@ impl Link for Realtek {
         if !self.update_link()? {
             return Err(LinkError::NoCarrier);
         }
-        let clock = &self.clock;
-        if !clock.wait(100_000, || self.transmit.available()) {
-            return Err(LinkError::Adapter(format!(
-                "{} transmit ring stalled",
-                self.location
-            )));
+        if !self.transmit.available() {
+            return Err(LinkError::Busy);
         }
         self.transmit.transmit(frame)?;
         fence(Ordering::SeqCst);

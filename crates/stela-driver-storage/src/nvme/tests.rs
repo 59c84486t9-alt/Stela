@@ -56,6 +56,7 @@ impl Fixture {
             ready_timeout_us: 500_000,
             configuration: CONFIGURATION_VALUE & !ENABLE,
             independent_identify: false,
+            fatal_standing: false,
             version: 0,
             commands: 0,
             scans: 0,
@@ -303,6 +304,22 @@ fn a_fatal_controller_is_reset_first_and_poisons_when_it_stays_fatal() {
     assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), 0);
 }
 
+/// INTMS masks pin and MSI interrupts. A controller configured for MSI-X
+/// is never written there, at attach or at a reset.
+#[test]
+fn the_interrupt_mask_register_is_left_alone_under_msix() {
+    for (signalled, mask) in [(false, u32::MAX), (true, 0)] {
+        let fixture = Fixture::new();
+        let mut c = fixture.disk.controller.borrow_mut();
+        c.signalled = signalled;
+        c.configure_admin().unwrap();
+        assert_eq!(c.registers.read32(INTERRUPT_MASK_SET).unwrap(), mask);
+        assert_eq!(c.registers.read32(ADMIN_ATTRIBUTES).unwrap(), 15 << 16 | 15);
+        assert_ne!(c.registers.read64(ADMIN_SUBMISSION).unwrap(), 0);
+        assert_ne!(c.registers.read64(ADMIN_COMPLETION).unwrap(), 0);
+    }
+}
+
 fn namespace(blocks: u64, flbas: u8, formats: &[(usize, u32)], attributes: u8) -> Vec<u8> {
     let mut page = vec![0u8; PAGE];
     page[NAMESPACE_SIZE].copy_from_slice(&blocks.to_le_bytes());
@@ -377,6 +394,92 @@ fn running_id(controller: &Controller, tag: u32) -> u16 {
         Tag::Running { id, .. } => id,
         _ => panic!("tag {tag} runs nothing"),
     }
+}
+
+/// Post, before it is sent, the successful completion of the next admin
+/// command, reporting it fetched.
+fn answer_next_admin(controller: &mut Controller) {
+    let id = controller.command_id.wrapping_add(1);
+    let entry = usize::from(controller.admin.head) * 16;
+    let head = u32::from(controller.admin.next(controller.admin.tail));
+    let phase = u32::from(controller.admin.phase) << 16;
+    controller.admin.completions.write(entry + 8, head);
+    controller
+        .admin
+        .completions
+        .write(entry + 12, phase | u32::from(id));
+}
+
+/// Linux `nvme_wait_ready` ends at CSTS.RDY and reads no more of CSTS
+/// before its first command, whose completion it takes: a CSTS.CFS still
+/// set once the controller is ready stands, at attach and after a reset,
+/// and fails no command the controller answers. A CFS that rises after a
+/// clean start fails the next command before it is sent.
+#[test]
+fn a_fatal_status_standing_at_ready_fails_no_command_the_controller_answers() {
+    let _clock = crate::test_clock::virtualize();
+    let fixture = Fixture::new();
+    let mut c = fixture.disk.controller.borrow_mut();
+    c.registers.write32(STATUS, READY | FATAL).unwrap();
+    c.wait_enabled(1000).unwrap();
+    assert!(c.fatal_standing);
+    answer_next_admin(&mut c);
+    let identify = c.identify_command(IDENTIFY_CONTROLLER, 0).unwrap();
+    assert_eq!(c.admin(identify), Ok(0));
+    assert_eq!(c.fault, None);
+
+    // A clean start: the CFS that rises later is the controller's failure.
+    c.registers.write32(STATUS, READY).unwrap();
+    c.wait_enabled(1000).unwrap();
+    assert!(!c.fatal_standing);
+    c.registers.write32(STATUS, READY | FATAL).unwrap();
+    let tail = c.admin.tail;
+    assert!(matches!(
+        c.admin_wait(identify, true),
+        Err(Lost::Reset(BlockError::Device { status: 3 }))
+    ));
+    assert_eq!(c.admin.tail, tail, "nothing sent to the failed controller");
+
+    // A reset's enable keeps a CFS standing at ready the same way and
+    // goes on to Identify Controller.
+    c.fatal_standing = false;
+    let deadline = c.deadline(1000).unwrap();
+    c.recovery = Some(Recovery::Enabling(deadline));
+    c.recover().unwrap();
+    assert!(c.fatal_standing);
+    assert!(matches!(
+        c.recovery,
+        Some(Recovery::Admin {
+            step: Step::Identify,
+            ..
+        })
+    ));
+}
+
+/// CAP.MQES bounds the I/O queues alone, as Linux shortens its I/O queue
+/// depth to it: a controller with four-entry queues is started with a
+/// four-entry I/O queue and three tags. Only the reserved MQES 0, one
+/// entry that can hold no command, is refused.
+#[test]
+fn a_short_mqes_shortens_the_io_queue_and_only_one_entry_is_refused() {
+    let _clock = crate::test_clock::virtualize();
+    let fixture = Fixture::new();
+    let mut c = fixture.disk.controller.borrow_mut();
+    c.clock = Clock {
+        ticks_per_microsecond: 1,
+    };
+    // MQES 3, CAP.TO one half second, the NVM command set. The fixture's
+    // CSTS never shows RDY, so the start ends waiting for it.
+    c.registers
+        .write64(CAPABILITIES, 3 | 1 << 24 | 1 << 37)
+        .unwrap();
+    assert_eq!(c.initialize(), Err(BlockError::Timeout.at(ENABLE_WAIT)));
+    assert_eq!(c.io.entries, 4);
+    assert_eq!(c.tags.len(), 3);
+    c.registers
+        .write64(CAPABILITIES, 1 << 24 | 1 << 37)
+        .unwrap();
+    assert!(matches!(c.initialize(), Err(BlockError::Unsupported(_))));
 }
 
 #[test]
@@ -902,10 +1005,11 @@ fn a_command_past_its_deadline_is_aborted_then_resets_the_controller_and_runs_ag
         assert!(matches!(controller.recovery, Some(Recovery::Enabling(_))));
         controller.registers.write32(STATUS, READY).unwrap();
     }
-    // Ready: identified, then the I/O queues created again, completion
-    // queue first.
+    // Ready: identified, then the queue count set and the I/O queues
+    // created again, completion queue first.
     for opcode in [
         ADMIN_IDENTIFY,
+        ADMIN_SET_FEATURES,
         ADMIN_CREATE_COMPLETION,
         ADMIN_CREATE_SUBMISSION,
     ] {

@@ -49,6 +49,14 @@ pub(super) struct Record {
     /// Schema 3: the installed `stela.efi`'s version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) stela_version: Option<String>,
+    /// The Stela version that made or last updated the setup
+    /// (`setup::release`); none before 0.4.
+    #[serde(
+        default,
+        rename = "stela_release",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) release: Option<String>,
     /// Schema 4: the PC disks macOS installs onto, each its own machine.
     #[serde(default)]
     pub(super) installs: Vec<machines::Install>,
@@ -494,7 +502,7 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
     let path = esp.join(RECORD);
     ensure!(
         path.is_file(),
-        "{} has no setup; run `stela setup` first",
+        "{} holds no Stela setup: make an installer on the stick with `stela create`",
         esp.display()
     );
     let header: serde_json::Value = stela_engine::read_json(&path)?;
@@ -506,14 +514,13 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
     );
     ensure!(
         schema == u64::from(RECORD_SCHEMA),
-        "{} is a schema {schema} setup, which this stela no longer reads: {}. Run `stela setup \
-         uninstall --usb {}` and set the USB up again",
+        "{} is a schema {schema} setup, which this stela no longer reads: {}. Start over with \
+         `stela create` on the stick's whole disk, which erases it",
         path.display(),
         match schema {
             8 => "it keeps its files under EFI/ on the data partition",
             _ => "it booted a recoveryOS bundle from the USB",
-        },
-        usb.display()
+        }
     );
     let mut value = header;
     rebase(
@@ -525,9 +532,9 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         .with_context(|| format!("cannot read setup record {}", path.display()))?;
     ensure!(
         !record.installs.is_empty(),
-        "{} names no install; run `stela setup uninstall --usb {}` and set the USB up again",
-        path.display(),
-        usb.display()
+        "{} names no install. Start over with `stela create` on the stick's whole disk, which \
+         erases it",
+        path.display()
     );
     Ok(record)
 }

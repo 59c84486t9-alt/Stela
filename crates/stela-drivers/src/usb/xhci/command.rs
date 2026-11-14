@@ -24,6 +24,19 @@ pub(super) struct Outstanding {
 /// controller that does not run its ring after a restart is given up.
 const RING_RESTARTS: u8 = 1;
 
+impl Outstanding {
+    /// The command's control word, how far its timeout handling went and
+    /// its ring restarts, for the record of a controller's death.
+    pub(super) fn state(&self) -> (u32, &'static str, u8) {
+        let phase = match self.phase {
+            Phase::Running => "running",
+            Phase::Aborting => "aborting",
+            Phase::Stopping => "stopping",
+        };
+        (self.control, phase, self.restarts)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Phase {
     Running,
@@ -181,7 +194,12 @@ impl Controller {
             }
             let current = self.outstanding.as_ref()?;
             let (address, control, phase) = (current.address, current.control, current.phase);
-            let expired = current.deadline.passed();
+            // By the command's own time alone: a passed device start
+            // budget ends transfers' waits, and the commands that then cancel
+            // them and reset the device each keep their own bound. Counting
+            // the budget here declared a controller dead microseconds after
+            // a Stop Endpoint's doorbell.
+            let expired = current.deadline.passed_at(Clock::ticks());
             // Quiet drains read no USBSTS: a controller that died without
             // an event is reported as such at a deadline.
             if expired && self.error.is_none() {

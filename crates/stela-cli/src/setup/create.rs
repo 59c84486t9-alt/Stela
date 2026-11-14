@@ -21,7 +21,6 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     fmt::Write as _,
     fs,
-    io::IsTerminal as _,
     path::{Path, PathBuf},
 };
 use stela_formats::builds;
@@ -415,10 +414,10 @@ impl Resume {
         } = request;
         let [install] = &previous.installs[..] else {
             bail!(
-                "the interrupted setup on {} names {} installs; remove it with {} first",
+                "the interrupted setup on {} names {} installs; {}",
                 previous.esp.display(),
                 previous.installs.len(),
-                super::fix(&command.usb, "uninstall")
+                super::START_OVER
             );
         };
         let mut differences = Vec::new();
@@ -469,19 +468,18 @@ impl Resume {
         let generation = environment.generation();
         let Some(ecid) = install.ecid else {
             bail!(
-                "the interrupted setup on {} names no ECID; remove it with {} first",
+                "the interrupted setup on {} names no ECID; {}",
                 previous.esp.display(),
-                super::fix(&command.usb, "uninstall")
+                super::START_OVER
             );
         };
         if !differences.is_empty() {
             bail!(
                 "{} holds an interrupted setup that differs from this one: {}. Finish it with {}, \
-                 or remove it with {} first",
+                 or start over with `stela create` on the stick's whole disk, which erases it",
                 previous.esp.display(),
                 differences.join(", "),
-                super::rerun(previous, &command.usb),
-                super::fix(&command.usb, "uninstall")
+                super::fix(&command.usb, "repair")
             );
         }
         // Every restore bundle intact and current, or all prepared again.
@@ -525,6 +523,10 @@ impl Resume {
         })
     }
 }
+
+/// [`SIGNING_NOTE`] in a sentence, as the wizard says it before a create.
+pub(super) const SIGNING_SUMMARY: &str = "Apple's signing service receives this machine's ECID \
+    and the restore's hashes to sign the restore.";
 
 /// What an install sends to Apple's signing service; the plan says it
 /// before setup writes the USB.
@@ -634,12 +636,12 @@ pub(super) fn plan(
         true => match super::record::interrupted(host, &esp, &command.usb) {
             Some(previous) => Some(previous),
             None => bail!(
-                "{} is already set up ({}). Update it with {} or {}, or remove it with {} first",
+                "{} is already set up ({}). Update it with {} or {}, or {}",
                 esp.display(),
                 esp.join(RECORD).display(),
-                super::fix(&command.usb, "update stela"),
-                super::fix(&command.usb, "update os"),
-                super::fix(&command.usb, "uninstall")
+                super::fix(&command.usb, "update"),
+                super::fix(&command.usb, "update --macos VERSION"),
+                super::START_OVER
             ),
         },
     };
@@ -750,6 +752,7 @@ pub(super) fn plan(
         complete: false,
         installed: None,
         stela_version: Some(update::version_id(&efi_image)),
+        release: Some(super::release::CURRENT.into()),
         installs: vec![install],
         default_install: None,
         bundle_schema: environment.interface.bundle_schema,
@@ -769,7 +772,10 @@ pub(super) fn plan(
         translations: None,
         wifi: command.wifi.clone().map(|ssid| wifi::Network {
             ssid,
-            country: command.wifi_country.clone(),
+            country: command
+                .wifi_country
+                .clone()
+                .or_else(environment.wifi_country),
         }),
         usb4_approved: command.usb4_approve.clone(),
         addresses: super::addresses::Addresses::requested(command)?,
@@ -968,7 +974,7 @@ pub(super) fn state_line(disk: &installed::InstalledDisk) -> String {
 pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Result<String> {
     let host = environment.host;
     // Before anything is erased.
-    command.read_wifi_passphrase()?;
+    command.read_wifi_passphrase(environment.ui)?;
     if command.fetch {
         builds::find_in(environment.builds, &command.build)?;
     }
@@ -978,7 +984,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         let found = found.with_context(|| format!("this computer lists no disk {disk}"))?;
         ensure!(
             found.erasable(),
-            "{disk} ({}) is an internal disk; setup erases only a removable USB",
+            "{disk} ({}) is an internal disk; stela erases only a removable USB stick",
             found.name
         );
         ensure!(
@@ -1015,13 +1021,13 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             .is_some_and(|typed| found.confirmed_by(typed));
         if !command.confirmed && !typed_back {
             ensure!(
-                std::io::stdin().is_terminal(),
-                "setup cannot ask before erasing {disk} ({}, {}) without a terminal; pass \
+                environment.ui.interactive(),
+                "stela cannot ask before erasing {disk} ({}, {}) without a terminal; pass \
                  --confirm-disk with its model or size to erase it",
                 found.name,
                 host::size_text(found.bytes)
             );
-            confirm_erase(host, &found)?;
+            confirm_erase(environment, &found)?;
         }
         erase = Some((disk, found.name, found.bytes, identity));
     } else {
@@ -1036,10 +1042,10 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             ensure!(
                 command.install_image.is_none_or(|asked| asked == kind),
                 "{} holds an interrupted {} setup, which goes on as it began. Run it again \
-                 without --installer, or remove it with {} and start over",
+                 without --installer, or {}",
                 esp.display(),
                 kind.name(),
-                super::fix(&command.usb, "uninstall")
+                super::START_OVER
             );
             command.install_image = Some(kind);
         } else if !esp.join(RECORD).exists() {
@@ -1216,9 +1222,8 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     writeln!(
         report,
         "Done. Eject the USB before you unplug it. Boot the PC from this USB (the firmware's \
-         boot menu lists it as a UEFI USB device): {start}.\nCheck it with {}\nUndo it with {}",
-        super::fix(&command.usb, "status"),
-        super::fix(&command.usb, "uninstall")
+         boot menu lists it as a UEFI USB device): {start}.\nCheck it with {}",
+        super::fix(&command.usb, "status")
     )?;
     Ok(report)
 }
@@ -1267,24 +1272,28 @@ fn usb_capacity(host: &dyn Host, usb: &Path) -> Result<u64> {
 
 /// Ask before erasing `disk` at a terminal: a mistyped disk name would
 /// erase another removable disk.
-fn confirm_erase(host: &dyn Host, disk: &host::Disk) -> Result<()> {
-    let serial = host
+fn confirm_erase(environment: &Environment<'_>, disk: &host::Disk) -> Result<()> {
+    let serial = environment
+        .host
         .serial(&disk.identifier)
         .ok()
         .flatten()
         .map(|serial| format!(", serial {serial}"))
         .unwrap_or_default();
-    eprint!(
-        "Erase {} ({}, {}{serial})? Everything on it is deleted. [y/N] ",
+    let question = format!(
+        "Erase {} ({}, {}{serial})? Everything on it is deleted.",
         disk.identifier,
         disk.name,
         host::size_text(disk.bytes)
     );
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    // Escape is a no.
+    let accepted = match environment.ui.confirm(&question) {
+        Err(error) if super::ui::cancelled(&error) => false,
+        answer => answer?,
+    };
     ensure!(
-        matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"),
-        "{} was not erased; setup stopped",
+        accepted,
+        "{} was not erased; nothing was changed",
         disk.identifier
     );
     Ok(())

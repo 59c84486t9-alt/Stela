@@ -467,7 +467,7 @@ fn transmit_fills_one_descriptor_per_frame_and_pads_short_frames() {
 }
 
 #[test]
-fn a_full_ring_waits_for_the_consumer_and_then_reports_a_stall() {
+fn a_full_ring_is_busy_until_the_consumer_frees_a_descriptor() {
     let mut fixture = Fixture::new();
     let mut alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
     fixture.link(Some(GIGABIT_FULL));
@@ -476,7 +476,8 @@ fn a_full_ring_waits_for_the_consumer_and_then_reports_a_stall() {
     for _ in 0..TX_RING - 1 {
         alx.transmit(&[1; 60]).unwrap();
     }
-    assert!(matches!(alx.transmit(&[1; 60]), Err(LinkError::Adapter(_))));
+    assert_eq!(alx.transmit(&[1; 60]), Err(LinkError::Busy));
+    assert_eq!(alx.transmit(&[1; 60]), Err(LinkError::Busy));
     // The consumer catches up: a descriptor frees.
     fixture
         .model
@@ -571,6 +572,75 @@ fn stop_resets_the_mac_and_refuses_further_frames() {
     assert!(!alx.carrier());
     assert!(matches!(alx.transmit(&[0; 60]), Err(LinkError::Adapter(_))));
     assert!(matches!(alx.receive(), Err(LinkError::Adapter(_))));
+}
+
+/// A dropped adapter halts: queues and MAC off before the MAC and DMA
+/// reset, within 2 ms of waits. A reset that never completes keeps the
+/// rings; a function that left the bus gets no write.
+#[test]
+fn dropping_an_adapter_halts_it_within_an_exit_and_a_lost_one_gets_no_write() {
+    let mut fixture = Fixture::new();
+    let (clock, elapsed) = crate::timing::counted_model(Clock {
+        ticks_per_microsecond: 1,
+    });
+    let alx = Alx::bring_up(
+        Peer(fixture.model.clone()),
+        clock,
+        Fixture::chip(0x1091, 0),
+        &mut fixture.dma,
+        1,
+        String::from("peer"),
+    )
+    .unwrap();
+    fixture.model.borrow_mut().writes.clear();
+    let before = elapsed.get();
+    drop(alx);
+    assert!(elapsed.get() - before < 2_000, "{}", elapsed.get() - before);
+    {
+        let model = fixture.model.borrow();
+        let at = |found: &dyn Fn(usize, u32) -> bool| {
+            model
+                .writes
+                .iter()
+                .position(|&(offset, value)| found(offset, value))
+                .unwrap()
+        };
+        let receive = at(&|offset, value| offset == RXQ0 && value & RXQ0_EN == 0);
+        let transmit = at(&|offset, value| offset == TXQ0 && value & TXQ0_EN == 0);
+        let mac = at(&|offset, value| {
+            offset == MAC_CTRL && value & (MAC_CTRL_RX_EN | MAC_CTRL_TX_EN) == 0
+        });
+        let reset = at(&|offset, value| offset == MASTER && value & MASTER_DMA_MAC_RST != 0);
+        assert!(receive < transmit && transmit < mac && mac < reset);
+    }
+    // A MAC that never goes idle fails the halt before any reset.
+    let alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
+    fixture
+        .model
+        .borrow_mut()
+        .registers
+        .insert(MAC_STS, MAC_STS_IDLE);
+    fixture.model.borrow_mut().writes.clear();
+    drop(alx);
+    assert!(
+        !fixture
+            .model
+            .borrow()
+            .writes
+            .iter()
+            .any(|&(offset, value)| offset == MASTER && value & MASTER_DMA_MAC_RST != 0)
+    );
+    // A lost function reads all ones.
+    fixture.model.borrow_mut().registers.remove(&MAC_STS);
+    let alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
+    fixture
+        .model
+        .borrow_mut()
+        .registers
+        .insert(MASTER, u32::MAX);
+    fixture.model.borrow_mut().writes.clear();
+    drop(alx);
+    assert!(fixture.model.borrow().writes.is_empty());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The complete host firmware bundle `stela setup` puts on the USB's data
+//! The complete host firmware bundle `stela` puts on the USB's data
 //! volume (`stela_loader::host_firmware::bundle`). Before boot services end
 //! this reads only the files the PC's PCI functions need, logs each one
 //! and the files the bundle lacks, and leaves the bundle as it is. A bundle
@@ -135,7 +135,7 @@ fn load_from(
         else {
             lacking += 1;
             output::arguments(format_args!(
-                "HOST FIRMWARE BUNDLE LACKS {} for {why}: `stela setup repair` adds it\n",
+                "HOST FIRMWARE BUNDLE LACKS {} for {why}: `stela repair` adds it\n",
                 artifact.member
             ));
             continue;

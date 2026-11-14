@@ -1021,3 +1021,71 @@ fn a_merged_reads_first_part_keeps_the_devices_buffer() {
     }
     assert_eq!(parts[0].as_ptr() as usize, address.get());
 }
+
+/// While another owner holds the disk, which may itself wait long for a
+/// lock its device needs, a window's looks come back later instead of
+/// waiting: no result, no room, a possible completion, and a commit that
+/// the next call taking the disk makes.
+#[test]
+fn a_window_never_waits_to_look_at_a_disk_another_owner_holds() {
+    let (delayed, (released, _, _)) = Delayed::new(RamDisk::new("held", 8, 512), 4);
+    let commits = delayed.commits.clone();
+    let disk = Shared::new(Box::new(delayed));
+    let mut window = disk.whole();
+    let tag = window.start_more(write(0, 1)).unwrap();
+    released.set(1);
+    {
+        let _held = disk.lock();
+        assert!(disk.try_lock().is_none());
+        window.commit();
+        assert_eq!(commits.get(), 0);
+        assert!(!window.room());
+        assert!(window.posted());
+        assert_eq!(window.finished(tag), None);
+        assert_eq!(window.finish(tag), None);
+    }
+    assert!(window.room());
+    assert_eq!(window.finish(tag), Some(Ok(None)));
+    assert_eq!(commits.get(), 1);
+    // A plain start tells the device of a put-off commit too.
+    let tag = window.start_more(write(1, 2)).unwrap();
+    {
+        let _held = disk.lock();
+        window.commit();
+    }
+    window.start(write(2, 3)).unwrap();
+    assert_eq!(commits.get(), 2);
+    released.set(2);
+    assert_eq!(window.finish(tag), Some(Ok(None)));
+}
+
+/// Another owner may take the disk between a window's `room` and its
+/// start: the start waits for it instead of refusing, as its caller found
+/// room (a NOR store failed on this, and the machine stopped).
+#[test]
+fn a_window_start_waits_for_an_owner_that_took_the_disk_after_room() {
+    extern crate std;
+    use std::{sync::mpsc, thread, time::Duration};
+    let disk = Shared::new(Box::new(RamDisk::new("raced", 8, 512)));
+    let mut window = disk.whole();
+    assert!(window.room());
+    let (taken, wait) = mpsc::channel();
+    let other = disk.clone();
+    let owner = thread::spawn(move || {
+        let _held = other.lock();
+        taken.send(()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+    });
+    wait.recv().unwrap();
+    assert!(!window.room());
+    let tag = window.start(write(0, 1)).unwrap();
+    owner.join().unwrap();
+    let mut result = None;
+    for _ in 0..1000 {
+        result = window.finish(tag);
+        if result.is_some() {
+            break;
+        }
+    }
+    assert_eq!(result, Some(Ok(None)));
+}

@@ -22,8 +22,9 @@
 //! valid station address gets a random one, as in Linux; a
 //! received frame spread over several free descriptors is dropped (the
 //! 1522-byte buffers hold every standard frame). Jumbo frames,
-//! Wake-on-LAN and suspend are outside this port. DMA buffers live until
-//! reboot.
+//! Wake-on-LAN and suspend are outside this port. Drop stops the adapter
+//! as `atl1c_down` does; DMA buffers live until reboot when that MAC reset
+//! is not observed.
 //!
 //! Tested only against the register and DMA model in `atl1c/tests.rs`; no
 //! atl1c hardware was available.
@@ -41,7 +42,10 @@ use crate::{
     timing::Timing,
 };
 use alloc::{format, string::String, vec::Vec};
-use core::sync::atomic::{Ordering, fence};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{Ordering, fence},
+};
 
 mod hardware;
 mod registers;
@@ -58,7 +62,6 @@ pub const DEVICES: [u16; 6] = [0x1062, 0x1063, 0x2060, 0x2062, 0x1073, 0x1083];
 /// The register window: every register this port names lies below it.
 const REGISTER_BYTES: u64 = 0x2000;
 const LINK_POLL_US: u64 = 10_000;
-const TRANSMIT_WAIT_US: u64 = 100_000;
 const DESCRIPTOR: usize = 16;
 const RFD: usize = 8;
 const FCS: usize = 4;
@@ -207,7 +210,7 @@ impl Queues {
 
 pub struct Atl1c<R: Registers = Mmio> {
     hardware: Hardware<R>,
-    queues: Queues,
+    queues: ManuallyDrop<Queues>,
     mac: Mac,
     /// When the PHY link was last sampled; `None` forces a sample.
     sampled: Option<u64>,
@@ -310,7 +313,7 @@ impl<R: Registers> Atl1c<R> {
         let queues = Queues::new(dma)?;
         let mut adapter = Self {
             hardware,
-            queues,
+            queues: ManuallyDrop::new(queues),
             mac,
             sampled: None,
             known: false,
@@ -443,6 +446,26 @@ impl<R: Registers> Atl1c<R> {
     }
 }
 
+impl<R: Registers> Drop for Atl1c<R> {
+    /// Linux `atl1c_down` ([`Atl1c::stop`]), then the rings freed, only
+    /// once the MAC's soft reset left it idle; otherwise they stay
+    /// allocated. The stop's waits stay under 50 ms, inside a processor's
+    /// exit. A function that left the bus reads all ones and gets no write.
+    ///
+    /// This drives the controller's registers, so the owner drops it where
+    /// its MMIO window is mapped; anywhere else the first read faults.
+    fn drop(&mut self) {
+        if self.hardware.registers.read32(MASTER_CTRL) == u32::MAX {
+            return;
+        }
+        if self.stop().is_ok() {
+            // SAFETY: the completed soft reset stopped every descriptor
+            // and buffer access, and the rings are not used after this.
+            unsafe { ManuallyDrop::drop(&mut self.queues) };
+        }
+    }
+}
+
 impl<R: Registers> Link for Atl1c<R> {
     fn mac(&self) -> Mac {
         self.mac
@@ -460,17 +483,7 @@ impl<R: Registers> Link for Atl1c<R> {
         }
         self.reclaim();
         if self.queues.transmit_available() == 0 {
-            let clock = self.hardware.timer.nominal();
-            let waited = clock.wait(TRANSMIT_WAIT_US, || {
-                self.reclaim();
-                self.queues.transmit_available() != 0
-            });
-            if !waited {
-                return Err(LinkError::Adapter(format!(
-                    "{} transmit ring stalled",
-                    self.location
-                )));
-            }
+            return Err(LinkError::Busy);
         }
         let index = self.queues.tx_write;
         let length = frame.len().max(MIN_FRAME);

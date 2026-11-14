@@ -6,8 +6,10 @@
 use super::*;
 
 impl Controller {
-    /// Point the controller at the admin queue, empty, with every interrupt
-    /// masked.
+    /// Point the controller at the admin queue, empty, with every pin or
+    /// MSI interrupt masked. Under MSI-X the mask registers are left alone:
+    /// NVMe leaves a host access to INTMS undefined then, and Linux never
+    /// writes it; the MSI-X table masks instead.
     pub(super) fn configure_admin(&mut self) -> Result<(), BlockError> {
         self.admin.restart();
         self.admin.completions.give()?;
@@ -22,6 +24,9 @@ impl Controller {
         self.admin.submissions.publish();
         self.registers
             .write64(ADMIN_COMPLETION, self.admin.completions.address()?)?;
+        if self.signalled {
+            return Ok(());
+        }
         self.registers.write32(INTERRUPT_MASK_SET, u32::MAX)
     }
 
@@ -61,11 +66,13 @@ impl Controller {
                 "NVMe controller without 4 KiB pages",
             ));
         }
-        // CAP.MQES is zero-based; both queues must fit.
+        // CAP.MQES, zero-based, bounds the I/O queues alone; AQA sizes the
+        // admin queue. Linux shortens its I/O queues to it, refusing none
+        // (the value 0, one entry, is reserved).
         let longest = (capabilities & 0xffff) + 1;
-        if longest < u64::from(ADMIN_ENTRIES) {
+        if longest < 2 {
             return Err(BlockError::Unsupported(
-                "NVMe queues shorter than 16 entries",
+                "NVMe controller reports one-entry queues (CAP.MQES 0)",
             ));
         }
         self.io.entries = self
@@ -82,14 +89,37 @@ impl Controller {
             self.configuration |= COMMAND_SETS_ALL;
         }
         self.registers.write32(CONFIGURATION, 0)?;
-        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)
+            .map_err(|error| error.at(DISABLE_WAIT))?;
         self.configure_admin()?;
         if let Some(owner) = self.owned.as_mut() {
             owner.lifecycle.enable_dma()?;
         }
         let timeout = self.enable()?;
-        self.wait_status(timeout, |status| status & (READY | FATAL) != 0)?;
-        self.check_fatal()
+        self.wait_enabled(timeout)
+    }
+
+    /// Linux `nvme_wait_ready` after CC.EN is set: CSTS.RDY alone ends the
+    /// wait, and Linux reads nothing more of CSTS before its first command.
+    /// CSTS.CFS while the controller starts is waited out; one still set
+    /// once it is ready is kept as standing ([`Self::fails`]), so a
+    /// controller that answers its commands is used, as under Linux. At the
+    /// timeout, a set CFS is the error reported.
+    pub(super) fn wait_enabled(&mut self, timeout: u64) -> Result<(), BlockError> {
+        match self.wait_status(timeout, |status| status & READY != 0) {
+            Err(BlockError::Timeout) => {
+                self.check_fatal()
+                    .map_err(|error| within(ENABLE_WAIT, fatal_status(error)))?;
+                return Err(BlockError::Timeout.at(ENABLE_WAIT));
+            }
+            other => other?,
+        }
+        let status = self.registers.read32(STATUS)?;
+        if status == REMOVED {
+            return Err(removed());
+        }
+        self.fatal_standing = status & FATAL != 0;
+        Ok(())
     }
 
     /// The admin command creating the I/O completion queue, or with
@@ -134,6 +164,11 @@ impl Controller {
     /// `nvme_timeout` does for the admin queue; a failed reset poisons every
     /// sibling. Only a positively identified CQE or an acknowledged reset
     /// authorizes SQ/PRP/data CPU reuse.
+    ///
+    /// A refusal is the completion's bare status, which callers tell from
+    /// every other failure. A command that got no answer names itself, by
+    /// opcode and Identify CNS or feature, and says when the controller's
+    /// CSTS, not a completion, reported the failure.
     pub(super) fn admin(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
         self.settle()?;
@@ -143,8 +178,13 @@ impl Controller {
             Err(Lost::Reset(error)) => {
                 // The lost command leaves no admin queue to delete with.
                 self.reset_with(false);
-                self.settle()?;
-                Err(error)
+                // A reset that fails poisons the controller; the command
+                // that was lost is still the error to report.
+                let _ = self.settle();
+                Err(within(
+                    admin_name(command[0] as u8, command[10]),
+                    fatal_status(error),
+                ))
             }
             Err(Lost::Fatal(error)) => Err(self.poison(error)),
         }
@@ -159,7 +199,7 @@ impl Controller {
     ) -> Result<(u32, u32), Lost> {
         match self.registers.read32(STATUS).map_err(Lost::Fatal)? {
             REMOVED => return Err(Lost::Fatal(removed())),
-            status if status & FATAL != 0 => {
+            status if self.fails(status) => {
                 return Err(Lost::Reset(BlockError::Device { status }));
             }
             _ => {}
@@ -176,7 +216,7 @@ impl Controller {
             if polls.is_multiple_of(STATUS_POLL_INTERVAL) {
                 let lost = match self.registers.read32(STATUS) {
                     Ok(REMOVED) => Some(Lost::Fatal(removed())),
-                    Ok(status) if status & FATAL != 0 => {
+                    Ok(status) if self.fails(status) => {
                         Some(Lost::Reset(BlockError::Device { status }))
                     }
                     Ok(_) => None,

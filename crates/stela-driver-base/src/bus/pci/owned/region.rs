@@ -377,17 +377,51 @@ impl<G: Grant> Region<G> {
         for (index, word) in words.iter_mut().enumerate() {
             *word = self.try_read32(ROUTING_BASE + index as u16 * 4)?;
         }
+        // A bridge holding Secondary Bus Reset keeps the buses below it in
+        // reset. Their functions answered nothing to the census, so the
+        // bridge is refused and the reset is left as found: releasing it
+        // would bring up functions nobody has stopped.
         let control = self.try_read16(BRIDGE_CONTROL)?;
         if control & SECONDARY_BUS_RESET != 0 {
-            return Err(ConfigError::before_effect(
-                ConfigFailure::UnqualifiedControl,
-            ));
+            return Err(ConfigError::before_effect(ConfigFailure::Readback {
+                offset: BRIDGE_CONTROL,
+                width: 2,
+                expected: u32::from(control & !SECONDARY_BUS_RESET),
+                observed: u32::from(control),
+            }));
         }
         self.grant
             .state()
             .routing_seal
             .set(Some(RoutingSeal { words, control }));
         Ok(())
+    }
+
+    /// Assert or release Secondary Bus Reset on this routing-sealed bridge,
+    /// writing the sealed Bridge Control word with only that bit changed
+    /// (and Discard Timer Status, write-one-to-clear, left alone). The seal
+    /// is unchanged, so released, the bridge passes its routing check again.
+    ///
+    /// # Safety
+    /// The caller owns every function below the bridge: none can be in use
+    /// by another owner, each is stopped or contained with its DMA
+    /// accounted for, and the caller restores or keeps refusing each after
+    /// the reset. The caller releases the reset it asserted.
+    pub unsafe fn set_secondary_bus_reset(&mut self, asserted: bool) -> Result<(), ConfigError> {
+        let Some(seal) = self.grant.state().routing_seal.get() else {
+            return Err(ConfigError::before_effect(ConfigFailure::Address));
+        };
+        let control = seal.control & !(DISCARD_TIMER_STATUS | SECONDARY_BUS_RESET);
+        let value = if asserted {
+            control | SECONDARY_BUS_RESET
+        } else {
+            control
+        };
+        self.write16_with(
+            BRIDGE_CONTROL,
+            value,
+            SECONDARY_BUS_RESET | DISCARD_TIMER_STATUS,
+        )
     }
 
     fn check_routing(&self, seal: RoutingSeal) -> Result<(), ConfigError> {
@@ -399,7 +433,14 @@ impl<G: Grant> Region<G> {
         })
     }
 
-    fn check_write(&self, offset: u16, value: u32, bytes: usize) -> Result<(), ConfigError> {
+    /// `free`: Bridge Control bits that may differ from the routing seal.
+    fn check_write(
+        &self,
+        offset: u16,
+        value: u32,
+        bytes: usize,
+        free: u16,
+    ) -> Result<(), ConfigError> {
         self.check_terminal()?;
         if self.grant.state().master_sealed.get() && offset == 4 && value & 4 != 0 {
             return Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed));
@@ -424,9 +465,12 @@ impl<G: Grant> Region<G> {
             // Line metadata at3Ch remains writable.
             for byte in 0..bytes {
                 let at = usize::from(offset) + byte;
-                if (0x3e..0x40).contains(&at)
-                    && ((value >> (byte * 8)) as u8) != ((*control >> ((at - 0x3e) * 8)) as u8)
-                {
+                if !(0x3e..0x40).contains(&at) {
+                    continue;
+                }
+                let shift = (at - 0x3e) * 8;
+                let written = (value >> (byte * 8)) as u8;
+                if (written ^ (*control >> shift) as u8) & !(free >> shift) as u8 != 0 {
                     return Err(ConfigError::before_effect(ConfigFailure::RoutingSealed));
                 }
             }
@@ -601,7 +645,7 @@ impl<G: Grant> Region<G> {
     }
     pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
         self.run(|| {
-            self.check_write(offset, u32::from(value), 1)?;
+            self.check_write(offset, u32::from(value), 1, 0)?;
             let register = self.try_register::<u8>(offset)?;
             self.begin_operation(Operation::Write {
                 offset,
@@ -615,8 +659,11 @@ impl<G: Grant> Region<G> {
         })
     }
     pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.write16_with(offset, value, 0)
+    }
+    fn write16_with(&mut self, offset: u16, value: u16, free: u16) -> Result<(), ConfigError> {
         self.run(|| {
-            self.check_write(offset, u32::from(value), 2)?;
+            self.check_write(offset, u32::from(value), 2, free)?;
             let register = self.try_register::<u16>(offset)?;
             self.begin_operation(Operation::Write {
                 offset,
@@ -631,7 +678,7 @@ impl<G: Grant> Region<G> {
     }
     pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
         self.run(|| {
-            self.check_write(offset, value, 4)?;
+            self.check_write(offset, value, 4, 0)?;
             let register = self.try_register::<u32>(offset)?;
             self.begin_operation(Operation::Write {
                 offset,

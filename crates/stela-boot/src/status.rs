@@ -259,7 +259,7 @@ impl State {
         let mut text = running.title;
         // A failed step keeps what it was on, such as the PCI function a
         // probe stopped in: before the engine resumes the boot log, the
-        // screen is the only record of it.
+        // screen shows it whatever becomes of the stop's record.
         if matches!(mark, Mark::Failed) && !running.detail.is_empty() {
             text.push_str(" at ");
             text.push_str(&running.detail);
@@ -454,6 +454,12 @@ pub fn fail(result: &str) {
 /// A line of its own, under the step lines.
 pub fn info(text: &str) {
     with(|state| state.line(Mark::Info, text));
+}
+
+/// A warning line of its own, with no step to end, as for what an earlier
+/// start left.
+pub fn warning(text: &str) {
+    with(|state| state.line(Mark::Warn, text));
 }
 
 /// Draw with Stela's console on `screen` from now on, starting with the

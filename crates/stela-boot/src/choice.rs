@@ -31,6 +31,7 @@ use stela_contracts::refuse;
 use stela_loader::mount_interface::{
     CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, Opening, opening, with_disk,
 };
+use stela_runtime::pc::{disk_plan::Plan, disk_writes::Pending};
 use uefi::{
     CString16,
     boot::{self, EventType, TimerTrigger, Tpl},
@@ -191,9 +192,6 @@ fn storage(options: &str) -> Option<&str> {
 enum Item {
     /// Entry `n` of the startup choices.
     Choice(usize, ChoiceKind),
-    /// Entry `n`, an Install macOS that chooses its disk, on a disk other
-    /// than the one chosen before; named.
-    Another(usize, String),
     /// One of the PC firmware's own boot entries.
     Firmware(Entry),
 }
@@ -203,9 +201,6 @@ struct Menu<'a> {
     choices: &'a Choices,
     /// The partition Install macOS chose, when it chose one.
     disk: Option<String>,
-    /// [`Self::disk`] is still on this PC and holds no macOS: Install macOS
-    /// goes on with it, and [`Item::Another`] chooses another.
-    present: bool,
     items: Vec<Item>,
     selected: usize,
     /// Seconds before the first entry starts, while the countdown runs.
@@ -220,8 +215,18 @@ struct Menu<'a> {
 
 impl<'a> Menu<'a> {
     /// The menu of `choices`: those that can start now, then the firmware's
-    /// entries. `held` is why the machine can only be set up.
-    fn new(choices: &'a Choices, held: Option<&'a str>, disk: Option<String>) -> Self {
+    /// entries. An entry is checked on its disk as choosing it leaves the
+    /// `pending` work: the updates done and no plan, which a choice
+    /// replaces. `held` is why the machine can only be set up.
+    fn new(
+        choices: &'a Choices,
+        held: Option<&'a str>,
+        disk: Option<String>,
+        pending: &Pending,
+    ) -> Self {
+        let mut pending = pending.clone();
+        pending.replace_plan(None);
+        let pending = &pending;
         // A choice on a disk not chosen yet waits for Install macOS.
         let resolved: Vec<Option<String>> = choices
             .entries
@@ -233,7 +238,7 @@ impl<'a> Menu<'a> {
             .iter()
             .zip(&resolved)
             .map(|(entry, options)| match options {
-                Some(options) => selection::ready(options, entry.kind()),
+                Some(options) => selection::ready(options, entry.kind(), pending),
                 None => Readiness::Unprepared,
             })
             .collect();
@@ -247,11 +252,6 @@ impl<'a> Menu<'a> {
             .filter(|((_, r), _)| **r == Readiness::Ready)
             .map(|(_, options)| options.as_deref().and_then(storage))
             .collect();
-        // A disk with macOS on it is erased only through the picker, which
-        // asks first.
-        let present = disk
-            .as_deref()
-            .is_some_and(|disk| !prepared.contains(&Some(disk)) && selection::chosen_present(disk));
         let mut items = Vec::new();
         for (n, entry) in choices.entries.iter().enumerate() {
             let kind = entry.kind();
@@ -274,12 +274,7 @@ impl<'a> Menu<'a> {
                     n + 1,
                     entry.name
                 )),
-                None => {
-                    items.push(Item::Choice(n, kind));
-                    if present && kind == ChoiceKind::Setup && unchosen(entry.options.as_bytes()) {
-                        items.push(Item::Another(n, format!("{} on another disk", entry.name)));
-                    }
-                }
+                None => items.push(Item::Choice(n, kind)),
             }
         }
         // A setup without its restore choice still lists its own.
@@ -319,7 +314,6 @@ impl<'a> Menu<'a> {
         Self {
             choices,
             disk,
-            present,
             countdown: match opens {
                 Opening::Countdown(seconds) => Some(seconds),
                 Opening::Glance | Opening::Wait => None,
@@ -335,7 +329,6 @@ impl<'a> Menu<'a> {
     fn name(&self, item: &'a Item) -> &'a str {
         match item {
             Item::Choice(n, _) => &self.choices.entries[*n].name,
-            Item::Another(_, name) => name,
             Item::Firmware(entry) => &entry.name,
         }
     }
@@ -421,6 +414,26 @@ impl<'a> Menu<'a> {
     }
 }
 
+/// What boots: the options, and the change Install macOS's disk picker
+/// planned for the disk they name, which Stela's drivers make after the
+/// firmware has exited (`pc::disk_plan`). The plan belongs to these options
+/// alone: another choice made later replaces both, and nothing of a
+/// dropped plan was written.
+pub struct Chosen {
+    pub options: Vec<u8>,
+    pub plan: Option<Plan>,
+}
+
+impl From<Vec<u8>> for Chosen {
+    /// Options that change no disk before they boot.
+    fn from(options: Vec<u8>) -> Self {
+        Self {
+            options,
+            plan: None,
+        }
+    }
+}
+
 /// Log the chosen entry; its options, on `disk`.
 fn chosen(choices: &Choices, index: usize, disk: Option<&str>) -> Vec<u8> {
     let entry = &choices.entries[index];
@@ -437,87 +450,90 @@ fn asked() -> bool {
     pressed().is_some() || matches!(key(Some(GLANCE)), Wait::Key(_))
 }
 
-/// `menu` until one of `choices` is chosen; its options. Install macOS on a
-/// disk not chosen yet, no longer on this PC or holding macOS opens the
-/// disk picker first ([`installer::choose`]), as does its "on another disk"
-/// item, and returns to the menu when it is left; with the disk chosen
-/// before still here and without macOS it goes on with that one, blank
-/// again ([`installer::again`]). A firmware entry chosen restarts the PC
-/// into it. `None` without console input to choose with.
-fn menu(volume: &mut FileSystem, choices: &Choices, mut menu: Menu<'_>) -> Option<Vec<u8>> {
+/// `menu` until one of `choices` is chosen; its options. Install macOS that
+/// chooses its disk always opens the disk picker first
+/// ([`installer::choose`]), where the partition chosen before can be chosen
+/// again, and returns to the menu when the picker is left. The picker gives
+/// a plan and writes nothing to the disk; the plan goes with the options. A
+/// firmware entry chosen restarts the PC into it. `None` without console
+/// input to choose with.
+fn menu(volume: &mut FileSystem, choices: &Choices, mut menu: Menu<'_>) -> Option<Chosen> {
     loop {
         let index = menu.run()?;
-        let (n, picker) = match &menu.items[index] {
-            Item::Another(n, _) => (*n, true),
+        let n = match &menu.items[index] {
             Item::Choice(n, ChoiceKind::Setup)
                 if unchosen(choices.entries[*n].options.as_bytes()) =>
             {
-                (*n, !menu.present)
+                *n
             }
-            Item::Choice(n, _) => return Some(chosen(choices, *n, menu.disk.as_deref())),
+            Item::Choice(n, _) => {
+                return Some(chosen(choices, *n, menu.disk.as_deref()).into());
+            }
             Item::Firmware(entry) => {
                 output::arguments(format_args!("CHOICE firmware entry ({})\n", entry.name));
                 menu.notice = Some(entries::start(entry.number));
                 continue;
             }
         };
-        if !picker {
-            let disk = menu.disk.clone()?;
-            match crate::installer::again(&disk) {
-                Ok(()) => return Some(chosen(choices, n, Some(&disk))),
-                Err(error) => {
-                    output::arguments(format_args!("INSTALLER again refused: {error}\n"));
-                    menu.notice = Some("The disk chosen before could not be prepared again.");
-                    continue;
-                }
-            }
-        }
-        let Some(disk) = crate::installer::choose() else {
+        let Some(plan) = crate::installer::choose() else {
             continue;
         };
+        let disk = format!("{}:{}", plan.serial, plan.partition.guid);
+        // The record goes to the USB before the disk is changed: a boot
+        // that stops in between finds no such partition and chooses again
+        // (`chosen_disk::Stale`).
         let path = CString16::try_from(DISK_FILE).map(PathBuf::from).ok()?;
         if volume.write(&path, format!("{disk}\n")).is_err() {
             menu.notice = Some("The chosen disk could not be recorded on the USB.");
             continue;
         }
         output::arguments(format_args!("CHOSEN DISK {disk}\n"));
-        return Some(chosen(choices, n, Some(&disk)));
+        return Some(Chosen {
+            options: chosen(choices, n, Some(&disk)),
+            plan: Some(plan),
+        });
     }
 }
 
-/// The options to boot: the chosen entry's, or `options` (`stela.cfg`).
+/// What to boot: the chosen entry's options, or `options` (`stela.cfg`).
 /// `held` is why the default boot can only wait for the setup restore, when
-/// it can.
-pub fn choose(volume: &mut FileSystem, options: Vec<u8>, held: Option<&str>) -> Vec<u8> {
+/// it can. `pending` is the disk work decided so far, which the entries'
+/// disks are read with (`selection::ready`).
+pub fn choose(
+    volume: &mut FileSystem,
+    options: Vec<u8>,
+    held: Option<&str>,
+    pending: &Pending,
+) -> Chosen {
     if let Some(reason) = held {
-        return hold(volume, reason).unwrap_or(options);
+        return hold(volume, reason, pending).unwrap_or(options.into());
     }
     let Some(choices) = read(volume) else {
-        return options;
+        return options.into();
     };
     // Only a key pressed before the menu opens asks for it.
     if choices.timeout_seconds == 0 && pressed().is_none() {
-        return chosen(&choices, 0, chosen_disk(volume).as_deref());
+        return chosen(&choices, 0, chosen_disk(volume).as_deref()).into();
     }
-    let opened = Menu::new(&choices, None, chosen_disk(volume));
+    let opened = Menu::new(&choices, None, chosen_disk(volume), pending);
     if opened.glance
         && !asked()
         && let Some(Item::Choice(n, _)) = opened.items.first()
     {
-        return chosen(&choices, *n, opened.disk.as_deref());
+        return chosen(&choices, *n, opened.disk.as_deref()).into();
     }
     menu(volume, &choices, opened)
-        .unwrap_or_else(|| chosen(&choices, 0, chosen_disk(volume).as_deref()))
+        .unwrap_or_else(|| chosen(&choices, 0, chosen_disk(volume).as_deref()).into())
 }
 
 /// Wait at the menu after `reason`, with no countdown, as LLB waits in
 /// recovery mode for a restore host: the machine can only be set up. The
 /// setup entry starts highlighted; any entry may be chosen, and one that
-/// cannot boot either returns here. Returns the chosen entry's options;
+/// cannot boot either returns here. Returns what the chosen entry boots;
 /// `None` when the volume has no choices or no console input to choose with.
-pub fn hold(volume: &mut FileSystem, reason: &str) -> Option<Vec<u8>> {
+pub fn hold(volume: &mut FileSystem, reason: &str, pending: &Pending) -> Option<Chosen> {
     let choices = read(volume)?;
     output::arguments(format_args!("HOLD {reason}\n"));
-    let held = Menu::new(&choices, Some(reason), chosen_disk(volume));
+    let held = Menu::new(&choices, Some(reason), chosen_disk(volume), pending);
     menu(volume, &choices, held)
 }

@@ -31,11 +31,13 @@ use crate::{
     },
     registers,
 };
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, rc::Rc, string::String, vec::Vec};
 use core::{
     mem::ManuallyDrop,
     sync::atomic::{Ordering, fence},
+    task::Poll,
 };
+use stela_driver_base::stepped::{Allowance, Stepped};
 
 const VENDOR: u16 = 0x8086;
 /// igc.h IGC_DEFAULT_RXD and IGC_DEFAULT_TXD.
@@ -181,6 +183,21 @@ pub struct Igc {
     pub phy_identity: u32,
     /// Whether MSI-X vector 0 sends the handoff's completion signal.
     signalled: bool,
+    /// A reset under way after a transmit hang; the rings are untouched
+    /// until it ends.
+    recovery: Option<Recovery>,
+}
+
+/// Linux igc_reinit_locked's stop and reinitialization, driven a slice per
+/// call so no call holds the processor long: Linux's own bounds, 800 bus
+/// master polls 2 ms apart among them, spread over as many calls as needed.
+struct Recovery {
+    /// The stop and reinitialization, yielding whenever a slice is used up.
+    task: Stepped<'static, Result<u32, BlockError>>,
+    slice: Rc<Allowance>,
+    /// The PHY identity of a finished reinitialization, whose rings start
+    /// on the next call.
+    finished: Option<u32>,
 }
 
 impl Igc {
@@ -251,6 +268,7 @@ impl Igc {
             location: format!("{}", function.address),
             phy_identity,
             signalled,
+            recovery: None,
         };
         net.start_receive()?;
         net.start_transmit()?;
@@ -344,37 +362,86 @@ impl Igc {
 
     /// Linux igc_down: record the counters, then stop the controller. Errors
     /// leave its DMA state uncertain.
-    fn stop(&mut self) -> Result<(), BlockError> {
+    fn stop(&mut self, master_polls: usize) -> Result<(), BlockError> {
         if let Some(error) = &self.timing_failure {
             return Err(error.clone());
         }
         let _ = self.statistics.accumulate(&self.device);
-        hardware::Hardware::new(&self.device, &self.clock)?.stop()
+        hardware::Hardware::new(&self.device, &self.clock)?.stop(master_polls)
     }
 
     /// Linux igc_reinit_locked, as igc_reset_task runs it for a transmit
     /// hang: a completed stop, full reinitialization, and both rings
     /// restarted empty on their existing buffers. The carrier then follows
     /// a fresh link check. Any failure leaves the adapter faulted.
-    fn reinitialize(&mut self) -> Result<(), BlockError> {
-        let result = (|| {
-            self.stop()?;
-            self.phy_identity = hardware::Hardware::new(&self.device, &self.clock)?.initialize()?;
-            self.receive.reset();
-            self.transmit.reset();
-            self.discarding = false;
-            self.stalled = None;
-            self.link = link::Supervisor::new();
-            self.start_receive()?;
-            self.start_transmit()
-        })();
+    ///
+    /// It runs in slices ([`Recovery`]): this call takes the first; later
+    /// calls of the link take the rest. `None` while it is under way.
+    fn reinitialize(&mut self) -> Option<Result<(), BlockError>> {
+        if let Some(error) = &self.timing_failure {
+            return Some(Err(error.clone()));
+        }
+        let _ = self.statistics.accumulate(&self.device);
+        let (device, clock) = (self.device, self.clock.clone());
+        let slice = Rc::new(Allowance::new(hardware::STEP_US));
+        let shared = slice.clone();
+        self.recovery = Some(Recovery {
+            task: Stepped::new(async move {
+                let mut hardware = hardware::Hardware::new(&device, &clock)?.sliced(&shared);
+                hardware.stop_steps(hardware::MASTER_POLLS).await?;
+                hardware.initialize_steps().await
+            }),
+            slice,
+            finished: None,
+        });
+        self.recover()
+    }
+
+    /// One slice of the reset under way, if any: `None` while it continues
+    /// or when there is none, its result once it ended.
+    fn recover(&mut self) -> Option<Result<(), BlockError>> {
+        let recovery = self.recovery.as_mut()?;
+        let result = match recovery.finished {
+            Some(identity) => {
+                self.recovery = None;
+                self.restart(identity)
+            }
+            None => {
+                recovery.slice.refill();
+                match recovery.task.step() {
+                    Poll::Pending => return None,
+                    // The rings start on the next call, in a slice of their own.
+                    Poll::Ready(Ok(identity)) => {
+                        recovery.finished = Some(identity);
+                        return None;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        self.recovery = None;
+                        Err(error)
+                    }
+                }
+            }
+        };
         self.faulted |= result.is_err();
         if let Err(error) = &result
             && matches!(error, BlockError::PciPower(_))
         {
             self.timing_failure = Some(error.clone());
         }
-        result
+        Some(result)
+    }
+
+    /// Both rings restarted empty on their existing buffers after a
+    /// completed reinitialization, and a fresh link check due.
+    fn restart(&mut self, identity: u32) -> Result<(), BlockError> {
+        self.phy_identity = identity;
+        self.receive.reset();
+        self.transmit.reset();
+        self.discarding = false;
+        self.stalled = None;
+        self.link = link::Supervisor::new();
+        self.start_receive()?;
+        self.start_transmit()
     }
 
     /// The negotiated link while the carrier is up: speed, duplex and the
@@ -402,6 +469,16 @@ impl Igc {
         if let Some(error) = &self.timing_failure {
             return Err(LinkError::Pci(error.clone()));
         }
+        if self.recovery.is_some() {
+            match self.recover() {
+                // The carrier stays down until the reset ends.
+                None => return Ok(false),
+                Some(Err(BlockError::PciPower(error))) => {
+                    return Err(LinkError::Pci(BlockError::PciPower(error)));
+                }
+                Some(_) => {}
+            }
+        }
         let change = match self.faulted {
             true => link::Change::None,
             false => match self
@@ -428,12 +505,14 @@ impl Igc {
                 |offset, value| device.write32(offset, value),
             );
             // A queue that will not stop needs the reset Linux uses here.
-            if !flushed
-                && let Err(error) = self.reinitialize()
-                && matches!(error, BlockError::PciPower(_))
-            {
-                self.timing_failure = Some(error.clone());
-                return Err(LinkError::Pci(error));
+            if !flushed {
+                match self.reinitialize() {
+                    None => return Ok(false),
+                    Some(Err(BlockError::PciPower(error))) => {
+                        return Err(LinkError::Pci(BlockError::PciPower(error)));
+                    }
+                    Some(_) => {}
+                }
             }
         }
         match self.faulted {
@@ -461,9 +540,15 @@ impl Igc {
         let held = now.saturating_sub(since);
         if status == u32::MAX {
             self.faulted = true;
-        } else if status & STATUS_TXOFF == 0 && held >= TRANSMIT_HANG_US * factor {
+            return LinkError::Adapter(format!(
+                "Intel I225/I226 {} lost register access; reinitialization required",
+                self.location
+            ));
+        }
+        // A PHY read under way holds a semaphore the reset must not cut.
+        if status & STATUS_TXOFF == 0 && held >= TRANSMIT_HANG_US * factor && !self.link.reading() {
             let reset = self.reinitialize();
-            if let Err(error) = &reset
+            if let Some(Err(error)) = &reset
                 && matches!(error, BlockError::PciPower(_))
             {
                 return LinkError::Pci(error.clone());
@@ -471,29 +556,31 @@ impl Igc {
             return LinkError::Adapter(format!(
                 "Intel I225/I226 {} transmit hang; controller reset {}",
                 self.location,
-                if reset.is_ok() { "completed" } else { "failed" }
+                match reset {
+                    None => "under way",
+                    Some(Ok(())) => "completed",
+                    Some(Err(_)) => "failed",
+                }
             ));
         }
-        LinkError::Adapter(format!(
-            "Intel I225/I226 {} transmit ring full{}",
-            self.location,
-            if status & STATUS_TXOFF != 0 && status != u32::MAX {
-                " while paused by flow control"
-            } else {
-                ""
-            }
-        ))
+        // Full, held off by PAUSE frames or not yet past the hang timeout:
+        // the caller tries again later.
+        LinkError::Busy
     }
 }
 
 impl Drop for Igc {
     /// Linux igc_down then igc_release_hw_control. The rings are freed only
     /// once the controller verifiably stopped; otherwise they stay allocated.
+    /// Its waits stay under 120 ms, plus one 40 ms step of a PHY read under
+    /// way, inside a processor's exit.
     ///
     /// This drives the controller's registers, so the owner drops it where
     /// its MMIO window is mapped; anywhere else the first read faults.
     fn drop(&mut self) {
-        if self.stop().is_ok() {
+        // A PHY read under way gets one more step to finish first.
+        self.link.settle();
+        if self.stop(hardware::DROP_MASTER_POLLS).is_ok() {
             let _ =
                 hardware::Hardware::new(&self.device, &self.clock).map(|hw| hw.release_control());
             // SAFETY: the completed MAC reset stopped every descriptor and
@@ -520,7 +607,7 @@ impl Link for Igc {
         if !self.watchdog()? {
             return Err(LinkError::NoCarrier);
         }
-        if !self.transmit.free(self.clock.nominal(), transmitted) {
+        if !self.transmit.free(transmitted) {
             return Err(self.transmit_stalled());
         }
         self.stalled = None;
@@ -556,6 +643,9 @@ impl Igc {
         mut take: impl FnMut(&[u8]) -> T,
     ) -> Result<Option<T>, LinkError> {
         self.watchdog()?;
+        if self.recovery.is_some() {
+            return Ok(None);
+        }
         loop {
             let index = self.receive.next;
             let base = index * DESCRIPTOR;
@@ -650,6 +740,7 @@ mod tests {
                 location: "model".into(),
                 phy_identity: 0x67c9dc01,
                 signalled: false,
+                recovery: None,
             };
             net.start_receive().unwrap();
             net.start_transmit().unwrap();
@@ -681,12 +772,21 @@ mod tests {
         // A link change whose PHY check finds no link (here: no PHY answers).
         let _clock = crate::test_clock::virtualize();
         fixture.registers[ICR / 4] = 1 << 2;
+        // The check runs a step per call; the carrier holds until it ends.
+        // This model's cause register does not clear on read.
+        assert!(fixture.net.carrier());
+        fixture.registers[ICR / 4] = 0;
+        let mut calls = 0;
+        while fixture.net.carrier() {
+            calls += 1;
+            assert!(calls < 100);
+        }
+        assert!(calls > 0);
         assert_eq!(fixture.net.transmit(&[1; 60]), Err(LinkError::NoCarrier));
         assert_eq!(fixture.net.negotiated(), None);
         assert!(!fixture.net.transmit.pending());
         assert_eq!(fixture.registers[TDT / 4], 0);
         assert_ne!(fixture.registers[TXDCTL / 4] & QUEUE_ENABLE, 0);
-        fixture.registers[ICR / 4] = 0;
         fixture.net.link = link::Supervisor::established(LINK);
         fixture.net.transmit(&[2; 60]).unwrap();
         assert_eq!(fixture.registers[TDT / 4], 1);
@@ -695,7 +795,19 @@ mod tests {
     #[test]
     fn a_held_ring_resets_only_after_the_hang_timeout_and_never_while_paused() {
         let _clock = crate::test_clock::virtualize();
-        let error = |fixture: &mut Fixture| match fixture.net.transmit(&[2; 60]) {
+        // A full ring never waits: each refused send costs no time, and the
+        // hang timeout runs on the clock between sends.
+        let nominal = Clock {
+            ticks_per_microsecond: 1,
+        };
+        let send = |fixture: &mut Fixture| {
+            let before = nominal.now_us();
+            let result = fixture.net.transmit(&[2; 60]);
+            assert!(nominal.now_us() - before < 1_000);
+            crate::test_clock::advance(nominal, 100_000);
+            result
+        };
+        let error = |fixture: &mut Fixture| match send(fixture) {
             Err(LinkError::Adapter(message)) => message,
             other => panic!("{other:?}"),
         };
@@ -712,12 +824,13 @@ mod tests {
         let mut attempts = 0;
         let message = loop {
             attempts += 1;
-            let message = error(&mut fixture);
-            if !message.ends_with("transmit ring full") {
-                break message;
+            match send(&mut fixture) {
+                Err(LinkError::Busy) => {}
+                Err(LinkError::Adapter(message)) => break message,
+                other => panic!("{other:?}"),
             }
         };
-        assert!(attempts > 1);
+        assert!(attempts > 5);
         assert!(message.ends_with("transmit hang; controller reset failed"));
         assert!(fixture.net.faulted);
         assert!(error(&mut fixture).ends_with("reinitialization required"));
@@ -727,9 +840,7 @@ mod tests {
         let mut fixture = full();
         fixture.registers[STATUS / 4] = STATUS_TXOFF;
         for _ in 0..attempts * 2 {
-            assert!(
-                error(&mut fixture).ends_with("transmit ring full while paused by flow control")
-            );
+            assert_eq!(send(&mut fixture), Err(LinkError::Busy));
         }
         assert!(!fixture.net.faulted);
         fixture.registers[STATUS / 4] = 0;
@@ -1017,6 +1128,83 @@ mod tests {
         assert_eq!(registers[CTRL_EXT / 4], DRV_LOAD);
     }
 
+    /// A bus master that never drains fails the drop's stop within its
+    /// bound, before any MAC reset, and control stays with the driver.
+    #[test]
+    fn dropping_an_adapter_whose_bus_master_never_drains_ends_within_an_exit() {
+        let mut fixture = Fixture::new();
+        let (clock, elapsed) = crate::timing::counted_model(Clock {
+            ticks_per_microsecond: 1,
+        });
+        fixture.net.clock = clock;
+        fixture.registers[STATUS / 4] |= 1 << 19;
+        fixture.registers[CTRL_EXT / 4] = DRV_LOAD;
+        let Fixture {
+            net,
+            registers,
+            _backing,
+        } = fixture;
+        drop(net);
+        assert!(elapsed.get() < 120_000, "{}", elapsed.get());
+        assert_eq!(registers[CTRL / 4] & MAC_RESET, 0);
+        assert_eq!(registers[CTRL_EXT / 4], DRV_LOAD);
+        // A drained master whose reset never completes waits no longer.
+        let mut fixture = Fixture::new();
+        let (clock, elapsed) = crate::timing::counted_model(Clock {
+            ticks_per_microsecond: 1,
+        });
+        fixture.net.clock = clock;
+        drop(fixture);
+        assert!(elapsed.get() < 120_000, "{}", elapsed.get());
+    }
+
+    /// A transmit-hang reset whose bus master never drains takes Linux's
+    /// 800 polls 2 ms apart, but in slices: no call waits more than 60 ms,
+    /// the carrier stays down and the rings untouched meanwhile, and the
+    /// adapter faults once the polls run out.
+    #[test]
+    fn a_transmit_hang_reset_runs_in_slices_within_linux_bounds() {
+        let mut fixture = Fixture::new();
+        let (clock, elapsed) = crate::timing::counted_model(Clock {
+            ticks_per_microsecond: 1,
+        });
+        fixture.net.clock = clock;
+        fixture.registers[STATUS / 4] |= 1 << 19;
+        let mut before = elapsed.get();
+        assert_eq!(fixture.net.reinitialize(), None);
+        let mut calls = 1;
+        let mut waited = elapsed.get() - before;
+        assert!(waited <= 60_000, "{waited}");
+        let descriptors = fixture.net.transmit.descriptors.bytes().to_vec();
+        // Every entry point takes one slice: the carrier check, receive and
+        // transmit in turn.
+        while fixture.net.recovery.is_some() {
+            before = elapsed.get();
+            let ended = match calls % 3 {
+                0 => !fixture.net.carrier() && fixture.net.recovery.is_some(),
+                1 => fixture.net.receive() == Ok(None) && fixture.net.recovery.is_some(),
+                _ => {
+                    fixture.net.transmit(&[1; 60]) == Err(LinkError::NoCarrier)
+                        && fixture.net.recovery.is_some()
+                }
+            };
+            let slice = elapsed.get() - before;
+            assert!(slice <= 60_000, "{slice}");
+            waited += slice;
+            calls += 1;
+            assert!(ended || fixture.net.recovery.is_none());
+            assert_eq!(fixture.net.transmit.descriptors.bytes(), descriptors);
+        }
+        // The stop's 10 ms settle, then all 800 master polls.
+        assert!(waited >= 10_000 + 800 * 2_000, "{waited}");
+        assert!(calls > 30, "{calls}");
+        assert!(fixture.net.faulted);
+        assert!(matches!(
+            fixture.net.transmit(&[1; 60]),
+            Err(LinkError::Adapter(message)) if message.ends_with("reinitialization required")
+        ));
+    }
+
     /// A function that is gone reads all ones: dropping it writes nothing.
     #[test]
     fn dropping_a_lost_adapter_writes_no_register() {
@@ -1040,7 +1228,7 @@ mod tests {
         fixture.net.clock = timing;
         failed.set(true);
         let expected = BlockError::PciPower(crate::bus::pci::power::Error::Clock);
-        assert_eq!(fixture.net.reinitialize(), Err(expected.clone()));
+        assert_eq!(fixture.net.reinitialize(), Some(Err(expected.clone())));
         let observed = fixture.registers.clone();
         for _ in 0..3 {
             assert!(!fixture.net.carrier());

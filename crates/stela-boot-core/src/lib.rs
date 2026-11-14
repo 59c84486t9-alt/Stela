@@ -1,5 +1,5 @@
 //! The UEFI mount's firmware-independent logic, built for the host (its
-//! tests and `stela setup`) and for `x86_64-unknown-uefi` (`stela.efi`).
+//! tests and `stela`) and for `x86_64-unknown-uefi` (`stela.efi`).
 //! `stela-boot` keeps the firmware calls and the code that needs its
 //! allocator, page tables or console.
 #![cfg_attr(not(test), no_std)]
@@ -27,9 +27,12 @@ pub mod console_lines;
 pub mod crs;
 pub mod dmar;
 pub mod doorbell;
+pub mod drivers_turn;
 pub mod early_fault;
 pub mod entropy;
 pub mod exit_port;
+pub mod firmware_connect;
+pub mod firmware_pages;
 pub mod firmware_state;
 pub mod firmware_time;
 pub mod gpu_status;
@@ -62,6 +65,7 @@ pub mod panic_region;
 pub mod passthrough;
 pub mod pe;
 pub mod pm_timer;
+pub mod poll_timer;
 pub mod ram;
 pub mod random;
 pub mod record;
@@ -71,13 +75,17 @@ pub mod requester;
 pub mod resident_image;
 pub mod root_transition;
 pub mod screen;
+pub mod service_watch;
 pub mod shutdown;
 pub mod source_health;
 pub mod staged_disk;
 pub mod staged_frame;
+pub mod stop_keys;
+pub mod stop_record;
 pub mod storage;
 pub mod topology;
 pub mod tsc;
+pub mod usb_legacy;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
 pub mod work_status;

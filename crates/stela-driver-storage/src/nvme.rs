@@ -22,7 +22,7 @@ use crate::{
     bus::{dma::DmaAllocator, pci::Function},
     registers,
 };
-use alloc::{format, rc::Rc, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, vec::Vec};
 
 mod admin;
 mod features;
@@ -99,6 +99,9 @@ const ADMIN_ASYNC_EVENT: u8 = 0x0c;
 /// One MSI-X table entry: message address, data and vector control.
 const MSIX_ENTRY_BYTES: u64 = 16;
 /// Autonomous Power State Transition (NVMe Base 2.1 5.27.1.6).
+/// Number of Queues: CDW11 asks the I/O submission and completion queue
+/// counts, zero-based.
+const FEATURE_QUEUE_COUNT: u32 = 0x07;
 const FEATURE_APST: u32 = 0x0c;
 /// Asynchronous Event Configuration, and the notices Linux enables from
 /// OAES (`NVME_AEN_SUPPORTED`): namespace attributes, firmware activation,
@@ -521,7 +524,8 @@ enum Tag {
 /// The admin commands bringing a controller up, as Linux's
 /// `nvme_reset_work` runs them after every reset and probe runs them once:
 /// `nvme_init_ctrl_finish`'s Identify, host options and APST,
-/// `nvme_setup_host_mem`, the I/O queues and `nvme_start_ctrl`'s events.
+/// `nvme_setup_host_mem`, `nvme_setup_io_queues`' queue count and I/O
+/// queues, and `nvme_start_ctrl`'s events.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Identify,
@@ -530,17 +534,20 @@ enum Step {
     HostOptions,
     Apst,
     HostMemory,
+    /// `nvme_set_queue_count`'s Set Features, before any I/O queue.
+    QueueCount,
     CreateCompletion,
     CreateSubmission,
     Events,
 }
 
-const STEPS: [Step; 8] = [
+const STEPS: [Step; 9] = [
     Step::Identify,
     Step::Limits,
     Step::HostOptions,
     Step::Apst,
     Step::HostMemory,
+    Step::QueueCount,
     Step::CreateCompletion,
     Step::CreateSubmission,
     Step::Events,
@@ -683,6 +690,11 @@ struct Controller {
     configuration: u32,
     /// CAP.CRMS.CRIMS: namespaces report readiness of their own.
     independent_identify: bool,
+    /// CSTS.CFS already stood when CSTS.RDY rose after the last enable.
+    /// Linux looks at CSTS only once a command timed out, so a controller
+    /// that answers is used, and only a timeout resets it; a CFS that rises
+    /// later still fails a command at once.
+    fatal_standing: bool,
     /// The VS register, read at discovery.
     version: u32,
     /// ONCS from Identify Controller.
@@ -735,6 +747,14 @@ impl Controller {
         }
     }
 
+    /// Whether CSTS `status` fails a command at once: CSTS.CFS, unless it
+    /// already stood when the controller became ready
+    /// ([`Self::fatal_standing`]). A command's timeout still looks at the
+    /// raw CSTS, as `nvme_timeout` does.
+    fn fails(&self, status: u32) -> bool {
+        status & FATAL != 0 && !self.fatal_standing
+    }
+
     fn poison(&mut self, error: BlockError) -> BlockError {
         self.fault = Some(error.clone());
         error
@@ -768,6 +788,95 @@ impl Controller {
 
 fn removed() -> BlockError {
     BlockError::Unsupported("the NVMe controller is gone")
+}
+
+/// What a failed start says of a CSTS with CSTS.CFS set: a register's
+/// value, never a command's completion status.
+const FATAL_STATUS: &str = "NVMe controller fatal status, CSTS";
+const DISABLE_WAIT: &str = "NVMe controller disable, waiting for CSTS.RDY to clear";
+const ENABLE_WAIT: &str = "NVMe controller enable, waiting for CSTS.RDY";
+
+/// `error` under `step`, whatever it names already.
+fn within(step: &'static str, error: BlockError) -> BlockError {
+    BlockError::Step {
+        step,
+        error: Box::new(error),
+    }
+}
+
+/// A CSTS read as fatal, said to be one.
+fn fatal_status(error: BlockError) -> BlockError {
+    match error {
+        error @ BlockError::Device { .. } => within(FATAL_STATUS, error),
+        other => other,
+    }
+}
+
+/// The name an admin command's failure is reported under: its opcode and
+/// its Identify CNS or its feature.
+fn admin_name(opcode: u8, selector: u32) -> &'static str {
+    match (opcode, selector & 0xff) {
+        (ADMIN_IDENTIFY, IDENTIFY_NAMESPACE) => "NVMe Identify Namespace (opcode 0x06, CNS 0x00)",
+        (ADMIN_IDENTIFY, IDENTIFY_CONTROLLER) => "NVMe Identify Controller (opcode 0x06, CNS 0x01)",
+        (ADMIN_IDENTIFY, IDENTIFY_ACTIVE_NAMESPACES) => {
+            "NVMe Identify Active Namespace List (opcode 0x06, CNS 0x02)"
+        }
+        (ADMIN_IDENTIFY, IDENTIFY_DESCRIPTORS) => {
+            "NVMe Identify Namespace Identification Descriptors (opcode 0x06, CNS 0x03)"
+        }
+        (ADMIN_IDENTIFY, IDENTIFY_COMMAND_SET_CONTROLLER) => {
+            "NVMe Identify Controller, NVM command set (opcode 0x06, CNS 0x06)"
+        }
+        (ADMIN_IDENTIFY, IDENTIFY_INDEPENDENT_NAMESPACE) => {
+            "NVMe Identify Namespace, command set independent (opcode 0x06, CNS 0x08)"
+        }
+        (ADMIN_IDENTIFY, _) => "NVMe Identify (opcode 0x06)",
+        (ADMIN_SET_FEATURES, FEATURE_QUEUE_COUNT) => {
+            "NVMe Set Features, Number of Queues (opcode 0x09, feature 0x07)"
+        }
+        (ADMIN_SET_FEATURES, FEATURE_ASYNC_EVENTS) => {
+            "NVMe Set Features, Asynchronous Event Configuration (opcode 0x09, feature 0x0b)"
+        }
+        (ADMIN_SET_FEATURES, FEATURE_APST) => {
+            "NVMe Set Features, Autonomous Power State Transition (opcode 0x09, feature 0x0c)"
+        }
+        (ADMIN_SET_FEATURES, FEATURE_HOST_MEMORY) => {
+            "NVMe Set Features, Host Memory Buffer (opcode 0x09, feature 0x0d)"
+        }
+        (ADMIN_SET_FEATURES, FEATURE_HOST_BEHAVIOR) => {
+            "NVMe Set Features, Host Behavior Support (opcode 0x09, feature 0x16)"
+        }
+        (ADMIN_SET_FEATURES, _) => "NVMe Set Features (opcode 0x09)",
+        (ADMIN_CREATE_COMPLETION, _) => "NVMe Create I/O Completion Queue (opcode 0x05)",
+        (ADMIN_CREATE_SUBMISSION, _) => "NVMe Create I/O Submission Queue (opcode 0x01)",
+        (ADMIN_DELETE_COMPLETION, _) => "NVMe Delete I/O Completion Queue (opcode 0x04)",
+        (ADMIN_DELETE_SUBMISSION, _) => "NVMe Delete I/O Submission Queue (opcode 0x00)",
+        (ADMIN_GET_LOG_PAGE, _) => "NVMe Get Log Page (opcode 0x02)",
+        (ADMIN_ABORT, _) => "NVMe Abort (opcode 0x08)",
+        (ADMIN_ASYNC_EVENT, _) => "NVMe Asynchronous Event Request (opcode 0x0c)",
+        _ => "NVMe admin command",
+    }
+}
+
+fn identify_name(cns: u32) -> &'static str {
+    admin_name(ADMIN_IDENTIFY, cns)
+}
+
+impl Step {
+    /// The name of this step's admin command.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Identify => identify_name(IDENTIFY_CONTROLLER),
+            Self::Limits => identify_name(IDENTIFY_COMMAND_SET_CONTROLLER),
+            Self::HostOptions => admin_name(ADMIN_SET_FEATURES, FEATURE_HOST_BEHAVIOR),
+            Self::Apst => admin_name(ADMIN_SET_FEATURES, FEATURE_APST),
+            Self::HostMemory => admin_name(ADMIN_SET_FEATURES, FEATURE_HOST_MEMORY),
+            Self::QueueCount => admin_name(ADMIN_SET_FEATURES, FEATURE_QUEUE_COUNT),
+            Self::CreateCompletion => admin_name(ADMIN_CREATE_COMPLETION, 0),
+            Self::CreateSubmission => admin_name(ADMIN_CREATE_SUBMISSION, 0),
+            Self::Events => admin_name(ADMIN_SET_FEATURES, FEATURE_ASYNC_EVENTS),
+        }
+    }
 }
 
 /// One namespace of a controller.
@@ -841,6 +950,7 @@ pub fn attach(
         ready_timeout_us: 500_000,
         configuration: CONFIGURATION_VALUE & !ENABLE,
         independent_identify: false,
+        fatal_standing: false,
         version: 0,
         commands: 0,
         scans: 0,
@@ -875,7 +985,11 @@ fn discover(
     location: alloc::string::String,
     host_memory: &mut dyn HostMemorySource,
 ) -> Result<Attached, BlockError> {
-    let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?.to_vec();
+    // A refusal that ends the start names the command it refused.
+    let identify = controller
+        .identify(IDENTIFY_CONTROLLER, 0)
+        .map_err(|error| error.at(identify_name(IDENTIFY_CONTROLLER)))?
+        .to_vec();
     let request = HostMemoryRequest::from_identify(&identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
@@ -943,7 +1057,20 @@ fn discover(
                 .push((namespace, BlockError::Unsupported("NVMe I/O command set")));
             continue;
         }
-        let data = controller.identify(IDENTIFY_NAMESPACE, namespace)?;
+        let data = match controller.identify(IDENTIFY_NAMESPACE, namespace) {
+            Ok(data) => data,
+            // Linux `nvme_scan_ns` passes over a namespace whose Identify
+            // the controller refuses, and keeps the controller: a
+            // sequential scan meets the IDs of no namespace this way.
+            Err(error @ BlockError::Device { .. }) => {
+                if !sequential {
+                    let error = error.at(identify_name(IDENTIFY_NAMESPACE));
+                    attached.failures.push((namespace, error));
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if !independent {
             ids.fill(version, data);
         }

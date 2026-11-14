@@ -38,23 +38,16 @@ fn mark_sparse(file: &fs::File) {
 
 #[test]
 fn partitions_are_named_alone_or_by_device_path() {
-    use clap::Parser as _;
-    let crate::Command::Setup(setup) = crate::Cli::try_parse_from([
-        "stela",
-        "setup",
-        "--usb",
+    let setup = crate::tests::parse(&[
+        "create",
         "/dev/sdb",
         "--target",
         "/dev/nvme0n1p2",
         "--nor",
         "sdc3",
     ])
-    .unwrap()
-    .command
-    else {
-        panic!("not a setup");
-    };
-    let setup = setup.request();
+    .unwrap();
+    assert_eq!(setup.usb, Path::new("/dev/sdb"));
     assert_eq!(setup.target.as_deref(), Some("nvme0n1p2"));
     assert_eq!(setup.nor.as_deref(), Some("sdc3"));
 }
@@ -291,43 +284,11 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         efi: Some(f.efi.clone()),
         model: Some(restore::payload::SYNTHETIC_MODEL.into()),
         build: restore::payload::SYNTHETIC_BUILD.into(),
-        dry_run: false,
-        target: None,
-        nor: None,
-        disk_serial: None,
-        erase_target: false,
-        verify: false,
-        initialize_nor: false,
-        install: None,
-        ecid: None,
-        new_ecid: false,
-        profile: false,
-        no_profile: false,
-        verify_on_read: false,
-        install_volume: None,
-        default_install: None,
-        remove_install: None,
-        chooser_timeout: None,
         // The smallest store: its spare is allocated at the bound, and
         // `snapshot` reads every file it compares. The default bound's
         // shrinking to fit is `translations::choose`'s to test.
         translation_store_bytes: Some(translations::MIN_PACK_BYTES),
-        host_firmware_cache: None,
-        confirm_disk: None,
-        confirmed: false,
-        wifi: None,
-        wifi_passphrase_file: None,
-        wifi_country: None,
-        no_wifi: false,
-        usb4_approve: Vec::new(),
-        no_usb4_approve: false,
-        wifi_passphrase: None,
-        ipv4: None,
-        ipv4_gateway: None,
-        dns: None,
-        automatic_ipv4: false,
-        automatic_dns: false,
-        output: None,
+        ..Request::default()
     }
 }
 
@@ -415,7 +376,9 @@ fn environment(host: &FakeHost) -> Environment<'_> {
         image_caches: &*TEST_CACHES,
         image_size: &offline_image_size,
         fetch_image: &offline_fetch_image,
-        ask: &|_| None,
+        ui: &ui::NoTerminal,
+        wifi_networks: &Vec::new,
+        wifi_country: &|| None,
         bundle_inputs: &fake_bundle_inputs,
         prepare_restore: &fake_prepare_restore,
         prepare_update: &fake_prepare_update,
@@ -488,7 +451,6 @@ fn other_mac_models_are_refused_naming_the_supported_one() {
         );
     }
     assert_eq!(PINNED_MODEL, "Mac14,3");
-    assert!(supported_model("Mac14,3") && !supported_model("MacBookPro18,3"));
 }
 
 /// Stand-ins for the restore and update restore `boot prepare` of a
@@ -589,7 +551,8 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     );
 
     let report = setup(&environment(host), command(&f, &f.esp)).unwrap();
-    assert!(report.contains("stela setup uninstall"), "{report}");
+    assert!(report.contains("Check it with `stela status`"), "{report}");
+    assert!(!report.contains("uninstall"), "{report}");
     assert!(report.contains("pick the PC disk"), "{report}");
     let record = record(&f);
     let ecid = record.installs[0].ecid.unwrap();
@@ -599,7 +562,7 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
         options,
         format!(
             "--system --storage @disk --nor @disk --preboot @disk --ecid {ecid} \
-             --external-disks --guest-network\n"
+             --external-disks --guest-network --input\n"
         )
     );
     assert!(!options.contains("--bundle"), "{options}");
@@ -628,12 +591,9 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     assert_eq!(record.schema_version, RECORD_SCHEMA);
     // A second setup is refused until the first is undone.
     let again = setup(&environment(host), command(&f, &f.esp));
-    assert!(
-        again
-            .unwrap_err()
-            .to_string()
-            .contains("stela setup uninstall")
-    );
+    let again = again.unwrap_err().to_string();
+    assert!(again.contains("start over with `stela create`"), "{again}");
+    assert!(!again.contains("uninstall"), "{again}");
     // The only install is not removed alone.
     let error = rerun(&f, |c| {
         c.action = Action::Configure;
@@ -731,7 +691,7 @@ fn usbs_setup_cannot_boot_from_are_explained_and_left_unchanged() {
     let error = setup(&environment(&host), command(&f, dir.path()))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("names its whole disk"), "{error}");
+    assert!(error.contains("given its whole disk"), "{error}");
     let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
     host.partitions = f.host.partitions.clone();
     // An unmounted EFI partition is mounted, or the error says why not.
@@ -857,7 +817,7 @@ fn older_setups_are_still_read_and_undone() {
         .to_string();
     assert!(error.contains("schema 7 setup"), "{error}");
     assert!(error.contains("recoveryOS bundle"), "{error}");
-    assert!(error.contains("stela setup uninstall"), "{error}");
+    assert!(error.contains("Start over with `stela create`"), "{error}");
     let error = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
@@ -1175,15 +1135,34 @@ fn setup_erases_usb_and_refuses_internal_disk() {
         .to_string();
     assert!(error.contains("pass --ipsw"), "{error}");
     // Without a terminal and without the model or size typed back, a USB
-    // is not erased.
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let mut unasked = command(&f, Path::new("disk5"));
-        unasked.ipsw = None;
-        let error = setup(&environment(&f.host), unasked)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("without a terminal"), "{error}");
+    // is not erased; --yes does not change that.
+    let mut unasked = command(&f, Path::new("disk5"));
+    unasked.ipsw = None;
+    unasked.yes = true;
+    let error = setup(&environment(&f.host), unasked)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("without a terminal"), "{error}");
+    assert!(error.contains("--confirm-disk"), "{error}");
+    // On a terminal the erase is asked, and a no or Escape erases nothing.
+    let before = (snapshot(&f.esp), snapshot(&f.data));
+    for answer in ["no", "cancel"] {
+        let person = ui::tests::Scripted::new(&[answer]);
+        let mut asked = command(&f, Path::new("disk5"));
+        asked.ipsw = None;
+        let environment = Environment {
+            ui: &person,
+            ..environment(&f.host)
+        };
+        let error = setup(&environment, asked).unwrap_err().to_string();
+        assert_eq!(error, "disk5 was not erased; nothing was changed");
+        assert!(
+            person.transcript().starts_with("? Erase disk5 ("),
+            "{}",
+            person.transcript()
+        );
     }
+    assert_eq!((snapshot(&f.esp), snapshot(&f.data)), before);
 }
 
 #[test]
@@ -1329,10 +1308,7 @@ fn install_and_repair_unmount_target_filesystems() {
         .to_string();
     assert!(error.contains("holds another file system"), "{error}");
     let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
-    assert!(
-        report.contains("`stela setup repair --erase-target --usb"),
-        "{report}"
-    );
+    assert!(report.contains("`stela repair --erase-target`"), "{report}");
     assert!(!erased(&f));
     rerun(&f, |c| {
         c.action = Action::Repair;
@@ -1528,7 +1504,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     let region = format!("{SERIAL}:{REGION_GUID}");
     let line = format!(
         "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --preboot {region} \
-         --ecid {ecid}"
+         --ecid {ecid} --input"
     );
     assert_eq!(
         fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
@@ -1679,6 +1655,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
         error.contains("is not connected to this computer"),
         "{error}"
     );
+    assert!(error.contains("run stela on the PC itself"), "{error}");
     assert_eq!(partition_bytes(&f, NOR), nor);
     f.host.partitions.get_mut(NOR).unwrap().0.guid = NOR_GUID.to_ascii_lowercase();
 
@@ -2012,7 +1989,7 @@ fn status_notes_the_spare_the_first_boot_took_and_succeeds() {
         .find(|line| line.contains(&store.spare_repair()))
         .unwrap();
     assert!(note.trim_start().starts_with("note"), "{status}");
-    assert!(note.contains("`stela setup repair --usb"), "{status}");
+    assert!(note.contains("`stela repair`"), "{status}");
     // Repair prepares the next spare and keeps the pack.
     rerun(&f, |c| c.action = Action::Repair).unwrap();
     assert!(store.spare_ready() && pack.is_file());
@@ -2335,17 +2312,14 @@ fn revision_update_rebuilds_bundles() {
         "{status}"
     );
     assert!(!status.contains("--fetch"), "{status}");
-    assert!(status.contains("stela setup update stela"), "{status}");
+    assert!(status.contains("`stela update`"), "{status}");
     // Other changes that prepare bundles wait for the update.
     let repair = run(&|c| {
         c.action = Action::Repair;
         c.ipsw = Some(f.ipsw.clone());
     });
     assert!(
-        repair
-            .unwrap_err()
-            .to_string()
-            .contains("stela setup update stela"),
+        repair.unwrap_err().to_string().contains("`stela update`"),
         "the repair is refused"
     );
     let update = |ipsw: bool, dry_run: bool| {
@@ -2601,7 +2575,7 @@ fn repair_puts_a_damaged_bundle_back_from_the_usbs_own_image() {
     let problems = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(problems.contains("stela setup repair --usb"), "{problems}");
+    assert!(problems.contains("`stela repair`"), "{problems}");
     assert!(!problems.contains("--fetch"), "{problems}");
     // No image, no network: the USB holds the image.
     let plan = rerun(&f, |c| {
@@ -2659,16 +2633,13 @@ fn status_advises_update_stela_while_bundles_are_of_another_revision() {
     let mut status = update_request(&f, &f._dir.path().join("cache"));
     status.action = Action::Status;
     let problems = status.dispatch(&environment).unwrap_err().to_string();
-    assert!(
-        problems.contains("stela setup update stela --usb"),
-        "{problems}"
-    );
-    assert!(!problems.contains("repair --usb"), "{problems}");
+    assert!(problems.contains("`stela update`"), "{problems}");
+    assert!(!problems.contains("`stela repair`"), "{problems}");
     // Repair refuses before downloading anything (downloads panic here).
     let mut repair = update_request(&f, &f._dir.path().join("cache"));
     repair.action = Action::Repair;
     let error = repair.dispatch(&environment).unwrap_err().to_string();
-    assert!(error.contains("update stela"), "{error}");
+    assert!(error.contains("`stela update`"), "{error}");
 }
 
 #[test]
@@ -2759,7 +2730,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     let offline = || {
         let mut request = update_request(&f, &f._dir.path().join("empty"));
         request.action = Action::Repair;
-        request.verify = true;
+        request.full = true;
         request
     };
     let error = format!(
@@ -2800,7 +2771,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     let repair = |verify: bool, dry_run: bool| {
         let mut request = update_request(&f, &cache);
         request.action = Action::Repair;
-        request.verify = verify;
+        request.full = verify;
         request.dry_run = dry_run;
         request.dispatch(&environment(&f.host)).unwrap()
     };
@@ -2824,7 +2795,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
         problems.contains("ipsw.000 failed its block check"),
         "{problems}"
     );
-    assert!(problems.contains("setup repair --usb"), "{problems}");
+    assert!(problems.contains("`stela repair`"), "{problems}");
     // Repair finds it by itself, and writes it again from the image.
     let done = repair(false, false);
     assert!(done.contains("ipsw.000 damaged: removed"), "{done}");
@@ -2929,61 +2900,44 @@ fn os_update_with_room_for_one_copy_replaces_it_only_after_asking() {
             .dispatch(&environment(&f.host))
             .unwrap_err()
     );
-    assert!(error.contains("on a terminal"), "{error}");
-    assert!(error.contains("free"), "{error}");
+    assert!(error.contains("Add --yes"), "{error}");
+    assert!(error.contains("room for one copy"), "{error}");
     // A dry run says it would ask, and asks nothing.
-    let never = |_: &str| -> Option<bool> { panic!("a dry run asks nothing") };
+    let never = ui::tests::Scripted::new(&[]);
     let mut dry = os_update(&f, &newer);
     dry.dry_run = true;
     let plan = dry
         .dispatch(&Environment {
-            ask: &never,
+            ui: &never,
             ..environment(&f.host)
         })
         .unwrap();
+    assert!(never.shown.borrow().is_empty());
     assert!(plan.contains("remove first"), "{plan}");
     assert!(plan.contains(&old.display().to_string()), "{plan}");
     // A no keeps everything.
-    let asked = std::cell::RefCell::new(String::new());
-    let answer = |yes: bool| {
-        let asked = &asked;
-        let host = &f.host;
-        move |question: &str| {
-            *asked.borrow_mut() = question.to_owned();
-            if yes {
-                host.freed.set(old_bytes);
-            }
-            Some(yes)
-        }
-    };
-    let no = answer(false);
+    let no = ui::tests::Scripted::new(&["no"]);
     let error = os_update(&f, &newer)
         .dispatch(&Environment {
-            ask: &no,
+            ui: &no,
             ..environment(&f.host)
         })
         .unwrap_err()
         .to_string();
-    assert!(error.contains("was kept"), "{error}");
-    assert!(
-        asked.borrow().contains("cannot install macOS"),
-        "{}",
-        asked.borrow()
-    );
-    assert!(
-        asked.borrow().contains("keeps starting"),
-        "{}",
-        asked.borrow()
-    );
+    assert_eq!(error, "nothing was changed");
+    let asked = no.transcript();
+    assert!(asked.contains("cannot install macOS"), "{asked}");
+    assert!(asked.contains("keeps starting"), "{asked}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
-    // A yes replaces the copy.
-    let yes = answer(true);
+    // A yes replaces the copy, whose removal frees its bytes.
+    let yes = ui::tests::Scripted::with_hook(&["yes"], |_| f.host.freed.set(old_bytes));
     os_update(&f, &newer)
         .dispatch(&Environment {
-            ask: &yes,
+            ui: &yes,
             ..environment(&f.host)
         })
         .unwrap();
+    assert!(yes.done());
     let updated = record(&f);
     assert_eq!(
         (updated.build.as_str(), updated.replacing.as_deref()),
@@ -3010,17 +2964,13 @@ fn an_interrupted_copy_replacement_is_named_and_finished_by_the_same_update() {
         .to_string();
     assert!(status.contains("cannot install macOS"), "{status}");
     assert!(
-        status.contains("update os --build STELA2 --usb"),
+        status.contains(&format!("{} finishes it", fix(&f.esp, "repair"))),
         "{status}"
     );
-    assert!(!status.contains("repair --usb"), "{status}");
-    let repair = rerun(&f, |c| c.action = Action::Repair)
-        .unwrap_err()
-        .to_string();
-    assert!(repair.contains("update os --build STELA2"), "{repair}");
-    os_update(&f, &newer)
-        .dispatch(&environment(&f.host))
-        .unwrap();
+    // Repair goes on with the switch, asking nothing: the old copy is gone.
+    let mut repair = os_update(&f, &newer);
+    repair.action = Action::Repair;
+    repair.dispatch(&environment(&f.host)).unwrap();
     let finished = record(&f);
     assert_eq!(
         (finished.build.as_str(), finished.replacing.as_deref()),
@@ -3331,10 +3281,10 @@ fn interrupted_first_setup_resumes_keeping_intact_files() {
     let status = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(status.contains("was interrupted. To finish it"), "{status}");
+    assert!(status.contains("was interrupted: "), "{status}");
     // The parts it had not written are named as its, not as other fixes.
     assert!(status.contains("1 problem:"), "{status}");
-    assert!(!status.contains("setup repair"), "{status}");
+    assert_eq!(status.matches("repair").count(), 1, "{status}");
     // The same command resumes it: a dry run changes nothing.
     let mut dry = installed_command(&f);
     dry.dry_run = true;
@@ -3384,7 +3334,7 @@ fn interrupted_first_setup_of_another_build_or_target_is_refused() {
     );
     assert!(error.contains("this one STELA2"), "{error}");
     assert!(error.contains("target"), "{error}");
-    assert!(error.contains("stela setup uninstall"), "{error}");
+    assert!(error.contains("start over with `stela create`"), "{error}");
     let mut renamed = installed_command(&f);
     renamed.install = Some("Other".into());
     let error = setup(&environment(&f.host), renamed)
@@ -3500,7 +3450,7 @@ fn medium_pieces(f: &Fixture) -> Vec<PathBuf> {
     pieces
 }
 
-/// Run the interrupted setup again as `stela setup` run again does: no
+/// Run the interrupted setup again as `stela repair` does: no
 /// installer choice, which comes from the record.
 fn resume_setup(f: &Fixture) -> String {
     let mut again = installed_command(f);
@@ -3696,11 +3646,11 @@ fn interrupted_disk_add_is_finished_by_repair_initialize_nor() {
     let problems = status().unwrap_err().to_string();
     assert!(problems.contains("never booted"), "{problems}");
     assert!(
-        problems.contains("stela setup repair --initialize-nor"),
+        problems.contains("`stela repair --initialize-nor`"),
         "{problems}"
     );
     assert!(!problems.contains("state restore"), "{problems}");
-    assert!(problems.contains("stela setup repair --usb"), "{problems}");
+    assert!(problems.contains("`stela repair`"), "{problems}");
     // Without the flag, repair names it and leaves the partition alone.
     let repair = |initialize: bool, dry_run: bool| {
         rerun(&f, |c| {
@@ -3711,7 +3661,10 @@ fn interrupted_disk_add_is_finished_by_repair_initialize_nor() {
         })
     };
     let report = repair(false, false).unwrap();
-    assert!(report.contains("repair --initialize-nor --usb"), "{report}");
+    assert!(
+        report.contains("`stela repair --initialize-nor`"),
+        "{report}"
+    );
     assert_eq!(state()[..], foreign[..]);
     let plan = repair(true, true).unwrap();
     assert!(plan.contains("a blank SEP area"), "{plan}");
@@ -3760,7 +3713,7 @@ fn records_with_the_retired_signing_opt_in_are_still_read() {
     let problems = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(problems.contains("stela setup repair --usb"), "{problems}");
+    assert!(problems.contains("`stela repair`"), "{problems}");
     rerun(&f, |c| {
         c.action = Action::Repair;
         c.ipsw = Some(f.ipsw.clone());
@@ -3916,6 +3869,8 @@ fn repair_restores_recorded_state() {
     write_record(&f.esp, &old).unwrap();
     let error = status().unwrap_err().to_string();
     assert!(error.contains("has no ECID"), "{error}");
+    assert!(error.contains("`stela repair`"), "{error}");
+    assert!(!error.contains("--fetch"), "{error}");
     rerun(&f, |c| {
         c.action = Action::Repair;
         c.ipsw = Some(f.ipsw.clone());
@@ -4363,7 +4318,9 @@ fn machine_state_tail_stays_outside_guest_region() {
     );
     assert_eq!(
         fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
-        format!("--system --storage {region} --nor {region} --preboot {region} --ecid {ecid}\n")
+        format!(
+            "--system --storage {region} --nor {region} --preboot {region} --ecid {ecid} --input\n"
+        )
     );
     let choices = Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
     assert!(
@@ -4758,55 +4715,6 @@ fn wifi_configuration_applies_to_all_boot_choices() {
 }
 
 #[test]
-fn firmware_action_checks_capability_and_dry_run() {
-    let mut f = fixture(64 * GIB, false);
-    add_stela(&mut f);
-    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
-    let inventory = f._dir.path().join("observed-firmware.json");
-    fs::write(&inventory, br#"{"schema":1,"complete":true,"requirements":[{"name":"rtl_nic/rtl8168e-3.fw","target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-2c8","board":null},"minimum_bytes":4}]}"#).unwrap();
-    let before = snapshot(&f.esp);
-    assert!(
-        rerun(&f, |c| {
-            c.action = Action::HostFirmwareFetch {
-                requirements: Some(inventory.clone()),
-                gpu: None,
-            };
-            c.dry_run = true;
-        })
-        .unwrap_err()
-        .to_string()
-        .contains("cannot load host firmware")
-    );
-    assert_eq!(snapshot(&f.esp), before);
-    let capable = f._dir.path().join("firmware-capable.efi");
-    let mut image = efi_image(b"observed-firmware-capable");
-    let mut legacy_marker = stela_loader::host_firmware::MOUNT_CAPABILITY;
-    legacy_marker[20] = 1;
-    image.extend_from_slice(&legacy_marker);
-    fs::write(&capable, image).unwrap();
-    rerun(&f, |c| {
-        c.action = Action::UpdateStela;
-        c.efi = Some(capable.clone());
-    })
-    .unwrap();
-    let before = snapshot(&f.esp);
-    let cache = f._dir.path().join("firmware-cache");
-    let report = rerun(&f, |c| {
-        c.action = Action::HostFirmwareFetch {
-            requirements: Some(inventory.clone()),
-            gpu: None,
-        };
-        c.host_firmware_cache = Some(cache.clone());
-        c.dry_run = true;
-    })
-    .unwrap();
-    assert!(report.contains("1 exact observed bindings"));
-    assert!(report.contains("3872 bytes"));
-    assert_eq!(snapshot(&f.esp), before);
-    assert!(!cache.exists());
-}
-
-#[test]
 fn legacy_operations_reject_oversized_firmware() {
     use sha2::{Digest, Sha256};
     use stela_loader::host_firmware::{DIRECTORY, MOUNT_CAPABILITY, Package};
@@ -5010,12 +4918,33 @@ fn host_firmware_publication_preserves_guest_bundles() {
     assert_eq!(fs::read(published).unwrap(), active);
 }
 
-/// Every `stela setup` command `text` names in backticks names the USB.
+/// Every `stela` command `text` names in backticks is spelled as this
+/// stela takes it, and names the stick only when several hold Stela.
 fn assert_hints_name_the_usb(text: &str) {
-    for hint in text.split("`stela setup").skip(1) {
+    let several = SEVERAL.get();
+    let mut hints = 0;
+    for hint in text.split("`stela ").skip(1) {
         let hint = hint.split('`').next().unwrap();
-        assert!(hint.contains("--usb "), "`stela setup{hint}` in:\n{text}");
+        hints += 1;
+        assert!(
+            !hint.starts_with("setup") && !hint.contains("--usb"),
+            "`stela {hint}` in:\n{text}"
+        );
+        let first = hint.split(' ').next().unwrap();
+        assert!(
+            [
+                "create", "update", "repair", "status", "settings", "log", "nvram", "state"
+            ]
+            .contains(&first),
+            "`stela {hint}` in:\n{text}"
+        );
+        assert_eq!(
+            hint.contains("ESP"),
+            several && hint != "create",
+            "`stela {hint}` in:\n{text}"
+        );
     }
+    assert!(hints > 0, "no command in:\n{text}");
 }
 
 #[test]
@@ -5037,31 +4966,29 @@ fn interrupted_first_setup_status_names_the_command_that_finishes_it() {
         "{}",
         reported.summary
     );
-    let usb = f.esp.display();
-    assert!(
-        reported
-            .report
-            .contains("To finish it, run it again: `stela setup --build STELA1 ")
-            && reported
-                .report
-                .contains(&format!("--target {REGION} --nor {NOR} --usb {usb}`")),
-        "{}",
-        reported.report
-    );
+    let finish = format!("{} finishes it", fix(&f.esp, "repair"));
+    assert!(reported.report.contains(&finish), "{}", reported.report);
     assert!(!reported.report.contains("then set up again"));
     assert_hints_name_the_usb(&reported.report);
     let (report, result) = split_report(Err(error));
     assert!(report.contains("was interrupted"), "{report}");
     let summary = result.unwrap_err().to_string();
     assert!(!summary.contains("was interrupted"), "{summary}");
-    // Update and configure name the same fix.
-    for action in [(|| Action::UpdateStela) as fn() -> Action, || {
-        Action::Repair
-    }] {
-        let refusal = rerun(&f, |c| c.action = action()).unwrap_err().to_string();
-        assert!(refusal.contains("To finish it, run it again"), "{refusal}");
-        assert_hints_name_the_usb(&refusal);
-    }
+    // Update names the same fix, and repair finishes the setup as it
+    // began: its build, model, target and machine state partition.
+    let refusal = rerun(&f, |c| c.action = Action::UpdateStela)
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains(&finish), "{refusal}");
+    rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.ipsw = Some(f.ipsw.clone());
+    })
+    .unwrap();
+    let finished = record(&f);
+    assert!(finished.complete);
+    assert_eq!(finished.installs[0].disk.apple_region, REGION);
+    rerun(&f, |c| c.action = Action::Status).unwrap();
 }
 
 #[test]
@@ -5085,7 +5012,7 @@ fn every_maintenance_hint_names_the_usb() {
     let problems = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(problems.contains("stela setup repair --usb"), "{problems}");
+    assert!(problems.contains("`stela repair`"), "{problems}");
     assert_hints_name_the_usb(&problems);
     let report = rerun(&f, |c| {
         c.action = Action::Repair;
@@ -5094,6 +5021,30 @@ fn every_maintenance_hint_names_the_usb() {
     .unwrap();
     assert!(report.contains("--initialize-nor"), "{report}");
     assert_hints_name_the_usb(&report);
+    // With several sticks that hold Stela, each command names its stick.
+    SEVERAL.set(true);
+    let problems = rerun(&f, |c| c.action = Action::Status)
+        .unwrap_err()
+        .to_string();
+    SEVERAL.set(false);
+    assert!(
+        problems.contains(&format!("`stela repair {}`", f.esp.display())),
+        "{problems}"
+    );
+    SEVERAL.set(true);
+    assert_hints_name_the_usb(&problems);
+    // A stick named on the command line is named as it was typed.
+    NAMED.set(Some("/dev/sdb".into()));
+    let problems = rerun(&f, |c| c.action = Action::Status)
+        .unwrap_err()
+        .to_string();
+    NAMED.set(None);
+    SEVERAL.set(false);
+    assert!(problems.contains("`stela repair /dev/sdb`"), "{problems}");
+    assert!(
+        !problems.contains(&format!("repair {}", f.esp.display())),
+        "{problems}"
+    );
 }
 
 /// Move the partition `from` to `to` on disk `disk`, as a PC that numbers
@@ -5243,7 +5194,7 @@ fn a_usb_made_without_an_nvidia_gpu_needs_no_firmware_step() {
         lines.push(line);
     }
     assert_eq!(lines[0], lines[1]);
-    assert!(lines[0].contains("79 files, 115.8 MiB"), "{}", lines[0]);
+    assert!(lines[0].contains("86 files, 115.8 MiB"), "{}", lines[0]);
     f.host.nvidia_gpus.borrow_mut().clear();
     let report = setup(&environment(&f.host), installed_command(&f)).unwrap();
     assert!(!report.contains("NVIDIA"), "{report}");
@@ -5251,31 +5202,20 @@ fn a_usb_made_without_an_nvidia_gpu_needs_no_firmware_step() {
 }
 
 #[test]
-fn the_wizard_resumes_an_interrupted_setup_on_the_chosen_usb() {
+fn repair_resumes_an_interrupted_setup_with_its_recorded_inputs() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
-    let usb = f
-        .host
-        .disks
-        .iter()
-        .find(|d| d.identifier == "disk5")
-        .unwrap()
-        .clone();
-    assert!(wizard::interrupted(&f.host, &usb).is_none());
     setup(&environment(&f.host), installed_command(&f)).unwrap();
-    assert!(
-        wizard::interrupted(&f.host, &usb).is_none(),
-        "a finished setup"
-    );
     interrupt_setup(&f);
-    let (esp, found) = wizard::interrupted(&f.host, &usb).expect("an interrupted setup");
-    assert_eq!(esp, f.esp);
+    let found = read_record(&environment(&f.host), &f.esp).unwrap();
+    assert!(!found.complete, "an interrupted setup");
+    let esp = f.esp.clone();
     // Resuming names the mounted volume, not the whole disk, and the
     // recorded inputs.
     let mut command = command(&f, Path::new("disk5"));
     command.ipsw = None;
     command.install_image = Some(InstallImage::Network);
-    wizard::resume(&mut command, esp, &found);
+    command.resume_from(esp, &found);
     assert_eq!(command.usb, f.esp);
     assert!(command.fetch);
     // The full installer it was making goes on.
@@ -5351,7 +5291,7 @@ fn status_and_repair_name_the_firmware_the_last_boot_asked_for() {
         error.contains("asked for firmware rtl_nic/rtl8168d-1.fw (realtek 10ec:8168 xid-281)"),
         "{error}"
     );
-    assert!(error.contains("repair --usb"), "{error}");
+    assert!(error.contains("`stela repair`"), "{error}");
     let before = snapshot(&f.esp);
     let report = rerun(&f, |c| {
         c.action = Action::Repair;
@@ -5416,12 +5356,13 @@ fn a_full_installer_with_every_signing_answer_says_the_install_needs_no_network(
 
 #[test]
 fn offline_is_made_on_a_usb_of_32_gb_or_more_from_an_image_with_all_of_macos() {
-    for capacity in [0, 31_000_000_000, 64 * GIB] {
+    // Sticks sold as 32 GB: 28.8 GB and 30.0 GB are common capacities.
+    for capacity in [0, 28_800_000_000, 30_015_488_000, 31_000_000_000, 64 * GIB] {
         assert_eq!(offline_unavailable(capacity, true), None, "{capacity}");
     }
     assert_eq!(
         offline_unavailable(16_000_000_000, true).as_deref(),
-        Some("needs a USB of 32 GB or more (this one is 16.0 GB)")
+        Some("needs a USB stick of 32 GB or more (this one is 16.0 GB)")
     );
     assert!(offline_unavailable(8_000_000_000, true).is_some());
     let startup_files = offline_unavailable(64 * GIB, false).unwrap();
@@ -5462,7 +5403,7 @@ fn a_new_setup_makes_the_installer_asked_for_or_else_offline_where_it_fits() {
     assert_eq!(
         choose(full, 16_000_000_000, None),
         Err(
-            "Offline needs a USB of 32 GB or more (this one is 16.0 GB). Use --installer \
+            "Offline needs a USB stick of 32 GB or more (this one is 16.0 GB). Use --installer \
              online, or a larger USB"
                 .into()
         )
@@ -5485,7 +5426,6 @@ fn a_new_setup_makes_the_installer_asked_for_or_else_offline_where_it_fits() {
 
 #[test]
 fn installer_flag_offline_on_a_small_usb_is_refused_before_anything_changes() {
-    use clap::Parser as _;
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     for disk in f.host.disks.iter_mut().filter(|d| d.identifier == "disk5") {
@@ -5493,20 +5433,9 @@ fn installer_flag_offline_on_a_small_usb_is_refused_before_anything_changes() {
     }
     let volume = stela_volume(&f);
     let parse = |kind: &str| {
-        let crate::Command::Setup(parsed) = crate::Cli::try_parse_from([
-            "stela".as_ref(),
-            "setup".as_ref(),
-            "--usb".as_ref(),
-            volume.as_os_str(),
-            "--installer".as_ref(),
-            kind.as_ref(),
-        ])
-        .unwrap()
-        .command
-        else {
-            panic!("not a setup command");
-        };
-        let mut request = parsed.request();
+        let mut request =
+            crate::tests::parse(&["create", volume.to_str().unwrap(), "--installer", kind])
+                .unwrap();
         assert!(matches!(request.action, Action::Create));
         (request.ipsw, request.efi) = (Some(f.ipsw.clone()), Some(f.efi.clone()));
         request.fetch = false;
@@ -5522,7 +5451,7 @@ fn installer_flag_offline_on_a_small_usb_is_refused_before_anything_changes() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.starts_with("Offline needs a USB of 32 GB or more (this one is 16.0 GB)"),
+        error.starts_with("Offline needs a USB stick of 32 GB or more (this one is 16.0 GB)"),
         "{error}"
     );
     assert_eq!((snapshot(&f.esp), snapshot(&volume)), before);
@@ -5577,24 +5506,10 @@ fn the_offline_promise_says_the_install_checks_the_answers_first() {
 
 #[test]
 fn boot_log_report_goes_to_the_output_file() {
-    use clap::Parser as _;
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("boot-log.txt");
-    let crate::Command::Setup(setup) = crate::Cli::try_parse_from([
-        "stela".as_ref(),
-        "setup".as_ref(),
-        "boot-log".as_ref(),
-        "--usb".as_ref(),
-        "/Volumes/EFI".as_ref(),
-        "-o".as_ref(),
-        output.as_os_str(),
-    ])
-    .unwrap()
-    .command
-    else {
-        panic!("not a setup");
-    };
-    let request = setup.request();
+    let request =
+        crate::tests::parse(&["log", "/Volumes/EFI", "-o", output.to_str().unwrap()]).unwrap();
     assert!(matches!(request.action, Action::BootLog));
     assert_eq!(request.output.as_deref(), Some(output.as_path()));
     save_report(&output, "=== STELA BOOT 1 ===\nline\n").unwrap();
@@ -5607,22 +5522,20 @@ fn boot_log_report_goes_to_the_output_file() {
 
 #[test]
 fn boot_log_without_a_usb_reads_every_disk() {
-    use clap::Parser as _;
     let parse = |words: &[&str]| {
-        crate::Cli::try_parse_from(["stela", "setup", "boot-log"].iter().chain(words)).map(|cli| {
-            match cli.command {
-                crate::Command::Setup(setup) => setup.request(),
-                _ => panic!("not a setup"),
-            }
-        })
+        crate::tests::parse(
+            &std::iter::once("log")
+                .chain(words.iter().copied())
+                .collect::<Vec<_>>(),
+        )
     };
     let request = parse(&["-o", "log.txt"]).unwrap();
     assert!(matches!(request.action, Action::BootLog));
     assert!(request.usb.as_os_str().is_empty());
     assert_eq!(request.output.as_deref(), Some(Path::new("log.txt")));
-    // An install is chosen on a setup's USB only.
+    // An install is chosen on a setup's stick only.
     assert!(parse(&["--install", "macOS"]).is_err());
-    let request = parse(&["--usb", "E:\\", "--install", "macOS"]).unwrap();
+    let request = parse(&["E:\\", "--install", "macOS"]).unwrap();
     assert_eq!(request.usb, Path::new("E:\\"));
     assert_eq!(request.install.as_deref(), Some("macOS"));
 }
@@ -5769,7 +5682,7 @@ fn setup_boot_log_reads_the_usb_raw_when_its_folder_cannot_be_read() {
         "{:#}",
         rerun(&f, |c| c.action = Action::BootLog).unwrap_err()
     );
-    assert!(error.contains("has no setup"), "{error}");
+    assert!(error.contains("holds no Stela setup"), "{error}");
     assert!(error.contains("nor does Disk disk5"), "{error}");
 }
 
@@ -5795,11 +5708,14 @@ fn without_usb_the_one_disk_holding_a_setup_is_used_and_two_are_never_guessed() 
     let other = volume("other", Some("stela/boot"));
     let host = |disks: Vec<Disk>| FakeHost::new(BTreeMap::new(), disks);
     // None: the error says how to name one.
-    let error = choose_setup(&host(vec![disk("disk0", &[("Linux", Some(&system))])]))
-        .unwrap_err()
-        .to_string();
+    let error = choose_setup(
+        &host(vec![disk("disk0", &[("Linux", Some(&system))])]),
+        "status",
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("no mounted volume"), "{error}");
-    assert!(error.contains("--usb"), "{error}");
+    assert!(error.contains("`stela create`"), "{error}");
     // One: its EFI partition, which holds the record, over its data volume.
     let one = host(vec![
         disk("disk0", &[("Linux", Some(&system))]),
@@ -5808,45 +5724,723 @@ fn without_usb_the_one_disk_holding_a_setup_is_used_and_two_are_never_guessed() 
             &[("Microsoft Basic Data", Some(&data)), ("EFI", Some(&esp))],
         ),
     ]);
-    assert_eq!(choose_setup(&one).unwrap(), esp);
+    assert_eq!(choose_setup(&one, "status").unwrap().0, esp);
     // A USB whose EFI partition is not mounted is found by its data volume.
     let data_only = host(vec![disk(
         "disk5",
         &[("EFI", None), ("Microsoft Basic Data", Some(&data))],
     )]);
-    assert_eq!(choose_setup(&data_only).unwrap(), data);
+    assert_eq!(choose_setup(&data_only, "status").unwrap().0, data);
     // Two: both are listed and neither is used.
     let two = host(vec![
         disk("disk5", &[("EFI", Some(&esp))]),
         disk("disk6", &[("Microsoft Basic Data", Some(&other))]),
     ]);
-    let error = choose_setup(&two).unwrap_err().to_string();
-    assert!(error.starts_with("2 disks hold a Stela setup"), "{error}");
-    assert!(error.contains(&esp.display().to_string()), "{error}");
-    assert!(error.contains(&other.display().to_string()), "{error}");
-    assert!(error.contains("Name the one to use with --usb"), "{error}");
+    let error = choose_setup(&two, "settings").unwrap_err().to_string();
+    assert!(error.starts_with("2 sticks hold Stela"), "{error}");
+    // Each is named by its whole disk, never by a volume path, which may
+    // hold the user's name.
+    assert!(error.contains("disk5 (Disk disk5)"), "{error}");
+    assert!(error.contains("disk6 (Disk disk6)"), "{error}");
+    assert!(!error.contains(&esp.display().to_string()), "{error}");
+    assert!(
+        error.contains(&format!(
+            "such as `stela settings {}disk5`",
+            host::DISK_PREFIX
+        )),
+        "{error}"
+    );
+    assert_eq!(command_words(&Action::UpdateOs), "update");
 }
 
 #[test]
 fn maintenance_commands_parse_without_usb() {
-    use clap::Parser as _;
     for args in [
-        &["stela", "setup", "status"][..],
-        &["stela", "setup", "repair"],
-        &["stela", "setup", "update", "stela"],
-        &["stela", "setup", "update", "os"],
-        &["stela", "setup", "host-firmware", "fetch"],
+        &["status"][..],
+        &["repair"],
+        &["update"],
+        &["update", "--macos", "latest"],
+        &["settings"],
+        &["uninstall"],
+        &["nvram", "reset"],
+        &["state", "backup", "state.bin"],
     ] {
-        let crate::Command::Setup(setup) = crate::Cli::try_parse_from(args)
-            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
-            .command
-        else {
-            panic!("not a setup");
-        };
-        let request = setup.request();
+        let request = crate::tests::parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
         assert!(request.usb.as_os_str().is_empty(), "{args:?}");
         assert!(finds_usb(&request.action), "{args:?}");
     }
-    // Uninstall still names its USB.
-    assert!(crate::Cli::try_parse_from(["stela", "setup", "uninstall"]).is_err());
+    // Create finds a stick to erase, and log reads every disk.
+    for args in [&["create"][..], &["log"]] {
+        let request = crate::tests::parse(args).unwrap();
+        assert!(!finds_usb(&request.action), "{args:?}");
+    }
+}
+
+#[test]
+fn a_stick_named_by_its_whole_disk_is_read_through_its_stela_volume() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    // The whole disk and its device path name the volume that holds the
+    // record; a volume names itself.
+    assert_eq!(stick_volume(&f.host, Path::new("disk5")).unwrap(), f.esp);
+    assert_eq!(
+        stick_volume(&f.host, Path::new("/dev/disk5")).unwrap(),
+        f.esp
+    );
+    assert_eq!(stick_volume(&f.host, &f.data).unwrap(), f.data);
+    // A disk without Stela says how to make an installer on it.
+    let error = stick_volume(&f.host, Path::new("disk0"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`stela create disk0`"), "{error}");
+}
+
+/// A setup whose record says Stela `release` (none before 0.4) made it.
+fn made_by(release: Option<&str>) -> Fixture {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let mut made = record(&f);
+    assert_eq!(made.release.as_deref(), Some(release::CURRENT));
+    made.release = release.map(Into::into);
+    record::write_record(&f.esp, &made).unwrap();
+    f
+}
+
+#[test]
+fn a_stick_records_its_stela_version_and_an_update_brings_an_older_one_to_this_one() {
+    let f = made_by(None);
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains("Stela 0.3 or older; this stela is"),
+        "{status}"
+    );
+    rerun(&f, |c| c.action = Action::UpdateStela).unwrap();
+    assert_eq!(record(&f).release.as_deref(), Some(release::CURRENT));
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains(&format!("Stela {}\n", release::CURRENT)),
+        "{status}"
+    );
+}
+
+#[test]
+fn an_older_stela_asks_before_it_changes_a_newer_stick_and_a_no_changes_nothing() {
+    let f = made_by(Some("99.0.0"));
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains("Stela 99.0.0, newer than this stela"),
+        "{status}"
+    );
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let unchanged = || {
+        assert_eq!(
+            (snapshot(&f.esp), snapshot(&stela_volume(&f))),
+            before,
+            "the stick changed"
+        )
+    };
+    for action in [
+        || Action::UpdateStela,
+        || Action::Repair,
+        || Action::Configure,
+    ] {
+        let action = || {
+            let action = action();
+            let configure = matches!(action, Action::Configure);
+            (action, configure.then_some(command::Wait::Seconds(3)))
+        };
+        // Without a terminal: refused, naming --yes.
+        let error = rerun(&f, |c| (c.action, c.chooser_timeout) = action())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("newer than this stela") && error.contains("Add --yes"),
+            "{error}"
+        );
+        unchanged();
+        // Asked on a terminal, and declined.
+        let no = ui::tests::Scripted::new(&["no"]);
+        let mut request = command(&f, &f.esp);
+        (request.ipsw, request.model) = (None, None);
+        (request.action, request.chooser_timeout) = action();
+        let environment = Environment {
+            ui: &no,
+            ..environment(&f.host)
+        };
+        let error = request.dispatch(&environment).unwrap_err().to_string();
+        assert_eq!(error, "nothing was changed");
+        assert!(
+            no.transcript()
+                .contains("Stela 99.0.0, newer than this stela")
+        );
+        unchanged();
+    }
+    // Finishing a macOS switch the newer Stela began asks too.
+    let mut switching = record(&f);
+    switching.replacing = Some("STELA2".into());
+    record::write_record(&f.esp, &switching).unwrap();
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let error = rerun(&f, |c| c.action = Action::Repair)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("newer than this stela") && error.contains("Add --yes"),
+        "{error}"
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    let mut done = record(&f);
+    done.replacing = None;
+    record::write_record(&f.esp, &done).unwrap();
+    // --yes puts this Stela on it.
+    rerun(&f, |c| {
+        c.action = Action::UpdateStela;
+        c.yes = true;
+    })
+    .unwrap();
+    assert_eq!(record(&f).release.as_deref(), Some(release::CURRENT));
+}
+
+#[test]
+fn repair_finishes_an_interrupted_create_with_its_wifi_and_asks_nothing() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    let passphrase = f._dir.path().join("passphrase");
+    fs::write(&passphrase, "correct horse").unwrap();
+    let mut online = command(&f, &f.esp);
+    online.install_image = Some(InstallImage::Network);
+    online.wifi = Some("Home".into());
+    online.wifi_passphrase_file = Some(passphrase);
+    setup(&environment(&f.host), online).unwrap();
+    let mut stopped = record(&f);
+    stopped.complete = false;
+    write_record(&f.esp, &stopped).unwrap();
+    for path in [efi::LOADER, efi::OPTIONS, CHOICES_PATH] {
+        fs::remove_file(f.esp.join(path)).unwrap();
+    }
+    // No terminal and no passphrase file: the key the create wrote serves.
+    let report = rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.ipsw = Some(f.ipsw.clone());
+    })
+    .unwrap();
+    assert!(
+        report.contains("continuing the Online installer"),
+        "{report}"
+    );
+    let finished = record(&f);
+    assert!(finished.complete);
+    assert_eq!(finished.wifi.unwrap().ssid, "Home");
+    assert_eq!(
+        fs::read_to_string(f.esp.join(wifi::KEY_PATH))
+            .unwrap()
+            .trim(),
+        "correct horse"
+    );
+    rerun(&f, |c| c.action = Action::Status).unwrap();
+}
+
+#[test]
+fn repair_asks_before_downloading_more_than_a_gigabyte_and_a_no_changes_nothing() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let medium = record(&f).active_medium().cloned().unwrap();
+    let first = medium
+        .directory()
+        .join(stela_formats::payload::piece_name(0));
+    let piece = fs::read(&first).unwrap();
+    fs::write(&first, &piece[1..]).unwrap();
+    // Apple's image is 3 GB: most of it is missing from the stick.
+    let size = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((1_000_000, 3_000_000_000)) };
+    let fetch = |_: &Path, _: &str, _: &str, need: sources::Need| -> Result<sources::Fetched> {
+        anyhow::bail!("asked for {need:?}")
+    };
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let repair = |ui: &dyn ui::Ui, yes: bool| {
+        let mut request = update_request(&f, &f._dir.path().join("cache"));
+        request.action = Action::Repair;
+        request.yes = yes;
+        request.dispatch(&Environment {
+            image_size: &size,
+            fetch_image: &fetch,
+            ui,
+            ..environment(&f.host)
+        })
+    };
+    // Without a terminal: refused before anything changes, naming --yes.
+    let error = repair(&ui::NoTerminal, false).unwrap_err().to_string();
+    assert!(
+        error.contains("this downloads") && error.contains("Add --yes"),
+        "{error}"
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    // Asked on a terminal, saying the size; a no changes nothing.
+    let no = ui::tests::Scripted::new(&["no"]);
+    let error = repair(&no, false).unwrap_err().to_string();
+    assert_eq!(error, "nothing was changed");
+    assert!(
+        no.transcript().contains("from Apple"),
+        "{}",
+        no.transcript()
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    // A yes, or --yes, goes on to the download.
+    let yes = ui::tests::Scripted::new(&["yes"]);
+    let error = repair(&yes, false).unwrap_err().to_string();
+    assert!(error.contains("asked for Pieces"), "{error}");
+    let error = repair(&ui::NoTerminal, true).unwrap_err().to_string();
+    assert!(error.contains("asked for Pieces"), "{error}");
+}
+
+#[test]
+fn finishing_a_create_asks_before_downloading_more_than_a_gigabyte() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    interrupt_setup(&f);
+    // Apple's image is 3 GB: most of it is missing from the stick.
+    let size = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((1_000_000, 3_000_000_000)) };
+    let fetch = |_: &Path, _: &str, _: &str, need: sources::Need| -> Result<sources::Fetched> {
+        anyhow::bail!("asked for {need:?}")
+    };
+    let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+    let finish = |ui: &dyn ui::Ui, yes: bool| {
+        let mut request = update_request(&f, &f._dir.path().join("cache"));
+        request.action = Action::Repair;
+        request.yes = yes;
+        request.dispatch(&Environment {
+            image_size: &size,
+            fetch_image: &fetch,
+            ui,
+            ..environment(&f.host)
+        })
+    };
+    let error = finish(&ui::NoTerminal, false).unwrap_err().to_string();
+    assert!(
+        error.contains("this downloads") && error.contains("Add --yes"),
+        "{error}"
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    let no = ui::tests::Scripted::new(&["no"]);
+    assert_eq!(
+        finish(&no, false).unwrap_err().to_string(),
+        "nothing was changed"
+    );
+    assert!(
+        no.transcript().contains("the rest of macOS"),
+        "{}",
+        no.transcript()
+    );
+    assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+    let error = finish(&ui::NoTerminal, true).unwrap_err().to_string();
+    // --yes goes on past the question to the download.
+    assert!(!error.contains("this downloads"), "{error}");
+    // Plain stela names the size in its Finish it choice.
+    let person = ui::tests::Scripted::new(&["Quit"]);
+    let environment = Environment {
+        image_size: &size,
+        fetch_image: &fetch,
+        ui: &person,
+        ..environment(&f.host)
+    };
+    let request = Request {
+        efi: Some(f.efi.clone()),
+        ..Request::home(command::Global::default())
+    };
+    home::run(&environment, request).unwrap();
+    let shown = person.transcript();
+    assert!(shown.contains("downloads the rest (3.0 GB)"), "{shown}");
+}
+
+/// Plain `stela` on `f`'s computer, answered by `answers`; what it showed
+/// and how it ended. `networks` are the Wi-Fi networks this computer sees.
+fn plain_stela(f: &Fixture, answers: &[&str], networks: &[&str]) -> (String, Result<()>, bool) {
+    let person = ui::tests::Scripted::new(answers);
+    let networks: Vec<String> = networks.iter().map(|n| (*n).to_owned()).collect();
+    let list = move || networks.clone();
+    let environment = Environment {
+        ui: &person,
+        wifi_networks: &list,
+        ..environment(&f.host)
+    };
+    let request = Request {
+        efi: Some(f.efi.clone()),
+        ..Request::home(command::Global::default())
+    };
+    let result = home::run(&environment, request);
+    (person.transcript(), result, person.done())
+}
+
+/// Every file on `f`'s stick.
+fn stick_files(f: &Fixture) -> (BTreeMap<PathBuf, Vec<u8>>, BTreeMap<PathBuf, Vec<u8>>) {
+    (snapshot(&f.esp), snapshot(&f.data))
+}
+
+#[test]
+fn journey_a_blank_stick_walks_through_the_wizard_and_cancel_changes_nothing() {
+    let f = fixture(64 * GIB, false);
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(
+        &f,
+        &[
+            "Online",
+            "No Wi-Fi (Ethernet)",
+            "Change something",
+            "Installer",
+            "Offline",
+            "Cancel",
+        ],
+        &[],
+    );
+    result.unwrap();
+    assert!(done, "{shown}");
+    // One stick: it is not asked for. Offline is offered first, Wi-Fi only
+    // for Online, and the erase is named before the last question.
+    assert!(!shown.contains("? Which stick?"), "{shown}");
+    for line in [
+        "? Installer",
+        "● Offline · macOS is copied to the stick now",
+        "? Wi-Fi during installation",
+        "◇ Review",
+        "  Installer  Online · the install downloads macOS",
+        "  Installer  Offline · the install needs no internet",
+        "? Change what?",
+        "● Erase and create",
+        "■ Nothing was changed.",
+    ] {
+        assert!(shown.contains(line), "{line:?} missing:\n{shown}");
+    }
+    assert!(shown.contains("Everything on"), "{shown}");
+    assert_eq!(stick_files(&f), before);
+    assert!(f.host.unmounted.borrow().is_empty());
+    // Escape at the first question changes nothing either.
+    let (shown, result, _) = plain_stela(&f, &["cancel"], &[]);
+    result.unwrap();
+    assert!(shown.ends_with("■ Nothing was changed."), "{shown}");
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn review_and_status_show_the_wifi_country() {
+    let f = fixture(64 * GIB, false);
+    let person = ui::tests::Scripted::new(&["Online", "Home", "correct horse", "Cancel"]);
+    let networks = || vec!["Home".to_owned()];
+    let country = || Some("DE".to_owned());
+    let environment = Environment {
+        ui: &person,
+        wifi_networks: &networks,
+        wifi_country: &country,
+        ..environment(&f.host)
+    };
+    let request = Request {
+        efi: Some(f.efi.clone()),
+        ..Request::home(command::Global::default())
+    };
+    home::run(&environment, request).unwrap();
+    let shown = person.transcript();
+    assert!(shown.contains("Network    Wi-Fi Home, DE rules"), "{shown}");
+    // Status names the network and its country.
+    let f = made_by(Some(release::CURRENT));
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(status.contains("Wi-Fi          none"), "{status}");
+    let mut joined = record(&f);
+    joined.wifi = Some(wifi::Network {
+        ssid: "Home".into(),
+        country: Some("DE".into()),
+    });
+    record::write_record(&f.esp, &joined).unwrap();
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap_or_else(|e| e.to_string());
+    assert!(
+        status.contains("Wi-Fi          \"Home\", DE rules"),
+        "{status}"
+    );
+}
+
+#[test]
+fn journey_b_a_stick_with_stela_is_not_treated_as_blank() {
+    let f = made_by(Some(release::CURRENT));
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(!shown.contains("? Installer"), "{shown}");
+    assert!(
+        shown.contains(&format!("● Stela {} · Offline · macOS", release::CURRENT)),
+        "{shown}"
+    );
+    assert!(shown.contains("This stick is ready."), "{shown}");
+    assert!(!shown.contains("Nothing to do"), "{shown}");
+    // Enter takes Quit, the one row marked: no row that writes the stick.
+    assert!(shown.contains("● Quit"), "{shown}");
+    assert!(
+        shown.contains("○ Erase it and make a new installer"),
+        "{shown}"
+    );
+    assert!(shown.ends_with("■ Nothing was changed."), "{shown}");
+    assert_eq!(shown.matches("Nothing was changed.").count(), 1, "{shown}");
+    assert_eq!(stick_files(&f), before);
+    // Erasing it from the menu warns that it holds Stela; Cancel keeps it.
+    let (shown, result, done) = plain_stela(
+        &f,
+        &["Erase it and make a new installer", "Offline", "Cancel"],
+        &[],
+    );
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(
+        shown.contains("▲ This stick holds Stela with macOS"),
+        "{shown}"
+    );
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_c_an_older_stick_offers_the_update_and_quit_changes_nothing() {
+    let f = made_by(None);
+    let before = stick_files(&f);
+    let question = format!("? Update this stick to Stela {}?", release::CURRENT);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(shown.contains(&question), "{shown}");
+    assert!(shown.contains("● Stela 0.3 or older · Offline"), "{shown}");
+    assert!(shown.contains("● Replaces stela.efi"), "{shown}");
+    assert!(shown.ends_with("■ Nothing was changed."), "{shown}");
+    assert_eq!(stick_files(&f), before);
+    // Update brings it to this Stela.
+    let (shown, result, _) = plain_stela(&f, &["Update", "Not now"], &[]);
+    result.unwrap();
+    assert_eq!(record(&f).release.as_deref(), Some(release::CURRENT));
+    assert!(shown.contains("└ Done."), "{shown}");
+}
+
+#[test]
+fn journey_d_a_newer_stick_is_left_alone() {
+    let f = made_by(Some("99.0.0"));
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Show status"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(
+        shown.contains("▲ This stick has Stela 99.0.0, newer than this stela"),
+        "{shown}"
+    );
+    // Nothing that changes the stick is offered.
+    assert!(!shown.contains("Update"), "{shown}");
+    assert!(!shown.contains("Repair"), "{shown}");
+    assert!(!shown.contains("Erase"), "{shown}");
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn the_menu_saves_the_boot_logs_to_the_file_it_names() {
+    let f = made_by(Some(release::CURRENT));
+    let usb = crate::boot_log::tests::region(&["CHOICE 3 (Install macOS)\n"]);
+    fs::write(f.esp.join(efi::BOOT_LOG), &usb).unwrap();
+    let before = stick_files(&f);
+    let output = f._dir.path().join("log.txt");
+    let person = ui::tests::Scripted::new(&[]);
+    let environment = Environment {
+        ui: &person,
+        ..environment(&f.host)
+    };
+    let request = Request {
+        action: Action::BootLog,
+        usb: f.esp.clone(),
+        output: Some(output.clone()),
+        ..Request::default()
+    };
+    home::perform(&environment, request).unwrap();
+    let saved = fs::read_to_string(&output).unwrap();
+    assert!(saved.starts_with("Boot log on the USB ("), "{saved}");
+    assert!(saved.contains("CHOICE 3 (Install macOS)\n"), "{saved}");
+    assert!(
+        person.transcript().starts_with("└ Saved the boot logs to "),
+        "{}",
+        person.transcript()
+    );
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_e_an_interrupted_create_offers_to_finish_it() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    interrupt_setup(&f);
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    for line in [
+        "▲ A create stopped part way: continuing the Offline installer",
+        "? Finish the create?",
+        "● Finish it · Keeps what is written, checks it, and writes the rest",
+        "○ Start over · Erases the stick",
+        "■ Nothing was changed.",
+    ] {
+        assert!(shown.contains(line), "{line:?} missing:\n{shown}");
+    }
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_f_an_interrupted_macos_switch_offers_to_finish_it() {
+    let f = made_by(Some(release::CURRENT));
+    let mut switching = record(&f);
+    switching.replacing = Some("STELA2".into());
+    record::write_record(&f.esp, &switching).unwrap();
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(
+        shown.contains("● Finish the switch to macOS STELA2"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("cannot install macOS until it is"),
+        "{shown}"
+    );
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_g_a_damaged_stick_offers_repair_and_quit_changes_nothing() {
+    let f = made_by(Some(release::CURRENT));
+    fs::remove_file(f.esp.join(LOADER_PATH)).unwrap();
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(shown.contains("▲ This stick needs repair:"), "{shown}");
+    assert!(shown.contains("? Repair this stick?"), "{shown}");
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_h_without_a_terminal_plain_stela_reports_and_fails_when_something_is_due() {
+    let f = made_by(None);
+    let before = stick_files(&f);
+    let request = Request::home(command::Global::default());
+    let error = home::run(&environment(&f.host), request).unwrap_err();
+    assert!(error.is::<home::Due>());
+    let (text, due) = home::report(&home::sticks(&environment(&f.host)).unwrap());
+    assert!(due);
+    assert!(text.contains("Stela 0.3 or older · Offline"), "{text}");
+    assert!(text.contains("Next: stela update\n"), "{text}");
+    assert_eq!(stick_files(&f), before);
+    // A healthy stick: nothing is due.
+    let f = made_by(Some(release::CURRENT));
+    let request = Request::home(command::Global::default());
+    home::run(&environment(&f.host), request).unwrap();
+    let (text, due) = home::report(&home::sticks(&environment(&f.host)).unwrap());
+    assert!(!due, "{text}");
+    assert!(text.contains("Nothing to do."), "{text}");
+    // A blank stick names the command that makes an installer, and is not
+    // due.
+    let f = fixture(64 * GIB, false);
+    let request = Request::home(command::Global::default());
+    home::run(&environment(&f.host), request).unwrap();
+    let (text, due) = home::report(&home::sticks(&environment(&f.host)).unwrap());
+    assert!(!due, "{text}");
+    let command = format!("Next: stela create {}disk5", host::DISK_PREFIX);
+    assert!(text.contains(&command), "{text}");
+}
+
+#[test]
+fn journey_settings_change_the_wifi_and_cancel_changes_nothing() {
+    let f = made_by(Some(release::CURRENT));
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(
+        &f,
+        &[
+            "Change Wi-Fi or network settings",
+            "Home",
+            "correct horse",
+            "Automatic",
+            "Cancel",
+        ],
+        &["Home"],
+    );
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(shown.contains("? Save these settings?"), "{shown}");
+    assert!(shown.ends_with("■ Nothing was changed."), "{shown}");
+    assert_eq!(stick_files(&f), before);
+    let (shown, result, done) = plain_stela(
+        &f,
+        &[
+            "Change Wi-Fi or network settings",
+            "Home",
+            "correct horse",
+            "Automatic",
+            "Save",
+        ],
+        &["Home"],
+    );
+    result.unwrap();
+    assert!(done, "{shown}");
+    let saved = record(&f);
+    assert_eq!(
+        saved.wifi.as_ref().map(|wifi| wifi.ssid.as_str()),
+        Some("Home")
+    );
+}
+
+#[test]
+fn settings_without_a_terminal_and_without_a_setting_change_nothing() {
+    let f = made_by(Some(release::CURRENT));
+    let before = stick_files(&f);
+    let error = rerun(&f, |c| c.action = Action::Configure)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("name a setting to change, such as --wifi SSID"),
+        "{error}"
+    );
+    assert!(error.contains("`stela settings` asks"), "{error}");
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn journey_several_sticks_are_chosen_from_and_quit_changes_nothing() {
+    let mut f = made_by(Some(release::CURRENT));
+    let mut second = disk("disk6", &[("EFI", None)]);
+    second.removal = host::Removal::Usb;
+    f.host.disks.push(second);
+    let before = stick_files(&f);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(shown.contains("? Which stick?"), "{shown}");
+    // The Stela stick comes first.
+    let stela = shown.find("Disk disk5").unwrap();
+    let other = shown.find("Disk disk6").unwrap();
+    assert!(stela < other, "{shown}");
+    assert_eq!(stick_files(&f), before);
+}
+
+#[test]
+fn home_create_dispatches_create_after_wizard_confirmation() {
+    let f = fixture(64 * GIB, false);
+    let before = stick_files(&f);
+    let person = ui::tests::Scripted::new(&["Offline", "Erase and create"]);
+    let environment = Environment {
+        ui: &person,
+        builds: builds::SUPPORTED,
+        ..environment(&f.host)
+    };
+    let request = Request {
+        efi: Some(f.efi.clone()),
+        dry_run: true,
+        ..Request::home(command::Global::default())
+    };
+    let result = home::run(&environment, request);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(person.done(), "{}", person.transcript());
+    assert_eq!(stick_files(&f), before);
+    assert!(f.host.unmounted.borrow().is_empty());
 }

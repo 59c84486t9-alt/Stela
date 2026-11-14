@@ -24,6 +24,7 @@ use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
 use stela_contracts::refuse;
 use stela_engine::machine::mmu::placement::Placement;
 use stela_runtime::pc;
+use stela_runtime::pc::disk_writes::Pending;
 use stela_runtime::pc::gpt::Guid;
 use uefi::{
     boot::{self, AllocateType, MemoryType},
@@ -93,6 +94,8 @@ pub(crate) fn take_snapshot() -> Option<Snapshot> {
     let (base, bytes) = image.info();
     let extent = firmware::loaded_extent(base as usize, bytes).ok()?;
     let bytes = extent.mapped_bytes;
+    // Taken before the loader's heap exists, so without the fallback of
+    // `firmware::any_pages`, which reads the memory map into it.
     let copy = boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
@@ -334,6 +337,9 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
         crate::status::begin("Finding the PCI devices Stela drives itself");
         let found = storage::discover()?;
         crate::status::done("");
+        if let Some(notice) = storage::gpu_notice_found() {
+            crate::status::info(notice);
+        }
         Some(found)
     } else {
         None
@@ -366,8 +372,11 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
         // its own after boot services end.
         (None, Some(path)) => {
             crate::status::begin("Checking the macOS install files on the USB");
-            let inventory =
-                crate::engine::bundle::with_inventory(path, crate::engine::install::check_pieces)?;
+            let inventory = crate::engine::bundle::with_inventory(
+                path,
+                system.install_source.map(|guid| guid.0),
+                crate::engine::install::check_pieces,
+            )?;
             crate::status::done("");
             Some(inventory)
         }
@@ -554,8 +563,9 @@ fn log_stale(stale: stela_boot_core::chosen_disk::Stale) {
 }
 
 /// Why the default boot, `options`, can only wait for a restore, checked
-/// before the startup menu opens so that the menu starts there.
-pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
+/// before the startup menu opens so that the menu starts there. `pending`
+/// is the disk work decided so far.
+pub fn held_at_start(options: &[u8], pending: &Pending) -> Option<&'static str> {
     if !options.starts_with(b"--system") {
         return None;
     }
@@ -563,7 +573,7 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
         return Some("No disk is chosen for macOS yet: choose Install macOS first.");
     }
     crate::status::begin("Checking the internal SSD and NVRAM");
-    let (held, found) = match crate::selection::peek(options.to_vec()) {
+    let (held, found) = match crate::selection::peek(options.to_vec(), pending) {
         Err(refusal @ Refusal::BlankDisk) => (Some(held(refusal)), "no macOS installed yet"),
         Err(refusal @ Refusal::RecoveryMode) => (Some(held(refusal)), "an install did not finish"),
         Err(refusal @ Refusal::NoRecovery { .. }) => (Some(held(refusal)), "no recoveryOS to boot"),
@@ -578,10 +588,14 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
 }
 
 /// Run the engine; never returns.
-/// `log` is the partition holding the USB's boot log, when the loader keeps
-/// one there (`log_file`).
+/// `pending` is the disk work decided so far, which the engine's drivers
+/// do (`pc::disk_writes`): the change the disk picker planned for the disk
+/// `options` name, and the partition updates. `log` is the partition
+/// holding the USB's boot log, when the loader keeps one there
+/// (`log_file`).
 pub(crate) fn boot(
     mut options: Vec<u8>,
+    mut pending: Pending,
     mut volume: FileSystem,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
@@ -592,7 +606,7 @@ pub(crate) fn boot(
     // waits for a restore host, until one that boots is chosen.
     let options = loop {
         crate::status::begin("Reading the startup request in NVRAM");
-        let routed = crate::selection::route(options);
+        let routed = crate::selection::route(options, &mut pending);
         crate::status::done("");
         match routed {
             Ok(routed) => break routed,
@@ -601,12 +615,19 @@ pub(crate) fn boot(
                 if let Refusal::Stale(stale) = &refusal {
                     log_stale(*stale);
                 }
-                options = crate::choice::hold(&mut volume, held(refusal)).unwrap_or_else(|| {
-                    output::fatal(
-                        "the machine can only be restored and this volume has no startup \
-                         choices to restore it from",
-                    )
-                });
+                // The new choice replaces the options and their plan: a
+                // plan dropped here wrote nothing. The NVRAM consumed for
+                // the refused boot stays consumed, unless the new plan
+                // makes its partition afresh.
+                let chosen = crate::choice::hold(&mut volume, held(refusal), &pending)
+                    .unwrap_or_else(|| {
+                        output::fatal(
+                            "the machine can only be restored and this volume has no startup \
+                             choices to restore it from",
+                        )
+                    });
+                options = chosen.options;
+                pending.replace_plan(chosen.plan);
                 if !options.starts_with(b"--system") {
                     output::fatal("the chosen startup option is not a system-mode boot");
                 }
@@ -620,6 +641,7 @@ pub(crate) fn boot(
     let result = inputs.and_then(|inputs| {
         load(
             options,
+            pending,
             inputs,
             log,
             host_firmware,
@@ -672,12 +694,12 @@ fn translation_store(
             crate::status::warn(&format!("this PC's memory has no room for it; {stays}"))
         }
         PackRead::Whole(bytes) => crate::status::warn(&format!(
-            "{} MB; {stays}: `stela setup repair` prepares the file",
+            "{} MB; {stays}: `stela repair` on another computer prepares the file",
             mb(bytes)
         )),
-        PackRead::None => {
-            crate::status::warn(&format!("{stays}: `stela setup repair` prepares the file"))
-        }
+        PackRead::None => crate::status::warn(&format!(
+            "{stays}: `stela repair` on another computer prepares the file"
+        )),
     }
     if files.len() < MAX_FILES {
         files.push((
@@ -693,6 +715,7 @@ fn translation_store(
 
 fn load(
     options: Vec<u8>,
+    pending: Pending,
     inputs: Inputs,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
@@ -707,6 +730,24 @@ fn load(
     } = inputs;
     let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
+    // The engine's drivers apply the plan to the `--storage` partition's
+    // disk and no other.
+    if let Some(plan) = &pending.plan
+        && !system
+            .storage
+            .as_ref()
+            .is_some_and(|target| plan.is_for(target))
+    {
+        return Err(refuse!(
+            "the disk chosen for macOS is not this boot's --storage, so it cannot be prepared; \
+             nothing was written to it"
+        ));
+    }
+    let disk_writes = if pending.is_empty() {
+        Vec::new()
+    } else {
+        pending.encode()
+    };
     let (native_processors, available_cores) = crate::native_smp::firmware::capture_inventory()
         .map_err(crate::native_smp::firmware::Error::message)?;
     let cores = system.assigned_native_cores(available_cores, bundle_pes)?;
@@ -726,6 +767,9 @@ fn load(
     }
     let wall = read_rtc();
     let power = host_power();
+    if let Some(power) = &power {
+        crate::stop::arm(power, tsc_hz);
+    }
     let random_seed = match crate::entropy::retain_seed() {
         Ok((region, source)) => {
             output::arguments(format_args!("HOST entropy seeded source={source}\n"));
@@ -782,7 +826,8 @@ fn load(
         source: source_region,
         files,
         file_count,
-    } = handoff_phase::retain_files(options, source, bundle)?;
+        disk_writes,
+    } = handoff_phase::retain_files(options, source, bundle, disk_writes)?;
     let handoff = handoff_page.physical as *mut Handoff;
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
@@ -801,6 +846,9 @@ fn load(
         boot_disk_bytes = take;
     }
     let (device_skips, device_needs) = device_starts(&system);
+    // Found now, through the firmware's own protocol; claimed as the first
+    // act after the firmware's exit.
+    let usb_legacy = crate::usb_legacy::find();
     crate::status::done("");
     let boot_heap = crate::ALLOCATOR.usage();
     output::arguments(format_args!(
@@ -834,10 +882,30 @@ fn load(
         map: core::mem::ManuallyDrop::new(map),
         ownership: Some(EbsOwnership { _private: () }),
     };
+    // The firmware's exception handlers ended with its boot services. Until
+    // the engine's root is entered a fault shows on the screen instead of
+    // resetting the PC with no record.
+    // SAFETY: boot services have ended; interrupts stay off from here to
+    // the engine's own tables, and no firmware handler runs again.
+    unsafe {
+        asm!("cli", options(nomem, nostack));
+        crate::paging::report_faults();
+    }
+    // The log is closed from here to the engine's start, so a freeze in
+    // this step shows only on the screen: each part names itself there.
+    // Before anything stops a controller: firmware that still drives USB
+    // from system management mode hangs there when its controller's bus
+    // mastering ends under it (issue 36). Linux claims them this early too.
+    crate::status::progress("the firmware has left; its USB controllers");
+    // SAFETY: boot services ended above with interrupts off, the firmware's
+    // identity map is loaded and no Stela driver has started.
+    unsafe { usb_legacy.take(tsc_hz) };
+    crate::status::progress("the firmware's DMA remapping");
     // SAFETY: the firmware's identity map is still loaded, the APs idle in
     // firmware code, and no Stela driver or memory reuse has started.
     let inactive_firmware_units =
         unsafe { crate::native_dma::release_firmware_units(remapping, tsc_hz) };
+    crate::status::progress("the final memory map");
     let native_mmio_capture = match native_mmio {
         Ok(prepared) => match prepared.finish(&mut exit) {
             Ok(sealed) => crate::native_mmio::CaptureHandoff::new(sealed),
@@ -856,6 +924,7 @@ fn load(
     // runs on this processor, and every later APIC handle is made from the
     // base returned here (the handoff's) or read afresh. The APs take the
     // same mode as they enter Stela (`native_smp::executor`).
+    crate::status::progress("the local APIC");
     // SAFETY: CPL0, interrupts masked, no APIC handle of this processor made.
     let apic_base = unsafe { crate::apic::prefer_x2apic() };
     let sender = crate::apic::Apic::new(apic_base, apic_base & crate::apic::BASE_ADDRESS);
@@ -867,6 +936,7 @@ fn load(
             "xAPIC (no x2APIC offered)"
         }
     ));
+    crate::status::progress("stopping the firmware's processors");
     // SAFETY: interrupts are masked, the BSP alone sends ICR commands, and `capture` lists the
     // enabled firmware APs.
     let deliveries = match unsafe {
@@ -897,6 +967,7 @@ fn load(
         handoff.write(Handoff {
             magic: MAGIC,
             options: options_region,
+            disk_writes,
             random_seed,
             source: source_region,
             files,
@@ -944,6 +1015,7 @@ fn load(
             amd_tables,
             device_skips,
             device_needs,
+            stop_record: crate::stop_record::services(),
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

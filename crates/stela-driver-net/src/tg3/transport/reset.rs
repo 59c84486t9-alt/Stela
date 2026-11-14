@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! Unmanaged core reset: no DMA rings or packet-ready state is implied.
+//! Core reset: no DMA rings or packet-ready state is implied.
 use super::*;
 use crate::block::BlockError;
 use crate::bus::pci::regs;
@@ -11,6 +11,7 @@ use crate::bus::pci::{
     Capabilities, ConfigError, ConfigFailure, ConfigSpace, capability::Transport,
 };
 use core::cell::{Cell, RefCell};
+use stela_driver_base::stepped::block_on;
 
 const PCI_STATUS_CAP_LIST: u32 = 1 << 20;
 const PCI_EXPRESS: u8 = 0x10;
@@ -25,14 +26,6 @@ const CPMU_CLOCK_OVERRIDE: u32 = 0x3624;
 const CPMU_CLOCK_OVERRIDE_ENABLE: u32 = 0x3628;
 const CLOCK_OVERRIDE: u32 = 1 << 31;
 const MAC_OVERRIDE_ENABLE: u32 = 1 << 13;
-const APE_SIGNATURE: u32 = 0x4000;
-const APE_FIRMWARE_STATUS: u32 = 0x400c;
-const APE_SIGNATURE_MAGIC: u32 = 0x4150_4521;
-const APE_READY: u32 = 0x100;
-const SRAM_DATA_SIGNATURE: u32 = 0xb54;
-const SRAM_DATA_CONFIG: u32 = 0xb58;
-const ASF_ENABLE: u32 = 0x80;
-const APE_ENABLE: u32 = 0x0020_0000;
 const MAC_DATA_SWAP: u32 = 0x34;
 const RESET_PCIE_CLOCK: u32 = 1 << 29;
 const CORE_RESET: u32 = 1;
@@ -98,72 +91,59 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             })
         })
     }
-    pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
-        // The managed APE/ASF handshake is not inferred from an
-        // absent NCSI feature bit or from firmware which has not finished boot.
-        if self.ape_read(APE_SIGNATURE)? == APE_SIGNATURE_MAGIC
-            || self.ape_read(APE_FIRMWARE_STATUS)? & APE_READY != 0
-        {
-            return Err(Error::UnsupportedManaged);
-        }
-        // Signature/ready absence alone does not establish ownership while
-        // management firmware may still be booting. Require positive signed
-        // board configuration showing that neither manager is enabled.
-        if self.sram(SRAM_DATA_SIGNATURE, None)? != FIRMWARE_MAGIC {
-            return Err(Error::UnmanagedNotObserved);
-        }
-        if self.sram(SRAM_DATA_CONFIG, None)? & (ASF_ENABLE | APE_ENABLE) != 0 {
-            return Err(Error::UnsupportedManaged);
-        }
-        Ok(())
-    }
-    pub(super) fn nvram_lock(&mut self) -> Result<(), Error> {
+    pub(super) async fn nvram_lock(&mut self) -> Result<(), Error> {
         self.write(NVRAM_SWARB, SWARB_REQUEST)?;
-        let result = (|| {
+        let result = async {
             for _ in 0..8000 {
                 if self.read(NVRAM_SWARB)? & SWARB_GRANTED != 0 {
                     return Ok(());
                 }
-                self.wait(20)?;
+                self.wait(20).await?;
             }
             Err(Error::NvramTimeout)
-        })();
+        }
+        .await;
         if result.is_err() {
             let cleanup = self.flush(NVRAM_SWARB, SWARB_RELEASE);
             self.cleanup(cleanup);
         }
         result
     }
-    fn firmware_after_reset(&mut self) -> Result<(), Error> {
+    async fn firmware_after_reset(&mut self) -> Result<(), Error> {
         for _ in 0..100_000 {
             if self.sram(FIRMWARE_MBOX, None)? == !FIRMWARE_MAGIC {
                 return Ok(());
             }
-            self.wait(10)?;
+            self.wait(10).await?;
         }
         Err(Error::FirmwareTimeout)
     }
     /// Execute the Linux tg3_chip_reset ordinary PCIe/CPMU sequence for
-    /// an unmanaged named ASIC. Bus mastering stays disabled: no rings exist.
-    /// The firmware inversion, config restoration and APE release must all be
-    /// observed before `core_reset_completed` is true. Any failure is terminal
-    /// and keeps the config/BAR owner, including uncertain held locks.
-    pub fn reset_unmanaged_core(&mut self) -> Result<(), Error> {
+    /// a named ASIC, with `tg3_write_sig_pre_reset`'s firmware signature and
+    /// ASF START state before it. Bus mastering stays disabled: no rings
+    /// exist. The firmware inversion, config restoration and APE release
+    /// must all be observed before `core_reset_completed` is true. Any
+    /// failure is terminal and keeps the config/BAR owner, including
+    /// uncertain held locks.
+    pub fn reset_core(&mut self) -> Result<(), Error> {
+        block_on(self.reset_core_steps())
+    }
+    pub(super) async fn reset_core_steps(&mut self) -> Result<(), Error> {
         if self.failure.is_some() {
             return Err(Error::Poisoned);
         }
         self.timer_ready()?;
         let identity = self.identity.ok_or(Error::NotIdentified)?;
         self.core_reset_complete = false;
-        let result = (|| {
-            self.unmanaged()?;
+        let result = async {
+            self.observe_management()?;
             let pcie = self.pcie_capability()?;
             let command = Self::checked(self.regs().config_read32(regs::COMMAND)?)? as u16;
             if command & regs::COMMAND_MEMORY == 0 {
                 return Err(Error::ConfigDidNotLatch);
             }
             if !self.stopped {
-                self.stop_engines()?;
+                self.stop_engines_steps().await?;
             }
             // No new requester DMA can start while reset/bootcode state is
             // being rebuilt. The source saves/restores command using WORD
@@ -173,9 +153,12 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             if self.regs().config_read32(regs::COMMAND)? as u16 != command {
                 return Err(Error::ConfigDidNotLatch);
             }
+            // tg3_reset_hw: tg3_stop_fw, then tg3_write_sig_pre_reset.
+            self.stop_firmware().await?;
             self.sram(FIRMWARE_MBOX, Some(FIRMWARE_MAGIC))?;
-            self.nvram_lock()?;
-            if let Err(error) = self.lock(1) {
+            self.asf_driver_state(management::DRV_STATE_START)?;
+            self.nvram_lock().await?;
+            if let Err(error) = self.lock(1).await {
                 let cleanup = self.flush(NVRAM_SWARB, SWARB_RELEASE);
                 self.cleanup(cleanup);
                 return Err(error);
@@ -185,11 +168,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             // itself undoes the NVRAM lock (Linux has no matching unlock).
             let preparation = (|| {
                 self.write(GRC_FASTBOOT_PC, 0)?;
-                if identity.asic == Asic::Bcm5761 && self.read(PHY_TEST_CONTROL)? == PCIE10_PSCRAM {
+                if identity.asic.legacy() && self.read(PHY_TEST_CONTROL)? == PCIE10_PSCRAM {
                     self.write(PHY_TEST_CONTROL, PSCRAM)?;
                 }
                 self.write(GRC_MISC_CFG, RESET_PCIE_CLOCK)?;
-                if identity.asic == Asic::Bcm5720 {
+                // tg3_override_clk.
+                if identity.asic == Asic::Bcm5717 {
+                    let value = self.read(CPMU_CLOCK_OVERRIDE_ENABLE)?;
+                    self.write(CPMU_CLOCK_OVERRIDE_ENABLE, value | MAC_OVERRIDE_ENABLE)?;
+                } else if identity.asic.plus_5717() {
                     self.write(CPMU_CLOCK_OVERRIDE, CLOCK_OVERRIDE)?;
                 }
                 Ok(())
@@ -203,9 +190,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             // Do not MMIO-read here: decode may disappear until PCI config is
             // restored. The source requires both 120-us waits/config flush.
             self.write(GRC_MISC_CFG, CORE_RESET | RESET_PCIE_CLOCK)?;
-            self.wait(120)?;
+            self.wait(120).await?;
             Self::checked(self.regs().config_read32(regs::COMMAND)?)?;
-            self.wait(120)?;
+            self.wait(120).await?;
             let control = Self::checked(self.regs().config_read32(pcie + 8)?)? as u16;
             self.regs().config_write16(pcie + 8, control & !0x0810)?;
             if Self::checked(self.regs().config_read32(pcie + 8)?)? & 0x0810 != 0 {
@@ -215,9 +202,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             let host = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
             self.regs()
                 .config_write32(MISC_HOST_CTRL, (host & 0xffff_0000) | HOST_ACCESS)?;
-            self.regs().config_write32(PCISTATE, 0x60 | ALLOW_APE)?;
+            // tg3_restore_pci_state: the APE space only for a chip with one.
+            let allow = if identity.ape { ALLOW_APE } else { 0 };
+            self.regs().config_write32(PCISTATE, 0x60 | allow)?;
             if Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)? & 0xffff != HOST_ACCESS
-                || Self::checked(self.regs().config_read32(PCISTATE)?)? & ALLOW_APE != ALLOW_APE
+                || Self::checked(self.regs().config_read32(PCISTATE)?)? & ALLOW_APE != allow
             {
                 return Err(Error::ConfigDidNotLatch);
             }
@@ -230,18 +219,22 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             if self.read(MEMARB_MODE)? & ENABLE == 0 {
                 return Err(Error::ConfigDidNotLatch);
             }
-            self.firmware_after_reset()?;
+            self.firmware_after_reset().await?;
             self.write(GRC_MODE, MAC_DATA_SWAP)?;
             self.flush(MAC_MODE, 0)?;
-            self.wait(40)?;
+            self.wait(40).await?;
             self.unlock(1)?;
             self.flush(MAC_MI_MODE, 0x8000)?; // CPMU's 500-kHz MDIO clock.
-            self.wait(80)?;
-            if identity.asic == Asic::Bcm5761 {
+            self.wait(80).await?;
+            if identity.asic.legacy() {
                 let value = self.read(POST_RESET_PCIE)?;
                 self.write(POST_RESET_PCIE, value | PCIE_POST_RESET_FIX)?;
             }
-            if identity.asic == Asic::Bcm5720 {
+            // tg3_restore_clk.
+            if identity.asic == Asic::Bcm5717 {
+                let value = self.read(CPMU_CLOCK_OVERRIDE_ENABLE)?;
+                self.write(CPMU_CLOCK_OVERRIDE_ENABLE, value & !MAC_OVERRIDE_ENABLE)?;
+            } else if identity.asic.plus_5717() {
                 let value = self.read(CPMU_CLOCK_OVERRIDE)?;
                 self.write(CPMU_CLOCK_OVERRIDE, value & !CLOCK_OVERRIDE)?;
             }
@@ -249,11 +242,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 let value = self.read(CPMU_CLOCK_OVERRIDE_ENABLE)?;
                 self.write(CPMU_CLOCK_OVERRIDE_ENABLE, value | MAC_OVERRIDE_ENABLE)?;
             }
-            // Bootcode can change management state. Do not claim an unmanaged
-            // reset epoch if that state changed while firmware was running.
-            self.unmanaged()?;
+            // tg3_chip_reset reprobes the ASF setting bootcode left.
+            self.observe_management()?;
             Ok(())
-        })();
+        }
+        .await;
         if result.is_ok() {
             self.core_reset_complete = true;
             self.stopped = false;

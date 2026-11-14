@@ -9,12 +9,7 @@ use crate::{
     bus::{
         dma::{DomainAllocator, mapping::DmaDomain},
         mmio::owned::{CacheAttribute, Mapping, Protection},
-        pci::{
-            Address, Bar, ConfigSpace, Function,
-            msix::MappedBar,
-            owned::OwnedConfig,
-            requester::{FunctionRole, StoppedRequester},
-        },
+        pci::{Address, Bar, ConfigSpace, Function, msix::MappedBar, owned::OwnedConfig},
         vmd,
     },
     net::{
@@ -211,8 +206,10 @@ struct Claimed {
     reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
 )]
 fn claim(services: &dyn NativeServices, address: Address) -> Result<Claimed, Failure> {
-    let requester = services
-        .claim_stopped(address)
+    // The Wi-Fi drivers set Bus Master before they reset their engines, so
+    // they produce no quiescence receipt yet: the function stays unmastered,
+    // and the seal refuses that write.
+    let requester = super::services::claim_unmastered(services, address)
         .map_err(|error| (Error::Native(error), None))?;
     let (requester, binding) = match requester.into_dma_binding() {
         Ok(value) => value,
@@ -302,7 +299,8 @@ pub(super) unsafe fn ehci(
     }
 }
 
-/// Attach a Tigon3 adapter: BAR0 holds the MAC registers, BAR2 the APE.
+/// Attach a Tigon3 adapter: BAR0 holds the MAC registers, BAR2 the APE
+/// of a chip that has one.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, and `clock` is the
@@ -328,16 +326,21 @@ pub(super) unsafe fn tg3(
         Ok(mac) => mac,
         Err(error) => return Err(keep_error(Error::Native(error), (requester, minimum))),
     };
-    let ape = match map(services, address, &bars, 2) {
-        Ok(ape) => ape,
-        Err(error) => return Err(keep_error(Error::Native(error), (requester, mac, minimum))),
+    // Only a chip with an APE has BAR 2 (Linux maps it for those alone).
+    let ape = if tg3::ape(requester.function_mut().device) {
+        match map(services, address, &bars, 2) {
+            Ok(ape) => Some(ape),
+            Err(error) => return Err(keep_error(Error::Native(error), (requester, mac, minimum))),
+        }
+    } else {
+        None
     };
     let window = |mapping: &Mapping| {
         let bytes = mapping.bytes()?;
         Ok((mapping.address(0, bytes)?, bytes))
     };
-    let ((mac_window, mac_bytes), (ape_window, ape_bytes)) =
-        match window(&mac).and_then(|mac| Ok((mac, window(&ape)?))) {
+    let ((mac_window, mac_bytes), ape_window) =
+        match window(&mac).and_then(|mac| Ok((mac, ape.as_ref().map(window).transpose()?))) {
             Ok(windows) => windows,
             Err(error) => {
                 return Err(keep_error(
@@ -350,9 +353,7 @@ pub(super) unsafe fn tg3(
     // SAFETY: original preparation keeps configuration/root/inherited backing
     // and prior IRQ/work exclusions. Both UC mappings belong to that function.
     let registers = unsafe {
-        tg3::io::Cold::from_owned_windows(
-            requester, mac_window, mac_bytes, ape_window, ape_bytes, windows,
-        )
+        tg3::io::Cold::from_owned_windows(requester, mac_window, mac_bytes, ape_window, windows)
     }
     .map_err(|(error, requester, windows)| {
         (
@@ -893,100 +894,106 @@ pub(super) unsafe fn vmd(
         .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed = |error: vmd::Error, owner: Box<dyn Any>| (Error::Vmd(error), Some(owner));
-    let requester = services.claim_stopped(address).map_err(refused)?;
-    let (requester, binding) = match requester.into_dma_binding() {
-        Ok(value) => value,
-        Err((error, owner)) => {
-            return Err(keep_error(Error::Native(ServiceError::Claim(error)), owner));
-        }
-    };
-    let domain = match services.domain(binding) {
-        Ok(domain) => domain,
-        Err(error) => return Err(keep_error(Error::Native(error), requester)),
-    };
-    let mut function = requester.into_function();
+    let mut preparing = services.prepare_requester(address).map_err(refused)?;
+    let function = preparing.function_mut();
     let profile = match vmd::Profile::identify(function.vendor, function.device) {
         Ok(profile) => profile,
-        Err(error) => return Err(keep_error(Error::Vmd(error), (function, domain))),
+        Err(error) => return Err(keep_error(Error::Vmd(error), preparing)),
     };
-    let bars = match function.bars() {
+    let bars = match preparing.function_mut().bars() {
         Ok(bars) => bars,
-        Err(error) => return Err(keep_error(error, (function, domain))),
+        Err(error) => return Err(keep_error(error, preparing)),
     };
-    // SAFETY: the mount claimed this function stopped, and sizing its BARs
-    // with decode off left it so.
-    let requester =
-        match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
-            Ok(requester) => requester,
-            Err((error, function)) => {
-                return Err(keep_error(
-                    Error::Native(ServiceError::Claim(error)),
-                    (function, domain),
-                ));
-            }
-        };
+    // SAFETY: VMD has no engine of its own: every request it issues is a
+    // child's, forwarded upstream under its requester ID. Its Bus Master bit
+    // has been clear since the mount parked it, the preparation's seal keeps
+    // it so, and finalization releases the seal without setting the bit.
+    // Only the hierarchy owner sets it again, after discovery stopped every
+    // child firmware left mastering (refusing one that does not stop),
+    // preparation cleared every child's Bus Master and the NVMe driver
+    // disabled its controller. The cold grant excludes prior
+    // firmware, IRQ and work users; no Stela producer exists yet. The BARs
+    // were sized with decode as the mount left it, and finalization rechecks
+    // the stopped state after the original root's drain.
+    let bound = match unsafe { preparing.acknowledge_quiescence() }.finalize() {
+        Ok(bound) => bound,
+        Err(failure) => {
+            return Err((Error::Preparation(failure.error), Some(Box::new(failure))));
+        }
+    };
+    let domain = bound.attachment.domain();
+    let (requester, attachment) = (bound.requester, bound.attachment);
     let reserve = |index: usize| match bars[index] {
         Some(bar @ Bar::Memory { .. }) => services.bar_resource(address, bar),
         _ => Err(ServiceError::Refused("missing memory BAR")),
     };
-    let cfgbar = reserve(0).map_err(refused)?;
-    let membar1 = reserve(2).map_err(refused)?;
-    let membar2 = reserve(4).map_err(refused)?;
-    let authority = services.authority().map_err(refused)?;
-    let map = |resource: &crate::bus::mmio::owned::Resource, window: core::ops::Range<u64>| {
-        authority
-            .map(
-                resource.clone(),
-                window.start as usize,
-                (window.end - window.start) as usize,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )
-            .map_err(|error| refused(ServiceError::Mapping(error)))
+    // A failure here keeps the stopped requester and its attachment, as
+    // every later failure keeps them with the host.
+    let reserved = (|| {
+        let bars = [reserve(0)?, reserve(2)?, reserve(4)?];
+        let authority = services.authority()?;
+        let map = |resource: &crate::bus::mmio::owned::Resource, window: core::ops::Range<u64>| {
+            authority
+                .map(
+                    resource.clone(),
+                    window.start as usize,
+                    (window.end - window.start) as usize,
+                    CacheAttribute::Uncached,
+                    Protection::ReadWrite,
+                )
+                .map_err(ServiceError::Mapping)
+        };
+        let configuration = map(&bars[0], 0..bars[0].physical_span().bytes())?;
+        let shadow = profile
+            .shadow_window()
+            .map(|window| map(&bars[2], window))
+            .transpose()?;
+        Ok::<_, ServiceError>((bars, authority, configuration, shadow))
+    })();
+    let (bars, authority, configuration, shadow) = match reserved {
+        Ok(reserved) => reserved,
+        Err(error) => return Err(keep_error(Error::Native(error), (requester, attachment))),
     };
-    let configuration = map(&cfgbar, 0..cfgbar.physical_span().bytes())?;
-    let shadow = profile
-        .shadow_window()
-        .map(|window| map(&membar2, window))
-        .transpose()?;
     let resources = vmd::NativeResources {
         requester,
-        bars: [cfgbar, membar1, membar2],
+        bars,
         cfgbar: configuration,
         shadow,
         msix: None,
     };
     // SAFETY: the mount reserved and mapped these BARs for this stopped host,
     // and no other owner reaches the hierarchy behind it.
-    let registers = unsafe { vmd::NativeRegisters::claim(resources) }
-        .map_err(|(error, resources)| failed(error, Box::new(resources)))?;
-    let mut host = vmd::Host::initialize(registers).map_err(|(error, registers)| {
-        (
-            Error::Vmd(error),
-            registers.map(|r| Box::new(r) as Box<dyn Any>),
-        )
-    })?;
+    let registers = match unsafe { vmd::NativeRegisters::claim(resources) } {
+        Ok(registers) => registers,
+        Err((error, resources)) => return Err(failed(error, Box::new((resources, attachment)))),
+    };
+    let mut host = match vmd::Host::initialize(registers) {
+        Ok(host) => host,
+        Err((error, registers)) => {
+            return Err(keep_error(Error::Vmd(error), (registers, attachment)));
+        }
+    };
     let mut others = match host.scan() {
         Ok(children) => children,
-        Err(error) => return Err(failed(error, Box::new(host))),
+        Err(error) => return Err(failed(error, Box::new((host, attachment)))),
     };
     let Some(index) = others.iter().position(|child| child.class == [1, 8, 2]) else {
         return Ok(Vmd {
             nvme: None,
             others,
-            owner: Box::new(host),
+            owner: Box::new((host, attachment)),
         });
     };
     let child = others.remove(index);
     let bytes = match host.memory_bar_bytes(child.address) {
         Ok(bytes) => bytes,
-        Err(error) => return Err(failed(error, Box::new(host))),
+        Err(error) => return Err(failed(error, Box::new((host, attachment)))),
     };
     // SAFETY: `bytes` is the child's firmware-assigned BAR0, sized with its
     // decode off, and the stopped hierarchy has no other owner.
     let bar = match unsafe { vmd::endpoint::FirmwareBar::claim(&mut host, child.address, bytes) } {
         Ok(bar) => bar,
-        Err(error) => return Err(failed(error, Box::new(host))),
+        Err(error) => return Err(failed(error, Box::new((host, attachment)))),
     };
     let label = alloc::format!(
         "{address} VMD {:02x}:{:02x}.{}",
@@ -994,8 +1001,9 @@ pub(super) unsafe fn vmd(
         child.address.device,
         child.address.function
     );
-    // SAFETY: the mount's domain covers the host's requester and its aliases,
-    // its permission issued these mappings, and the hierarchy is stopped.
+    // SAFETY: the host's own attached domain covers its requester, under
+    // which every child's request reaches the root; the mount's permission
+    // issued these mappings, and the hierarchy is stopped.
     match unsafe {
         crate::storage::nvme::vmd::attach(
             host,
@@ -1011,9 +1019,12 @@ pub(super) unsafe fn vmd(
         Ok((attached, hierarchy)) => Ok(Vmd {
             nvme: Some(attached),
             others,
-            owner: Box::new(hierarchy),
+            owner: Box::new((hierarchy, attachment)),
         }),
-        Err((error, hierarchy)) => Err((Error::Device(error), Some(Box::new(hierarchy)))),
+        Err((error, hierarchy)) => Err((
+            Error::Device(error),
+            Some(Box::new((hierarchy, attachment))),
+        )),
     }
 }
 
@@ -1422,7 +1433,6 @@ mod tests {
         ));
         assert!(services.requests.borrow().is_empty());
         assert!(services.preparations.borrow().is_empty());
-        assert!(services.stopped.borrow().is_empty());
     }
     #[test]
     fn ehci_requests_original_preparation_without_a_stopped_or_bound_grant() {
@@ -1438,7 +1448,6 @@ mod tests {
         ));
         assert_eq!(*services.requests.borrow(), [address()]);
         assert_eq!(*services.preparations.borrow(), [address()]);
-        assert!(services.stopped.borrow().is_empty());
     }
 
     #[test]
@@ -1454,7 +1463,6 @@ mod tests {
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
         assert_eq!(*services.preparations.borrow(), [address()]);
-        assert!(services.stopped.borrow().is_empty());
         // SAFETY: as above.
         let aqtion = unsafe { aqtion(&services, address()) };
         assert!(matches!(
@@ -1462,13 +1470,14 @@ mod tests {
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
         assert_eq!(*services.preparations.borrow(), [address(); 2]);
-        assert!(services.stopped.borrow().is_empty());
         // SAFETY: as above.
         let vmd = unsafe { vmd(&services, address(), clock) };
         assert!(matches!(
             vmd,
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
+        // VMD attaches through the cold preparation the policy plans for it.
+        assert_eq!(*services.preparations.borrow(), [address(); 3]);
         // SAFETY: as above.
         let bluetooth = unsafe { intel_bluetooth(&services, address(), clock) };
         assert!(matches!(

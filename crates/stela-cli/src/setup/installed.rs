@@ -132,6 +132,9 @@ impl InstalledDisk {
             preboot: Some(region),
             bundle: true,
             ecid: ecid.map(|ecid| ecid.0),
+            // The PC's keyboards and pointers drive the Mac's. An install
+            // runs without them (`bundle_options`).
+            input: true,
             ..self.external()
         })
     }
@@ -190,6 +193,10 @@ pub(super) enum Role {
     Nor,
 }
 
+/// Where a command that changes the PC's own disk works.
+const ON_THE_PC: &str = "run stela on the PC itself, for example from a Linux live USB, with \
+    that disk connected";
+
 /// The partition identifier that is still `disk`'s partition in `role`:
 /// `explicit` when the user names one, else the recorded identifier, else
 /// whichever partition of this computer's disks carries the recorded GUID,
@@ -198,6 +205,10 @@ pub(super) enum Role {
 /// computer reports one) and be unmounted. Every write setup makes to a
 /// partition goes through this, so a renumbered disk or another partition
 /// is never written.
+///
+/// A machine's state is on the PC's own disk, which is rarely connected to
+/// the computer that makes the stick: each refusal says where the command
+/// works.
 pub(super) fn confirm(
     host: &dyn Host,
     disk: &InstalledDisk,
@@ -206,7 +217,8 @@ pub(super) fn confirm(
 ) -> Result<String> {
     ensure!(
         !disk.is_chosen(),
-        "this install's disk is chosen in stela.efi on the PC, out of this computer's reach"
+        "this install's disk is chosen in stela.efi on the PC, so the stick does not record \
+         where it is and stela cannot reach it from any computer"
     );
     let (recorded, serial, guid, what) = match role {
         Role::AppleRegion => (
@@ -239,7 +251,8 @@ pub(super) fn confirm(
             Some(found) => found,
             None => bail!(
                 "this install's {what} (partition {guid}, on the disk with serial {serial:?}) is \
-                 not connected to this computer: connect that disk"
+                 not connected to this computer. It is on the PC's own disk: connect that disk \
+                 here, or {ON_THE_PC}"
             ),
         },
     };
@@ -777,14 +790,13 @@ pub(super) fn lost_keys(install: &super::machines::Install, usb: &Path, several:
     let start_over = if several {
         format!(
             "remove the install with {}, then add the disk again with {}",
-            fix(&format!("configure --remove-install {name}")),
-            fix(&format!("{target} --initialize-nor"))
+            fix(&format!("settings --remove-install {name}")),
+            fix(&format!("create {target} --initialize-nor"))
         )
     } else {
         format!(
-            "remove the setup with {}, then set it up again with {}",
-            fix("uninstall"),
-            fix(&format!("{target} --initialize-nor"))
+            "make the stick again with {}, which erases it",
+            fix(&format!("create {target} --initialize-nor"))
         )
     };
     format!(

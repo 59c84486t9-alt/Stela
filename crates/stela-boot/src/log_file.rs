@@ -1,5 +1,5 @@
 //! The USB's own boot log, [`BOOT_LOG_FILE`] beside Stela on its volume,
-//! which `stela setup` preallocates: the loader writes it through the
+//! which `stela` preallocates: the loader writes it through the
 //! firmware's file system from its first line until boot services end
 //! ([`open`]), and the system engine writes on to the same clusters, wherever
 //! they lie, through Stela's own drivers ([`resume`]), so the stick keeps the
@@ -47,6 +47,7 @@ pub fn open() -> Option<Guid> {
         let writer = Writer::open(&mut *device)
             .map_err(|error| refuse!("firmware boot log: {error}", %error))?;
         report(&writer, "firmware");
+        crate::stop_record::set_boot(writer.boots());
         output::add_log(writer, device, Log::Firmware)
             .map_err(|error| refuse!("firmware boot log output: {error}", %error))?;
         Ok(partition)

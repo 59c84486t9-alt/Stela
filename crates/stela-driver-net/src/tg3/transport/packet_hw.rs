@@ -3,28 +3,30 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! One BCM5720/5761/5762 A0 host-send/standard-receive/return queue, polled status DMA.
+//! One BCM5717/5718/5719/5720/5761/5762/57765-class host-send/standard-receive/return queue, polled status DMA.
 use super::{board::Board, phy::Speed, regs::*, *};
 
 impl<R: Registers, D: Delay> Hardware<R, D> {
-    pub(in crate::tg3) fn packet_prepare(&mut self) -> Result<Board, Error> {
-        self.packet_identity()?;
+    pub(in crate::tg3) async fn packet_prepare(&mut self) -> Result<Board, Error> {
+        self.packet_identity().await?;
         // Reject inherited requester DMA before allocating or publishing RAM.
         if self.regs().config_read32(4)? & 4 != 0 {
             return Err(Error::UnsupportedBoard);
         }
-        self.board()
+        self.board().await
     }
-    pub(in crate::tg3) fn packet_reset(&mut self, board: Board) -> Result<(), Error> {
+    pub(in crate::tg3) async fn packet_reset(&mut self, board: Board) -> Result<(), Error> {
         self.timer_ready()?;
         // PHY/config access is legal in the stopped packet epoch. No packet
         // engine is enabled by reopening this serialized register transport.
         self.stopped = false;
-        self.initialize_phy(board)?;
-        self.reset_unmanaged_core()?;
+        // tg3_start: the APE hears of the driver before tg3_init_hw.
+        self.ape_driver_start().await?;
+        self.initialize_phy(board).await?;
+        self.reset_core_steps().await?;
         // Re-observe post-bootcode signed board identity; never keep a
         // guessed MAC/management setting across reset.
-        let observed = self.board()?;
+        let observed = self.board().await?;
         if observed.mac != board.mac
             || observed.apd != board.apd
             || observed.capacitive != board.capacitive
@@ -32,6 +34,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             || observed.led != board.led
             || observed.profile_5762 != board.profile_5762
             || observed.profile_5761 != board.profile_5761
+            || observed.phy_otp != board.phy_otp
         {
             return Err(Error::UnsupportedBoard);
         }
@@ -43,7 +46,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.sram(at + 8, Some(count << 16))?;
         Ok(())
     }
-    pub(in crate::tg3) fn packet_start(
+    pub(in crate::tg3) async fn packet_start(
         &mut self,
         board: Board,
         addresses: [u64; 4],
@@ -56,7 +59,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         let asic = self.identity.ok_or(Error::NotIdentified)?.asic;
         let bcm5762 = asic == Asic::Bcm5762;
-        let legacy = asic == Asic::Bcm5761;
+        let legacy = asic.legacy();
+        let bcm5717 = asic == Asic::Bcm5717;
+        let class_57765 = asic.class_57765();
+        let bcm5719 = asic == Asic::Bcm5719;
+        // tg3's statistics workaround (5717, 5720 A0 and 5762, not 5719
+        // after A0)
+        // and its kept transmit length and mode fields (5720 and 5762).
+        let attention = Self::statistics_attention(asic);
+        let keeps_tx_fields = matches!(asic, Asic::Bcm5720 | Asic::Bcm5762);
         let geometry = super::super::geometry::Geometry::of(asic);
         if bcm5762 && self.read(TG3_CPMU_CLCK_ORIDE_ENABLE)? & TG3_CPMU_MAC_ORIDE_ENABLE == 0 {
             return Err(Error::ConfigDidNotLatch);
@@ -75,7 +86,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | GRC_MODE_NO_TX_PHDR_CSUM
                 | GRC_MODE_IRQ_ON_MAC_ATTN
                 | GRC_MODE_HOST_STACKUP
-                | if legacy { 0 } else { GRC_MODE_IRQ_ON_FLOW_ATTN },
+                | if attention {
+                    GRC_MODE_IRQ_ON_FLOW_ATTN
+                } else {
+                    0
+                },
         )?;
         let misc = self.read(GRC_MISC_CFG)?;
         self.flush(
@@ -109,10 +124,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             BUFMGR_MODE,
             BUFMGR_MODE_ENABLE
                 | BUFMGR_MODE_ATTN_ENABLE
-                | if legacy {
-                    0
+                | if bcm5719 {
+                    BUFMGR_MODE_NO_TX_UNDERRUN
                 } else {
+                    0
+                }
+                | if attention {
                     BUFMGR_MODE_MBLOW_ATTN_ENAB
+                } else {
+                    0
                 },
         )?;
         let mut enabled = false;
@@ -121,7 +141,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 enabled = true;
                 break;
             }
-            self.wait(10)?;
+            self.wait(10).await?;
         }
         if !enabled {
             return Err(Error::ConfigDidNotLatch);
@@ -138,8 +158,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             RCVDBDI_STD_BD + 8,
             ((geometry.rx as u32) << 16) | if legacy { 0 } else { 1536 << 2 },
         )?;
+        // tg3_reset_hw: the standard ring's NIC address outside 5717_PLUS.
         if bcm5762 || legacy {
             self.bcm5762_write(RCVDBDI_STD_BD + 12, NIC_SRAM_RX_BUFFER_DESC)?;
+        } else if class_57765 {
+            self.write(RCVDBDI_STD_BD + 12, NIC_SRAM_RX_BUFFER_DESC)?;
         }
         if !legacy {
             self.write(RCVDBDI_JUMBO_BD + 8, BDINFO_FLAGS_DISABLED)?;
@@ -148,7 +171,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.flush(TG3_RX_JMB_PROD_IDX_REG, 0)?;
         for index in 1..if legacy {
             1
-        } else if bcm5762 {
+        } else if bcm5762 || class_57765 {
             2
         } else {
             4
@@ -160,7 +183,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         for index in 1..if legacy {
             1
-        } else if bcm5762 {
+        } else if bcm5762 || class_57765 {
             4
         } else {
             17
@@ -193,10 +216,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             mac.iter().map(|b| u32::from(*b)).sum::<u32>() & 0x3ff,
         )?;
         self.write(MAC_RX_MTU_SIZE, 1522)?;
-        let lengths = if legacy {
-            0
-        } else {
+        let lengths = if keeps_tx_fields {
             self.read(MAC_TX_LENGTHS)? & (TX_LENGTHS_JMB_FRM_LEN_MSK | TX_LENGTHS_CNT_DWN_VAL_MSK)
+        } else {
+            0
         };
         self.write(
             MAC_TX_LENGTHS,
@@ -212,7 +235,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         } else {
             TG3_LSO_RD_DMA_CRPTEN_CTRL
         };
-        if !legacy {
+        // tg3_reset_hw: 5719, 5720 and 5762 only.
+        if !(legacy || bcm5717 || class_57765) {
             let corruption = self.read(corruption_register)?
                 | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
                 | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K;
@@ -230,7 +254,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             SNDDATAI_STATSCTRL,
             SNDDATAI_SCTRL_ENABLE | SNDDATAI_SCTRL_FASTUPD,
         )?;
-        self.stop_block(HOSTCC_MODE)?;
+        self.stop_block(HOSTCC_MODE).await?;
         // Interrupts stay masked. Time and max-frame coalescing cause
         // status DMA even when the caller hasn't requested a NOW update yet.
         for (at, value) in [
@@ -250,7 +274,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         self.flush(
             HOSTCC_MODE,
-            HOSTCC_MODE_ENABLE | HOSTCC_MODE_32BYTE | if legacy { 0 } else { HOSTCC_MODE_ATTN },
+            HOSTCC_MODE_ENABLE | HOSTCC_MODE_32BYTE | if attention { HOSTCC_MODE_ATTN } else { 0 },
         )?;
         self.write(RCVCC_MODE, RCVCC_MODE_ENABLE | RCVCC_MODE_ATTN_ENABLE)?;
         self.write(RCVLPC_MODE, RCVLPC_MODE_ENABLE)?;
@@ -262,12 +286,18 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | MAC_MODE_TDE_ENABLE
                 | MAC_MODE_RDE_ENABLE
                 | MAC_MODE_FHDE_ENABLE
+                // ENABLE_APE: the APE sends and receives through the MAC.
+                | if self.identity.ok_or(Error::NotIdentified)?.ape {
+                    MAC_MODE_APE_TX_EN | MAC_MODE_APE_RX_EN
+                } else {
+                    0
+                }
                 | MAC_MODE_RXSTAT_CLEAR
                 | MAC_MODE_TXSTAT_CLEAR,
         )?;
-        self.wait(40)?;
+        self.wait(40).await?;
         self.flush(GRC_LOCAL_CTRL, board.local)?;
-        self.wait(100)?;
+        self.wait(100).await?;
         self.flush(
             WDMAC_MODE,
             WDMAC_MODE_ENABLE
@@ -281,9 +311,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | WDMAC_MODE_LNGREAD_ENAB
                 | WDMAC_MODE_STATUS_TAG_FIX,
         )?;
-        self.wait(40)?;
+        self.wait(40).await?;
         // BCM5762 uses a different register and rewrites the source
-        // margin/watermark fields. BCM5720 and BCM5761 only add FIFO_OFLW_FIX.
+        // margin/watermark fields. BCM5717, BCM5719 after A0, BCM5720 and BCM5761
+        // only add FIFO_OFLW_FIX.
         // Preserve every unrelated observed bit.
         let reserve_register = if bcm5762 {
             TG3_RDMA_RSRVCTRL_REG2
@@ -306,14 +337,28 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if self.read(reserve_register)? != reserve {
             return Err(Error::ConfigDidNotLatch);
         }
-        let rdma = if legacy {
-            0
-        } else {
+        let rdma = if keeps_tx_fields {
             self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET
+        } else {
+            0
         };
         self.flush(
             RDMAC_MODE,
-            rdma | RDMAC_MODE_IPV4_LSO_EN // source HW_TSO_2/3 mode; descriptors remain plain.
+            rdma | if bcm5717 { RDMAC_MODE_MULT_DMA_RD_DIS } else { 0 }
+                // tg3_reset_hw: a 57766 at the standard MTU reads send data
+                // in 2K requests, and tg3 splits send BDs at 2K
+                // (TG3_TX_BD_DMA_MAX_2K). Every frame here is a single BD
+                // below 2K, so none needs splitting.
+                | if asic == Asic::Bcm57766 { RDMAC_MODE_JMB_2K_MMRR } else { 0 }
+                // tg3_reset_hw: a 5784 checks its BDs and mbufs for corruption.
+                | if asic == Asic::Bcm5784 {
+                    RDMAC_MODE_BD_SBD_CRPT_ENAB
+                        | RDMAC_MODE_MBUF_RBD_CRPT_ENAB
+                        | RDMAC_MODE_MBUF_SBD_CRPT_ENAB
+                } else {
+                    0
+                }
+                | RDMAC_MODE_IPV4_LSO_EN // source HW_TSO_2/3 mode; descriptors remain plain.
                 | RDMAC_MODE_ENABLE
                 | RDMAC_MODE_TGTABORT_ENAB
                 | RDMAC_MODE_MSTABORT_ENAB
@@ -326,10 +371,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | RDMAC_MODE_FIFO_LONG_BURST
                 | if legacy { 0 } else { RDMAC_MODE_IPV6_LSO_EN },
         )?;
-        self.wait(40)?;
-        // Observe the residual channel lengths before applying 5720's
-        // documented workaround; no synthetic normal-channel assumption.
-        for index in 0..if bcm5762 || legacy {
+        self.wait(40).await?;
+        // Observe the residual channel lengths before applying 5719's or
+        // 5720's documented workaround; no synthetic normal-channel assumption.
+        for index in 0..if bcm5762 || legacy || bcm5717 || class_57765 {
             0
         } else {
             TG3_NUM_RDMA_CHANNELS
@@ -338,7 +383,12 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 let value = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
                 self.write(
                     TG3_LSO_RD_DMA_CRPTEN_CTRL,
-                    value | TG3_LSO_RD_DMA_TX_LENGTH_WA_5720,
+                    value
+                        | if bcm5719 {
+                            TG3_LSO_RD_DMA_TX_LENGTH_WA_5719
+                        } else {
+                            TG3_LSO_RD_DMA_TX_LENGTH_WA_5720
+                        },
                 )?;
                 break;
             }
@@ -347,7 +397,12 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             (RCVDCC_MODE, RCVDCC_MODE_ENABLE | RCVDCC_MODE_ATTN_ENABLE),
             (
                 SNDDATAC_MODE,
-                SNDDATAC_MODE_ENABLE | if legacy { SNDDATAC_MODE_CDELAY } else { 0 },
+                SNDDATAC_MODE_ENABLE
+                    | if asic == Asic::Bcm5761 {
+                        SNDDATAC_MODE_CDELAY
+                    } else {
+                        0
+                    },
             ),
             (SNDBDC_MODE, SNDBDC_MODE_ENABLE | SNDBDC_MODE_ATTN_ENABLE),
             (RCVBDI_MODE, RCVBDI_MODE_ENABLE | RCVBDI_MODE_RCB_ATTN_ENAB),
@@ -355,7 +410,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 RCVDBDI_MODE,
                 RCVDBDI_MODE_ENABLE
                     | RCVDBDI_MODE_INV_RING_SZ
-                    | if legacy { 0 } else { RCVDBDI_MODE_LRG_RING_SZ },
+                    | if asic.large_rings() {
+                        RCVDBDI_MODE_LRG_RING_SZ
+                    } else {
+                        0
+                    },
             ),
             (SNDDATAI_MODE, SNDDATAI_MODE_ENABLE),
             (SNDDATAI_MODE, SNDDATAI_MODE_ENABLE | 0x8), // hardware TSO generation 2/3.
@@ -364,20 +423,20 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         ] {
             self.flush(at, value)?;
         }
-        let tx_mode = if legacy {
-            0
-        } else {
+        let tx_mode = if keeps_tx_fields {
             self.read(MAC_TX_MODE)? & (TX_MODE_JMB_FRM_LEN | TX_MODE_CNT_DN_MODE)
+        } else {
+            0
         };
         self.flush(
             MAC_TX_MODE,
             tx_mode | TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX,
         )?;
-        self.wait(100)?;
+        self.wait(100).await?;
         // Restore the requested table/mode before any new receive DMA can
         // start; the same policy survives full restart and held-D0 PHY resume.
         self.packet_filter_tables(filter)?;
-        let rx_mode = Self::receive_mode(
+        let rx_mode = self.receive_mode(
             RX_MODE_ENABLE
                 | RX_MODE_IPV6_CSUM_ENABLE
                 | if bcm5762 { RX_MODE_IPV4_FRAG_FIX } else { 0 },
@@ -388,26 +447,37 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         } else {
             self.flush(MAC_RX_MODE, rx_mode)?;
         }
-        self.wait(10)?;
+        self.wait(10).await?;
         self.write(MAC_LED_CTRL, board.led)?;
         self.write(MAC_MI_STAT, MAC_MI_STAT_LNKSTAT_ATTN_ENAB)?;
-        self.flush(MAC_LOW_WMARK_MAX_RX_FRAME, 2)?;
+        // 57765_CLASS keeps one frame, the others two.
+        self.flush(MAC_LOW_WMARK_MAX_RX_FRAME, if class_57765 { 1 } else { 2 })?;
         // No multicast/VLAN/checksum offload is relied upon by the software.
         // Accept broadcast, own unicast and multicast as a raw Ethernet link.
         self.write(MAC_RCV_RULE_0, 0xc200_0000 & RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_VALUE_0, RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_RULE_1, 0x8600_0004 & RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_VALUE_1, RCV_RULE_DISABLE_MASK)?;
-        for index in 4..8 {
+        // tg3_reset_hw clears the rules up to its limit, eight on 5705_PLUS
+        // parts, less the four ASF firmware keeps for itself.
+        let limit = if self.management.asf { 4 } else { 8 };
+        for index in 4..limit {
             self.write(MAC_RCV_RULE_0 + index * 8, 0)?;
             self.write(MAC_RCV_VALUE_0 + index * 8, 0)?;
         }
-        self.initialize_phy(board)?;
+        self.initialize_phy(board).await?;
+        self.management_started()?;
         self.stopped = false;
         Ok(())
     }
-    pub(in crate::tg3) fn packet_carrier(&mut self) -> Result<bool, Error> {
+    /// tg3_get_invariants' statistics workaround: 5717, 5720 A0 and 5762
+    /// raise flow attention for the MBUF low-water discard indication.
+    fn statistics_attention(asic: Asic) -> bool {
+        matches!(asic, Asic::Bcm5717 | Asic::Bcm5720 | Asic::Bcm5762)
+    }
+    pub(in crate::tg3) async fn packet_carrier(&mut self) -> Result<bool, Error> {
         self.copper_carrier()
+            .await
             .map(|speed: Option<Speed>| speed.is_some())
     }
     pub(in crate::tg3) fn request_status(&mut self) -> Result<(), Error> {
@@ -415,10 +485,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             HOSTCC_MODE,
             HOSTCC_MODE_ENABLE
                 | HOSTCC_MODE_32BYTE
-                | if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5761 {
-                    0
-                } else {
+                | if Self::statistics_attention(self.identity.ok_or(Error::NotIdentified)?.asic) {
                     HOSTCC_MODE_ATTN
+                } else {
+                    0
                 }
                 | HOSTCC_MODE_NOW
                 | HOSTCC_MODE_NOINT_ON_NOW,
@@ -433,6 +503,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let message = self.read(MSGINT_STATUS)?;
         let read_dma = self.read(RDMAC_STATUS)?;
         let write_dma = self.read(WDMAC_STATUS)?;
+        // tg3_process_error never treats the low-water bit as an error;
+        // 5719 raises it without the statistics workaround's attention.
         let allowed = if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5761 {
             0
         } else {
@@ -478,12 +550,25 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     pub(in crate::tg3) fn rx_consumer(&mut self, index: usize) -> Result<(), Error> {
         self.flush(MAILBOX_RCVRET_CON_IDX_0 + 4, index as u32)
     }
-    pub(in crate::tg3) fn packet_stop(&mut self) -> Result<(), Error> {
+    /// tg3_halt's `tg3_stop_fw` and `tg3_write_sig_pre_reset(RESET_KIND_SHUTDOWN)`,
+    /// before the engines stop.
+    pub(in crate::tg3) async fn packet_unload_begin(&mut self) -> Result<(), Error> {
+        self.stop_firmware().await?;
+        self.asf_driver_state(super::management::DRV_STATE_UNLOAD)
+    }
+    /// tg3_halt's `tg3_write_sig_post_reset(RESET_KIND_SHUTDOWN)` and
+    /// `tg3_power_down_prepare`'s APE UNLOAD, after the engines stopped: the
+    /// management firmware has the port to itself again.
+    pub(in crate::tg3) async fn packet_unload_end(&mut self) -> Result<(), Error> {
+        self.asf_driver_state(super::management::DRV_STATE_UNLOAD_DONE)?;
+        self.ape_driver_unload().await
+    }
+    pub(in crate::tg3) async fn packet_stop(&mut self) -> Result<(), Error> {
         // A poisoned submission epoch cannot use normal helpers, but
         // stop accesses remain legal for containment. Failure never retires.
         // Re-observe every engine even after a partially failed core reset;
         // an old stopped bit cannot certify bootcode's subsequent effects.
-        self.stop_engines_inner()?;
+        self.stop_engines_inner().await?;
         self.stopped = true;
         let command = Self::checked(self.regs().config_read32(4)?)? as u16;
         self.regs().config_write16(4, command & !4)?;

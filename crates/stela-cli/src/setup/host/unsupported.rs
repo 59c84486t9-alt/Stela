@@ -5,9 +5,11 @@ use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
 pub(crate) const ADMIN: &str = "administrator rights";
+/// What a disk identifier is preceded by where a user types it.
+pub(crate) const DISK_PREFIX: &str = "";
 pub(crate) const DISK_EXAMPLE: &str = "a whole disk";
 
-/// The computer `stela setup` runs on.
+/// The computer `stela` runs on.
 pub(crate) struct System;
 
 fn unsupported<T>(what: &str) -> Result<T> {

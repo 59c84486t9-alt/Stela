@@ -8,7 +8,11 @@
 //! maps the pool and the unit's reserved regions one to one. A unit with
 //! none starts blocked. When a device the machine needs attaches only
 //! natively (VMD, EHCI) and the fabric cannot be blocked whole, no unit is
-//! taken. A driver that asks the native services for a domain gets its own
+//! taken. With every unit off, units that cannot all start blocked are all
+//! left, as any other mix of taken units keeps the IOAPICs and every native
+//! device refused; a blocked fabric that does not qualify then stops its
+//! taken units the same way. A driver that
+//! asks the native services for a domain gets its own
 //! ([`Remappers::domain`]).
 //!
 //! With no unit taken and every described unit proven off since
@@ -27,7 +31,10 @@ use crate::{
         firmware_state::Kind,
         requester::RequesterClaim,
         vtd::interrupt::DirectDelivery,
-        vtd::{BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, Unit, VtdError},
+        vtd::{
+            BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, TakeOverError, Unit,
+            VtdError,
+        },
     },
     native_mmio, output,
 };
@@ -106,6 +113,7 @@ impl BlockedFabric {
         source: &native_mmio::Source,
         descriptor: usize,
         rid: u16,
+        aliases: &[u16],
     ) -> Result<BlockedRequester<MmioRegisters>, DmaError> {
         if !core::ptr::eq(self.source, source) {
             return Err(DmaError::IommuUnavailable);
@@ -115,7 +123,7 @@ impl BlockedFabric {
             .iter()
             .find(|(index, _)| *index == descriptor)
             .ok_or(DmaError::IommuUnavailable)?;
-        cohort.claim(rid)
+        cohort.claim(rid, aliases)
     }
 }
 
@@ -231,6 +239,18 @@ impl Remappers {
     ) -> Self {
         let mmio = pci.source();
         let mut remappers = Self::none();
+        // A function whose Bus Master bit stayed set may master DMA that no
+        // stop accounted for. Every unit then stays as the firmware left it
+        // at ExitBootServices and no native requester is prepared, as when
+        // containment fails: the legacy probe path runs with nothing proven
+        // stopped, and a blocked fabric or untranslated settle, which both
+        // rest on every function being stopped, is never published.
+        if let Some(address) = pci.unstopped_master() {
+            output::arguments(format_args!(
+                "HOST IOMMU not taken: PCI function {address} may still master DMA\n"
+            ));
+            return remappers;
+        }
         let (dmar, ivrs) = {
             // SAFETY: forwarded; the loader root maps the original tables.
             let _root = unsafe { RestoreRoot::enter(root) };
@@ -288,7 +308,7 @@ impl Remappers {
                         .map(Some)
                         .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
                 });
-                pci.check_stopped(reader)
+                pci.check_stopped(reader, native_mmio::PciScope::Fabric)
                     .map(|()| (inventories, identities, roles))
             })
         };
@@ -339,7 +359,23 @@ impl Remappers {
         // Whether a unit was left in a state no proof covers: partly
         // programmed, or not stopped after the policy refused it.
         let mut uncertain = false;
-        if let Some(ivrs) = &ivrs {
+        // A table with blocks or entries stepped over may hide units or
+        // routes, so no AMD-Vi unit translates from it; each stays as the
+        // boot left it, and `settle` decides from whether all read off.
+        let ivrs_complete = ivrs.as_ref().is_none_or(|table| {
+            match stela_drivers::bus::dma::amd::ivrs::Ivrs::parse(table, amd::MAXIMUM_BLOCKS) {
+                Ok(parsed) if !parsed.skipped().is_empty() => {
+                    output::arguments(format_args!(
+                        "UNSUPPORTED host IVRS parts stepped over {:?}: AMD-Vi units stay untranslated\n",
+                        parsed.skipped()
+                    ));
+                    false
+                }
+                // `amd::take` reports a table it cannot read.
+                _ => true,
+            }
+        });
+        if let Some(ivrs) = ivrs.as_ref().filter(|_| ivrs_complete) {
             // SAFETY: forwarded.
             let outcome = unsafe {
                 amd::take(
@@ -359,7 +395,9 @@ impl Remappers {
             if blocked == Some(true) {
                 // SAFETY: no driver, AP or competing configuration writer
                 // can change the original stopped PCI cohort during takeover.
-                match unsafe { remappers.recheck_amd_stopped(pci) } {
+                match unsafe {
+                    remappers.recheck_stopped_by_page(pci, native_mmio::PciScope::Fabric)
+                } {
                     Ok(()) => {
                         remappers.amd_fabric = Some(mmio);
                         output::arguments(format_args!(
@@ -379,8 +417,10 @@ impl Remappers {
         }
         let Some(table) = dmar else {
             let units_off = ivrs.as_ref().is_some_and(|ivrs| {
-                stela_drivers::bus::dma::amd::ivrs::Ivrs::parse(ivrs, amd::MAXIMUM_BLOCKS)
-                    .is_ok_and(|ivrs| inactive_firmware_units.matches_amd(&ivrs))
+                match stela_drivers::bus::dma::amd::ivrs::Ivrs::parse(ivrs, amd::MAXIMUM_BLOCKS) {
+                    Ok(ivrs) => inactive_firmware_units.off_amd(&ivrs),
+                    Err(_) => inactive_firmware_units.all_off(),
+                }
             });
             remappers.settle(units_off && !uncertain);
             return remappers;
@@ -388,12 +428,27 @@ impl Remappers {
         let parsed = match dmar::parse(&table) {
             Ok(parsed) => parsed,
             Err(error) => {
+                // No unit was taken from this table. With every unit the
+                // early inventory found off, nothing translates, as with no
+                // IOMMU; otherwise native attachments stay refused.
                 output::arguments(format_args!(
-                    "UNSUPPORTED host DMAR unreadable ({error:?}): host DMA stays untranslated\n"
+                    "UNSUPPORTED host DMAR unreadable ({error:?}): no VT-d unit translates\n"
                 ));
+                remappers.settle(inactive_firmware_units.all_off() && !uncertain);
                 return remappers;
             }
         };
+        if !parsed.skipped.is_empty() {
+            output::arguments(format_args!(
+                "UNSUPPORTED host DMAR parts passed over {:?}{}\n",
+                parsed.skipped,
+                if parsed.complete() {
+                    ""
+                } else {
+                    ": no VT-d unit translates"
+                }
+            ));
+        }
         let mut cohorts = Vec::new();
         remappers.dmar = Some(parsed.clone());
         if cohorts.try_reserve_exact(parsed.units.len()).is_err()
@@ -433,16 +488,21 @@ impl Remappers {
                 planned.push((*segment, index, decision, reserved));
             }
         }
+        let found_off = inactive_firmware_units.matches_dmar(&parsed.units);
         let candidates: Vec<Candidate> = planned
             .iter()
             .map(|(segment, _, decision, reserved)| Candidate {
                 segment: *segment,
                 decision: decision.clone(),
-                blockable: reserved.is_empty(),
+                // A blocked start needs the units found off, not turned off.
+                blockable: reserved.is_empty() && found_off,
             })
             .collect();
-        let units_off = inactive_firmware_units.matches_dmar(&parsed.units);
-        let modes = initial::modes(&candidates, &requesters, units_off);
+        let units_off = inactive_firmware_units.off_dmar(&parsed.units);
+        // A unit on a segment without a captured configuration space is
+        // never planned, so never taken.
+        let refused = planned.len() < parsed.units.len();
+        let modes = initial::modes(&candidates, &requesters, units_off, refused);
         for ((_, index, decision, reserved), mode) in planned.into_iter().zip(modes) {
             let unit = &parsed.units[index];
             let (requesters, mut window) = match (decision, mode) {
@@ -453,6 +513,13 @@ impl Remappers {
                         "HOST IOMMU VT-d unit {:#x} left untranslated: {} attaches only natively, which a taken unit beside the drivers' window refuses\n",
                         unit.base,
                         address(segment, rid)
+                    ));
+                    continue;
+                }
+                (_, Mode::Left(Left::Incomplete)) => {
+                    output::arguments(format_args!(
+                        "HOST IOMMU VT-d unit {:#x} left untranslated: the units form no complete blocked fabric and every unit is off, so the machine runs untranslated\n",
+                        unit.base
                     ));
                     continue;
                 }
@@ -521,11 +588,15 @@ impl Remappers {
                     });
                 }
                 Err(error) => {
-                    // A refused takeover may have programmed its root.
-                    uncertain = true;
+                    // A takeover that wrote the unit, or read it on or
+                    // unreadable, leaves a state no proof covers.
+                    let off = error.leaves_unit_off();
+                    uncertain |= !off;
                     output::arguments(format_args!(
-                        "HOST IOMMU VT-d unit {:#x} left untranslated: {error:?}\n",
-                        unit.base
+                        "HOST IOMMU VT-d unit {:#x} left untranslated: {:?}{}\n",
+                        unit.base,
+                        error.error,
+                        if off { "" } else { ", its state uncertain" }
                     ));
                 }
             }
@@ -540,7 +611,7 @@ impl Remappers {
         {
             // SAFETY: no PCI driver, controller or AP can write configuration
             // between the original census and this post-drain readback.
-            if let Err(error) = unsafe { pci.recheck_stopped() } {
+            if let Err(error) = unsafe { pci.recheck_stopped(native_mmio::PciScope::Fabric) } {
                 output::arguments(format_args!(
                     "HOST IOMMU VT-d blocked PCI fabric changed after drain: {error}\n"
                 ));
@@ -574,8 +645,36 @@ impl Remappers {
                 pci.functions()
             ));
         }
+        // With every unit off, the policy takes units only for a complete
+        // blocked fabric. One that did not qualify would leave the IOAPICs
+        // and every native device refused, so the taken units stop and the
+        // machine settles untranslated, as when the policy leaves them all.
+        if remappers.initial_fabric.is_none() && units_off && !uncertain {
+            uncertain = !remappers.retire_taken();
+        }
         remappers.settle(units_off && !uncertain);
         remappers
+    }
+
+    /// Stop every taken VT-d unit. False when one did not stop: it stays
+    /// taken, and its shutdown failure keeps it held.
+    fn retire_taken(&mut self) -> bool {
+        let dmar = self.dmar.as_ref();
+        self.taken.retain(|taken| {
+            // SAFETY: no driver has started, so no requester has a domain,
+            // and every requester's Bus Master stays stopped since the
+            // original census.
+            let Err(error) = (unsafe { taken.unit.shut_down() }) else {
+                return false;
+            };
+            output::arguments(format_args!(
+                "HOST IOMMU VT-d unit {:#x} did not stop: {error:?}\n",
+                dmar.and_then(|dmar| dmar.units.get(taken.descriptor))
+                    .map_or(0, |unit| unit.base)
+            ));
+            true
+        });
+        self.taken.is_empty()
     }
 
     /// With no unit taken and every described unit `off` since
@@ -664,6 +763,7 @@ impl Remappers {
         source: &native_mmio::Source,
         taken: &Taken,
         rid: u16,
+        aliases: &[u16],
     ) -> Result<Option<BlockedRequester<MmioRegisters>>, DmaError> {
         match taken.initial {
             InitialContexts::Window => Ok(None),
@@ -671,7 +771,7 @@ impl Remappers {
                 .initial_fabric
                 .as_ref()
                 .ok_or(DmaError::DrainUnavailable)?
-                .requester(source, taken.descriptor, rid)
+                .requester(source, taken.descriptor, rid, aliases)
                 .map(Some),
         }
     }
@@ -685,25 +785,32 @@ impl Remappers {
         physical_bits: u8,
         mmio: &native_mmio::Source,
         tsc_hz: u64,
-    ) -> Result<Arc<Unit<MmioRegisters>>, VtdError> {
-        let span =
-            PhysicalSpan::new(unit.base, unit.bytes as u64).map_err(|_| VtdError::RegisterRange)?;
-        // SAFETY: the DMAR names this unit's registers, which no driver owns.
-        let resource = unsafe { mmio.claim_platform(span) }.map_err(|_| VtdError::RegisterRange)?;
-        let mapping = mmio
-            .authority()
-            .map(
-                resource,
-                0,
-                unit.bytes,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )
-            .map_err(|_| VtdError::RegisterRange)?;
-        // SAFETY: the unit's exclusive uncached register window is mapped
-        // through this boot's shared aperture.
-        let registers =
-            unsafe { MmioRegisters::from_mapping(mapping, crate::apic::rdtsc, tsc_hz.max(1)) }?;
+    ) -> Result<Arc<Unit<MmioRegisters>>, TakeOverError> {
+        let map = || {
+            let span = PhysicalSpan::new(unit.base, unit.bytes as u64)
+                .map_err(|_| VtdError::RegisterRange)?;
+            // SAFETY: the DMAR names this unit's registers, which no driver owns.
+            let resource =
+                unsafe { mmio.claim_platform(span) }.map_err(|_| VtdError::RegisterRange)?;
+            let mapping = mmio
+                .authority()
+                .map(
+                    resource,
+                    0,
+                    unit.bytes,
+                    CacheAttribute::Uncached,
+                    Protection::ReadWrite,
+                )
+                .map_err(|_| VtdError::RegisterRange)?;
+            // SAFETY: the unit's exclusive uncached register window is mapped
+            // through this boot's shared aperture.
+            unsafe { MmioRegisters::from_mapping(mapping, crate::apic::rdtsc, tsc_hz.max(1)) }
+        };
+        // Mapping the registers writes none of them.
+        let registers = map().map_err(|error| TakeOverError {
+            error,
+            started: false,
+        })?;
         // SAFETY: forwarded: the policy resolved the scope and the window
         // holds the reserved regions the covered requesters use.
         unsafe {
@@ -958,7 +1065,8 @@ impl Remappers {
         source: &native_mmio::Source,
         binding: RequesterBinding,
     ) -> Result<Result<Arc<dyn DmaDomain>, VtdError>, RequesterBinding> {
-        let segment = binding.address().segment;
+        let binding_address = binding.address();
+        let segment = binding_address.segment;
         let rid = binding.requester();
         let amd = match self.amd(segment, rid) {
             Ok(taken) => taken,
@@ -993,21 +1101,35 @@ impl Remappers {
                 return Ok(Err(error));
             }
         };
-        let initial = self
-            .initial_requester(source, taken, rid)
-            .and_then(|blocked| blocked.map_or(Ok(()), |requester| requester.drain()));
-        if let Err(error) = initial {
-            output::arguments(format_args!(
-                "HOST IOMMU VT-d requester {rid:#06x} initial handoff refused: {error:?}\n"
-            ));
-            let _kept = core::mem::ManuallyDrop::new(claim);
-            return Ok(Err(match error {
-                DmaError::InvalidationFailed => VtdError::Invalidation,
-                _ => VtdError::Unsupported,
-            }));
-        }
-        // SAFETY: the same checked stopped claim and original unit remain held.
-        let owner = match unsafe { taken.unit.attach_requester(claim) } {
+        // A unit beside the drivers' window claims no alias, so it attaches
+        // the requester's own ID alone, as before any requester attached.
+        let aliases = match taken.initial {
+            InitialContexts::Blocked => self.vtd_aliases(source, binding_address, taken),
+            InitialContexts::Window => Ok(Vec::new()),
+        };
+        let initial = aliases
+            .map_err(|_| DmaError::IommuUnavailable)
+            .and_then(|aliases| {
+                let blocked = self.initial_requester(source, taken, rid, &aliases)?;
+                blocked.map_or(Ok(()), |requester| requester.drain())?;
+                Ok(aliases)
+            });
+        let aliases = match initial {
+            Ok(aliases) => aliases,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "HOST IOMMU VT-d requester {rid:#06x} initial handoff refused: {error:?}\n"
+                ));
+                let _kept = core::mem::ManuallyDrop::new(claim);
+                return Ok(Err(match error {
+                    DmaError::InvalidationFailed => VtdError::Invalidation,
+                    _ => VtdError::Unsupported,
+                }));
+            }
+        };
+        // SAFETY: the same checked stopped claim and original unit remain
+        // held, and the blocked claim covered each alias.
+        let owner = match unsafe { taken.unit.attach_requester(claim, &aliases) } {
             Ok(owner) => owner,
             Err(failure) => return Ok(Err(failure.error)),
         };
@@ -1016,5 +1138,29 @@ impl Remappers {
         // DMA projection contains no command/configuration callback.
         self.requesters.borrow_mut().push(owner);
         Ok(Ok(domain as Arc<dyn DmaDomain>))
+    }
+
+    /// The other requester IDs the DMA of the function at `address` may
+    /// arrive under ([`native_mmio::Source::requester_aliases`]), each
+    /// routed to the same `taken` unit and allowed there. An ID no function
+    /// has is admitted: no function uses it, so its context entry only
+    /// ever carries this requester's DMA once the requester claims it.
+    fn vtd_aliases(
+        &self,
+        source: &native_mmio::Source,
+        address: Address,
+        taken: &Taken,
+    ) -> Result<Vec<u16>, native_mmio::ContainmentError> {
+        let aliases = source.requester_aliases(address)?;
+        for &alias in &aliases {
+            let same = matches!(
+                self.vtd(address.segment, alias),
+                Ok(Some(unit)) if Arc::ptr_eq(&unit.unit, &taken.unit)
+            );
+            if !same || taken.unit.admit_requester(alias).is_err() {
+                return Err(native_mmio::ContainmentError::bridge_alias(address));
+            }
+        }
+        Ok(aliases)
     }
 }

@@ -83,9 +83,22 @@ struct State {
     /// can reset, and how many resets it ran.
     port_reset: bool,
     port_resets: usize,
+    /// Whether the model's timer keeps minimum intervals a caller polls.
+    intervals: bool,
 }
 #[derive(Clone)]
 struct Model(Rc<RefCell<State>>);
+/// A minimum interval of the model's timer, which proves the reset's
+/// settle as a waited minimum does once its time has passed.
+struct ModelInterval(Rc<RefCell<State>>, u64);
+impl crate::bus::pci::power::Interval for ModelInterval {
+    fn elapsed(&self) -> Result<bool, crate::bus::pci::power::Error> {
+        let mut state = self.0.borrow_mut();
+        let elapsed = state.now >= self.1;
+        state.reset_minimum |= elapsed;
+        Ok(elapsed)
+    }
+}
 impl Io for Model {
     type Buffer = DmaBuffer;
 
@@ -186,6 +199,16 @@ impl Io for Model {
             state.delays += 1;
         }
         Ok(())
+    }
+    fn begin_minimum(
+        &mut self,
+        micros: u64,
+    ) -> Result<Option<Box<dyn crate::bus::pci::power::Interval>>, BlockError> {
+        let state = self.0.borrow();
+        Ok(state.intervals.then(|| {
+            Box::new(ModelInterval(self.0.clone(), state.now + micros))
+                as Box<dyn crate::bus::pci::power::Interval>
+        }))
     }
     fn now_us(&self) -> u64 {
         self.0.borrow().now
@@ -518,6 +541,7 @@ fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
         order: Vec::new(),
         port_reset: false,
         port_resets: 0,
+        intervals: false,
     })))
 }
 /// The begun command's result, from calls of [`Bot::end`], each of which
@@ -1096,6 +1120,7 @@ fn native_poison_preflight_preserves_all_buffers() {
                 controller,
                 id,
                 endpoints: endpoints(),
+                command_us: scan_command_time(),
             },
             interface: 3,
             endpoints: endpoints(),
@@ -1891,3 +1916,158 @@ fn a_failed_class_reset_resets_the_port_and_completes_on_the_same_disk() {
 }
 
 mod minimum;
+
+/// With a timer that keeps intervals, a reset settles by polling it: no
+/// look waits, and the halts clear only once the interval proves the time.
+#[test]
+fn a_reset_settles_by_the_timers_interval_without_a_wait() {
+    let mut memory = vec![0u64; 32 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    let mut dma = dma(&mut memory);
+    let io = model(start, start + memory.len() as u64 * 8, vec![unit(0)]);
+    let state = io.0.clone();
+    state.borrow_mut().intervals = true;
+    let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+    state.borrow_mut().fault = Fault::Phase;
+    bot.begin(0, &[0; 6], Data::None).unwrap();
+    assert!(ended(&mut bot).is_err());
+    state.borrow_mut().fault = Fault::None;
+    state.borrow_mut().now += RESET_RECOVERY_US - 1;
+    assert!(bot.busy());
+    state.borrow_mut().now += 1;
+    assert!(!bot.busy());
+    assert_eq!(
+        state.borrow().order,
+        vec![
+            Order::Cbw(0),
+            Order::Reset,
+            Order::Clear(0x82),
+            Order::Clear(0x02)
+        ]
+    );
+}
+
+/// A stalled status stage is cleared and read again at once, as Linux's
+/// transport does: nothing waits, as no reset ran.
+#[test]
+fn a_stalled_status_is_cleared_without_a_wait() {
+    let mut memory = vec![0u64; 32 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    let mut dma = dma(&mut memory);
+    let io = model(start, start + memory.len() as u64 * 8, vec![unit(0)]);
+    let state = io.0.clone();
+    let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+    state.borrow_mut().fault = Fault::CswStall;
+    bot.begin(0, &scsi::inquiry(), Data::In(36)).unwrap();
+    assert_eq!(ended(&mut bot).unwrap().len(), 36);
+    assert_eq!(
+        state.borrow().order,
+        vec![Order::Cbw(0), Order::Clear(0x82)]
+    );
+}
+
+/// The disks of a device behind its owner begin a command and return once
+/// its wrapper is submitted, their caller polling for the end, as a
+/// shared disk's queue needs: a start never runs the command through.
+#[test]
+fn an_owned_disk_begins_commands_and_ends_them_at_later_looks() {
+    use super::super::media::{Owner, scan_bot};
+    use crate::block::{BlockDevice, Command};
+    let mut memory = vec![0u64; 32 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    let mut dma = dma(&mut memory);
+    let io = model(
+        start,
+        start + memory.len() as u64 * 8,
+        vec![unit(1), unit(2)],
+    );
+    let state = io.0.clone();
+    let owner = Rc::new(RefCell::new(Owner::new(
+        Bot::new(io, 3, endpoints(), &mut dma).unwrap(),
+        "reader".into(),
+        "serial".into(),
+    )));
+    let mut failures = Vec::new();
+    let mut disks = scan_bot(owner, &mut failures).unwrap();
+    assert_eq!(disks[1].depth(), 1);
+    let before = state.borrow().transfers;
+    let tag = disks[1]
+        .start(Command::Write {
+            lba: 0,
+            data: vec![0x77; 512],
+            fua: false,
+        })
+        .unwrap();
+    assert_eq!(state.borrow().transfers, before + 1, "the wrapper alone");
+    assert!(!disks[0].room() && !disks[1].room());
+    // A waiting command of the other unit ends the begun one first and
+    // keeps its result for its disk.
+    let mut bytes = [0; 512];
+    disks[0].read(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [1; 512]);
+    assert!(matches!(disks[1].finish(tag), Some(Ok(None))));
+    assert!(disks[1].room());
+    let tag = disks[1]
+        .start(Command::Read { lba: 0, bytes: 512 })
+        .unwrap();
+    let read = (0..16).find_map(|_| disks[1].finish(tag)).unwrap();
+    assert_eq!(read.unwrap().unwrap(), vec![0x77; 512]);
+}
+
+/// A begun command keeps a waiting one's retries: once for the UNIT
+/// ATTENTION a class reset raised, and once more after a port reset.
+#[test]
+fn an_owned_begun_command_is_retried_as_a_waiting_one_is() {
+    use super::super::media::{Owner, scan_bot};
+    use crate::block::{BlockDevice, Command};
+    let mut memory = vec![0u64; 32 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    let mut dma = dma(&mut memory);
+    let io = model(
+        start,
+        start + memory.len() as u64 * 8,
+        vec![unit(1), unit(2)],
+    );
+    let state = io.0.clone();
+    let owner = Rc::new(RefCell::new(Owner::new(
+        Bot::new(io, 3, endpoints(), &mut dma).unwrap(),
+        "reader".into(),
+        "serial".into(),
+    )));
+    let mut failures = Vec::new();
+    let mut disks = scan_bot(owner, &mut failures).unwrap();
+    let finish = |disk: &mut super::super::Disk<Owner<Bot<Model>>>, tag| {
+        (0..64)
+            .find_map(|_| disk.finish(tag))
+            .expect("a begun command ended")
+    };
+    // A class reset ends one command; the device's UNIT ATTENTION after it
+    // is retried once.
+    state.borrow_mut().fault = Fault::Phase;
+    let tag = disks[1].start(Command::Flush).unwrap();
+    assert!(finish(&mut disks[1], tag).is_err());
+    state.borrow_mut().fault = Fault::None;
+    state.borrow_mut().now += RESET_RECOVERY_US;
+    state.borrow_mut().units[1].as_mut().unwrap().attention = true;
+    assert!(disks[1].room());
+    let tag = disks[1]
+        .start(Command::Read { lba: 0, bytes: 512 })
+        .unwrap();
+    assert_eq!(finish(&mut disks[1], tag).unwrap().unwrap(), vec![2; 512]);
+    // A failed class reset resets the port and runs the write once more.
+    state.borrow_mut().port_reset = true;
+    state.borrow_mut().fault = Fault::Reset;
+    let tag = disks[1]
+        .start(Command::Write {
+            lba: 0,
+            data: vec![0x41; 512],
+            fua: false,
+        })
+        .unwrap();
+    assert!(matches!(finish(&mut disks[1], tag), Ok(None)));
+    assert_eq!(state.borrow().port_resets, 1);
+    assert_eq!(
+        state.borrow().units[1].as_ref().unwrap().media[..512],
+        [0x41; 512]
+    );
+}

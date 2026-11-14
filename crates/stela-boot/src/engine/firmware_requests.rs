@@ -2,7 +2,7 @@
 //! USB lacks, the boot log names each such file once and then holds the
 //! boot's complete request inventory on one line
 //! (`stela_loader::host_firmware::requirements::LOG_LINE`), which
-//! `stela setup repair` and `update stela` read to add the pinned files.
+//! `stela repair` and `stela update` read to add the pinned files.
 //! The device that needed the file stays off, as its driver reports.
 use crate::output;
 use alloc::boxed::Box;
@@ -15,7 +15,7 @@ use stela_loader::host_firmware::{
 /// What the screen says once a driver found a file missing that setup has
 /// a pinned source for.
 pub const MISSING: &str = "Firmware this PC's devices need is missing from the USB, so they \
-    stay off: running `stela setup repair --usb USB` on a computer with internet adds it.";
+    stay off: on a computer with internet, plug in this USB and run `stela repair` to add it.";
 
 /// Every firmware request of the boot's host drivers, which reach it only
 /// through the host drivers' lock (`storage::RestoreRoot`).

@@ -57,6 +57,8 @@ pub enum Error {
     Pch(pch::AttachError),
     /// The mount's [`NativeServices`] refused or lack a resource.
     Native(ServiceError),
+    /// The original root refused a driver's quiescence receipt.
+    Preparation(crate::bus::pci::requester::preparation::Error),
     Vmd(crate::bus::vmd::Error),
     Tg3(net::tg3::Error),
     Aqtion(net::aqtion::native::Error),
@@ -88,6 +90,7 @@ impl fmt::Display for Error {
             Self::Realtek(error) => error.fmt(f),
             Self::Pch(error) => write!(f, "e1000e: {error}"),
             Self::Native(error) => error.fmt(f),
+            Self::Preparation(error) => write!(f, "cold requester preparation: {error}"),
             Self::Vmd(error) => write!(f, "VMD: {error}"),
             Self::Tg3(error) => write!(f, "tg3: {error}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error}"),
@@ -219,6 +222,9 @@ impl fmt::Display for PlatformError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     Message(&'static str),
+    /// An xHCI controller stopped answering: what it was doing, and whether
+    /// it was reset and attached again or this was the second attachment.
+    XhciDied(Option<xhci::Death>, bool),
     Realtek(realtek::Warning),
     /// An Intel xHCI took its switchable ports from EHCI.
     IntelPortSwitch(usb::handoff::Switched),
@@ -228,6 +234,17 @@ impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Message(message) => f.write_str(message),
+            Self::XhciDied(death, again) => {
+                f.write_str(if *again {
+                    XHCI_DIED_AGAIN
+                } else {
+                    XHCI_RESTARTED
+                })?;
+                match death {
+                    Some(death) => write!(f, " ({death})"),
+                    None => Ok(()),
+                }
+            }
             Self::Realtek(warning) => write!(f, "Realtek {warning}"),
             Self::IntelPortSwitch(switched) => write!(
                 f,
@@ -745,6 +762,10 @@ pub struct Devices {
     /// Storage, network, audio and USB functions no driver here takes, with
     /// their class and why.
     pub unsupported: Vec<(Address, [u8; 3], &'static str)>,
+    /// PCI bridges found with bus mastering off, which the scan turned on
+    /// so the functions below them reach memory and the interrupt
+    /// controllers.
+    pub bridges_reopened: Vec<Address>,
     /// Functions whose start ran past [`DEVICE_START_US`]: their waits then
     /// ended at once, the driver gave up, and the function was left with
     /// bus mastering and interrupts off where the probe still held it.
@@ -759,6 +780,15 @@ pub struct Devices {
 /// starts far inside this; one that stops answering is given up here even
 /// when a driver's per-step bounds would add up to more.
 pub const DEVICE_START_US: u64 = 30_000_000;
+
+/// Said when an xHCI controller died as its devices started and was reset
+/// and attached a second time.
+const XHCI_RESTARTED: &str = "xHCI: the controller stopped answering while its devices started; \
+                              Stela reset it and looked for its devices again";
+
+/// Said when the second attachment of an xHCI controller died as well.
+const XHCI_DIED_AGAIN: &str = "xHCI: the controller stopped answering again after its reset; \
+                               its devices are out of reach for this boot";
 
 /// Why a Wi-Fi adapter is left alone.
 const NO_WIFI_NETWORK: &str = "Wi-Fi adapter stays off: no --wifi network";
@@ -821,6 +851,16 @@ impl<'a> DeviceStart<'a> {
             budget: budget::Budget::start(clock, DEVICE_START_US).ok(),
             abandoned,
         }
+    }
+
+    /// A fresh budget for a second start of the same function, as a
+    /// controller reset and attached again gets: the first start's budget,
+    /// which its failure may have used up, would end every wait of the
+    /// second at once.
+    fn renew(&mut self, clock: Clock) {
+        // Dropped first, so the new budget replaces what the old replaced.
+        self.budget = None;
+        self.budget = budget::Budget::start(clock, DEVICE_START_US).ok();
     }
 
     /// Turn off a function whose budget passed while the probe still holds
@@ -1557,7 +1597,37 @@ pub unsafe fn probe_observed(
                 + usb4_hosts.len()
         }};
     }
+    // xHCI controllers started in the scan, whose devices are enumerated
+    // after it.
+    let mut xhci_started = Vec::new();
     let mut claimed = Claimed::default();
+    // A driver that enables a function needs every bridge above it to
+    // forward the function's DMA and message interrupts upstream: Linux's
+    // `pci_enable_bridge`. A mount that stopped the bridges and did not
+    // reopen them itself leaves that to this probe, which opens them all
+    // before any function starts, the observer's first one included.
+    let mut scanned = scanned;
+    if legacy_pci_writes {
+        for function in scanned.iter_mut().flatten() {
+            if function.class[..2] != [6, 4] {
+                continue;
+            }
+            let address = function.address;
+            let opened = (|| -> Result<bool, BlockError> {
+                use crate::bus::pci::{ConfigSpace, regs};
+                if function.config().read16(regs::COMMAND)? & regs::COMMAND_MASTER != 0 {
+                    return Ok(false);
+                }
+                function.enable_memory_and_bus_master()?;
+                Ok(true)
+            })();
+            match opened {
+                Ok(true) => devices.bridges_reopened.push(address),
+                Ok(false) => {}
+                Err(error) => devices.failures.push((address, error.into())),
+            }
+        }
+    }
     let (scanned, mut first_pending) = first_of(scanned, observer.first());
     let mut seen = 0usize;
     for found in scanned {
@@ -1656,7 +1726,7 @@ pub unsafe fn probe_observed(
                 devices.unsupported.push((address, function.class, why));
                 continue;
             }
-            let start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
+            let mut start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
             #[cfg(feature = "native-acpi")]
             if smbus::matches(&function) {
                 smbus_functions.push(address);
@@ -1753,19 +1823,49 @@ pub unsafe fn probe_observed(
                 })
             } else if function.class == xhci::CLASS {
                 let minimum = minimum_for_function!().clone();
-                match xhci::attach_with_provider(
+                // Every controller but the boot's own is started here and
+                // its devices are enumerated after the scan: its ports
+                // settle while the other devices start, as Linux's hub
+                // threads settle beside its other drivers.
+                if observer.first() != Some(address) {
+                    match xhci::begin_with_provider(
+                        &mut function,
+                        handoff,
+                        dma,
+                        firmware,
+                        minimum.clone(),
+                    ) {
+                        Ok(started) => {
+                            claimed.started();
+                            drop(start);
+                            xhci_started.push((function, minimum, started));
+                        }
+                        Err(error) => {
+                            start.quiesce(&mut function);
+                            devices.failures.push((address, error.into()));
+                        }
+                    }
+                    continue;
+                }
+                let attached = xhci::attach_with_provider(
                     &mut function,
                     handoff,
                     dma,
                     firmware,
                     minimum.clone(),
-                ) {
-                    Ok(found) => devices.absorb_usb(Some(address), found, firmware),
-                    Err(error) => {
-                        start.quiesce(&mut function);
-                        devices.failures.push((address, error.into()));
-                    }
-                }
+                );
+                absorb_xhci(
+                    attached,
+                    &mut function,
+                    &XhciInputs {
+                        handoff,
+                        firmware,
+                        minimum: &minimum,
+                    },
+                    dma,
+                    &mut start,
+                    &mut devices,
+                );
                 continue;
             } else if net::virtio::matches(&function) {
                 let minimum = minimum_for_function!().clone();
@@ -2003,6 +2103,29 @@ pub unsafe fn probe_observed(
     if first_pending {
         observer.first_started(&mut devices);
     }
+    for (mut function, minimum, started) in xhci_started {
+        let address = function.address;
+        crate::working(&alloc::format!("PCI {address}"));
+        // Named again, so a start that never ends is this controller's.
+        if let Start::Skip(why) = observer.starting(&function.identity()) {
+            devices.unsupported.push((address, function.class, why));
+            core::mem::forget(started);
+            continue;
+        }
+        let mut start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
+        absorb_xhci(
+            Ok(started.finish(dma, firmware)),
+            &mut function,
+            &XhciInputs {
+                handoff,
+                firmware,
+                minimum: &minimum,
+            },
+            dma,
+            &mut start,
+            &mut devices,
+        );
+    }
     devices.abandoned = abandoned;
     let companions_released = pci_scan_complete
         && !usb_handoff_failures
@@ -2029,6 +2152,64 @@ pub unsafe fn probe_observed(
     #[cfg(feature = "native-acpi")]
     attach_platform(services, smbus_functions, &bridges, handoff, &mut devices);
     devices
+}
+
+/// What an xHCI controller's attachment needs again when it is retried.
+struct XhciInputs<'a> {
+    handoff: &'a Handoff,
+    firmware: &'static dyn crate::firmware::Provider,
+    minimum: &'a Rc<dyn crate::bus::pci::power::Timer>,
+}
+
+/// Record an xHCI controller's attachment. A controller that stopped
+/// answering while its devices started has lost every device below it, the
+/// boot stick and the keyboard among them. Its reset starts it again, so
+/// it is attached once more. The first attachment's owners are kept, never
+/// dropped: their rings stay allocated and they touch no register again.
+fn absorb_xhci(
+    mut attached: Result<xhci::Found, BlockError>,
+    function: &mut Function,
+    inputs: &XhciInputs<'_>,
+    dma: &mut dyn DmaAllocator,
+    start: &mut DeviceStart<'_>,
+    devices: &mut Devices,
+) {
+    let address = function.address;
+    if let Ok(found) = &attached
+        && found.controller_died()
+    {
+        devices
+            .warnings
+            .push((address, Warning::XhciDied(found.controller_death(), false)));
+        if let Ok(found) = core::mem::replace(
+            &mut attached,
+            Err(BlockError::Unsupported("xHCI host controller died")),
+        ) {
+            core::mem::forget(found);
+        }
+        start.renew(inputs.handoff.clock);
+        attached = xhci::attach_with_provider(
+            function,
+            inputs.handoff,
+            dma,
+            inputs.firmware,
+            inputs.minimum.clone(),
+        );
+        if let Ok(found) = &attached
+            && found.controller_died()
+        {
+            devices
+                .warnings
+                .push((address, Warning::XhciDied(found.controller_death(), true)));
+        }
+    }
+    match attached {
+        Ok(found) => devices.absorb_usb(Some(address), found, inputs.firmware),
+        Err(error) => {
+            start.quiesce(function);
+            devices.failures.push((address, error.into()));
+        }
+    }
 }
 
 /// What the USB hosts' firmware handoffs in one scan share.
@@ -3169,6 +3350,94 @@ mod tests {
                 "{first:?}"
             );
         }
+    }
+
+    /// A bridge found with bus mastering off forwards nothing upstream from
+    /// the functions below it; the scan turns it on, as Linux's
+    /// `pci_enable_bridge` does, and says so. One that forwards is left.
+    #[test]
+    fn a_bridge_with_bus_mastering_off_is_reopened_for_the_functions_below_it() {
+        /// Whether the bridge forwarded as each function's start was told.
+        struct Forwarding {
+            command: *const u32,
+            first: Address,
+            seen: Vec<bool>,
+        }
+        impl Observer for Forwarding {
+            fn first(&self) -> Option<Address> {
+                Some(self.first)
+            }
+            fn starting(&mut self, _: &crate::bus::pci::Identity) -> Start {
+                // SAFETY: the test's own ECAM words, alive for the probe.
+                self.seen
+                    .push(unsafe { self.command.read_volatile() } & 4 != 0);
+                Start::Skip("left alone")
+            }
+        }
+        let mut ecam = alloc::vec![u32::MAX; (1 << 20) / 4];
+        for (device, command, class, header) in [
+            (0, 0x0002, 0x0604_0000, 0x0001_0000),
+            (1, 0x0006, 0x0604_0000, 0x0001_0000),
+            (2, 0x0002, 0x0c03_3000, 0),
+        ] {
+            let start = device * (1 << 15) / 4;
+            let page = &mut ecam[start..start + 4096 / 4];
+            page.fill(0);
+            page[0] = 0x5678_1234;
+            page[1] = command;
+            page[2] = class;
+            page[3] = header;
+        }
+        let window = EcamWindow {
+            base: ecam.as_mut_ptr() as u64,
+            segment: 0,
+            start_bus: 0,
+            end_bus: 0,
+        };
+        let handoff = Handoff {
+            ecam: alloc::vec![window],
+            mapped: alloc::vec![window.range()],
+            dma: 0..0,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: None,
+        };
+        let address = |device| Address {
+            segment: 0,
+            bus: 0,
+            device,
+            function: 0,
+        };
+        let services = services::tests::Refusing::minimum_only();
+        // The boot's own controller starts first, ahead of the scan's order:
+        // the bridge above it forwards by then.
+        let mut observer = Forwarding {
+            command: &raw const ecam[1],
+            first: address(2),
+            seen: Vec::new(),
+        };
+        // SAFETY: no DMA pages, only the synthetic ECAM mapped, and every
+        // native grant refused.
+        let mut dma = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+        // SAFETY: as above.
+        let devices = unsafe {
+            probe_observed(
+                &handoff,
+                PlatformCaptures::default(),
+                &mut dma,
+                handoff_provider(&handoff),
+                Some(&services),
+                None,
+                &mut observer,
+            )
+        };
+        assert_eq!(devices.bridges_reopened, [address(0)]);
+        assert!(devices.failures.is_empty());
+        assert!(!observer.seen.is_empty() && observer.seen.iter().all(|&forwarded| forwarded));
+        assert_eq!(ecam[1] & 0xffff, 0x0006);
+        assert_eq!(ecam[(1 << 15) / 4 + 1] & 0xffff, 0x0006);
     }
 
     /// Every function a driver here claims ends its probe with a record:

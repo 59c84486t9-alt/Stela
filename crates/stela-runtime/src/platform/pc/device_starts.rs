@@ -4,8 +4,8 @@
 //! and [`STARTED`] once every function's start has ended. A boot whose last
 //! [`START`] has no later [`STARTED`] stopped inside that start. A boot
 //! that skips such a function writes [`SKIPPED`] for it, so later boots go
-//! on skipping it while the same device is at that address; `stela setup
-//! repair` and `stela setup update stela` write [`CLEARED`].
+//! on skipping it while the same device is at that address; `stela
+//! repair` and `stela update` write [`CLEARED`].
 //!
 //! The markers name the function by its PCI address and vendor:device ID
 //! only: no serial, MAC or other identifier.
@@ -18,7 +18,7 @@ pub const START: &str = "HOST DEVICE START";
 pub const STARTED: &str = "HOST DEVICES STARTED";
 /// A function this boot skipped.
 pub const SKIPPED: &str = "HOST DEVICE SKIPPED";
-/// Every skip ends: `stela setup repair` or `update stela` wrote it.
+/// Every skip ends: `stela repair` or `stela update` wrote it.
 pub const CLEARED: &str = "HOST DEVICE SKIPS CLEARED";
 
 /// The most functions a boot skips; a stall record names at most one
@@ -168,7 +168,7 @@ pub fn decide(
 pub fn skipped_line(function: &Function) -> String {
     format!(
         "PCI {} {:04x}:{:04x} skipped: it did not finish starting on an earlier boot. \
-         Run stela setup repair to try it again.",
+         Run stela repair to try it again.",
         function.address, function.vendor, function.device
     )
 }
@@ -178,8 +178,8 @@ pub fn skipped_line(function: &Function) -> String {
 pub fn retried_line(function: &Function) -> String {
     format!(
         "PCI {} {:04x}:{:04x} did not finish starting on an earlier boot. The boot needs it, \
-         so it is started again. If the boot stops here, `stela setup boot-log --output \
-         log.txt` on another computer saves the USB's log; include that file in a report.",
+         so it is started again. If the boot stops here, `stela log --output log.txt` on \
+         another computer saves the USB's log; include that file in a report.",
         function.address, function.vendor, function.device
     )
 }
@@ -213,6 +213,11 @@ fn boot_skips(boot: &str) -> Option<Skips> {
     let mut skips = Skips::default();
     let mut pending = None;
     for line in boot.lines() {
+        // The log stamps each line it keeps with `[  12.345] ` (`output::stamp`).
+        let line = line
+            .strip_prefix('[')
+            .and_then(|stamped| stamped.split_once("] "))
+            .map_or(line, |(_, rest)| rest);
         if let Some(function) = Function::parse(line, START) {
             pending = Some(function);
         } else if line.starts_with(STARTED) {
@@ -290,9 +295,9 @@ mod tests {
         // A boot that never reached the device start keeps the record.
         text.push_str("=== STELA BOOT 9 ===\nSTEP Reading Stela's settings\n");
         assert!(read(text.as_bytes()).holds(&lan));
-        // `stela setup repair` writes the clearing line into the newest boot.
+        // `stela repair` writes the clearing line into the newest boot.
         text.push_str(CLEARED);
-        text.push_str(" by stela setup repair\n");
+        text.push_str(" by stela repair\n");
         assert!(read(text.as_bytes()).is_empty());
         // A boot without a skip line, once the ID changed, ends it too.
         let mut changed = boot(&[lan.line(START)]);
@@ -332,7 +337,7 @@ mod tests {
         assert_eq!(
             skipped_line(&lan),
             "PCI 0000:07:00.0 10ec:8125 skipped: it did not finish starting on an earlier \
-             boot. Run stela setup repair to try it again."
+             boot. Run stela repair to try it again."
         );
         assert!(retried_line(&nvme).contains("log.txt"));
     }
@@ -352,6 +357,26 @@ mod tests {
         older.push_str(&text);
         assert_eq!(read(older.as_bytes()), read(text.as_bytes()));
         assert!(read(text.as_bytes()).holds(&lan));
+    }
+
+    #[test]
+    fn stamped_lines_as_the_log_keeps_them_are_read() {
+        // A v0.3.1 boot that stalled in its RTL8126's start, as its log has it.
+        let text = "=== STELA BOOT 1 ===\n\
+                    [   46.686] HOST DEVICE START pci=0000:0a:0d.0 id=1022:43f5\n\
+                    [   46.693] HOST DEVICE PCI 0000:0d:00.0 start\n\
+                    [   46.693] HOST DEVICE START pci=0000:0d:00.0 id=10ec:8126\n";
+        let lan = Function {
+            address: Address::parse("0000:0d:00.0").unwrap(),
+            vendor: 0x10ec,
+            device: 0x8126,
+        };
+        assert!(settled(text.as_bytes()));
+        let skips = read(text.as_bytes());
+        assert!(skips.holds(&lan));
+        assert_eq!(skips.iter().count(), 1);
+        let finished = format!("{text}[   47.000] {STARTED}\n");
+        assert!(read(finished.as_bytes()).is_empty());
     }
 
     #[test]

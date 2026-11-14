@@ -74,7 +74,6 @@ pub(super) const CONFIG_LOCKED: u8 = 0;
 pub(super) const RX_FIFO_THRESHOLD: u32 = 7 << 13;
 pub(super) const RX_DMA_BURST: u32 = 7 << 8;
 pub(super) const RX_128_INTERRUPTS: u32 = 1 << 15;
-pub(super) const RX_MULTI_ENABLE: u32 = 1 << 14;
 pub(super) const RX_EARLY_OFF: u32 = 1 << 11;
 pub(super) const RX_FETCH_8125: u32 = 8 << 27;
 /// Accept broadcast, multicast and frames to the station address only.
@@ -107,6 +106,12 @@ pub(super) const MCU_TX_EMPTY: u8 = 1 << 5;
 pub(super) const MCU_RX_EMPTY: u8 = 1 << 4;
 pub(super) const LINK_LIST_READY: u8 = 1 << 1;
 pub(super) const TX_FIFO_EMPTY: u32 = 1 << 11;
+/// Every receive-accept bit of RxConfig (Linux `RX_CONFIG_ACCEPT_MASK`).
+pub(super) const RX_ACCEPT_MASK: u32 = 0x3f;
+/// ChipCmd's transmit stop request (`StopReq`).
+pub(super) const STOP_REQ: u8 = 0x80;
+/// TxPoll's low-priority queue poll (`NPQ`).
+pub(super) const NPQ: u8 = 0x40;
 pub(super) const RXDV_GATED: u32 = 1 << 19;
 /// Linux r8169's `NUM_RX_DESC` and `NUM_TX_DESC`.
 pub(super) const DESCRIPTORS: usize = 256;
@@ -116,7 +121,10 @@ pub(super) const OWN: u32 = 1 << 31;
 pub(super) const END: u32 = 1 << 30;
 pub(super) const FIRST: u32 = 1 << 29;
 pub(super) const LAST: u32 = 1 << 28;
+/// Receive status: RxRWT, RxRES, RxRUNT and RxCRC.
 pub(super) const RX_ERRORS: u32 = 0xf << 19;
+/// Received length with the FCS (Linux `GENMASK(13, 0)`); bits 14..16
+/// above it are checksum results.
 pub(super) const LENGTH: u32 = 0x3fff;
 
 // The source extended-XID register lies beyond the normal NBASE timer aperture.

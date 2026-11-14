@@ -2,7 +2,9 @@
 //! `/Library/GPUBundles` on the Data volume.
 //!
 //! The StelaGPU kext writes the plugin's files from the copy it carries, but
-//! the kernel gives a kext no way to create a directory (`files.h`), so on a
+//! the kernel gives a kext no way to create a directory (`files.h`:
+//! `VNOP_MKDIR` is kernel-private and not in the kernel's symbol table the
+//! kext is linked against), so on a
 //! freshly installed system, whose Data volume holds only Apple's empty
 //! `/Library/GPUBundles`, it reports the plugin missing. Nothing else can
 //! create them before the first boot: the Data volume is encrypted, Stela's
@@ -28,6 +30,12 @@
 //! that finds it missing after an attempt stops with the manual remedy
 //! ([`decide`]).
 //!
+//! A finished erase install knows the plugin is missing without a boot to
+//! find it: it records [`BUNDLE_REPAIR_INSTALLED`] ([`Change::Installed`]),
+//! which makes the first macOS boot the maintenance boot and is removed
+//! before that boot starts. If that repair fails, the next normal boot finds
+//! the plugin missing with no record and asks for the repair as above.
+//!
 //! The manual remedy's `xattr -w com.apple.rootless ...` is not a step: it
 //! failed with EPERM in every manual installation (runs 20261106-070021,
 //! 20261106-083218, 20261107-060417, and in this repair's first run), even
@@ -41,7 +49,7 @@ use alloc::{
     vec::Vec,
 };
 use stela_loader::boot_selection::{
-    BUNDLE_REPAIR, BUNDLE_REPAIR_ATTEMPTED, BUNDLE_REPAIR_PENDING, lookup,
+    BUNDLE_REPAIR, BUNDLE_REPAIR_ATTEMPTED, BUNDLE_REPAIR_INSTALLED, BUNDLE_REPAIR_PENDING, lookup,
 };
 use stela_soc_data::nor::nvram::{Partition, Variables};
 
@@ -83,6 +91,9 @@ pub enum Record {
     None,
     Pending,
     Attempted,
+    /// An erase install's request, which the loader removes when it takes
+    /// it.
+    Installed,
     /// A value Stela never writes.
     Other,
 }
@@ -95,6 +106,7 @@ impl Record {
             None => Self::None,
             Some(BUNDLE_REPAIR_PENDING) => Self::Pending,
             Some(BUNDLE_REPAIR_ATTEMPTED) => Self::Attempted,
+            Some(BUNDLE_REPAIR_INSTALLED) => Self::Installed,
             Some(_) => Self::Other,
         }
     }
@@ -107,6 +119,8 @@ pub enum Change {
     Request,
     /// The plugin is installed: forget any repair.
     Forget,
+    /// An erase install finished: the first macOS boot repairs.
+    Installed,
 }
 
 impl Change {
@@ -120,6 +134,15 @@ impl Change {
                 }
                 variables
                     .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_PENDING)
+                    .map_err(|error| format!("{error:?}"))?;
+                Ok(true)
+            }
+            Self::Installed => {
+                if Record::read(variables) == Record::Installed {
+                    return Ok(false);
+                }
+                variables
+                    .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_INSTALLED)
                     .map_err(|error| format!("{error:?}"))?;
                 Ok(true)
             }
@@ -161,9 +184,9 @@ pub fn decide(report: Report, boot: Boot, record: Record, persistent: bool) -> D
         (Report::Failed, Boot::Normal) => Decision::StopFailed,
         (Report::Missing, Boot::Normal) => match record {
             Record::None | Record::Other if persistent => Decision::Repair,
-            // A pending request this boot did not take means NVRAM was not
-            // read for it; another request would loop.
-            Record::None | Record::Other | Record::Pending => {
+            // A request this boot did not take means NVRAM was not read
+            // for it; another request would loop.
+            Record::None | Record::Other | Record::Pending | Record::Installed => {
                 Decision::StopMissing { attempted: false }
             }
             Record::Attempted => Decision::StopMissing { attempted: true },

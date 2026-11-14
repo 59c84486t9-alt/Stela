@@ -29,7 +29,7 @@ use crate::{
         amd::{
             device::{DeviceTable, DeviceTableError, DeviceTableHardware},
             format::{Command, DomainId, PhysicalAddress, TableLevel},
-            ivrs::Ivrs,
+            ivrs::{Ivhd, Ivrs},
             memory::TableVisibility,
             tables::{PageTables, TableHardware, TranslationError},
         },
@@ -69,6 +69,8 @@ const COMMAND_ENABLE: u64 = 1 << 12;
 const EVENT_RUNNING: u64 = 1 << 3;
 const COMMAND_RUNNING: u64 = 1 << 4;
 const RUNNING: u64 = EVENT_RUNNING | COMMAND_RUNNING;
+/// The control bits a started unit must read back.
+const STARTED: u64 = IOMMU_ENABLE | EVENT_ENABLE | COMMAND_ENABLE | COHERENT;
 const RING_BYTES: usize = 8192;
 const RING_LENGTH: u64 = 9 << 56;
 const COMMAND_BYTES: usize = 16;
@@ -85,7 +87,19 @@ pub enum Error {
     PciCapability(crate::bus::pci::CapabilityError),
     Firmware,
     Profile,
-    NotCold,
+    /// A register the firmware left set that a stopped unit's reset did not
+    /// clear, or one that says the unit runs: its offset and value.
+    NotCold {
+        register: usize,
+        value: u64,
+    },
+    /// The unit did not start. It was turned off again; `stopped` says
+    /// whether its registers then read off, `timeout` whether it failed by
+    /// not running in time.
+    DidNotStart {
+        timeout: bool,
+        stopped: bool,
+    },
     Busy,
     Requester,
     Exhausted,
@@ -98,6 +112,25 @@ pub enum Error {
     DeviceTable(DeviceTableError),
     Translation(TranslationError),
     Dma(DmaError),
+}
+
+impl Error {
+    /// Whether a [`Unit::cold`] that failed with this left the unit off: it
+    /// was refused before any register was written, as a unit its caller
+    /// knows stopped, or it was turned off again and read so. A unit found
+    /// translating or running, or one that did not read off, is not.
+    pub fn leaves_unit_off(&self) -> bool {
+        match *self {
+            Self::NotCold { register, value } => {
+                !(register == CONTROL
+                    && value & (IOMMU_ENABLE | EVENT_ENABLE | COMMAND_ENABLE) != 0)
+                    && !(register == STATUS && value & RUNNING != 0)
+            }
+            Self::DidNotStart { stopped, .. } => stopped,
+            Self::Firmware | Self::Profile | Self::Config(_) | Self::PciCapability(_) => true,
+            _ => false,
+        }
+    }
 }
 
 fn invalidation_error(error: Error) -> DmaError {
@@ -183,7 +216,8 @@ struct Engine<P, C> {
     poisoned: Cell<bool>,
     exposed: Cell<bool>,
     retired: Cell<bool>,
-    control: u64,
+    /// The control register as the unit read it back once started.
+    control: Cell<u64>,
     hardware_errors: bool,
     wait_us: u64,
     table_base: Cell<u64>,
@@ -343,6 +377,37 @@ impl DirectDelivery {
     }
 }
 
+/// The requesters one IVHD routes to its unit, read from the IVRS alone,
+/// so that a policy can decide on the unit before anything starts it.
+pub struct Coverage {
+    segment: u16,
+    routes: Vec<bool>,
+}
+
+impl Coverage {
+    /// `unit`'s device entries, refused as [`Unit::cold`] refuses them.
+    pub fn of(unit: Ivhd<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            segment: unit.id().segment,
+            routes: firmware::routes(unit)?.coverage,
+        })
+    }
+
+    /// Whether the IVHD routes requester `rid` on `segment` to the unit.
+    pub fn covers(&self, segment: u16, rid: u16) -> bool {
+        segment == self.segment && self.routes[usize::from(rid)]
+    }
+}
+
+/// Whether the unit `inspection` holds reads off: no translation, event
+/// or command enable set, and neither ring running. Only reads; for a unit
+/// that is left as found rather than started.
+pub fn reads_off<C: UnitConfig>(inspection: &FunctionInspection<C>) -> Result<bool, Error> {
+    let control = inspection.native_read(CONTROL).map_err(Error::Register)?;
+    let status = inspection.native_read(STATUS).map_err(Error::Register)?;
+    Ok(control & (IOMMU_ENABLE | EVENT_ENABLE | COMMAND_ENABLE) == 0 && status & RUNNING == 0)
+}
+
 /// Original cold unit plus complete blocked DTE table and bounded RID policy.
 /// Requesters and their page trees keep this exact engine independently.
 pub struct Unit<P: ColdPlatform, C: UnitConfig = OwnedConfig> {
@@ -404,7 +469,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             poisoned: Cell::new(false),
             exposed: Cell::new(false),
             retired: Cell::new(false),
-            control: admitted.control,
+            control: Cell::new(admitted.control),
             hardware_errors: admitted.hardware_errors,
             wait_us: limits.wait_us,
             table_base: Cell::new(0),
@@ -419,13 +484,23 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         let mut table = unsafe { DeviceTable::new(hardware, &admitted.policies, admitted.bits) }
             .map_err(Error::DeviceTable)?;
         let _guard = engine.resources.platform.enter().map_err(Error::Dma)?;
+        engine.reset_stopped()?;
         engine.check_cold()?;
         let base = table
             .register_for_publication()
             .map_err(Error::DeviceTable)?;
         // Arm before even the first store/callback can unwind or fail.
         engine.exposed.set(true);
-        engine.initialize(base)?;
+        if let Err(error) = engine.initialize(base) {
+            // A unit that did not start is turned off again, as far as its
+            // registers still answer: left on, its table blocks every
+            // device behind it, the boot's own disks included.
+            let _ = engine.write(CONTROL, 0);
+            return Err(Error::DidNotStart {
+                timeout: error == Error::Timeout,
+                stopped: engine.stopped(),
+            });
+        }
         drop(_guard);
         Ok(Self {
             engine,
@@ -481,7 +556,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             valid: self.direct_delivery.clone(),
             base: base.as_ptr() as usize,
             table: self.engine.table_base.get(),
-            control: self.engine.control,
+            control: self.engine.control.get(),
         })
     }
 
@@ -500,6 +575,14 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
                 .map(|&(_, target)| target),
         );
         group
+    }
+
+    /// Whether requester `rid`'s domain also takes each of `ids`: the
+    /// firmware names each one as its alias, as Linux's IVRS alias table
+    /// does for a device behind a bridge that forwards under its own ID.
+    pub fn arrives_under(&self, rid: u16, ids: &[u16]) -> bool {
+        let group = self.group(rid);
+        ids.iter().all(|id| group.contains(id))
     }
 
     /// Whether another requester can address a member of this group, either
@@ -740,7 +823,8 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             .clock()
             .deadline(self.limits.wait_us);
         loop {
-            if self.engine.read(STATUS)? == 0 && self.engine.read(CONTROL)? == 0 {
+            // Its rings have stopped; an event bit left set runs nothing.
+            if self.engine.read(STATUS)? & RUNNING == 0 && self.engine.read(CONTROL)? == 0 {
                 break;
             }
             if deadline.passed() {
@@ -771,6 +855,25 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         unsafe { self.table.borrow_mut().retire() };
         self.engine.retired.set(true);
         Ok(())
+    }
+
+    /// After a successful [`Self::retire`]: the unit's function and register
+    /// mappings, for the caller to retire with their original owner. Left
+    /// inside a dropped unit they stay claimed, and nothing else can map
+    /// the configuration space they lie in. `None`, with the unit dropped
+    /// as before, when it was not retired or its engine is still shared.
+    pub fn into_inputs(self) -> Option<registers::Inputs<C>> {
+        let Self { engine, table, .. } = self;
+        drop(table);
+        let engine = Rc::try_unwrap(engine).ok()?;
+        if !engine.retired.get() {
+            return None;
+        }
+        let mut engine = ManuallyDrop::new(engine);
+        // SAFETY: the sole, retired engine; its `Drop` never runs, so the
+        // resources are taken exactly once.
+        let Resources { inspection, .. } = unsafe { ManuallyDrop::take(&mut engine.resources) };
+        Some(inspection.into_inputs())
     }
 }
 

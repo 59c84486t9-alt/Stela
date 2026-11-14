@@ -21,7 +21,10 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use stela_boot_core::shutdown::{Mode as Shutdown, Requests as ShutdownRequests};
+use stela_boot_core::{
+    service_watch::SlowParts,
+    shutdown::{Mode as Shutdown, Requests as ShutdownRequests},
+};
 
 static SHUTDOWN: ShutdownRequests = ShutdownRequests::new();
 
@@ -223,11 +226,12 @@ impl Service {
             #[cfg(feature = "diagnostics")]
             input_peak,
         } = self;
-        let mut lap = Lap::new();
+        let mut lap = Lap::new(*tsc_hz, boot, step);
         let now = host::rdtsc();
         // The guest console's input, which its device model takes under
         // the devices' lock and so cannot wait for the host's port there.
         super::feed_console_input();
+        let fed = host::rdtsc();
         // A service runs the parts from where the last one stopped on: a
         // step until one ends past its time, a waiting PE until an
         // interrupt comes for it, as whoever sent it may time the answer and
@@ -260,20 +264,27 @@ impl Service {
         };
         #[cfg(feature = "diagnostics")]
         let mut input_turn = InputTurn {
-            start: lap.0,
+            start: lap.started,
             boot,
             ..InputTurn::default()
         };
         let inputs_due = due(INPUTS, false, next);
         if let Some(usb) = usb.as_mut().filter(|_| inputs_due) {
-            let arrived = usb.poll(
-                #[cfg(feature = "diagnostics")]
-                &mut input_turn.usb_wait,
-            );
+            let arrived = usb.poll();
             if let Some(input) = input.as_mut() {
                 input.add(arrived);
             }
-            lap.part(Part::Usb);
+            // The part's time holds the console's input before it: the
+            // host's port is read outside every lock.
+            let console = fed.wrapping_sub(now);
+            let (hz, split) = (*tsc_hz, usb.split());
+            lap.part_of(Part::Usb, |took| {
+                format!(
+                    " console={}{}",
+                    u128::from(console) * 1_000_000 / u128::from(hz.max(1)),
+                    split.line(took.saturating_sub(console), hz),
+                )
+            });
         }
         if let Some(input) = input.as_mut().filter(|_| inputs_due) {
             #[cfg(feature = "diagnostics")]
@@ -310,7 +321,7 @@ impl Service {
             lap.part(Part::Input);
             #[cfg(feature = "diagnostics")]
             {
-                input_turn.end = lap.0;
+                input_turn.end = lap.started;
                 if input_peak
                     .as_ref()
                     .is_none_or(|prior| input_turn.duration() > prior.duration())
@@ -320,19 +331,24 @@ impl Service {
             }
         }
         if due(LOGS, true, next) {
-            if now.wrapping_sub(*log_flushed) >= *tsc_hz {
-                output::flush_due();
-                *log_flushed = host::rdtsc();
-            } else {
-                output::advance_logs();
-            }
-            lap.part(Part::Log);
+            // The logs' disks are looked at without waiting for the host
+            // drivers: a store another processor's driver call holds up
+            // goes on at a later turn.
+            let ((), drivers) = super::storage::without_waiting(*tsc_hz, || {
+                if now.wrapping_sub(*log_flushed) >= *tsc_hz {
+                    output::flush_due();
+                    *log_flushed = host::rdtsc();
+                } else {
+                    output::advance_logs();
+                }
+            });
+            lap.part_of(Part::Log, |_| drivers);
         }
         if let Some(network) = network.as_mut().filter(|_| due(NETWORK, true, next)) {
             // The host adapter's sends and receives wait outside the
             // devices' lock, which every PE's device accesses take.
             let (frames, status, room) = devices.with(|devices| {
-                let frames = network::GuestNetwork::queued(devices);
+                let frames = network.queued(devices);
                 (frames, devices.network_status(), devices.network_room())
             });
             network.status(status);
@@ -361,6 +377,7 @@ impl Service {
             lap.part(Part::Bluetooth);
         }
         if due(NOR, true, next) {
+            let mut drivers = String::new();
             if let Some(nor) = nor {
                 let due =
                     anchored.is_none_or(|at| now.wrapping_sub(at) >= ANCHOR_SECONDS * *tsc_hz);
@@ -368,16 +385,22 @@ impl Service {
                     let anchor = due.then(|| devices.rtc_anchor()).flatten();
                     (nor::HostNor::dirty(devices), anchor)
                 });
-                nor.store(dirty);
-                if let Some(anchor) = anchor {
-                    nor.keep_anchor(anchor);
+                if anchor.is_some() {
                     *anchored = Some(now);
                 }
+                // As the logs' stores: never waiting for the host drivers.
+                let ((), line) = super::storage::without_waiting(*tsc_hz, || {
+                    nor.store(dirty);
+                    if let Some(anchor) = anchor {
+                        nor.keep_anchor(anchor);
+                    }
+                });
+                drivers = line;
             }
             if power.pressed() {
                 devices.serve(|devices| power.press(devices));
             }
-            lap.part(Part::Nor);
+            lap.part_of(Part::Nor, |_| drivers);
         }
         let interrupted = || !boot && host::interrupted();
         if let Some(experiment) = restore.as_mut().filter(|_| due(RESTORE, false, next)) {
@@ -392,8 +415,17 @@ impl Service {
             lap.part(Part::Restore);
             if !interrupted() {
                 experiment.prefetch();
+                let prefetched = host::rdtsc();
                 experiment.work();
-                lap.part(Part::Read);
+                let (hz, work) = (*tsc_hz, host::rdtsc().wrapping_sub(prefetched));
+                lap.part_of(Part::Read, |took| {
+                    let us = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(hz.max(1));
+                    format!(
+                        " prefetch_us={} work_us={}",
+                        us(took.saturating_sub(work)),
+                        us(work)
+                    )
+                });
                 devices.serve(|devices| experiment.poll(devices));
                 lap.part(Part::Restore);
             }
@@ -450,27 +482,63 @@ static TOTAL: [AtomicU64; PARTS] = [const { AtomicU64::new(0) }; PARTS];
 /// Services since the last report: by a waiting PE and by the boot PE.
 static SERVICES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
+/// The parts that held a PE for [`SLOW_MILLIS`], each reported in a line of
+/// its own a few times a boot at most ([`SlowParts`]).
+static SLOW: SlowParts<PARTS> = SlowParts::new();
+
+/// How long one part of one service turn may take before it is named in a
+/// line of its own: a fifth of what XNU's watchdog allows one exit.
+const SLOW_MILLIS: u64 = 100;
+
 /// When the running part started, and this core's posted pumps' ticks then
-/// (`gpu::posted_ticks_here`).
-struct Lap(u64, u64);
+/// (`gpu::posted_ticks_here`), in a turn of the kind [`serve`] was asked for.
+struct Lap {
+    started: u64,
+    pumped: u64,
+    tsc_hz: u64,
+    boot: bool,
+    step: bool,
+}
 
 impl Lap {
-    fn new() -> Self {
-        Self(host::rdtsc(), super::gpu::posted_ticks_here())
+    fn new(tsc_hz: u64, boot: bool, step: bool) -> Self {
+        Self {
+            started: host::rdtsc(),
+            pumped: super::gpu::posted_ticks_here(),
+            tsc_hz,
+            boot,
+            step,
+        }
     }
 
     fn part(&mut self, part: Part) {
+        self.part_of(part, |_| String::new());
+    }
+
+    /// The running part ended; `detail` says where its time went, given
+    /// the ticks it took, when the part is reported as slow.
+    fn part_of(&mut self, part: Part, detail: impl FnOnce(u64) -> String) {
         let now = host::rdtsc();
         // The posted pumps a part ran between its device polls are the
         // pump's time (`GPU PUMP`), not the part's.
-        let pumped = super::gpu::posted_ticks_here().wrapping_sub(self.1);
-        let took = now.wrapping_sub(self.0).saturating_sub(pumped);
+        let pumped = super::gpu::posted_ticks_here().wrapping_sub(self.pumped);
+        let took = now.wrapping_sub(self.started).saturating_sub(pumped);
         LONGEST[part as usize].fetch_max(took, Ordering::Relaxed);
         TOTAL[part as usize].fetch_add(took, Ordering::Relaxed);
+        if SLOW.worth(part as usize, took, self.tsc_hz / 1000 * SLOW_MILLIS) {
+            output::arguments(format_args!(
+                "HOST SERVICE SLOW part={} us={} boot={} step={}{}\n",
+                NAMES[part as usize],
+                u128::from(took) * 1_000_000 / u128::from(self.tsc_hz.max(1)),
+                self.boot,
+                self.step,
+                detail(took),
+            ));
+        }
         // A posted GPU call waits for the boot CPU, not for the remaining
         // parts; the pump's time is no part's.
         super::gpu::pump_posted();
-        *self = Self::new();
+        *self = Self::new(self.tsc_hz, self.boot, self.step);
     }
 }
 
@@ -485,9 +553,6 @@ pub(super) struct InputTurn {
     read_done: u64,
     delivery_entered: u64,
     end: u64,
-    usb_wait: u64,
-    pub(super) led_wait: u64,
-    pub(super) read_wait: u64,
     pub(super) led_changed: bool,
     pub(super) devices: usize,
     reports: usize,
@@ -508,19 +573,16 @@ impl InputTurn {
             self.delivery_entered.wrapping_sub(self.read_done)
         };
         format!(
-            " input_turn_us={} input_turn_boot={} input_usb_us={} input_usb_wait_us={} \
-             input_led_us={} input_led_wait_us={} input_led_changed={} input_read_us={} \
-             input_read_wait_us={} input_devices={} input_delivery_us={} \
+            " input_turn_us={} input_turn_boot={} input_usb_us={} \
+             input_led_us={} input_led_changed={} input_read_us={} \
+             input_devices={} input_delivery_us={} \
              input_delivery_entry_us={} input_reports={}",
             us(self.duration()),
             self.boot,
             us(self.usb_done.wrapping_sub(self.start)),
-            us(self.usb_wait),
             us(self.led_done.wrapping_sub(self.usb_done)),
-            us(self.led_wait),
             self.led_changed,
             us(self.read_done.wrapping_sub(self.led_done)),
-            us(self.read_wait),
             self.devices,
             us(self.end.wrapping_sub(self.read_done)),
             us(delivery_entry),

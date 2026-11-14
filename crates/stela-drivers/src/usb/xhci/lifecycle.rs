@@ -62,8 +62,23 @@ pub struct Host {
     hubs: Vec<Hub>,
     roots: Vec<u32>,
     sleep: suspend::Sleep,
+    /// The failures the last poll found, each reported then. One that
+    /// stands from poll to poll is reported once, until it changes or ends.
+    standing: Vec<(String, BlockError)>,
 }
 impl Host {
+    /// Whether the controller stopped answering commands (Linux
+    /// xhci_hc_died): none of its devices can be reached again without a
+    /// controller reset.
+    pub fn died(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|c| matches!(c.hardware, hardware::State::Died))
+    }
+    /// What the controller was doing when it stopped answering.
+    pub fn death(&self) -> Option<super::Death> {
+        self.controller.try_borrow().ok().and_then(|c| c.death)
+    }
     /// Transfer this inventory's unbound Address-state device to the
     /// forwarding adapter. A failed constructor keeps the exclusive claim:
     /// neither dropping a handle nor a copied descriptor authorizes rebinding.
@@ -108,6 +123,7 @@ impl Host {
             hubs: Vec::new(),
             roots,
             sleep: suspend::Sleep::default(),
+            standing: Vec::new(),
         };
         host.register_hubs(devices, dma, failures);
         host
@@ -229,6 +245,23 @@ impl Host {
     /// No completion or new identity is inferred from elapsed time. Topology
     /// mutation is serialized through this controller's native Rc owner.
     pub fn poll(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+        firmware: &dyn crate::firmware::Provider,
+    ) -> Changes {
+        let mut changes = self.poll_changes(dma, firmware);
+        // A port or hub whose refusal stands fails the same way on every
+        // poll, thousands of times a second: say it once.
+        let found = changes.added.failures.clone();
+        changes
+            .added
+            .failures
+            .retain(|failure| !self.standing.contains(failure));
+        self.standing = found;
+        changes
+    }
+
+    fn poll_changes(
         &mut self,
         dma: &mut dyn DmaAllocator,
         firmware: &dyn crate::firmware::Provider,
@@ -435,6 +468,14 @@ impl Host {
                     .borrow_mut()
                     .current_port_reset(None, port)?;
             }
+        } else if status & CCS == 0 {
+            // A device that was refused or retired while it stayed
+            // connected kept its grant with no owner. The port is empty
+            // now, so the grant goes, as hub.c's budget drops a
+            // disconnected child.
+            self.controller
+                .borrow_mut()
+                .current_port_reset(None, port)?;
         }
         // A USB 3 device whose link a warm reset must bring up shows no
         // connection until then (`hub_port_warm_reset_required`).

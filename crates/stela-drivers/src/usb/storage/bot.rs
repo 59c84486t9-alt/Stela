@@ -12,10 +12,16 @@ mod ehci;
 mod quirks;
 use crate::{
     block::{BlockError, Sense},
-    bus::dma::{DmaAllocator, DmaBuffer},
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        pci::power::Interval,
+    },
 };
-use alloc::vec::Vec;
-use core::ops::{Deref, DerefMut};
+use alloc::{boxed::Box, rc::Rc, vec::Vec};
+use core::{
+    cell::Cell,
+    ops::{Deref, DerefMut},
+};
 pub(in crate::usb) use ehci::{EhciBulk, block as ehci_error};
 
 const RESET: u8 = 0xff;
@@ -25,6 +31,12 @@ const CSW_SIGNATURE: u32 = 0x5342_5355;
 /// bCSWStatus: Command Failed (BOT 5.2).
 const CSW_FAILED: u8 = 1;
 const COMMAND_US: u64 = 30_000_000;
+/// A command's time while the interface's first scan runs. A device that
+/// never answers its first command is reset and probed again, as the SCSI
+/// error handler does, and that must fit, after the controller's own start
+/// and enumeration, inside the start budget of the function it is on: with
+/// [`COMMAND_US`] the budget passed first, and the reset never ran.
+pub(super) const SCAN_COMMAND_US: u64 = 10_000_000;
 const RESET_RECOVERY_US: u64 = 6_000_000;
 const MAX_LUN: u8 = 15;
 /// xHCI completion code 22: the slot must be retired, not cancelled.
@@ -82,6 +94,16 @@ pub(super) trait Io {
     fn quarantine(&mut self);
     fn delay(&self, micros: u64);
     fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError>;
+    /// Start a minimum interval of `micros` that [`Self::minimum_elapsed`]
+    /// polls; `None` where the timer has none, and the caller waits with
+    /// [`Self::minimum_wait`].
+    fn begin_minimum(&mut self, _micros: u64) -> Result<Option<Box<dyn Interval>>, BlockError> {
+        Ok(None)
+    }
+    /// Whether a [`Self::begin_minimum`] interval has passed; never waits.
+    fn minimum_elapsed(&mut self, interval: &dyn Interval) -> Result<bool, BlockError> {
+        interval.elapsed().map_err(BlockError::PciPower)
+    }
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     /// Whether the host controller sends the handoff's completion signal.
@@ -183,7 +205,22 @@ pub(super) struct Native {
     pub controller: Shared,
     pub id: super::super::xhci::SlotId,
     pub endpoints: [Endpoint; 2],
+    /// A command's time: [`SCAN_COMMAND_US`] until the first scan ends,
+    /// then [`COMMAND_US`].
+    pub command_us: Rc<Cell<u64>>,
 }
+
+/// The command time a new interface starts with, and its owner's handle to
+/// raise it by [`scanned`].
+pub(super) fn scan_command_time() -> Rc<Cell<u64>> {
+    Rc::new(Cell::new(SCAN_COMMAND_US))
+}
+
+/// The first scan ended: later commands get the full time.
+pub(super) fn scanned(command_us: &Cell<u64>) {
+    command_us.set(COMMAND_US);
+}
+
 impl Io for Native {
     type Buffer = DmaBuffer;
 
@@ -232,7 +269,7 @@ impl Io for Native {
             endpoint.dci(),
             buffer.physical(),
             length,
-            COMMAND_US,
+            self.command_us.get(),
         )
     }
     fn quarantine(&mut self) {
@@ -250,6 +287,14 @@ impl Io for Native {
         controller.device(self.id)?.connected()?;
         controller.minimum_wait(micros)
     }
+    fn begin_minimum(&mut self, micros: u64) -> Result<Option<Box<dyn Interval>>, BlockError> {
+        let mut controller = self.controller.borrow_mut();
+        controller.device(self.id)?.connected()?;
+        controller.begin_minimum(micros)
+    }
+    fn minimum_elapsed(&mut self, interval: &dyn Interval) -> Result<bool, BlockError> {
+        self.controller.borrow_mut().minimum_elapsed(interval)
+    }
     fn now_us(&self) -> u64 {
         self.controller.borrow().clock.now_us()
     }
@@ -263,7 +308,7 @@ impl Io for Native {
         let mut controller = self.controller.borrow_mut();
         let deadline = controller
             .clock
-            .try_deadline(COMMAND_US)
+            .try_deadline(self.command_us.get())
             .map_err(|_| BlockError::Unsupported("xHCI transfer timeout clock unavailable"))?;
         let dci = endpoint.dci();
         let ticket = controller
@@ -423,9 +468,11 @@ struct Begun {
 enum Recovery {
     /// The class reset request.
     Resetting(Request),
-    /// Nominal scheduling time only; then an actual owner must still supply
-    /// the conservative complete physical minimum before any halt clear.
-    Settling(u64),
+    /// Nominal scheduling time, with the timer's own interval for the
+    /// complete physical minimum where it keeps one: polled, never waited
+    /// for. Without one, an actual owner must still supply that minimum,
+    /// waiting, before any halt clear.
+    Settling(u64, Option<Box<dyn Interval>>),
     /// A halt's clear: the input's, or with its result the output's.
     Clearing(Request, Option<Result<Vec<u8>, BlockError>>),
 }
@@ -700,19 +747,43 @@ impl<I: Io> Bot<I> {
                     if result.is_ok() {
                         // The acknowledged reset ends every published unit's media.
                         let settled = self.io.now_us().saturating_add(RESET_RECOVERY_US);
-                        self.recovery = Some(Recovery::Settling(settled));
+                        let interval = match self.io.begin_minimum(RESET_RECOVERY_US) {
+                            Ok(interval) => interval,
+                            Err(error) => {
+                                self.minimum_error = Some(error);
+                                self.poisoned = true;
+                                return false;
+                            }
+                        };
+                        self.recovery = Some(Recovery::Settling(settled, interval));
                         self.reset_generation = self.reset_generation.wrapping_add(1);
                     } else {
                         self.recovery = None;
                         self.poisoned = true;
                     }
                 }
-                Recovery::Settling(settled) => {
+                Recovery::Settling(settled, interval) => {
+                    let settled = *settled;
                     if self.minimum_error.is_some() {
                         return false;
                     }
-                    if self.io.now_us() < *settled {
+                    if self.io.now_us() < settled {
                         return true;
+                    }
+                    let measured = interval.take();
+                    if let Some(interval) = &measured {
+                        match self.io.minimum_elapsed(interval.as_ref()) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                self.recovery = Some(Recovery::Settling(settled, measured));
+                                return true;
+                            }
+                            Err(error) => {
+                                self.minimum_error = Some(error);
+                                self.poisoned = true;
+                                return false;
+                            }
+                        }
                     }
                     if let Err(error) = self.io.ready() {
                         if matches!(error, BlockError::PciPower(_)) {
@@ -724,10 +795,11 @@ impl<I: Io> Bot<I> {
                         self.poisoned = true;
                         continue;
                     }
-                    // The nominal deadline only schedules work. A genuine
-                    // owner now supplies the entire conservative minimum even
-                    // if numeric clock time already advanced past the deadline.
-                    if self.delay(RESET_RECOVERY_US).is_err() {
+                    // The nominal deadline only schedules work. Without the
+                    // timer's interval a genuine owner now supplies the
+                    // entire conservative minimum even if numeric clock time
+                    // already advanced past the deadline.
+                    if measured.is_none() && self.delay(RESET_RECOVERY_US).is_err() {
                         return false;
                     }
                     let request = self.io.begin_clear(self.endpoints[0]);
@@ -784,7 +856,7 @@ impl<I: Io> Bot<I> {
         output: Option<&mut [u8]>,
     ) -> Result<Vec<u8>, BlockError> {
         while self.recovering() {
-            if let Some(Recovery::Settling(settled)) = self.recovery {
+            if let Some(Recovery::Settling(settled, _)) = self.recovery {
                 self.io.delay(settled.saturating_sub(self.io.now_us()));
             } else {
                 crate::waiting();
@@ -1027,12 +1099,9 @@ impl<I: Io> Bot<I> {
                         status: super::STALL,
                     }) if !begun.stalled => {
                         begun.stalled = true;
-                        // The nominal deadline only schedules work. A genuine
-                        // owner now supplies the entire conservative minimum even
-                        // if numeric clock time already advanced past the deadline.
-                        if let Err(error) = self.delay(RESET_RECOVERY_US) {
-                            return Next::Done(Err(error));
-                        }
+                        // As Linux's usb_stor_bulk_transfer_buf: the halt is
+                        // cleared at once and the status read again; no reset
+                        // ran, so nothing settles.
                         let request = self.io.begin_clear(self.endpoints[0]);
                         Next::Stage(Stage::Clearing(request, true))
                     }
@@ -1290,6 +1359,7 @@ impl Bot<Native> {
                 controller: controller.clone(),
                 id,
                 endpoints: self.endpoints,
+                command_us: self.io.command_us.clone(),
             };
             let max_lun = Self::startup(&mut io, setting.number, flags).map_err(|e| {
                 (

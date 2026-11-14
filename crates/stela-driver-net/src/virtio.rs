@@ -9,6 +9,9 @@
 //! `virtio_net_hdr` (section 5.1.6, `num_buffers` included under
 //! VERSION_1) with all-zero offload fields. A device without a MAC
 //! address refuses: the stack needs a stable station address.
+//!
+//! Drop resets the device, as `virtnet_remove` does, and frees the queues
+//! only once the reset read back zero; otherwise they stay allocated.
 use super::{HEADER as ETHERNET_HEADER, Link, LinkError, MAX_FRAME, Mac, check_frame};
 use crate::{
     Clock, Handoff,
@@ -17,11 +20,14 @@ use crate::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
         pci::Function,
-        virtio::{AVAIL, DESCRIPTOR_WRITE, Modern, USED, VENDOR},
+        virtio::{AVAIL, DESCRIPTOR_WRITE, DeviceStatus, Modern, STOP_RESET_US, USED, VENDOR},
     },
 };
 use alloc::{format, vec::Vec};
-use core::sync::atomic::{Ordering, fence};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{Ordering, fence},
+};
 
 const MODERN_NET: u16 = 0x1041;
 const TRANSITIONAL_NET: u16 = 0x1000;
@@ -43,7 +49,6 @@ const BUFFER: usize = 2048;
 /// (Linux `receive_small` drops others as length errors).
 const SHORTEST_RECEIVE: usize = HEADER + ETHERNET_HEADER;
 const LONGEST_RECEIVE: usize = HEADER + MAX_FRAME;
-const TRANSMIT_WAIT_US: u64 = 100_000;
 
 pub fn matches(function: &Function) -> bool {
     matches_identity(&function.identity())
@@ -160,8 +165,10 @@ struct Broken;
 
 pub struct VirtioNet {
     device: Mmio,
-    receive: Queue,
-    transmit: Queue,
+    /// The common configuration's status, which resets the device.
+    device_status: DeviceStatus,
+    receive: ManuallyDrop<Queue>,
+    transmit: ManuallyDrop<Queue>,
     /// Transmit descriptors the device has handed back.
     free: Vec<u16>,
     /// The device broke a queue; it carries no more frames.
@@ -198,10 +205,11 @@ impl VirtioNet {
         let mac = Mac(core::array::from_fn(|n| device.read8(CONFIG_MAC + n)));
         let mut net = Self {
             device,
+            device_status: transport.status(),
             free: (0..transmit.entries).collect(),
             broken: false,
-            receive,
-            transmit,
+            receive: ManuallyDrop::new(receive),
+            transmit: ManuallyDrop::new(transmit),
             mac,
             status: accepted & FEATURE_STATUS != 0,
             clock: handoff.clock,
@@ -261,6 +269,25 @@ impl VirtioNet {
     }
 }
 
+impl Drop for VirtioNet {
+    /// Linux `virtnet_remove`: `virtio_reset_device`, then the queues freed,
+    /// only once the reset read back zero. A function that left the bus
+    /// gets no write.
+    ///
+    /// This drives the device's registers, so the owner drops it where its
+    /// MMIO windows are mapped; anywhere else the first read faults.
+    fn drop(&mut self) {
+        if self.device_status.reset(&self.clock, STOP_RESET_US).is_ok() {
+            // SAFETY: a reset device accesses no queue memory, and neither
+            // queue is used after this.
+            unsafe {
+                ManuallyDrop::drop(&mut self.receive);
+                ManuallyDrop::drop(&mut self.transmit);
+            }
+        }
+    }
+}
+
 impl Link for VirtioNet {
     fn mac(&self) -> Mac {
         self.mac
@@ -275,20 +302,7 @@ impl Link for VirtioNet {
         self.usable()?;
         let reclaimed = self.reclaim();
         self.break_on(reclaimed)?;
-        if self.free.is_empty() {
-            let deadline = self.clock.deadline(TRANSMIT_WAIT_US);
-            while self.free.is_empty() && !deadline.passed() {
-                let reclaimed = self.reclaim();
-                self.break_on(reclaimed)?;
-                crate::waiting();
-            }
-        }
-        let id = self.free.pop().ok_or_else(|| {
-            LinkError::Adapter(format!(
-                "virtio-net {} transmit queue stalled",
-                self.location
-            ))
-        })?;
+        let id = self.free.pop().ok_or(LinkError::Busy)?;
         let buffer = self.transmit.buffer(id);
         buffer[..HEADER].fill(0);
         buffer[HEADER..HEADER + frame.len()].copy_from_slice(frame);
@@ -357,8 +371,9 @@ mod tests {
             Self {
                 net: VirtioNet {
                     device: mmio,
-                    receive,
-                    transmit,
+                    device_status: DeviceStatus::new(mmio),
+                    receive: ManuallyDrop::new(receive),
+                    transmit: ManuallyDrop::new(transmit),
                     free: (0..ENTRIES).collect(),
                     broken: false,
                     mac: Mac([2, 0, 0, 0, 0, 1]),
@@ -453,6 +468,25 @@ mod tests {
                 if kick { 0 } else { u16::MAX }
             );
         }
+    }
+
+    /// With every transmit descriptor still the device's, a send is busy
+    /// at once and offers nothing; one the device returns is used next.
+    #[test]
+    fn a_full_transmit_queue_is_busy_until_the_device_returns_a_descriptor() {
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
+        for byte in 0..ENTRIES {
+            net.transmit(&[byte as u8; 60]).unwrap();
+        }
+        let available = net.transmit.ring.read::<u16>(AVAIL + 2);
+        assert_eq!(net.transmit(&[9; 60]), Err(LinkError::Busy));
+        assert_eq!(net.transmit(&[9; 60]), Err(LinkError::Busy));
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 2), available);
+        let mut produced = 0;
+        give_back(&mut net.transmit, &mut produced, 1, 0);
+        net.transmit(&[9; 60]).unwrap();
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 2), available + 1);
     }
 
     #[test]
@@ -564,5 +598,39 @@ mod tests {
             Err(LinkError::Invalid("frame shorter than its header"))
         );
         assert_eq!(fixture.net.transmit(&[0; 14]), Ok(()));
+    }
+
+    /// The common configuration's device status in the fixture's registers.
+    const DEVICE_STATUS: usize = 0x14;
+
+    /// A dropped device is reset, as `virtnet_remove` does; one that left
+    /// the bus reads all ones and gets no write.
+    #[test]
+    fn dropping_a_device_resets_it_and_a_lost_one_gets_no_write() {
+        let fixture = Fixture::new();
+        // SAFETY: the registers outlive the handle, which no driver uses.
+        let common = unsafe {
+            Mmio::new(
+                fixture._registers.as_ptr() as u64,
+                size_of_val(&fixture._registers[..]),
+            )
+        };
+        common.write8(DEVICE_STATUS, 0x0f);
+        let Fixture {
+            net,
+            _registers,
+            _memory,
+        } = fixture;
+        drop(net);
+        assert_eq!(common.read8(DEVICE_STATUS), 0);
+        let mut fixture = Fixture::new();
+        fixture._registers.fill(u64::MAX);
+        let Fixture {
+            net,
+            _registers: registers,
+            _memory,
+        } = fixture;
+        drop(net);
+        assert!(registers.iter().all(|&word| word == u64::MAX));
     }
 }

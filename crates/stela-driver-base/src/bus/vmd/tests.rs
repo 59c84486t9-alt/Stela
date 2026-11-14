@@ -206,12 +206,13 @@ fn vendor_shadow_requires_its_complete_declared_payload() {
         assert_eq!(host.windows()[0].bus_start, 0x1000_0000);
         assert_eq!(host.windows()[1].bus_start, 0x2000_2000);
     }
-    for length in 3..8 {
+    for length in 0..8 {
         let mut model = Model::new(0x201d);
         shadow_capability(&mut model, 0x80, length, 0);
         let reads = model.parent_reads.clone();
         let host = start(model);
-        // Valid short vendor data never advertises a complete SHDW signature.
+        // Short vendor data never advertises a complete SHDW signature, and a
+        // Length below the entry's own header reserves the header alone.
         // Poison bytes beyond its Length must not become window translations.
         assert_eq!(host.windows()[0].bus_start, 0x8000_0000);
         assert_eq!(host.windows()[1].bus_start, 0x9000_2000);
@@ -223,17 +224,12 @@ fn vendor_shadow_requires_its_complete_declared_payload() {
                 .all(|(offset, _)| !(0x84..0x98).contains(offset))
         );
     }
-    for length in (0..3).chain(8..24) {
+    for length in 8..24 {
         let mut model = Model::new(0x201d);
         shadow_capability(&mut model, 0x80, length, 0);
         let reads = model.parent_reads.clone();
-        let expected = if length < 3 {
-            Error::PciCapability(CapabilityError::Malformed { offset: 0x80 })
-        } else {
-            Error::Capability
-        };
         match Host::initialize(model) {
-            Err((error, None)) => assert_eq!(error, expected),
+            Err((error, None)) => assert_eq!(error, Error::Capability),
             _ => panic!("invalid shadow capability must retain the failed host"),
         }
         assert!(
@@ -346,30 +342,34 @@ fn scan_honors_multifunction_and_never_enables_child_dma() {
 }
 
 #[test]
-fn a_child_bar_is_sized_with_decode_off_and_restored() {
-    let mut model = Model::new(0x201d);
-    model.bars[0].1 = 1 << 20;
-    model.child_set(0, 4, 0x5678_144d);
-    model.child_set(4, 2, 0x0402);
-    model.child_set(8, 4, 0x0108_0200);
-    model.child_set(0x0e, 1, 0);
-    model.child_set(0x10, 4, 0x8000_4004);
-    model.child_set(0x14, 4, 0);
-    model.child_masks.insert(0x10, 0xffff_c000);
-    model.child_masks.insert(0x14, u32::MAX);
-    let mut host = start(model);
-    let child = host.scan().unwrap()[0].address;
-    assert_eq!(host.memory_bar_bytes(child), Ok(0x4000));
-    let mut config = host.config(0, 0, 0).unwrap();
-    assert_eq!(config.read(0x10, 4), Ok(0x8000_4004));
-    assert_eq!(config.read(0x14, 4), Ok(0));
-    assert_eq!(config.read(regs::COMMAND, 2), Ok(0x0402));
-    let writes = &host.registers.as_ref().unwrap().writes;
-    let sizing = writes
-        .iter()
-        .position(|write| *write == (1, 0x10, 4, u32::MAX))
-        .unwrap();
-    assert!(writes[..sizing].contains(&(1, 4, 2, 0x0400)));
+fn a_child_bar_is_sized_with_decode_off_and_restored_stopped() {
+    // The second child was left mastering, without INTx Disable.
+    for command in [0x0402, 0x0006] {
+        let mut model = Model::new(0x201d);
+        model.bars[0].1 = 1 << 20;
+        model.child_set(0, 4, 0x5678_144d);
+        model.child_set(4, 2, command);
+        model.child_set(6, 2, 0);
+        model.child_set(8, 4, 0x0108_0200);
+        model.child_set(0x0e, 1, 0);
+        model.child_set(0x10, 4, 0x8000_4004);
+        model.child_set(0x14, 4, 0);
+        model.child_masks.insert(0x10, 0xffff_c000);
+        model.child_masks.insert(0x14, u32::MAX);
+        let mut host = start(model);
+        let child = host.scan().unwrap()[0].address;
+        assert_eq!(host.memory_bar_bytes(child), Ok(0x4000));
+        let mut config = host.config(0, 0, 0).unwrap();
+        assert_eq!(config.read(0x10, 4), Ok(0x8000_4004));
+        assert_eq!(config.read(0x14, 4), Ok(0));
+        assert_eq!(config.read(regs::COMMAND, 2), Ok(0x0402));
+        let writes = &host.registers.as_ref().unwrap().writes;
+        let sizing = writes
+            .iter()
+            .position(|write| *write == (1, 0x10, 4, u32::MAX))
+            .unwrap();
+        assert!(writes[..sizing].contains(&(1, 4, 2, 0x0400)));
+    }
 }
 
 #[test]

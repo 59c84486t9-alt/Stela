@@ -316,6 +316,97 @@ fn failed_old_root_or_binding_keeps_the_preparation_graph() {
     }
 }
 #[test]
+fn an_unmastered_function_keeps_its_seal_and_never_touches_the_root() {
+    let (prepared, state) = preparing(false, false);
+    let mut function = prepared.into_unmastered();
+    let config = function.config();
+    assert_eq!(
+        config.write16(
+            regs::COMMAND,
+            regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE
+        ),
+        Err(crate::bus::pci::ConfigError::before_effect(
+            ConfigFailure::BusMasterSealed
+        ))
+    );
+    // Decode and interrupt controls stay the driver's.
+    let decoding = regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE;
+    config.write16(regs::COMMAND, decoding).unwrap();
+    assert_eq!(config.read16(regs::COMMAND), Ok(decoding));
+    // It is a stopped requester in every observation.
+    // SAFETY: the isolated fixture has no engine, and its seal stays set.
+    let requester = unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
+        .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    let mut config = requester.into_function().into_config();
+    // SAFETY: isolated idle fixture; the kept retention must refuse retirement.
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
+    assert!(state.events.lock().unwrap().is_empty());
+    assert_eq!(state.drops.load(Ordering::Relaxed), 0);
+}
+/// A bus reset that records the function it reset.
+struct Bus {
+    available: bool,
+    resets: Arc<AtomicUsize>,
+}
+// SAFETY: this isolated model touches no configuration.
+unsafe impl BusReset for Bus {
+    fn available(&self) -> bool {
+        self.available
+    }
+    fn reset(
+        &mut self,
+        function: &mut Function<OwnedConfig>,
+        _: &dyn crate::bus::pci::power::Timer,
+    ) -> Result<(), crate::block::BlockError> {
+        assert_eq!(function.address, ADDRESS);
+        self.resets.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+struct NoWait;
+// SAFETY: the model reset never waits.
+unsafe impl crate::bus::pci::power::Timer for NoWait {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+}
+#[test]
+fn an_offered_bus_reset_reaches_the_kept_function_and_none_is_refused() {
+    let (mut prepared, state) = preparing(false, false);
+    assert!(!prepared.bus_reset_available());
+    assert_eq!(
+        prepared.reset_bus(&NoWait),
+        Err(crate::block::BlockError::Unsupported(
+            "no bus reset is offered for this PCI function"
+        ))
+    );
+    let resets = Arc::new(AtomicUsize::new(0));
+    for available in [false, true] {
+        let (prepared, _) = preparing(false, false);
+        // SAFETY: the model owns no bridge.
+        let prepared = unsafe {
+            prepared.with_bus_reset(Box::new(Bus {
+                available,
+                resets: resets.clone(),
+            }))
+        };
+        assert_eq!(prepared.bus_reset_available(), available);
+    }
+    // SAFETY: as above.
+    prepared = unsafe {
+        prepared.with_bus_reset(Box::new(Bus {
+            available: true,
+            resets: resets.clone(),
+        }))
+    };
+    assert_eq!(prepared.reset_bus(&NoWait), Ok(()));
+    assert_eq!(resets.load(Ordering::Relaxed), 1);
+    assert!(state.events.lock().unwrap().is_empty());
+}
+#[test]
 fn abandoning_preparation_does_not_release_an_unstopped_owner() {
     let (prepared, state) = preparing(false, false);
     drop(prepared);

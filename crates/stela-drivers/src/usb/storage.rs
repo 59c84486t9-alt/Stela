@@ -415,11 +415,13 @@ pub(super) fn discover_retained(
     dma: &mut dyn DmaAllocator,
     failures: &mut Vec<(String, BlockError)>,
 ) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
+    let command_us = bot::scan_command_time();
     let bot = Bot::native(
         Native {
             controller,
             id: device.id,
             endpoints,
+            command_us: command_us.clone(),
         },
         device,
         interface,
@@ -433,8 +435,11 @@ pub(super) fn discover_retained(
     let mut storage = UsbStorage {
         owner: media::TransportOwner::Bot(owner),
     };
-    let disks = storage.rescan(failures)?;
-    Ok((storage, disks))
+    // As the SCSI error handler does for a first command that times out:
+    // one device reset and fresh probes before the interface is given up.
+    let disks = storage.service(dma, failures);
+    bot::scanned(&command_us);
+    Ok((storage, disks?))
 }
 
 /// A SCSI-transparent Bulk-Only interface.
@@ -503,7 +508,9 @@ pub unsafe fn discover_uas_retained(
     let mut storage = UsbStorage {
         owner: media::TransportOwner::Uas(owner),
     };
-    let disks = storage.rescan(failures)?;
+    // As the SCSI error handler does for a first command that times out:
+    // one device reset and fresh probes before the interface is given up.
+    let disks = storage.service(dma, failures)?;
     Ok((storage, disks))
 }
 

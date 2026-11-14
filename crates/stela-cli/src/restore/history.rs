@@ -14,7 +14,6 @@ struct Catalog {
 #[derive(Deserialize)]
 struct Device {
     name: String,
-    cpid: Option<u32>,
     firmwares: Vec<Firmware>,
 }
 
@@ -30,17 +29,6 @@ struct Firmware {
 
 pub(super) struct Releases {
     pub images: Vec<Image>,
-    pub models: BTreeMap<String, String>,
-}
-
-fn device_name(device: &Device) -> String {
-    if let Some(chip) = device.cpid.and_then(stela_soc_data::board::name) {
-        let chip = chip.strip_prefix("Apple ").unwrap_or(chip);
-        if !device.name.contains(chip) {
-            return format!("{} · {chip}", device.name);
-        }
-    }
-    device.name.clone()
 }
 
 pub(super) fn load() -> Result<Releases> {
@@ -54,6 +42,28 @@ pub(super) fn load() -> Result<Releases> {
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("stela/", env!("CARGO_PKG_VERSION")))
         .build()?;
+    // The service answers a request it cannot serve with status 200 and no
+    // list, so the shared retry on a failed status never sees it.
+    let mut wait = Duration::from_secs(2);
+    for _ in 1..ATTEMPTS {
+        let bytes = fetch(&client)?;
+        if !lacks_list(&bytes) {
+            return parse(&bytes);
+        }
+        eprintln!(
+            "note: api.ipsw.me answered without its list of macOS releases; asking again in {} s",
+            wait.as_secs()
+        );
+        std::thread::sleep(wait);
+        wait *= 2;
+    }
+    parse(&fetch(&client)?)
+}
+
+/// How often [`load`] asks while the service answers without its list.
+const ATTEMPTS: u32 = 4;
+
+fn fetch(client: &reqwest::blocking::Client) -> Result<Vec<u8>> {
     let response = crate::net::send("loading the list of macOS releases (api.ipsw.me)", || {
         client.get(URL)
     })?
@@ -66,25 +76,35 @@ pub(super) fn load() -> Result<Releases> {
         bytes.len() <= 32 * 1024 * 1024,
         "IPSW.me catalog exceeds 32 MiB"
     );
-    parse(&bytes)
+    Ok(bytes)
+}
+
+/// Well-formed JSON that holds no devices: what the service answers when it
+/// cannot serve the request.
+fn lacks_list(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .is_ok_and(|value| value.get("devices").is_none_or(serde_json::Value::is_null))
 }
 
 fn parse(bytes: &[u8]) -> Result<Releases> {
     let catalog: Catalog = serde_json::from_slice(bytes).map_err(|error| {
         // A network that wants a sign-in first answers with its own page.
         let page = bytes.trim_ascii_start().starts_with(b"<");
+        let empty = lacks_list(bytes);
         anyhow::anyhow!(
             "the list of macOS releases from api.ipsw.me cannot be read ({error}){}",
             if page {
                 "; the network answered with a web page instead, as one that wants a sign-in \
                  first does: sign in to the network and run setup again"
+            } else if empty {
+                "; api.ipsw.me answered without its list, as it does when it is overloaded: \
+                 it was asked several times; wait a few minutes and run the command again"
             } else {
                 ""
             }
         )
     })?;
     let mut images: BTreeMap<(String, String), Image> = BTreeMap::new();
-    let mut models = BTreeMap::new();
     for (model, device) in catalog.devices {
         if !model.starts_with("Mac") && !model.starts_with("iMac") {
             continue;
@@ -92,7 +112,6 @@ fn parse(bytes: &[u8]) -> Result<Releases> {
         if device.name.to_ascii_lowercase().contains("virtual") {
             continue;
         }
-        models.insert(model.clone(), device_name(&device));
         for firmware in device.firmwares {
             if !firmware.signed {
                 continue;
@@ -133,7 +152,6 @@ fn parse(bytes: &[u8]) -> Result<Releases> {
     }
     Ok(Releases {
         images: images.into_values().collect(),
-        models,
     })
 }
 
@@ -150,6 +168,22 @@ mod tests {
             "iPhone1,1": {"name":"iPhone", "firmwares":[firmware]}
         }}))
         .unwrap()
+    }
+
+    /// api.ipsw.me has answered `{"devices":null}` (issue 39): the message
+    /// says the service gave no list, not only what the parser expected.
+    #[test]
+    fn an_answer_without_devices_says_the_service_gave_no_list() {
+        for answer in [r#"{"devices":null}"#, "{}"] {
+            let error = parse(answer.as_bytes()).err().unwrap().to_string();
+            assert!(error.contains("answered without its list"), "{error}");
+            assert!(lacks_list(answer.as_bytes()));
+        }
+        for answer in ["not json", r#"{"devices":{}}"#, r#"{"devices":1}"#] {
+            assert!(!lacks_list(answer.as_bytes()), "{answer}");
+        }
+        let error = parse(b"not json").err().unwrap().to_string();
+        assert!(!error.contains("answered without its list"), "{error}");
     }
 
     #[test]
@@ -180,16 +214,6 @@ mod tests {
         let images = parse(&serde_json::to_vec(&catalog)?)?.images;
         assert_eq!(images[0].models, ["MacBookAir10,1"]);
         Ok(())
-    }
-
-    #[test]
-    fn year_only_names_include_the_chip_from_the_shared_soc_registry() {
-        let device = Device {
-            name: "Mac Studio (2025)".into(),
-            cpid: Some(0x6041),
-            firmwares: vec![],
-        };
-        assert_eq!(device_name(&device), "Mac Studio (2025) · M4 Max");
     }
 
     #[test]

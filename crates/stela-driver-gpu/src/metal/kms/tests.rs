@@ -51,6 +51,20 @@ struct Card {
     invalid_buffer: Option<(u32, u64)>,
     resource_changes: usize,
     mode_changes: usize,
+    /// Whether the second connector has a display.
+    connected: bool,
+    /// Connector requests that probed: those that list no modes.
+    probes: u32,
+    /// Controller mode sets, the ones that turned it off included.
+    mode_sets: u32,
+    /// What the next mode set answers instead of setting the mode.
+    set_error: Option<i64>,
+    /// Mappings to refuse.
+    map_refusals: u32,
+    /// Dumb buffers and framebuffers given back, and mappings removed.
+    destroyed: Vec<u32>,
+    removed: Vec<u32>,
+    unmapped: usize,
 }
 
 impl Card {
@@ -70,6 +84,14 @@ impl Card {
             invalid_buffer: None,
             resource_changes: 0,
             mode_changes: 0,
+            connected: true,
+            probes: 0,
+            mode_sets: 0,
+            set_error: None,
+            map_refusals: 0,
+            destroyed: Vec::new(),
+            removed: Vec::new(),
+            unmapped: 0,
         }
     }
 
@@ -105,9 +127,10 @@ unsafe impl Drm for &mut Card {
                 }
                 GET_CONNECTOR => {
                     let connector = &mut *argument.cast::<Connector>();
-                    let connected = connector.id == 51;
+                    let connected = connector.id == 51 && self.connected;
                     connector.connection = if connected { CONNECTED } else { 2 };
                     let modes: &[ModeInfo] = if connected { &self.modes } else { &[] };
+                    self.probes += u32::from(connector.mode_count == 0);
                     // Linux fills a list only when all of it fits.
                     if connector.mode_count as usize >= modes.len() && connector.mode_count != 0 {
                         let list = connector.modes as *mut ModeInfo;
@@ -116,9 +139,6 @@ unsafe impl Drm for &mut Card {
                     if connector.encoder_count != 0 {
                         (connector.encoders as *mut u32).write(60);
                     }
-                    assert!(
-                        connector.mode_count == 0 || connector.mode_count == modes.len() as u32
-                    );
                     connector.mode_count = modes.len() as u32;
                     connector.encoder_count = 1;
                     if connected && connector.modes != 0 && self.mode_changes != 0 {
@@ -155,8 +175,14 @@ unsafe impl Drm for &mut Card {
                 SET_CRTC => {
                     let crtc = &*argument.cast::<Crtc>();
                     assert_eq!(crtc.id, 41);
-                    assert_eq!((crtc.connectors as *const u32).read(), 51);
-                    self.set = Some((crtc.mode, crtc.framebuffer));
+                    self.mode_sets += 1;
+                    if let Some(error) = self.set_error.take() {
+                        return error;
+                    }
+                    self.set = (crtc.connector_count != 0).then(|| {
+                        assert_eq!((crtc.connectors as *const u32).read(), 51);
+                        (crtc.mode, crtc.framebuffer)
+                    });
                 }
                 PAGE_FLIP => {
                     assert!(self.immediate, "a flip requested where it must wait");
@@ -170,13 +196,30 @@ unsafe impl Drm for &mut Card {
                     }
                     self.flips.push((*argument.cast::<PageFlip>()).framebuffer);
                 }
+                REMOVE_FB => self.removed.push(*argument.cast::<u32>()),
+                DESTROY_DUMB => self
+                    .destroyed
+                    .push((*argument.cast::<DestroyDumb>()).handle),
                 other => panic!("request {other:#x}"),
             }
         }
         0
     }
 
+    fn unmap(&mut self, pixels: NonNull<u8>, bytes: usize) {
+        assert!(
+            self.memory
+                .iter()
+                .any(|memory| memory.as_ptr() == pixels.as_ptr() && memory.len() == bytes)
+        );
+        self.unmapped += 1;
+    }
+
     fn map(&mut self, _: u64, bytes: usize) -> Option<NonNull<u8>> {
+        if self.map_refusals != 0 {
+            self.map_refusals -= 1;
+            return None;
+        }
         self.memory.push(vec![0xa5; bytes]);
         NonNull::new(self.memory.last_mut()?.as_mut_ptr())
     }
@@ -196,6 +239,8 @@ fn requests_match_linux() {
     assert_eq!(CREATE_DUMB, 0xc020_64b2);
     assert_eq!(MAP_DUMB, 0xc010_64b3);
     assert_eq!(ADD_FB2, 0xc068_64b8);
+    assert_eq!(REMOVE_FB, 0xc004_64af);
+    assert_eq!(DESTROY_DUMB, 0xc004_64b4);
 }
 
 #[test]
@@ -205,10 +250,98 @@ fn the_firmwares_size_wins_then_the_preferred_mode() {
         mode(3840, 2160, PREFERRED),
         mode(1920, 1080, 0),
     ];
-    assert_eq!(choose(&modes, (1920, 1080)), Some(modes[2]));
-    assert_eq!(choose(&modes, (800, 600)), Some(modes[1]));
-    assert_eq!(choose(&modes[..1], (800, 600)), Some(modes[0]));
-    assert_eq!(choose(&[], (800, 600)), None);
+    let any: Fits<'_> = &|_, _, _| true;
+    assert_eq!(
+        choose(&modes, Wanted::Size((1920, 1080)), any),
+        Some(modes[2])
+    );
+    assert_eq!(
+        choose(&modes, Wanted::Size((800, 600)), any),
+        Some(modes[1])
+    );
+    assert_eq!(
+        choose(&modes[..1], Wanted::Size((800, 600)), any),
+        Some(modes[0])
+    );
+    assert_eq!(choose(&[], Wanted::Size((800, 600)), any), None);
+}
+
+/// Before the guest's mode is set the monitor's own mode wins: its fastest
+/// of the preferred size that fits, then the firmware's size.
+#[test]
+fn a_display_taken_at_start_runs_the_monitors_own_mode() {
+    let at = |width, height, kind, vrefresh| ModeInfo {
+        vrefresh,
+        ..mode(width, height, kind)
+    };
+    let modes = [
+        at(3840, 2160, PREFERRED, 60),
+        at(3840, 2160, 0, 144),
+        at(1920, 1080, 0, 240),
+        at(1920, 1080, 0, 60),
+    ];
+    let any: Fits<'_> = &|_, _, _| true;
+    let firmware = Wanted::Native((1920, 1080));
+    assert_eq!(choose(&modes, firmware, any), Some(modes[0]));
+    assert_eq!(
+        choose(&modes, Wanted::Size((1920, 1080)), any),
+        Some(modes[2])
+    );
+    // The native size cannot be described at all: the firmware's size.
+    let small: Fits<'_> = &|width, _, _| width < 3840;
+    assert_eq!(choose(&modes, firmware, small), Some(modes[2]));
+    // Its listed-first rate cannot: the next of the native size.
+    let fast = [modes[1], at(3840, 2160, PREFERRED, 60), modes[2]];
+    let slow: Fits<'_> = &|_, _, refresh| refresh < 100_000;
+    assert_eq!(choose(&fast, firmware, slow), Some(fast[1]));
+    // No preferred mode: the firmware's size, then the first.
+    assert_eq!(choose(&modes[2..], firmware, any), Some(modes[2]));
+    assert_eq!(
+        choose(&modes[2..], Wanted::Native((800, 600)), any),
+        Some(modes[2])
+    );
+}
+
+/// A monitor lists its fastest mode of a size first. One the guest cannot
+/// be told of is passed over for the next of that size; with none of that
+/// size, the preferred one that fits, then any; and with no mode that fits
+/// at all, the choice is as without the test.
+#[test]
+fn a_mode_the_guest_cannot_be_told_of_is_passed_over() {
+    let at = |width, height, kind, vrefresh| ModeInfo {
+        vrefresh,
+        ..mode(width, height, kind)
+    };
+    let modes = [
+        at(2560, 1440, PREFERRED, 180),
+        at(2560, 1440, 0, 144),
+        at(2560, 1440, 0, 60),
+        at(1920, 1080, 0, 240),
+        at(1920, 1080, 0, 60),
+    ];
+    let below_165: Fits<'_> = &|_, _, refresh| refresh < 165_000;
+    assert_eq!(
+        choose(&modes, Wanted::Size((2560, 1440)), below_165),
+        Some(modes[1])
+    );
+    assert_eq!(
+        choose(&modes, Wanted::Size((1920, 1080)), below_165),
+        Some(modes[4])
+    );
+    // No mode of that size: the preferred does not fit, so the first that does.
+    assert_eq!(
+        choose(&modes, Wanted::Size((800, 600)), below_165),
+        Some(modes[1])
+    );
+    let none: Fits<'_> = &|_, _, _| false;
+    assert_eq!(
+        choose(&modes, Wanted::Size((1920, 1080)), none),
+        Some(modes[3])
+    );
+    assert_eq!(
+        choose(&modes, Wanted::Size((800, 600)), none),
+        Some(modes[0])
+    );
 }
 
 #[test]
@@ -221,6 +354,24 @@ fn the_connected_output_runs_on_a_controller_it_can_reach() {
         display.buffers[0].framebuffer
     };
     assert_eq!(card.set, Some((modes[0], front)));
+}
+
+#[test]
+fn the_survey_names_every_connector_with_what_the_driver_detected() {
+    let mut card = Card::new(vec![mode(4, 2, PREFERRED)]);
+    let seen = survey(&mut &mut card).unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen.iter().filter(|seen| seen.connected).count(), 1);
+    let connected = seen.iter().find(|seen| seen.connected).unwrap();
+    assert_eq!(
+        alloc::format!("{connected}"),
+        "Unknown-0 connected modes=1 encoders=1"
+    );
+    let other = seen.iter().find(|seen| !seen.connected).unwrap();
+    assert_eq!(
+        alloc::format!("{other}"),
+        "Unknown-0 not connected modes=0 encoders=1"
+    );
 }
 
 #[test]
@@ -327,4 +478,76 @@ fn each_buffer_is_filled_with_its_own_stale_rows_and_the_damage() {
     assert_eq!(asked[..3], [every.clone(), every.clone(), every]);
     assert_eq!(asked[3], [0, 1, 2]);
     assert_eq!(asked[4], [1, 2]);
+}
+
+#[test]
+fn a_detected_display_is_read_without_a_probe() {
+    let mut card = Card::new(vec![mode(4, 2, PREFERRED), mode(2, 2, 0)]);
+    assert_eq!(detected(&mut &mut card), Ok(true));
+    card.connected = false;
+    assert_eq!(detected(&mut &mut card), Ok(false));
+    assert_eq!(card.probes, 0);
+}
+
+#[test]
+fn an_output_that_returns_gets_a_full_mode_set_on_the_buffer_on_screen() {
+    let modes = vec![mode(2, 2, PREFERRED)];
+    let mut card = Card::new(modes.clone());
+    let front;
+    {
+        let mut display = Display::take(&mut card, (2, 2)).unwrap();
+        front = display.buffers[0].framebuffer;
+        assert_eq!(display.watch(), Ok(Watched::Unchanged));
+        display.drm.connected = false;
+        assert_eq!(display.watch(), Ok(Watched::Lost));
+        assert_eq!(display.watch(), Ok(Watched::Unchanged));
+        // Where a request must wait, nothing is read.
+        display.drm.connected = true;
+        display.drm.immediate = false;
+        assert_eq!(display.watch(), Ok(Watched::Unchanged));
+        display.drm.immediate = true;
+        let probes = display.drm.probes;
+        assert_eq!(display.watch(), Ok(Watched::Restored));
+        assert_eq!(display.drm.probes, probes);
+        assert_eq!(display.watch(), Ok(Watched::Unchanged));
+    }
+    // The first set, then off and on again.
+    assert_eq!(card.mode_sets, 3);
+    assert_eq!(card.set, Some((modes[0], front)));
+}
+
+#[test]
+fn a_display_that_is_not_taken_gives_its_buffers_back() {
+    // The mode set is refused: all three buffers go.
+    let mut third = Card::new(vec![mode(1920, 1080, PREFERRED)]);
+    third.set_error = Some(-22);
+    assert!(Display::take(&mut third, (1920, 1080)).is_err());
+    assert_eq!(third.destroyed.len(), 3);
+    assert_eq!(third.removed.len(), 3);
+    assert_eq!(third.unmapped, 3);
+    assert_eq!(third.set, None);
+
+    // A refused mapping: the buffer and its framebuffer go, with no mapping.
+    let mut card = Card::new(vec![mode(1920, 1080, PREFERRED)]);
+    card.map_refusals = 1;
+    assert_eq!(
+        Display::take(&mut card, (1920, 1080)).err(),
+        Some(Error::Map)
+    );
+    assert_eq!(card.destroyed.len(), 1);
+    assert_eq!(card.removed.len(), 1);
+    assert_eq!(card.unmapped, 0);
+
+    // A buffer of the wrong shape has no framebuffer yet.
+    let mut shaped = Card::new(vec![mode(1920, 1080, PREFERRED)]);
+    shaped.invalid_buffer = Some((4, 4));
+    assert_eq!(
+        Display::take(&mut shaped, (1920, 1080)).err(),
+        Some(Error::InvalidBuffer)
+    );
+    assert_eq!(shaped.destroyed.len(), 1);
+    assert!(shaped.removed.is_empty());
+
+    // The next look takes the display.
+    assert!(Display::take(&mut card, (1920, 1080)).is_ok());
 }

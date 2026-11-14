@@ -363,6 +363,46 @@ static const char *hoisted =
 static const char *mistyped =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
 
+/* A [[function_constant(splits)]] buffer of a ushort constant, which Metal
+ * tests against zero: its predicate is a ushort, as MPS's matrix kernels'
+ * are. The kernel adds the buffer's value when splits is not zero. */
+static const char *counted =
+   "@splits.init = linkonce_odr hidden addrspace(2) externally_initialized constant i16"
+   " undef, section \"air.fc_initializer\", align 2\n"
+   "@splits = internal unnamed_addr addrspace(2) global i16 undef, align 2\n"
+   "@split = internal addrspace(2) global i16 0, align 2\n"
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"
+   "@llvm.compiler.used = appending global [1 x ptr] [ptr addrspacecast"
+   " (ptr addrspace(2) @split to ptr)], section \"llvm.metadata\"\n"
+   "declare i16 @air.normalize_function_constant_predicate.i16(i16)\n"
+   "define void @counted(ptr addrspace(1) %data, ptr addrspace(1) %extra) {\n"
+   "%u = load i16, ptr addrspace(2) @splits, align 2\n"
+   "%on = icmp ne i16 %u, 0\n"
+   "br i1 %on, label %added, label %done\n"
+   "added:\n%e = load i32, ptr addrspace(1) %extra, align 4\n"
+   "store i32 %e, ptr addrspace(1) %data, align 4\nret void\n"
+   "done:\nstore i32 7, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "define internal void @init() section \"air.static_init\" {\n"
+   "%v = load i16, ptr addrspace(2) @splits.init, align 2\n"
+   "store i16 %v, ptr addrspace(2) @splits, align 2\n"
+   "%t = call i16 @air.normalize_function_constant_predicate.i16(i16 %v)\n"
+   "store i16 %t, ptr addrspace(2) @split, align 2\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @counted, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4,"
+   " !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"int\","
+   " !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.function_constant\", !43, !\"air.buffer\","
+   " !\"air.location_index\", i32 1, i32 1, !\"air.read\", !\"air.address_space\", i32 1,"
+   " !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"extra\"}\n"
+   "!43 = !{ptr addrspace(2) @split, !\"ushort\", !\"splits\"}\n"
+   "!air.function_constants = !{!50}\n"
+   "!50 = !{ptr addrspace(2) @splits.init, !\"ushort\", !\"splits\", i32 0}\n";
+
 /* A fragment function that reads a [[function_constant(use_tint)]] buffer on
  * one side of a run-time test. With use_tint false that side cannot run, and
  * the test and its read go with it. */
@@ -1981,6 +2021,23 @@ function_constants_select_arguments(void)
    }
    assert(!reflect(mistyped, "conditional", &reflection, &error) &&
           error.kind == STELA_AIR_METADATA && strstr(error.detail, "predicate"));
+   /* A predicate of an integer constant holds when it is not zero. */
+   assert(reflect(counted, "counted", &reflection, &error));
+   assert(reflection.buffer_count == 1);
+   for (uint16_t splits = 0; splits < 3; splits++) {
+      const struct stela_air_constant_value value = {0, &splits, sizeof(splits)};
+      if (!reflect_specialized(counted, "counted", &value, 1, &reflection, &error))
+         fprintf(stderr, "counted: %u %s\n", error.kind, error.detail);
+      assert(reflection.buffer_count == (splits ? 2u : 1u));
+      assert(!splits || (reflection.buffers[1].index == 1 &&
+                         reflection.buffers[1].access == STELA_METAL_ACCESS_READ));
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {64, 1, 1}, .constants = &value, .constant_count = 1,
+      };
+      nir_shader *shader = compile(counted, "counted", &specialization, &error);
+      assert(shader);
+      stela_metal_release(shader);
+   }
    /* A render stage drops the path that must reach an absent buffer. */
    for (uint8_t on = 0; on < 2; on++) {
       const struct stela_air_constant_value value = {0, &on, sizeof(on)};
@@ -4488,6 +4545,255 @@ dynamic_kernels_take_their_dispatch_shape(void)
           error.kind == STELA_AIR_INPUT);
 }
 
+/* `shaped` with its threadgroup buffer's metadata typed by `typing`. */
+static char *
+shaped_typed(const char *typing)
+{
+   static const char typed[] =
+      "!\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+      " !\"air.arg_type_name\", !\"uint\",";
+   const char *at = strstr(shaped, typed);
+   assert(at && !strstr(at + 1, typed));
+   return ralloc_asprintf(NULL, "%.*s!\"air.address_space\", i32 3%s%s", (int)(at - shaped), shaped,
+                          typing, at + strlen(typed));
+}
+
+/* A `threadgroup void *` argument, which declares neither size nor
+ * alignment, as MPS's reductions take theirs: it reflects no bytes of its
+ * own, takes its dispatch's length and placement, and its stores reach the
+ * memory a typed buffer's do. Half a declaration is refused. */
+static void
+untyped_threadgroup_buffers_take_their_dispatch_lengths(void)
+{
+   struct stela_air_error error;
+   char *untyped = shaped_typed(", !\"air.arg_type_name\", !\"void\",");
+   struct stela_metal_reflection reflection;
+   assert(reflect(untyped, "shaped", &reflection, &error));
+   assert(reflection.threadgroup_count == 1 && reflection.threadgroup[0].index == 1 &&
+          reflection.threadgroup[0].bytes == 0);
+
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .dynamic_threadgroups = 1,
+   };
+   nir_shader *shader = compile(untyped, "shaped", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "untyped dynamic: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   struct air_effect_store trace[8];
+   assert(run_shaped(shader, 5, trace, ARRAY_SIZE(trace)) == 4);
+   expect_store(&trace[0], false, BASE + OUT, (const uint32_t[]){1, 1, 0}, 3);
+   expect_store(&trace[1], false, BASE + OUT + 16, (const uint32_t[]){4, 2, 1}, 3);
+   expect_store(&trace[2], false, BASE + OUT + 32, (const uint32_t[]){5, 1, 0}, 3);
+   expect_store(&trace[3], true, 48, (const uint32_t[]){1}, 1);
+   stela_metal_release(shader);
+
+   const struct stela_metal_threadgroup_length lengths[] = {{1, 256}};
+   specialization = (struct stela_metal_specialization){
+      .workgroup_size = {64, 1, 1}, .threadgroup_length_count = 1, .threadgroup_lengths = lengths,
+   };
+   shader = compile(untyped, "shaped", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "untyped: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.shared_size >= 256);
+   stela_metal_release(shader);
+   /* Its only bytes are its dispatch's length. */
+   specialization.threadgroup_length_count = 0;
+   assert(!compile(untyped, "shaped", &specialization, &error) && error.kind == STELA_AIR_ARGUMENT);
+   ralloc_free(untyped);
+
+   const char *halves[] = {
+      ", !\"air.arg_type_size\", i32 4, !\"air.arg_type_name\", !\"uint\",",
+      ", !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\",",
+      ", !\"air.arg_type_size\", i32 0, !\"air.arg_type_align_size\", i32 4,",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(halves); i++) {
+      char *half = shaped_typed(halves[i]);
+      assert(!reflect(half, "shaped", &reflection, &error) && error.kind == STELA_AIR_ARGUMENT);
+      ralloc_free(half);
+   }
+}
+
+/* A C++ template parameter object, an internal constant of the thread
+ * address space, which the kernel copies and reads fields of, as MPS's
+ * tensor kernels copy their matmul descriptors. */
+static const char *descriptor_copy =
+   "%struct.d = type { i32, i32, i8, i32 }\n"
+   "@descriptor = internal unnamed_addr constant %struct.d { i32 16, i32 32, i8 1, i32 5 },"
+   " align 16\n"
+   "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
+   "define void @copied(ptr addrspace(1) %out) {\n"
+   "%copy = alloca %struct.d, align 4\n"
+   "call void @llvm.memcpy.p0.p0.i64(ptr align 4 %copy, ptr align 16 @descriptor, i64 16, i1 false)\n"
+   "%b = getelementptr i8, ptr %copy, i64 4\n%v = load i32, ptr %b, align 4\n"
+   "%c = getelementptr i8, ptr @descriptor, i64 12\n%w = load i32, ptr %c, align 4\n"
+   "%s = add i32 %v, %w\nstore i32 %s, ptr addrspace(1) %out, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!2 = !{ptr @copied, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n";
+
+/* A threadgroup array of bfloat, as MPS's quantized matrix kernels stage
+ * their tiles: 2.5 and 1.5 stored at its first and last elements. */
+static const char *bfloat_tile =
+   "@tile = internal addrspace(3) global [4 x bfloat] undef, align 2\n"
+   "define void @tiled(ptr addrspace(1) %out) {\n"
+   "store bfloat 0xR4020, ptr addrspace(3) @tile, align 2\n"
+   "%p = getelementptr [4 x bfloat], ptr addrspace(3) @tile, i64 0, i64 3\n"
+   "store bfloat 0xR3FC0, ptr addrspace(3) %p, align 2\n"
+   "store i32 1, ptr addrspace(1) %out, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!2 = !{ptr @tiled, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n";
+
+/* Constant data of the thread address space holds its initializer's
+ * values, copied or read in place. */
+static void
+thread_constants_are_constant_data(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(descriptor_copy, "copied", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "copied: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   assert(run_summed(shader) == 32 + 5);
+   stela_metal_release(shader);
+}
+
+/* A threadgroup bfloat array holds the bfloat bits stored to it. */
+static void
+threadgroup_globals_hold_bfloat(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(bfloat_tile, "tiled", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "tiled: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.shared_size >= 8);
+   static uint8_t memory[0x900];
+   uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+   memset(memory, 0, sizeof(memory));
+   put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + OUT);
+   const struct air_effect_environment environment = {
+      .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+      .push_size = sizeof(push),
+   };
+   struct air_effect_store trace[4];
+   struct air_effect_run run = air_effect_execute_in(shader, 100000, trace, ARRAY_SIZE(trace),
+                                                     &environment);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "tiled: %s\n", run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE && run.stores == 3);
+   const uint16_t bits[] = {0x4020, 0x3fc0};
+   for (unsigned i = 0; i < 2; i++) {
+      assert(trace[i].shared && trace[i].bits == 16 && trace[i].components == 1);
+      assert(trace[i].values[0].u16 == bits[i]);
+   }
+   assert(trace[1].address == trace[0].address + 6);
+   expect_store(&trace[2], false, BASE + OUT, (const uint32_t[]){1}, 1);
+   stela_metal_release(shader);
+}
+
+/* Counts a loop to 4, and by tens to 40, beside a pointer PHI stepping off
+ * null, declared between the loop header's other PHIs, as MPS's matrix multiplies leave a
+ * buffer pointer their constants rule out: nothing may come between them. */
+static const char *null_loop =
+   "define void @null_loop(ptr addrspace(1) %out) {\n"
+   "entry:\n%r = getelementptr i8, ptr addrspace(1) null, i64 16\nbr label %loop\n"
+   "loop:\n%i = phi i32 [ 0, %entry ], [ %n, %loop ]\n"
+   "%p = phi ptr addrspace(1) [ %r, %entry ], [ %q, %loop ]\n"
+   "%j = phi i32 [ 10, %entry ], [ %m, %loop ]\n"
+   "%q = getelementptr i8, ptr addrspace(1) %p, i64 4\n"
+   "%n = add i32 %i, 1\n%m = add i32 %j, 10\n%c = icmp ult i32 %n, 4\n"
+   "br i1 %c, label %loop, label %done\n"
+   "done:\n%none = icmp eq ptr addrspace(1) %p, null\n%z = zext i1 %none to i32\n"
+   "%t = add i32 %n, %z\n%s = add i32 %t, %j\n"
+   "store i32 %s, ptr addrspace(1) %out, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!2 = !{ptr @null_loop, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n";
+
+/* A pointer PHI rooted at null among a block's PHIs keeps them together,
+ * and the loop and the comparison compute what they say. */
+static void
+null_pointer_phis_stay_among_phis(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(null_loop, "null_loop", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "null_loop: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   /* The pointer stepped off null is not null. */
+   assert(run_summed(shader) == 4 + 40);
+   stela_metal_release(shader);
+}
+
+/* Writes its thread's index plus 100 through the device address its
+ * constant parameters hold as an integer, as MPS's kernels keep their
+ * buffers' gpuAddress: the even threads' at it, the odd threads' 64 bytes
+ * past it, joined by a PHI. */
+static const char *addressed =
+   "define void @addressed(ptr addrspace(2) %params, i32 %tid) {\n"
+   "entry:\n%odd = and i32 %tid, 1\n%is_odd = icmp ne i32 %odd, 0\n"
+   "%a = load i64, ptr addrspace(2) %params, align 8\n"
+   "%pa = inttoptr i64 %a to ptr addrspace(1)\n"
+   "br i1 %is_odd, label %second, label %join\n"
+   "second:\n%pb = getelementptr i8, ptr addrspace(1) %pa, i64 64\nbr label %join\n"
+   "join:\n%p = phi ptr addrspace(1) [ %pa, %entry ], [ %pb, %second ]\n"
+   "%v = add i32 %tid, 100\nstore i32 %v, ptr addrspace(1) %p, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!2 = !{ptr @addressed, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","
+   " !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 8, !\"air.arg_type_name\", !\"Params\", !\"air.arg_name\", !\"params\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* A pointer made of a device address reaches the memory at that address,
+ * and past it through a PHI. */
+static void
+pointers_made_of_addresses_reach_their_memory(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(addressed, "addressed", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "addressed: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   for (uint32_t tid = 0; tid < 2; tid++) {
+      static uint8_t memory[0x900];
+      uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+      memset(memory, 0, sizeof(memory));
+      put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
+      put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + OUT);
+      put64(memory + OUT, BASE + OUT + 0x40);
+      const struct air_effect_environment environment = {
+         .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+         .push_size = sizeof(push), .local_index = tid,
+      };
+      struct air_effect_store store;
+      struct air_effect_run run = air_effect_execute_in(shader, 100000, &store, 1, &environment);
+      if (run.status != AIR_EFFECT_COMPLETE)
+         fprintf(stderr, "addressed: %s\n", run.detail);
+      assert(run.status == AIR_EFFECT_COMPLETE && run.stores == 1);
+      expect_store(&store, false, BASE + OUT + (tid ? 0x80 : 0x40), (const uint32_t[]){tid + 100}, 1);
+   }
+   stela_metal_release(shader);
+   /* Only a 64-bit address makes a device or constant pointer. */
+   char *narrow = ralloc_asprintf(NULL, "%s", addressed);
+   char *at = strstr(narrow, "%pa = inttoptr i64 %a");
+   assert(at);
+   memcpy(at, "%pa = inttoptr i32 %t", strlen("%pa = inttoptr i32 %t"));
+   char *fixture = ralloc_asprintf(NULL, "%.*s%%t = trunc i64 %%a to i32\n%s", (int)(at - narrow),
+                                   narrow, at);
+   assert(!compile(fixture, "addressed", &specialization, &error) && error.kind == STELA_AIR_TYPE);
+   ralloc_free(fixture);
+   ralloc_free(narrow);
+}
+
 /* TEMPORARY host harness (not for commit). */
 static void
 harness(void)
@@ -4573,6 +4879,11 @@ main(void)
    reflection_requires_a_unique_listed_entry();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();
+   untyped_threadgroup_buffers_take_their_dispatch_lengths();
+   thread_constants_are_constant_data();
+   threadgroup_globals_hold_bfloat();
+   pointers_made_of_addresses_reach_their_memory();
+   null_pointer_phis_stay_among_phis();
    render_stages_compile_at_their_linked_locations();
    patch_functions_compile_behind_their_tessellation_stages();
    kernels_compile_with_their_stage_in();

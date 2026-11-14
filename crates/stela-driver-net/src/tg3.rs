@@ -5,16 +5,18 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
 //!
-//! `Packet::attach` composes one polled BCM5720/5761/5762 A0 unmanaged copper
-//! queue with requester-domain DMA and explicit retirement. BCM5761 requires
+//! `Packet::attach` composes one polled BCM5720/5761/5762 A0 copper queue
+//! with requester-domain DMA and explicit retirement. BCM5761 requires
 //! function-zero NIC wiring and recognized NVM; its original CLKREQ setting
 //! selects the source per-speed send-BD workaround. These
 //! bounded source-reviewed packet profiles have native model validation;
-//! hardware remains unchecked. See NOTICE. Managed, SerDes and
-//! all other ASIC/revision profiles explicitly refuse.
+//! hardware remains unchecked. See NOTICE. SerDes and all other
+//! ASIC/revision profiles explicitly refuse.
 //!
 //! All named chips have an APE window. MDIO takes the per-function APE
-//! PHY grant, even when management firmware is not running. Linux's ignored
+//! PHY grant, even when management firmware is not running. Management
+//! firmware (ASF, APE) is told of the driver's start and stop as Linux
+//! tells it, and keeps its PHY, receive rules and address slot. Linux's ignored
 //! lock failures, firmware timeout fallback and silent stop timeout are
 //! errors here. An uncertain operation poisons and keeps the
 //! register owner, never permitting a new epoch by object reconstruction.
@@ -44,8 +46,9 @@ pub enum Error {
     MdioReadFailed,
     FirmwareTimeout,
     StopTimeout(u32),
-    UnsupportedManaged,
-    UnmanagedNotObserved,
+    /// The board configuration in NIC SRAM is not signed, so neither its
+    /// media nor its management setting can be trusted.
+    UnsignedBoard,
     UnsupportedPcie,
     ConfigDidNotLatch,
     NvramTimeout,
@@ -90,12 +93,7 @@ impl core::fmt::Display for Error {
             Self::StopTimeout(register) => {
                 write!(f, "its engine at {register:#x} did not stop")
             }
-            Self::UnsupportedManaged => {
-                f.write_str("its management firmware runs a mode Stela does not support")
-            }
-            Self::UnmanagedNotObserved => {
-                f.write_str("Stela could not confirm that no management firmware runs")
-            }
+            Self::UnsignedBoard => f.write_str("its board configuration in NIC SRAM is not signed"),
             Self::UnsupportedPcie => f.write_str("its PCIe setup is unsupported"),
             Self::ConfigDidNotLatch => f.write_str("a setting did not take"),
             Self::NvramTimeout => f.write_str("its NVRAM did not answer"),
@@ -167,15 +165,100 @@ pub use crate::bus::pci::power::Timer as Delay;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asic {
     Bcm5761,
+    Bcm5784,
+    Bcm57765,
+    Bcm57766,
+    Bcm5717,
+    Bcm5719,
     Bcm5720,
     Bcm5762,
+}
+impl Asic {
+    /// tg3's 5717_PLUS class among the named ASICs: the internal port
+    /// comes from the CPMU and addresses the PHY at port + 1.
+    pub const fn plus_5717(self) -> bool {
+        matches!(self, Self::Bcm5717 | Self::Bcm5719 | Self::Bcm5720)
+    }
+    /// The named 5755_PLUS ASICs before 57765_PLUS (5761 and 5784): no
+    /// jumbo ring, 512-entry rings, PCIe 1.0a reset fixes and the PHY
+    /// jitter workaround.
+    pub const fn legacy(self) -> bool {
+        matches!(self, Self::Bcm5761 | Self::Bcm5784)
+    }
+    /// tg3's 57765_CLASS: ASIC_REV_57765 and ASIC_REV_57766.
+    pub const fn class_57765(self) -> bool {
+        matches!(self, Self::Bcm57765 | Self::Bcm57766)
+    }
+    /// tg3's LRG_PROD_RING_CAP: 2048-entry standard and 4096-entry return
+    /// rings.
+    pub const fn large_rings(self) -> bool {
+        matches!(
+            self,
+            Self::Bcm5717 | Self::Bcm5719 | Self::Bcm5720 | Self::Bcm5762
+        )
+    }
+}
+
+/// Devices Linux's PCI table marks TG3_DRV_DATA_FLAG_10_100_ONLY among the
+/// named ones (BCM57791, BCM57795): their PHY has no gigabit to advertise.
+pub const fn ten_hundred_only(device: u16) -> bool {
+    matches!(device, 0x16b2 | 0x16b6)
+}
+
+/// Whether the device has an APE: Linux's `tg3_init_one` maps BAR 2 and
+/// sets ENABLE_APE for exactly these device IDs. Every other Tigon3 has no
+/// APE window, so its APE locks, events and register space do not exist.
+pub const fn ape(device: u16) -> bool {
+    matches!(
+        device,
+        0x1680
+            | 0x1681
+            | 0x1688
+            | 0x1689
+            | 0x1655
+            | 0x1665
+            | 0x1656
+            | 0x1657
+            | 0x165f
+            | 0x1683
+            | 0x1642
+            | 0x1687
+            | 0x1643
+            | 0x16f3
+            | 0x1641
+    )
 }
 
 /// Source PCI table membership is only a probe candidate, never an attach grant.
 pub fn candidate(vendor: u16, device: u16, class: [u8; 3]) -> bool {
     vendor == 0x14e4
         && class == [2, 0, 0]
-        && matches!(device, 0x165f | 0x1680 | 0x1681 | 0x1688 | 0x1689 | 0x1687)
+        && (gen15_product(device)
+            || matches!(
+                device,
+                0x1698
+                    | 0x1684
+                    | 0x1655
+                    | 0x1656
+                    | 0x1665
+                    | 0x1657
+                    | 0x165f
+                    | 0x1680
+                    | 0x1681
+                    | 0x1688
+                    | 0x1689
+                    | 0x1687
+            ))
+}
+
+/// The devices `tg3_detect_asic_rev` reads the product ID of from
+/// TG3PCI_GEN15_PRODID_ASICREV: BCM57781, 57785, 57761, 57765, 57791,
+/// 57795, 57762, 57766, 57782 and 57786, the 57765 class.
+pub const fn gen15_product(device: u16) -> bool {
+    matches!(
+        device,
+        0x16b0 | 0x16b1 | 0x16b2 | 0x16b4 | 0x16b5 | 0x16b6 | 0x1682 | 0x1686 | 0x16b7 | 0x16b3
+    )
 }
 
 impl From<crate::bus::dma::mapping::DmaError> for Error {

@@ -26,7 +26,12 @@ pub(in super::super) struct Model {
     firmware_busy: Cell<bool>,
     software_busy: Cell<bool>,
     sw_semaphore_refused: Cell<bool>,
-    elapsed: Cell<u64>,
+    /// Firmware holds the PHY's SW/FW semaphore until this model time.
+    pub(in super::super) firmware_busy_until: Cell<u64>,
+    /// Each MDIO cycle takes this long before MDIC reports it ready.
+    pub(in super::super) mdio_cycle_us: Cell<u64>,
+    mdio_ready_at: Cell<u64>,
+    pub(in super::super) elapsed: Cell<u64>,
 }
 impl Model {
     fn ready(flash: bool) -> Self {
@@ -64,6 +69,9 @@ impl Model {
             firmware_busy: Cell::new(false),
             software_busy: Cell::new(false),
             sw_semaphore_refused: Cell::new(false),
+            firmware_busy_until: Cell::new(0),
+            mdio_cycle_us: Cell::new(0),
+            mdio_ready_at: Cell::new(0),
             elapsed: Cell::new(0),
         }
     }
@@ -81,8 +89,13 @@ impl Registers for Model {
         if register == SWSM && self.software_busy.get() {
             return SMBI;
         }
-        if register == SW_FW_SYNC && self.firmware_busy.get() {
+        if register == SW_FW_SYNC
+            && (self.firmware_busy.get() || self.elapsed.get() < self.firmware_busy_until.get())
+        {
             return PHY_SYNC << 16;
+        }
+        if register == MDIC && self.elapsed.get() < self.mdio_ready_at.get() {
+            return 0;
         }
         self.state
             .borrow()
@@ -134,6 +147,8 @@ impl Registers for Model {
         }
         let count = self.mdio_count.get() + 1;
         self.mdio_count.set(count);
+        self.mdio_ready_at
+            .set(self.elapsed.get() + self.mdio_cycle_us.get());
         if self.mdio_silent.get() {
             return;
         }
@@ -173,6 +188,21 @@ impl Registers for Model {
         state
             .registers
             .insert(MDIC, value & !0xffff | u32::from(data) | MDIC_READY);
+    }
+}
+// Link supervision keeps its own handles on the registers and clock for
+// reads that run across polls.
+impl Registers for alloc::rc::Rc<Model> {
+    fn read(&self, register: usize) -> u32 {
+        Model::read(self, register)
+    }
+    fn write(&self, register: usize, value: u32) {
+        Model::write(self, register, value);
+    }
+}
+impl Timer for alloc::rc::Rc<Model> {
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError> {
+        Model::delay(self, microseconds)
     }
 }
 impl Timer for Model {
@@ -390,7 +420,7 @@ fn copper_link_check_resolves_pause_and_programs_ltr_from_the_negotiated_link() 
     ] {
         let model = linked(full, partner);
         let mut hw = Hardware::new(&model, &model).unwrap();
-        let link = hw.check_for_copper_link().unwrap().unwrap();
+        let link = block_on(hw.copper_link(2)).unwrap().unwrap();
         assert_eq!(
             link,
             Negotiated {
@@ -421,7 +451,7 @@ fn copper_link_check_resolves_pause_and_programs_ltr_from_the_negotiated_link() 
         .phy
         .insert(PHY_ADVERTISEMENT, ASYMMETRIC_PAUSE);
     let mut hw = Hardware::new(&model, &model).unwrap();
-    let link = hw.check_for_copper_link().unwrap().unwrap();
+    let link = block_on(hw.copper_link(2)).unwrap().unwrap();
     assert_eq!(
         (link.speed, link.flow_control),
         (100, FlowControl::TransmitPause)
@@ -439,7 +469,7 @@ fn copper_link_check_resolves_pause_and_programs_ltr_from_the_negotiated_link() 
         .registers
         .insert(CTRL, CTRL_RFCE | CTRL_TFCE);
     let mut hw = Hardware::new(&model, &model).unwrap();
-    let link = hw.check_for_copper_link().unwrap().unwrap();
+    let link = block_on(hw.copper_link(2)).unwrap().unwrap();
     assert_eq!(
         (link.speed, link.full_duplex, link.flow_control),
         (10, false, FlowControl::None)
@@ -457,7 +487,7 @@ fn copper_link_check_resolves_pause_and_programs_ltr_from_the_negotiated_link() 
         state.registers.insert(CTRL, CTRL_TFCE);
     }
     let mut hw = Hardware::new(&model, &model).unwrap();
-    let link = hw.check_for_copper_link().unwrap().unwrap();
+    let link = block_on(hw.copper_link(2)).unwrap().unwrap();
     assert_eq!(
         (link.speed, link.flow_control),
         (1000, FlowControl::TransmitPause)
@@ -470,7 +500,7 @@ fn copper_link_check_reports_no_link_without_touching_pause_or_ltr() {
     let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
     model.state.borrow_mut().phy.insert(PHY_STATUS, 0);
     let mut hw = Hardware::new(&model, &model).unwrap();
-    assert_eq!(hw.check_for_copper_link(), Ok(None));
+    assert_eq!(block_on(hw.copper_link(2)), Ok(None));
     let state = model.state.borrow();
     assert!(!state.registers.contains_key(&LTRMINV));
     assert!(!state.writes.iter().any(|&(r, _)| r == CTRL));
@@ -480,30 +510,30 @@ fn copper_link_check_reports_no_link_without_touching_pause_or_ltr() {
     let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
     model.mdio_fail.set(Some(1));
     let mut hw = Hardware::new(&model, &model).unwrap();
-    assert_eq!(hw.check_for_copper_link(), Ok(None));
+    assert_eq!(block_on(hw.copper_link(2)), Ok(None));
     assert_eq!(model.state.borrow().registers[&SW_FW_SYNC] & PHY_SYNC, 0);
     let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
     model.software_busy.set(true);
     let mut hw = Hardware::new(&model, &model).unwrap();
-    assert_eq!(hw.check_for_copper_link(), Ok(None));
+    assert_eq!(block_on(hw.copper_link(2)), Ok(None));
     let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
     let mut hw = Hardware::new(&model, &model).unwrap();
     model.fail_read.set(Some(model.reads.get() + 1));
     assert_eq!(
-        hw.check_for_copper_link(),
+        block_on(hw.copper_link(2)),
         Err(BlockError::Device { status: u32::MAX })
     );
 
     let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
     model.state.borrow_mut().phy.insert(PHY_GIGABIT_STATUS, 0);
     let mut hw = Hardware::new(&model, &model).unwrap();
-    assert_eq!(hw.remote_receiver_ready(), Ok(false));
+    assert_eq!(block_on(hw.remote_receiver_ready_steps()), Ok(false));
     model
         .state
         .borrow_mut()
         .phy
         .insert(PHY_GIGABIT_STATUS, REMOTE_RECEIVER_OK);
-    assert_eq!(hw.remote_receiver_ready(), Ok(true));
+    assert_eq!(block_on(hw.remote_receiver_ready_steps()), Ok(true));
 }
 
 #[test]
@@ -560,7 +590,7 @@ fn stop_disables_both_directions_before_the_reset_and_release_returns_control() 
         ]);
     }
     let hw = Hardware::new(&model, &model).unwrap();
-    hw.stop().unwrap();
+    hw.stop(DROP_MASTER_POLLS).unwrap();
     hw.release_control().unwrap();
     let state = model.state.borrow();
     let position = |entry| state.writes.iter().position(|&w| w == entry).unwrap();
@@ -575,7 +605,8 @@ fn stop_disables_both_directions_before_the_reset_and_release_returns_control() 
     assert!(model.elapsed.get() >= 20_000);
     drop(state);
 
-    // An incomplete drain or reset is never a stop.
+    // An incomplete drain or reset is never a stop, and a drop's stop ends
+    // well inside a processor's exit.
     for stuck in [0, 1] {
         let model = Model::ready(false);
         if stuck == 0 {
@@ -584,9 +615,12 @@ fn stop_disables_both_directions_before_the_reset_and_release_returns_control() 
             model.reset_stuck.set(true);
         }
         assert_eq!(
-            Hardware::new(&model, &model).unwrap().stop(),
+            Hardware::new(&model, &model)
+                .unwrap()
+                .stop(DROP_MASTER_POLLS),
             Err(BlockError::Timeout)
         );
+        assert!(model.elapsed.get() < 120_000, "{}", model.elapsed.get());
     }
 }
 
@@ -670,4 +704,49 @@ fn unchanged_linux_advertisement_matches_real_mdio_and_mmd_operations() {
         cases += 1;
     }
     assert_eq!(cases, 4096);
+}
+
+/// The same initialization driven in slices, as a transmit-hang reset runs
+/// it: every slice waits at most 60 ms, and the outcome matches the
+/// blocking run's, for a clean start and for each stuck or busy step.
+#[test]
+fn a_sliced_initialization_matches_the_blocking_one_and_waits_little_per_call() {
+    let models: [fn(&Model); 7] = [
+        |_| {},
+        |model| model.master_stuck.set(true),
+        |model| model.reset_stuck.set(true),
+        |model| model.phy_reset_stuck.set(true),
+        |model| model.firmware_busy.set(true),
+        |model| model.software_busy.set(true),
+        |model| model.mdio_silent.set(true),
+    ];
+    for (case, prepare) in models.into_iter().enumerate() {
+        for flash in [false, true] {
+            let blocking = Model::ready(flash);
+            prepare(&blocking);
+            let expected = Hardware::new(&blocking, &blocking).unwrap().initialize();
+            let model = Model::ready(flash);
+            prepare(&model);
+            let slice = Allowance::new(STEP_US);
+            let mut hw = Hardware::new(&model, &model).unwrap().sliced(&slice);
+            let mut task = core::pin::pin!(hw.initialize_steps());
+            let mut calls = 0;
+            let result = loop {
+                slice.refill();
+                let before = model.elapsed.get();
+                let poll = stela_driver_base::stepped::poll_once(task.as_mut());
+                let waited = model.elapsed.get() - before;
+                assert!(waited <= 60_000, "case {case}: {waited}");
+                calls += 1;
+                if let core::task::Poll::Ready(result) = poll {
+                    break result;
+                }
+            };
+            assert_eq!(result, expected, "case {case} flash {flash}");
+            assert_eq!(model.elapsed.get(), blocking.elapsed.get(), "case {case}");
+            if model.elapsed.get() > 100_000 {
+                assert!(calls > 1, "case {case}");
+            }
+        }
+    }
 }

@@ -147,6 +147,7 @@ storage_size(struct stela_air_metadata *t, LLVMTypeRef type, unsigned depth, uns
       break;
    }
    case LLVMHalfTypeKind:
+   case LLVMBFloatTypeKind:
    case LLVMFloatTypeKind:
       valid = true;
       break;
@@ -200,7 +201,9 @@ stela_air_metadata_constructed(LLVMValueRef global)
 /* Threadgroup memory is an internal AS3 global, undefined or zeroed as
  * Apple's compiler gives atomics, which Metal never initializes; constant
  * data is an initialized internal or private AS2 constant, or a global
- * constructors compute. */
+ * constructors compute. An initialized internal or private constant of the
+ * thread address space, such as a C++ template parameter object Apple's
+ * compiler copies from, is constant data too: nothing can write it. */
 bool
 stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
                           struct stela_air_global *info)
@@ -213,7 +216,7 @@ stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
    bool threadgroup = space == 3 && !constant && linkage == LLVMInternalLinkage && initializer &&
                       ((LLVMIsUndef(initializer) && !LLVMIsPoison(initializer)) ||
                        LLVMIsNull(initializer));
-   bool data = (space == 2 && constant && initializer &&
+   bool data = ((space == 2 || space == 0) && constant && initializer &&
                 (linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage)) ||
                (t->constructed && stela_air_metadata_constructed(global));
    if ((!threadgroup && !data) || LLVMIsThreadLocal(global) || LLVMIsExternallyInitialized(global) ||
@@ -1796,10 +1799,30 @@ control_point_input(struct stela_air_metadata *m, struct stela_air_render *r,
    return true;
 }
 
+/* The bits of a [[function_constant]] argument's predicate of the named
+ * scalar type, or 0. */
+static unsigned
+predicate_bits(LLVMValueRef name)
+{
+   static const struct {
+      const char *name;
+      unsigned bits;
+   } types[] = {
+      {"bool", 8},  {"char", 8},  {"uchar", 8}, {"short", 16}, {"ushort", 16},
+      {"int", 32},  {"uint", 32}, {"long", 64}, {"ulong", 64},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(types); i++) {
+      if (stela_air_md_string(name, types[i].name))
+         return types[i].bits;
+   }
+   return 0;
+}
+
 /* A [[function_constant]] argument's predicate, {ptr addrspace(2)
- * @predicate, !"bool", !"name"}: an internal AS2 bool the module's
+ * @predicate, !"type", !"name"}: an internal AS2 integer of the constant's
+ * scalar type, a bool or one Metal tests against zero, that the module's
  * constructors store. Once specialization has constructed it, *known is set,
- * and *absent when it is false. */
+ * and *absent when it is zero. */
 static bool
 argument_predicate(struct stela_air_metadata *m, LLVMValueRef node, bool *known, bool *absent)
 {
@@ -1812,7 +1835,7 @@ argument_predicate(struct stela_air_metadata *m, LLVMValueRef node, bool *known,
    LLVMTypeRef type = value ? LLVMGlobalGetValueType(global) : NULL;
    if (!value || !LLVMIsAConstantInt(value) || LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 2 ||
        LLVMGetLinkage(global) != LLVMInternalLinkage || LLVMGetTypeKind(type) != LLVMIntegerTypeKind ||
-       LLVMGetIntTypeWidth(type) != 8 || !stela_air_md_string(fields[1], "bool") || !fields[2] ||
+       LLVMGetIntTypeWidth(type) != predicate_bits(fields[1]) || !fields[2] ||
        !LLVMIsAMDString(fields[2]))
       return fail(m, STELA_AIR_METADATA, "invalid function constant argument predicate");
    *known = LLVMIsGlobalConstant(global);
@@ -2300,7 +2323,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          if (indirect && !argument_fields(t, kernel, struct_info, desc.type_size, index, 0,
                                           &argument_buffer))
             return false;
-         if (shared && (!has_size || !has_align || !desc.type_size || !desc.type_alignment))
+         /* A threadgroup void * declares neither size nor alignment: its
+          * bytes are only the length its dispatches set, placed as any
+          * threadgroup buffer is, and its accesses aligned as LLVM says, as
+          * a device void *'s are. A typed one declares both. */
+         if (shared && (has_size != has_align || (has_size && !desc.type_size)))
             return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
       } else if (payload) {
          /* An object function writes its payload; its mesh functions read it. */

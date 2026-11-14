@@ -22,7 +22,7 @@ use crate::{
     native_smp::memory_types::Image,
 };
 mod config_space;
-pub(crate) use config_space::{ContainedPci, ContainmentError};
+pub(crate) use config_space::{ContainedPci, ContainmentError, PciScope};
 mod hpet;
 use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -455,8 +455,8 @@ pub(crate) struct Source {
     pci_slots: config_space::PciSlots,
     pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
     /// The firmware framebuffer's PCI function, checked before and after
-    /// firmware exit, or why it could not be.
-    framebuffer: core::cell::OnceCell<Result<crate::pci_io::FramebufferSource, String>>,
+    /// firmware exit, or unknown, or why it could not be checked.
+    framebuffer: core::cell::OnceCell<Result<crate::pci_io::ScreenOwner, String>>,
     ioapics: core::cell::RefCell<MountedIoapics>,
 }
 
@@ -608,8 +608,9 @@ impl Source {
         })
     }
 
-    /// The checked framebuffer source, or a sentence saying why there is none.
-    pub(crate) fn verified_framebuffer(&self) -> Result<crate::pci_io::FramebufferSource, String> {
+    /// The checked owner of the firmware screen, or a sentence saying why it
+    /// could not be checked.
+    pub(crate) fn verified_framebuffer(&self) -> Result<crate::pci_io::ScreenOwner, String> {
         match self.framebuffer.get() {
             Some(result) => result.clone(),
             None => Err(String::from(
@@ -622,6 +623,14 @@ impl Source {
     /// first outcome stays.
     pub(crate) fn refuse_framebuffer(&self, why: String) {
         let _ = self.framebuffer.set(Err(why));
+    }
+
+    /// Keep that no PCI function was found for the firmware screen. The
+    /// first outcome stays.
+    pub(crate) fn framebuffer_owner_unknown(&self) {
+        let _ = self
+            .framebuffer
+            .set(Ok(crate::pci_io::ScreenOwner::Unknown));
     }
 
     pub(crate) fn authority(&self) -> &Authority {
@@ -947,7 +956,10 @@ impl Source {
             }
         }
         let routing = self.routing()?;
-        if modes.is_empty() || routing.units.is_empty() || routing.has_ioapic_nmis() {
+        // An NMI source pin is contained like any other: masked when
+        // firmware left it masked, refused when left delivering NMIs
+        // (`maskable_firmware_mode`), and never routed (`Routing::owner`).
+        if modes.is_empty() || routing.units.is_empty() {
             return Err(Error::Unavailable);
         }
         let domain: Arc<dyn NotificationDomain> = Arc::new(MountedNotification {
@@ -997,7 +1009,7 @@ impl Source {
             units.push((descriptor, unit));
         }
         routing.validate_units(&spans).map_err(failed)?;
-        // SAFETY: exact complete inventory with no IOAPIC NMI, original
+        // SAFETY: exact complete inventory with NMI source pins unrouted, original
         // mode pins, and the caller's exclusive controller handoff.
         let routes = unsafe { crate::native_irq::plan_firmware_lines(&units) }.map_err(failed)?;
         let count = units.len();
@@ -1014,6 +1026,19 @@ impl Source {
         if let Err(error) = contained {
             controllers.failure.set(Some(error));
             return Err(failed(error));
+        }
+        // Containment withholds an SMI pin as Unsupported, a pin whose
+        // Remote IRR, Delivery Status or old vector stayed pending as Drain,
+        // and a pin that would not read back cleared as Route.
+        for (gsi, error) in controllers.routes.iter().flat_map(|plan| plan.withheld()) {
+            match error {
+                irq::IrqError::Unsupported => crate::output::arguments(format_args!(
+                    "HOST IOAPIC GSI {gsi} left to firmware: SMI pin\n"
+                )),
+                error => crate::output::arguments(format_args!(
+                    "HOST IOAPIC GSI {gsi} withheld from devices: {error}\n"
+                )),
+            }
         }
         *self.ioapics.borrow_mut() = MountedIoapics::Ready(controllers);
         Ok(count)
@@ -1050,7 +1075,7 @@ impl Source {
     }
 
     /// Reuse the original controller after checking this unclaimed route
-    /// against its retained masked firmware entry.
+    /// against the masked entry its containment left.
     pub(crate) fn original_line(
         &self,
         line: irq::LineRoute,

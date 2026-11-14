@@ -56,10 +56,13 @@ mod random;
 mod selection;
 mod serial;
 mod status;
+mod stop;
+mod stop_record;
 mod storage;
 mod system;
 mod tables;
 mod ui;
+mod usb_legacy;
 #[global_allocator]
 pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new().reporting_failures(|report| {
     use core::fmt::Write;
@@ -203,7 +206,7 @@ impl core::fmt::Write for EarlyText {
     }
 }
 
-/// What this build reads, for `stela setup` to check before installing it
+/// What this build reads, for `stela` to check before installing it
 /// (`stela_loader::mount_interface`).
 #[used]
 static MOUNT_INTERFACE: [u8; stela_loader::mount_interface::MARKER_BYTES] =
@@ -212,6 +215,21 @@ static MOUNT_INTERFACE: [u8; stela_loader::mount_interface::MARKER_BYTES] =
 /// Optional native host resource capability read by setup before publication.
 #[used]
 static HOST_FIRMWARE_INTERFACE: [u8; 21] = stela_loader::host_firmware::MOUNT_CAPABILITY;
+
+/// Turn off the watchdog firmware arms before it starts a boot program,
+/// which resets the machine unless boot services end within 5 minutes: the
+/// menu, the disk chooser, a slow stick and install verification all take
+/// longer. Nothing arms it again. Firmware without the service is common,
+/// so a refusal is reported once and the boot continues.
+fn stop_firmware_watchdog() {
+    match uefi::boot::set_watchdog_timer(0, 0x10000, None) {
+        Ok(()) => output::arguments(format_args!("FIRMWARE watchdog off\n")),
+        Err(error) => output::arguments(format_args!(
+            "FIRMWARE watchdog not turned off: {:?}; if the firmware armed it, the machine resets 5 minutes after Stela's start\n",
+            error.status()
+        )),
+    }
+}
 
 #[uefi::entry]
 fn main() -> Status {
@@ -225,6 +243,12 @@ fn main() -> Status {
         "STELA UEFI MOUNT version={}\n",
         env!("CARGO_PKG_VERSION")
     ));
+    if !serial::present() {
+        output::arguments(format_args!(
+            "SERIAL no UART at COM1: nothing is sent to it or read from it\n"
+        ));
+    }
+    stop_firmware_watchdog();
     let heap_bytes =
         initial_heap_bytes().unwrap_or_else(|error| output::early_fatal(error.as_str()));
     let heap = uefi::boot::allocate_pages(
@@ -242,16 +266,25 @@ fn main() -> Status {
     };
     status::set_clock(firmware::tsc_hz());
     firmware::start_ticker();
+    // A stop the USB's log cannot keep leaves its record in the firmware.
+    stop_record::arm(stop_record::Services::capture(), None);
     let log = log_file::open();
+    // The record of such a stop at an earlier start reaches the log now.
+    if log.is_some() {
+        stop_record::carry();
+    }
     output::arguments(format_args!("{}", host_identity()));
     if output::hypervisor_exit_port() {
         output::arguments(format_args!(
             "HOST hypervisor present: stop codes also go to its exit port\n"
         ));
     }
-    status::begin("Connecting the firmware's drivers to every device");
-    let handles = firmware::connect_all();
-    output::arguments(format_args!("FIRMWARE connected {handles} handles\n"));
+    status::begin("Connecting the firmware's drivers to the boot's devices");
+    let connected = firmware::connect_needed();
+    output::arguments(format_args!(
+        "FIRMWARE connected {} of {} handles, left {} network controllers to Stela's drivers, {} slow\n",
+        connected.connected, connected.handles, connected.network, connected.slow
+    ));
     status::done("");
     status::begin("Reading Stela's settings");
     let (mut volume, mut firmware_root) = firmware::volume().unwrap_or_else(|e| output::fatal(e));
@@ -260,14 +293,23 @@ fn main() -> Status {
     drop(firmware_root);
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     let options = choice::resolve(&mut volume, options);
-    // A stop the USB's log could not keep last time reaches it now.
-    selection::carry_failure_record(&options);
+    // What this start changes on a PC disk is pending until Stela's own
+    // drivers run: before the firmware exits, a PC disk is only read.
+    let mut pending = stela_runtime::pc::disk_writes::Pending::default();
     status::done("");
-    let held = system::held_at_start(&options);
-    let options = choice::choose(&mut volume, options, held);
+    let held = system::held_at_start(&options, &pending);
+    let choice::Chosen { options, plan } = choice::choose(&mut volume, options, held, &pending);
+    pending.replace_plan(plan);
     status::take_screen(console::Framebuffer::from_firmware());
     if options.starts_with(b"--system") {
-        system::boot(options, volume, log, host_firmware, snapshot);
+        system::boot(options, pending, volume, log, host_firmware, snapshot);
+    }
+    // Only the system engine does the pending work on the boot's disks.
+    if pending.plan.is_some() {
+        output::fatal(
+            "the chosen startup option is not a system-mode boot, so the disk chosen for macOS \
+             cannot be prepared; nothing was written to it",
+        );
     }
     drop(snapshot);
     if options.starts_with(stela_boot_core::options::HOST_CHECK.as_bytes()) {
@@ -284,6 +326,8 @@ fn main() -> Status {
         console::install(screen);
         output::arguments(format_args!("STELA UEFI MOUNT\n"));
     }
+    // The storage check's tables do not map the firmware's runtime regions.
+    stop_record::disarm();
     // SAFETY: boot services have ended; the new tables map the image, heap,
     // the stack and every RAM byte in use.
     unsafe {
@@ -326,6 +370,7 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     // No allocator, formatting of caller-supplied values, Rust lock, unwind,
-    // poison recovery or continuation is allowed on this terminal path.
+    // poison recovery or continuation is allowed before the port has the
+    // report; the screen and the boot log are tried after it.
     output::panic(info)
 }

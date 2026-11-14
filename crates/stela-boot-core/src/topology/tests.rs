@@ -897,11 +897,117 @@ fn mtrr_pat_equality_does_not_conflate_clock_adjustment() {
     );
 }
 
+/// The legacy hole's DRAM routing is each processor's own on AMD: two
+/// processors that differ only there have the same installed memory types.
+#[test]
+fn amd_legacy_hole_routing_is_not_part_of_the_installed_memory_types() {
+    let mut baseline = native_snapshot();
+    baseline.msrs[baseline.msr_count as usize] = Msr {
+        index: 0x26e,
+        value: 0x1010_1010_1010_1010,
+    };
+    baseline.msrs[baseline.msr_count as usize + 1] = Msr {
+        index: 0x258,
+        value: 0x1e1e_1e1e_1e1e_1e1e,
+    };
+    baseline.msr_count += 2;
+    let shadow = baseline.msr_count as usize - 2;
+    let mut other = baseline;
+    other.msrs[shadow].value = 0x1818_1818_1818_1818;
+    // Masked reads say nothing of the routing: the values must be equal.
+    assert_eq!(
+        baseline.same_memory_types(&other),
+        Err(CapabilityRefusal::MemoryTypes)
+    );
+    baseline.amd_fixed_raw = true;
+    other.amd_fixed_raw = true;
+    assert_eq!(baseline.same_memory_types(&other), Ok(()));
+    other.msrs[shadow].value ^= 1; // the type is installed
+    assert_eq!(
+        baseline.same_memory_types(&other),
+        Err(CapabilityRefusal::MemoryTypes)
+    );
+    other.msrs[shadow].value ^= 1;
+    other.msrs[shadow + 1].value ^= 0x08; // conventional memory
+    assert_eq!(
+        baseline.same_memory_types(&other),
+        Err(CapabilityRefusal::MemoryTypes)
+    );
+}
+
 #[test]
 fn duplicate_physical_thread_refuses() {
     let mut cores = [processor(0, 0, 0, 0), processor(1, 0, 0, 0)];
     cores[0].flags |= BSP;
     assert_eq!(select(&cores), Err(Refusal::DuplicateThreadLocation));
+}
+
+/// Firmware that lists every processor at one package, core and thread
+/// with distinct APIC IDs: the IDs place them, by CPUID leaf 0xb's shifts
+/// where the processor has them and as one core each where it does not.
+#[test]
+fn processors_the_firmware_puts_at_one_location_are_placed_by_apic_id() {
+    let listed = || {
+        let mut cores: Vec<_> = (0..6).map(|number| processor(number, 0, 0, 0)).collect();
+        cores[0].flags |= BSP;
+        for (core, apic) in cores.iter_mut().zip([0u64, 1, 2, 3, 0x10, 0x11]) {
+            core.apic_id = apic;
+        }
+        cores
+    };
+    let mut cores = listed();
+    assert!(locations_collide(&cores));
+    // One thread bit, four bits of thread and core: two packages.
+    place_by_apic_id(&mut cores, Some((1, 4)));
+    assert!(!locations_collide(&cores));
+    let placed: Vec<_> = cores
+        .iter()
+        .map(|core| (core.location.package, core.location.core, core.thread))
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            (0, 0, 0),
+            (0, 0, 1),
+            (0, 1, 0),
+            (0, 1, 1),
+            (1, 0, 0),
+            (1, 0, 1)
+        ]
+    );
+    assert_eq!(physical_cores(&cores), 3);
+    // The BSP, then one thread of each other core, then the second threads.
+    assert_eq!(select(&cores), Ok(vec![0, 2, 4, 1, 3, 5]));
+
+    for shifts in [None, Some((5, 4)), Some((0, 32))] {
+        let mut cores = listed();
+        place_by_apic_id(&mut cores, shifts);
+        assert_eq!(physical_cores(&cores), 6, "{shifts:?}");
+        assert_eq!(select(&cores), Ok(vec![0, 1, 2, 3, 4, 5]));
+    }
+    // A duplicate APIC ID is not a location fault and is not placed over.
+    let mut cores = listed();
+    cores[1].apic_id = 0;
+    assert!(!locations_collide(&cores));
+    assert_eq!(select(&cores), Err(Refusal::DuplicateApicId));
+}
+
+#[test]
+fn an_amd_processor_without_leaf_0xb_gives_its_shifts_from_the_extended_leaves() {
+    // Ryzen 5 2400G: 4 cores of 2 threads, ApicIdCoreIdSize 4, NC 7.
+    assert_eq!(amd_apic_id_shifts(4 << 12 | 7, 1 << 8), (1, 4));
+    // No ApicIdCoreIdSize: the processor count, 8, gives 3 bits.
+    assert_eq!(amd_apic_id_shifts(7, 1 << 8), (1, 3));
+    // One thread a core, 6 cores: no thread bit, 3 bits of core.
+    assert_eq!(amd_apic_id_shifts(5, 0), (0, 3));
+    // The two threads of a core then share it and its package.
+    let mut cores: Vec<_> = (0..8).map(|n| processor(n, 0, 0, 0)).collect();
+    for (index, core) in cores.iter_mut().enumerate() {
+        core.apic_id = index as u64;
+    }
+    place_by_apic_id(&mut cores, Some(amd_apic_id_shifts(4 << 12 | 7, 1 << 8)));
+    assert_eq!(physical_cores(&cores), 4);
+    assert!(cores.iter().all(|core| core.location.package == 0));
 }
 
 #[test]

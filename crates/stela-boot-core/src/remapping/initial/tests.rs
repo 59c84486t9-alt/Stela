@@ -1,6 +1,7 @@
 //! The IOMMU states real PCs boot in: off, on and translating, on with
 //! units left untranslated, AMD-Vi with the GPU behind the only unit, and
-//! VT-d with an integrated GPU on its own unit.
+//! VT-d with an integrated GPU on its own unit. "Off" means the boot proved
+//! every unit off since ExitBootServices; "on" that it could not.
 use super::*;
 use crate::dmar::{Drhd, Remapping, Rmrr};
 use crate::remapping::{Scope, decide, plan, route};
@@ -68,6 +69,7 @@ fn dmar(units: Vec<Drhd>, reserved: Vec<Rmrr>) -> Remapping {
         physical_bits: 39,
         flags: 0,
         additional_structures: vec![],
+        skipped: vec![],
         units,
         reserved,
     }
@@ -128,7 +130,7 @@ fn needs_follow_the_driver_probe_attaches() {
 #[test]
 fn off_no_unit_leaves_every_requester_untranslated() {
     let (_, requesters) = census(&[HOST, NVME, XHCI]);
-    let modes = modes(&[], &requesters, true);
+    let modes = modes(&[], &requesters, true, false);
     assert!(modes.is_empty());
     assert!(none_taken(&modes));
     assert_eq!(access(&modes, None), Access::Untranslated);
@@ -137,11 +139,12 @@ fn off_no_unit_leaves_every_requester_untranslated() {
 
 #[test]
 fn on_and_translating_windows_the_unit_the_pool_drivers_sit_behind() {
-    // QEMU q35 with `intel-iommu` and no display: one include-all unit.
+    // One include-all unit and no display, which the boot could not prove
+    // off.
     let functions = [HOST, XHCI, NVME, SATA];
     let (present, requesters) = census(&functions);
     let remapping = dmar(vec![unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, false, false);
     assert_eq!(modes, [Mode::Window]);
     for (rid, _, _) in functions {
         let reached = reach(&remapping, &present, &modes, rid);
@@ -152,10 +155,27 @@ fn on_and_translating_windows_the_unit_the_pool_drivers_sit_behind() {
 }
 
 #[test]
+fn off_with_pool_drivers_leaves_the_unit_untranslated() {
+    // QEMU q35 with `intel-iommu` and no display: a window would leave the
+    // IOAPICs and every native device refused.
+    let functions = [HOST, XHCI, NVME, SATA];
+    let (present, requesters) = census(&functions);
+    let remapping = dmar(vec![unit(true, &[])], vec![]);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
+    assert_eq!(modes, [Mode::Left(Left::Incomplete)]);
+    assert!(none_taken(&modes));
+    for (rid, _, _) in functions {
+        let reached = reach(&remapping, &present, &modes, rid);
+        assert_eq!(reached, Access::Untranslated);
+        assert!(reached.reaches_pool());
+    }
+}
+
+#[test]
 fn on_and_translating_without_pool_drivers_blocks_the_whole_fabric() {
     let (present, requesters) = census(&[HOST, SMBUS, AUDIO]);
     let remapping = dmar(vec![unit(false, &[AUDIO.0]), unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(modes, [Mode::Blocked, Mode::Blocked]);
     assert_eq!(
         reach(&remapping, &present, &modes, AUDIO.0),
@@ -167,7 +187,12 @@ fn on_and_translating_without_pool_drivers_blocks_the_whole_fabric() {
 fn a_unit_without_pool_drivers_stays_blocked_beside_a_windowed_one() {
     let (present, requesters) = census(&[HOST, AUDIO, NVME]);
     let remapping = dmar(vec![unit(false, &[AUDIO.0]), unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let candidates = intel(&remapping, &present);
+    assert_eq!(
+        modes(&candidates, &requesters, true, false),
+        [Mode::Left(Left::Incomplete), Mode::Left(Left::Incomplete)]
+    );
+    let modes = modes(&candidates, &requesters, false, false);
     assert_eq!(modes, [Mode::Blocked, Mode::Window]);
     assert_eq!(reach(&remapping, &present, &modes, NVME.0), Access::Window);
     assert_eq!(
@@ -189,7 +214,14 @@ fn an_rmrr_windows_its_unit_as_before() {
     let remapping = dmar(vec![unit(true, &[])], vec![reserved]);
     let candidates = intel(&remapping, &present);
     assert!(!candidates[0].blockable);
-    assert_eq!(modes(&candidates, &requesters, true), [Mode::Window]);
+    assert_eq!(
+        modes(&candidates, &requesters, false, false),
+        [Mode::Window]
+    );
+    assert_eq!(
+        modes(&candidates, &requesters, true, false),
+        [Mode::Left(Left::Incomplete)]
+    );
 }
 
 #[test]
@@ -204,7 +236,7 @@ fn on_with_untranslated_passthrough_leaves_requesters_on_physical_addresses() {
         sources: vec![],
     };
     let remapping = dmar(vec![unit(true, &[])], vec![reserved]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(modes, [Mode::Left(Left::Policy(Leave::Reserved(SATA.0)))]);
     assert!(none_taken(&modes));
     for rid in [NVME.0, SATA.0] {
@@ -226,14 +258,14 @@ fn amd_vi_with_the_gpu_on_its_only_unit_leaves_the_machine_untranslated() {
         decision: decide(&covered, &[], &present, &[]),
         blockable: true,
     }];
-    let modes = modes(&candidates, &requesters, true);
+    let modes = modes(&candidates, &requesters, true, false);
     assert_eq!(modes, [Mode::Left(Left::Policy(Leave::Display(GPU.0)))]);
     assert!(none_taken(&modes));
     assert_eq!(access(&modes, Some(0)), Access::Untranslated);
 }
 
 #[test]
-fn amd_vi_with_the_gpu_on_one_of_several_units_windows_the_disk_unit() {
+fn amd_vi_with_the_gpu_on_one_of_several_units_leaves_every_unit() {
     // Threadripper: the GPU behind one IOMMU, the disks behind another.
     let (present, requesters) = census(&[HOST, GPU, NVME, SATA, XHCI]);
     let candidates = [
@@ -248,37 +280,192 @@ fn amd_vi_with_the_gpu_on_one_of_several_units_windows_the_disk_unit() {
             blockable: true,
         },
     ];
-    let modes = modes(&candidates, &requesters, true);
+    let modes = modes(&candidates, &requesters, true, false);
     assert_eq!(
         modes,
+        [
+            Mode::Left(Left::Policy(Leave::Display(GPU.0))),
+            Mode::Left(Left::Incomplete)
+        ]
+    );
+    assert!(none_taken(&modes));
+    assert_eq!(access(&modes, Some(1)), Access::Untranslated);
+}
+
+#[test]
+fn without_proof_the_units_are_off_a_left_unit_keeps_the_others_taken() {
+    let (present, requesters) = census(&[HOST, GPU, NVME]);
+    let candidates = [
+        Candidate {
+            segment: 0,
+            decision: decide(&rids(&[HOST, GPU]), &[], &present, &[]),
+            blockable: false,
+        },
+        Candidate {
+            segment: 0,
+            decision: decide(&rids(&[NVME]), &[], &present, &[]),
+            blockable: false,
+        },
+    ];
+    assert_eq!(
+        modes(&candidates, &requesters, false, false),
         [
             Mode::Left(Left::Policy(Leave::Display(GPU.0))),
             Mode::Window
         ]
     );
-    assert_eq!(access(&modes, Some(1)), Access::Window);
 }
 
 #[test]
-fn intel_with_an_integrated_gpu_windows_the_include_all_unit() {
+fn intel_with_an_integrated_gpu_leaves_the_include_all_unit() {
     let functions = [HOST, IGPU, XHCI, AUDIO, NVME];
     let (present, requesters) = census(&functions);
     let remapping = dmar(vec![unit(false, &[IGPU.0]), unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(
         modes,
         [
             Mode::Left(Left::Policy(Leave::Display(IGPU.0))),
-            Mode::Window
+            Mode::Left(Left::Incomplete)
         ]
     );
-    assert_eq!(
-        reach(&remapping, &present, &modes, IGPU.0),
-        Access::Untranslated
-    );
-    for rid in [NVME.0, XHCI.0] {
-        assert_eq!(reach(&remapping, &present, &modes, rid), Access::Window);
+    for (rid, _, _) in functions {
+        assert_eq!(
+            reach(&remapping, &present, &modes, rid),
+            Access::Untranslated
+        );
     }
+}
+
+/// `count` units on segment 0 over the host bridge and the pool drivers'
+/// functions, the first holding `display` when given.
+fn units(count: usize, display: Option<Function>) -> (Vec<Requester>, Vec<Candidate>) {
+    let mut functions = vec![HOST, NVME, SATA, XHCI, AUDIO];
+    functions.extend(display);
+    let (present, requesters) = census(&functions);
+    let candidates = (0..count)
+        .map(|index| {
+            let mut covered = match (count, index) {
+                (1, _) => vec![HOST, NVME, SATA, XHCI, AUDIO],
+                (_, 0) => vec![HOST],
+                (_, 1) => vec![NVME],
+                (_, 2) => vec![SATA, AUDIO],
+                _ => vec![XHCI],
+            };
+            if index == 0 {
+                covered.extend(display);
+            }
+            Candidate {
+                segment: 0,
+                decision: decide(&rids(&covered), &[], &present, &[]),
+                blockable: true,
+            }
+        })
+        .collect();
+    (requesters, candidates)
+}
+
+#[test]
+fn a_display_behind_one_of_one_two_or_four_units_leaves_them_all() {
+    for count in [1, 2, 4] {
+        for display in [GPU, IGPU] {
+            let (requesters, candidates) = units(count, Some(display));
+            let modes = modes(&candidates, &requesters, true, false);
+            assert_eq!(
+                modes[0],
+                Mode::Left(Left::Policy(Leave::Display(display.0))),
+                "{count} units"
+            );
+            assert!(
+                modes[1..]
+                    .iter()
+                    .all(|mode| *mode == Mode::Left(Left::Incomplete)),
+                "{count} units: {modes:?}"
+            );
+            assert!(none_taken(&modes));
+        }
+    }
+}
+
+#[test]
+fn off_without_a_display_one_two_or_four_units_are_all_left() {
+    // A headless PC: the disk needs the drivers' pool, so the units cannot
+    // all start blocked, and a window accounts for no IOAPIC.
+    for count in [1, 2, 4] {
+        let (requesters, candidates) = units(count, None);
+        let modes = modes(&candidates, &requesters, true, false);
+        assert_eq!(modes, vec![Mode::Left(Left::Incomplete); count]);
+        assert!(none_taken(&modes));
+    }
+}
+
+#[test]
+fn on_without_a_display_one_two_or_four_units_are_all_taken() {
+    for count in [1, 2, 4] {
+        let (requesters, candidates) = units(count, None);
+        let modes = modes(&candidates, &requesters, false, false);
+        assert_eq!(modes.len(), count);
+        assert!(
+            modes.iter().all(|mode| !matches!(mode, Mode::Left(_))),
+            "{count} units: {modes:?}"
+        );
+        // The disk's unit starts in the drivers' window.
+        assert_eq!(modes[count.min(2) - 1], Mode::Window, "{count} units");
+    }
+}
+
+#[test]
+fn a_unit_with_no_requester_leaves_the_others_off() {
+    let (present, requesters) = census(&[HOST, NVME]);
+    let candidates = [
+        Candidate {
+            segment: 0,
+            decision: decide(&[], &[], &present, &[]),
+            blockable: true,
+        },
+        Candidate {
+            segment: 0,
+            decision: decide(&rids(&[HOST, NVME]), &[], &present, &[]),
+            blockable: true,
+        },
+    ];
+    assert_eq!(
+        modes(&candidates, &requesters, true, false),
+        [
+            Mode::Left(Left::Policy(Leave::Empty)),
+            Mode::Left(Left::Incomplete)
+        ]
+    );
+}
+
+#[test]
+fn a_unit_refused_before_the_policy_leaves_the_others_off() {
+    let (requesters, candidates) = units(2, None);
+    assert_eq!(
+        modes(&candidates, &requesters, true, true),
+        [Mode::Left(Left::Incomplete), Mode::Left(Left::Incomplete)]
+    );
+    // Without proof the refused unit is off, the others are taken.
+    let taken = modes(&candidates, &requesters, false, true);
+    assert!(taken.iter().all(|mode| !matches!(mode, Mode::Left(_))));
+}
+
+#[test]
+fn a_unit_refused_before_the_policy_keeps_a_blocked_fabric_from_completing() {
+    let (present, requesters) = census(&[HOST, AUDIO]);
+    let candidates = [Candidate {
+        segment: 0,
+        decision: decide(&rids(&[HOST, AUDIO]), &[], &present, &[]),
+        blockable: true,
+    }];
+    assert_eq!(
+        modes(&candidates, &requesters, true, false),
+        [Mode::Blocked]
+    );
+    assert_eq!(
+        modes(&candidates, &requesters, true, true),
+        [Mode::Left(Left::Incomplete)]
+    );
 }
 
 #[test]
@@ -286,7 +473,7 @@ fn intel_with_an_integrated_gpu_and_a_vmd_disk_takes_no_unit() {
     // RST laptops: the disk is behind VMD, whose driver attaches natively.
     let (present, requesters) = census(&[HOST, IGPU, VMD, XHCI, AUDIO]);
     let remapping = dmar(vec![unit(false, &[IGPU.0]), unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(
         modes,
         [
@@ -310,7 +497,7 @@ fn intel_with_an_integrated_gpu_and_a_vmd_disk_takes_no_unit() {
 fn an_ehci_host_keeps_its_handoff_by_leaving_every_unit() {
     let (present, requesters) = census(&[HOST, EHCI_HOST, XHCI, NVME]);
     let remapping = dmar(vec![unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(
         modes,
         [Mode::Left(Left::Native {
@@ -324,7 +511,7 @@ fn an_ehci_host_keeps_its_handoff_by_leaving_every_unit() {
 fn without_proof_the_units_are_off_a_native_device_does_not_leave_them() {
     let (present, requesters) = census(&[HOST, VMD, XHCI]);
     let remapping = dmar(vec![unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, false);
+    let modes = modes(&intel(&remapping, &present), &requesters, false, false);
     assert_eq!(modes, [Mode::Window]);
 }
 
@@ -333,20 +520,48 @@ fn a_native_device_on_a_complete_blocked_fabric_keeps_it() {
     // No pool driver anywhere: VMD prepares through its blocked context.
     let (present, requesters) = census(&[HOST, VMD, AUDIO]);
     let remapping = dmar(vec![unit(true, &[])], vec![]);
-    let modes = modes(&intel(&remapping, &present), &requesters, true);
+    let modes = modes(&intel(&remapping, &present), &requesters, true, false);
     assert_eq!(modes, [Mode::Blocked]);
 }
 
 #[test]
 fn an_uncovered_requester_keeps_the_fabric_from_completing() {
-    // No include-all unit: the NVMe disk is routed by none.
-    let (present, requesters) = census(&[HOST, AUDIO, NVME]);
+    // No include-all unit: the SMBus host is routed by none.
+    let (present, requesters) = census(&[HOST, AUDIO, SMBUS]);
     let remapping = dmar(vec![unit(false, &[AUDIO.0])], vec![]);
     let candidates = intel(&remapping, &present);
-    let modes = modes(&candidates, &requesters, true);
-    assert_eq!(modes, [Mode::Blocked]);
+    // Off, the unit is left: the machine runs untranslated.
+    let off = modes(&candidates, &requesters, true, false);
+    assert_eq!(off, [Mode::Left(Left::Incomplete)]);
+    assert!(none_taken(&off));
+    // On, the unit is taken as before and the uncovered host untranslated.
+    let on = modes(&candidates, &requesters, false, false);
+    assert_eq!(on, [Mode::Blocked]);
     assert_eq!(
-        reach(&remapping, &present, &modes, NVME.0),
+        reach(&remapping, &present, &on, SMBUS.0),
         Access::Untranslated
     );
+}
+
+#[test]
+fn an_uncovered_requester_beside_a_windowed_unit_leaves_every_unit() {
+    // Two units, neither include-all, one windowed for the disk: the
+    // uncovered xHCI keeps the fabric from completing.
+    let (present, requesters) = census(&[HOST, AUDIO, NVME, XHCI]);
+    let remapping = dmar(
+        vec![unit(false, &[AUDIO.0]), unit(false, &[NVME.0])],
+        vec![],
+    );
+    let candidates = intel(&remapping, &present);
+    let modes = modes(&candidates, &requesters, true, false);
+    assert_eq!(
+        modes,
+        [Mode::Left(Left::Incomplete), Mode::Left(Left::Incomplete)]
+    );
+    for rid in [NVME.0, XHCI.0] {
+        assert_eq!(
+            reach(&remapping, &present, &modes, rid),
+            Access::Untranslated
+        );
+    }
 }

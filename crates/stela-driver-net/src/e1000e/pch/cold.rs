@@ -12,6 +12,7 @@
 use super::{Delay, Fault, Identity, Kind, Phy, Register, Registers, nvm};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_driver_base::stepped::block_on;
 
 pub mod attach;
 pub mod i219;
@@ -116,8 +117,9 @@ pub enum Error {
     /// The Intel ME blocked the PHY after its reset.
     BlockedAfterReset,
     DescriptorFlushRequired,
+    /// A PHY link change was still under way when the adapter had to stop.
+    LinkChangeUnfinished,
     Dma(crate::block::BlockError),
-    QueueStalled,
     Stopped,
     Poisoned,
 }
@@ -183,8 +185,10 @@ impl core::fmt::Display for Error {
             Self::DescriptorFlushRequired => {
                 f.write_str("the firmware left its rings needing a flush")
             }
+            Self::LinkChangeUnfinished => {
+                f.write_str("a PHY link change was still under way when it had to stop")
+            }
             Self::Dma(error) => write!(f, "its DMA memory failed ({error})"),
-            Self::QueueStalled => f.write_str("a queue stalled"),
             Self::Stopped => f.write_str("it is stopped"),
             Self::Poisoned => f.write_str("an earlier failure left it unusable"),
         }
@@ -616,13 +620,27 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         Ok(())
     }
     fn modify(&mut self, page: u16, index: u16, clear: u16, set: u16) -> Result<(), Error> {
+        block_on(self.modify_steps(page, index, clear, set))
+    }
+    async fn modify_steps(
+        &mut self,
+        page: u16,
+        index: u16,
+        clear: u16,
+        set: u16,
+    ) -> Result<(), Error> {
         let reg = Register::new(page, index)?;
-        let value = self.phy.read(reg)?;
-        Ok(self.phy.write(reg, (value & !clear) | set)?)
+        let value = self.phy.read_steps(reg).await?;
+        Ok(self.phy.write_steps(reg, (value & !clear) | set).await?)
     }
     fn emi(p: &mut Phy<Bus<R>, D>, at: u16, data: u16) -> Result<(), Fault> {
-        p.access(Register { page: 0, index: 16 }, Some(at))?;
-        p.access(Register { page: 0, index: 17 }, Some(data))?;
+        block_on(Self::emi_steps(p, at, data))
+    }
+    async fn emi_steps(p: &mut Phy<Bus<R>, D>, at: u16, data: u16) -> Result<(), Fault> {
+        p.access_steps(Register { page: 0, index: 16 }, Some(at))
+            .await?;
+        p.access_steps(Register { page: 0, index: 17 }, Some(data))
+            .await?;
         Ok(())
     }
     fn post_reset(&mut self) -> Result<(), Error> {

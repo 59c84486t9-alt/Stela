@@ -176,6 +176,10 @@ struct Model {
     stuck_ready: bool,
     /// CSTS.RDY never follows CC.EN: the controller never answers.
     never_ready: bool,
+    /// After each enable, this many CSTS reads report CSTS.CFS without
+    /// CSTS.RDY before the controller is ready; `usize::MAX` for ever.
+    fatal_while_enabling: usize,
+    enabling_reads: usize,
     coherent: bool,
     events: Vec<&'static str>,
     commands: usize,
@@ -201,6 +205,19 @@ struct Model {
     mdts: u8,
     nvm_limits: Option<(u8, u32)>,
     nvm_identifies: usize,
+    /// Number of Queues features set; whether one was since the last
+    /// controller reset; refuse them; and refuse an I/O queue created
+    /// before one, with Invalid Field in Command.
+    /// Refuse the Identify with this CNS, with Invalid Field in Command.
+    refuse_identify: Option<u32>,
+    /// Leave every admin command unanswered; and report CSTS.CFS once one
+    /// is.
+    ignore_admin: bool,
+    fatal_on_admin: bool,
+    queue_counts: usize,
+    queue_count_set: bool,
+    refuse_queue_count: bool,
+    queues_need_count: bool,
 }
 impl Model {
     fn new() -> Self {
@@ -260,6 +277,8 @@ impl Model {
             fail_disable: false,
             stuck_ready: false,
             never_ready: false,
+            fatal_while_enabling: 0,
+            enabling_reads: 0,
             coherent: true,
             events: Vec::new(),
             commands: 0,
@@ -277,6 +296,13 @@ impl Model {
             mdts: 0,
             nvm_limits: None,
             nvm_identifies: 0,
+            refuse_identify: None,
+            ignore_admin: false,
+            fatal_on_admin: false,
+            queue_counts: 0,
+            queue_count_set: false,
+            refuse_queue_count: false,
+            queues_need_count: true,
         }
     }
     fn registers_available(&self) -> bool {
@@ -378,6 +404,10 @@ impl Model {
         self.outstanding = true;
         self.drained = false;
         self.record("command");
+        if queue == 0 && self.ignore_admin {
+            self.fatal |= self.fatal_on_admin;
+            return;
+        }
         if holding {
             self.held_io.push(command);
             return;
@@ -413,6 +443,7 @@ impl Model {
                     result = 1;
                 }
             }
+            (0, 6) if self.refuse_identify == Some(command[10]) => status = 2,
             (0, 6) => {
                 let mut data = vec![0; 4096];
                 match command[10] {
@@ -482,6 +513,18 @@ impl Model {
                     status = 2;
                 }
             }
+            // Number of Queues: only before any I/O queue; one pair granted.
+            (0, 9) if command[10] == 0x07 => {
+                assert_eq!(command[11], 0);
+                assert_eq!(self.queues[1], (0, 0), "queue count after a queue");
+                self.queue_counts += 1;
+                if self.refuse_queue_count {
+                    status = 2;
+                } else {
+                    self.queue_count_set = true;
+                }
+            }
+            (0, 5 | 1) if self.queues_need_count && !self.queue_count_set => status = 2,
             (0, 9) if command[10] == 0x0b => self.event_configs.push(command[11]),
             (0, 2) => {
                 assert_eq!(command[1], u32::MAX);
@@ -758,6 +801,12 @@ unsafe impl Registers for Regs {
         if m.fail_read {
             return Err(register_error());
         }
+        if offset == 0x1c && m.enabled && m.enabling_reads > 0 {
+            if m.enabling_reads != usize::MAX {
+                m.enabling_reads -= 1;
+            }
+            return Ok(1 << 1);
+        }
         if offset == 0x1c {
             return Ok(u32::from((m.enabled && !m.never_ready) || m.stuck_ready)
                 | u32::from(m.fatal) << 1
@@ -776,6 +825,7 @@ unsafe impl Registers for Regs {
                 if value & 1 != 0 {
                     assert!(m.dma_enabled());
                     m.enabled = true;
+                    m.enabling_reads = m.fatal_while_enabling;
                     m.stopped = false;
                     m.queues[0] = (m.register64(0x28), m.register64(0x30));
                     m.record("enable");
@@ -790,6 +840,7 @@ unsafe impl Registers for Regs {
                         m.held_io.clear();
                         m.stopped = true;
                         m.fatal = false;
+                        m.queue_count_set = false;
                         m.queues[1] = (0, 0);
                         m.heads = [0; 2];
                         m.phases = [true; 2];
@@ -1111,7 +1162,7 @@ fn a_controller_that_never_becomes_ready_fails_within_its_bound() {
     let f = Fixture::new();
     f.model.lock().unwrap().never_ready = true;
     let started = Clock::ticks();
-    assert!(matches!(f.attach(), Err(BlockError::Timeout)));
+    assert_eq!(f.attach().err(), Some(BlockError::Timeout.at(ENABLE_WAIT)));
     let took_us = (Clock::ticks() - started) / 1000;
     assert!((500_000..2_000_000).contains(&took_us), "{took_us}");
 
@@ -1123,10 +1174,149 @@ fn a_controller_that_never_becomes_ready_fails_within_its_bound() {
     }
     let budget = stela_driver_base::budget::Budget::start(clock, 20_000).unwrap();
     let started = Clock::ticks();
-    assert!(matches!(f.attach(), Err(BlockError::Timeout)));
+    assert_eq!(f.attach().err(), Some(BlockError::Timeout.at(ENABLE_WAIT)));
     let took_us = (Clock::ticks() - started) / 1000;
     assert!(took_us < 40_000, "{took_us}");
     assert!(budget.expired().is_some());
+}
+
+/// Linux `nvme_setup_io_queues` sets the Number of Queues before it creates
+/// an I/O queue, at probe and after every reset: a controller that refuses
+/// queues it was not asked for attaches and resets. A refused feature
+/// still tries the queues, whose refusal then fails the attach.
+#[test]
+fn the_queue_count_is_set_before_the_io_queues_like_nvme_set_queue_count() {
+    let f = Fixture::new();
+    let mut a = f.attach().unwrap();
+    assert_eq!(f.model.lock().unwrap().queue_counts, 1);
+    let disk = &mut a.namespaces[0];
+    disk.write(0, &[0x77; 512]).unwrap();
+    disk.controller.borrow_mut().reset_and_settle().unwrap();
+    {
+        let m = f.model.lock().unwrap();
+        assert_eq!(m.queue_counts, 2);
+        assert!(m.queue_count_set);
+    }
+    let mut data = [0; 512];
+    disk.read(0, &mut data).unwrap();
+    assert_eq!(data, [0x77; 512]);
+    disk.retire_owned().unwrap();
+
+    // Refused, by a controller that creates its queues anyway.
+    let f = Fixture::new();
+    {
+        let mut m = f.model.lock().unwrap();
+        m.refuse_queue_count = true;
+        m.queues_need_count = false;
+    }
+    let mut a = f.attach().unwrap();
+    assert_eq!(f.model.lock().unwrap().queue_counts, 1);
+    a.namespaces[0].write(0, &[1; 512]).unwrap();
+    a.namespaces[0].retire_owned().unwrap();
+
+    // Refused, and so are the queues.
+    let f = Fixture::new();
+    f.model.lock().unwrap().refuse_queue_count = true;
+    assert_eq!(
+        f.attach().err(),
+        Some(BlockError::Device { status: 2 }.at("NVMe Create I/O Completion Queue (opcode 0x05)"))
+    );
+}
+
+/// Linux `nvme_wait_ready` waits for CSTS.RDY alone: a controller showing
+/// CSTS.CFS while it starts is waited for, at attach and at a reset, and
+/// one that stays fatal fails at its ready timeout with its CSTS.
+#[test]
+fn a_fatal_status_while_enabling_is_waited_out_like_nvme_wait_ready() {
+    let _clock = crate::test_clock::virtualize();
+    let f = Fixture::new();
+    f.model.lock().unwrap().fatal_while_enabling = 3;
+    let mut a = f.attach().unwrap();
+    assert_eq!(f.model.lock().unwrap().enabling_reads, 0);
+    let disk = &mut a.namespaces[0];
+    disk.write(0, &[0x3c; 512]).unwrap();
+    // A reset enables the controller the same way.
+    disk.controller.borrow_mut().reset_and_settle().unwrap();
+    assert_eq!(f.model.lock().unwrap().enabling_reads, 0);
+    let mut data = [0; 512];
+    disk.read(0, &mut data).unwrap();
+    assert_eq!(data, [0x3c; 512]);
+    disk.retire_owned().unwrap();
+
+    let f = Fixture::new();
+    f.model.lock().unwrap().fatal_while_enabling = usize::MAX;
+    let started = Clock::ticks();
+    let error = f.attach().err().unwrap();
+    assert_eq!(
+        format!("{error}"),
+        "NVMe controller enable, waiting for CSTS.RDY: \
+         NVMe controller fatal status, CSTS: device status 0x2"
+    );
+    let took_us = (Clock::ticks() - started) / 1000;
+    assert!((500_000..2_000_000).contains(&took_us), "{took_us}");
+    assert_eq!(f.model.lock().unwrap().commands, 0);
+}
+
+/// A start that fails names the admin command that failed, by opcode and
+/// Identify CNS or feature, and tells a completion's status from the
+/// controller's CSTS and from a command left unanswered.
+#[test]
+fn a_failed_start_names_its_admin_command() {
+    let _clock = crate::test_clock::virtualize();
+    let message = |prepare: fn(&mut Model)| {
+        let f = Fixture::new();
+        prepare(&mut f.model.lock().unwrap());
+        format!("{}", f.attach().err().unwrap())
+    };
+    // A refused command: its completion status.
+    assert_eq!(
+        message(|m| m.refuse_identify = Some(1)),
+        "NVMe Identify Controller (opcode 0x06, CNS 0x01): device status 0x2"
+    );
+    assert_eq!(
+        message(|m| m.refuse_queue_count = true),
+        "NVMe Create I/O Completion Queue (opcode 0x05): device status 0x2"
+    );
+    // An unanswered command: a timeout, here of the first Identify.
+    assert_eq!(
+        message(|m| m.ignore_admin = true),
+        "NVMe Identify Controller (opcode 0x06, CNS 0x01): device timeout"
+    );
+    // A controller that fails while its command waits: CSTS, said so.
+    assert_eq!(
+        message(|m| {
+            m.ignore_admin = true;
+            m.fatal_on_admin = true;
+        }),
+        "NVMe Identify Controller (opcode 0x06, CNS 0x01): \
+         NVMe controller fatal status, CSTS: device status 0x3"
+    );
+    // A controller that never becomes ready, and one that never stops.
+    assert_eq!(
+        message(|m| m.never_ready = true),
+        "NVMe controller enable, waiting for CSTS.RDY: device timeout"
+    );
+    assert_eq!(
+        message(|m| m.stuck_ready = true),
+        "NVMe controller disable, waiting for CSTS.RDY to clear: device timeout"
+    );
+}
+
+/// Linux `nvme_scan_ns` passes over a namespace whose Identify Namespace
+/// the controller refuses: the controller stays, the namespace is
+/// reported with the command it refused.
+#[test]
+fn a_refused_identify_namespace_leaves_the_controller_attached() {
+    let f = Fixture::new();
+    f.model.lock().unwrap().refuse_identify = Some(0);
+    let a = f.attach().unwrap();
+    assert!(a.namespaces.is_empty());
+    assert_eq!(a.failures.len(), 1);
+    assert_eq!(a.failures[0].0, 1);
+    assert_eq!(
+        format!("{}", a.failures[0].1),
+        "NVMe Identify Namespace (opcode 0x06, CNS 0x00): device status 0x2"
+    );
 }
 
 #[test]
