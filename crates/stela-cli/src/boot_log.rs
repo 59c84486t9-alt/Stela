@@ -29,6 +29,9 @@ use stela_runtime::pc::{
     machine_state,
 };
 
+/// The logs found, each with where it is, and the notes on what they lack.
+pub(crate) type Found = (Vec<(String, Log)>, Vec<String>);
+
 /// One machine-state place in a file, which the hidden `log` options name
 /// instead of finding every log.
 #[derive(Default, Clone)]
@@ -64,9 +67,9 @@ impl BootLog {
                 (logs, true, notes)
             }
             Some(file) if self.partition.is_none() && self.offset.is_none() => {
-                let logs = find(file)?;
+                let (logs, notes) = find(file)?;
                 let several = logs.len() > 1;
-                (logs, several, Vec::new())
+                (logs, several, notes)
             }
             Some(file) => (vec![(String::new(), self.load(file)?)], false, Vec::new()),
         };
@@ -207,7 +210,7 @@ pub(crate) fn shown(path: &Path) -> PathBuf {
 /// is a copied `boot.log`; else in each GPT partition, or in FILE itself
 /// without a GPT, the stick's log file on a FAT32 volume, then the machine
 /// state's at the start or in the tail.
-fn find(path: &Path) -> Result<Vec<(String, Log)>> {
+fn find(path: &Path) -> Result<Found> {
     let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let end = file.seek(SeekFrom::End(0))?;
     let mut magic = [0u8; 8];
@@ -217,7 +220,7 @@ fn find(path: &Path) -> Result<Vec<(String, Log)>> {
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut region)?;
         let log = boot_log::read(&region).with_context(|| format!("{}", path.display()))?;
-        return Ok(vec![(String::from("the file"), log)]);
+        return Ok((vec![(String::from("the file"), log)], Vec::new()));
     }
     let (spans, listed) = match table(path) {
         Ok((table, block)) => (
@@ -256,7 +259,8 @@ fn find(path: &Path) -> Result<Vec<(String, Log)>> {
         path.display(),
         crate::efi::BOOT_LOG
     );
-    Ok(logs.all())
+    let notes = std::mem::take(&mut logs.stick_notes);
+    Ok((logs.all(), notes))
 }
 
 /// The boot logs found on one disk or partition: the stick's own log file,
@@ -265,6 +269,12 @@ fn find(path: &Path) -> Result<Vec<(String, Log)>> {
 pub(crate) struct Logs {
     pub(crate) usb: Vec<(String, Log)>,
     pub(crate) machine: Vec<(String, Log)>,
+    /// Why a Stela stick's own log was not read, or was read without its
+    /// header: always worth saying.
+    pub(crate) stick_notes: Vec<String>,
+    /// The partitions that could not be read at all: worth saying only when
+    /// no stick's log was found, since one of them may be the stick.
+    pub(crate) unread: Vec<String>,
 }
 
 impl Logs {
@@ -275,6 +285,8 @@ impl Logs {
     fn extend(&mut self, other: Self) {
         self.usb.extend(other.usb);
         self.machine.extend(other.machine);
+        self.stick_notes.extend(other.stick_notes);
+        self.unread.extend(other.unread);
     }
 
     /// The USB's logs first.
@@ -312,9 +324,27 @@ impl ReadAt for Span<'_, '_> {
 /// finds it, and the machine state's at its start and in its last bytes.
 fn partition_logs(read: &mut Reader<'_>, bytes: u64, place: &str) -> Logs {
     let mut logs = Logs::default();
-    if let Ok(log) = file_log(read, bytes) {
-        logs.usb
-            .push((format!("{place}, {}", crate::efi::BOOT_LOG), log));
+    match file_log(read, bytes) {
+        Ok(StickLog::Whole(log)) => logs
+            .usb
+            .push((format!("{place}, {}", crate::efi::BOOT_LOG), log)),
+        Ok(StickLog::Raw(log, error)) => {
+            logs.stick_notes.push(format!(
+                "{place}: {} has no usable header ({error}); its contents follow as they lie \
+                 in the file, not in the order they were written",
+                crate::efi::BOOT_LOG
+            ));
+            logs.usb.push((
+                format!("{place}, {}, raw contents", crate::efi::BOOT_LOG),
+                log,
+            ));
+        }
+        // A volume that is no Stela stick has no log to miss.
+        Err(error) if stick(read, bytes) => logs.stick_notes.push(format!(
+            "{place} is a Stela stick whose {} could not be read: {error:#}",
+            crate::efi::BOOT_LOG
+        )),
+        Err(_) => {}
     }
     if bytes >= boot_log::PARTITION_BYTES
         && let Ok(log) = state_log(read, 0)
@@ -330,10 +360,27 @@ fn partition_logs(read: &mut Reader<'_>, bytes: u64, place: &str) -> Logs {
     logs
 }
 
+/// A stick's own log file as it was read.
+enum StickLog {
+    Whole(Log),
+    /// The file's bytes past a header that does not decode, zeros left out:
+    /// the lines are there even when their order and boot count are not.
+    Raw(Log, boot_log::HeaderError),
+}
+
+/// Whether a `bytes`-long partition is a Stela stick's FAT32 volume: it
+/// holds the loader's options or the log file.
+fn stick(read: &mut Reader<'_>, bytes: u64) -> bool {
+    Fat32::open(Span { read, bytes }).is_ok_and(|mut volume| {
+        volume.file(crate::efi::OPTIONS).is_ok() || volume.file(crate::efi::BOOT_LOG).is_ok()
+    })
+}
+
 /// The USB's own log, [`crate::efi::BOOT_LOG`] on the FAT32 volume of a
 /// `bytes`-long partition: the file's first [`boot_log::LOG_BYTES`], which
-/// `stela.efi` writes through its clusters.
-fn file_log(read: &mut Reader<'_>, bytes: u64) -> Result<Log> {
+/// `stela.efi` writes through its clusters. A file no boot has written is
+/// refused; one whose header does not decode is read raw.
+fn file_log(read: &mut Reader<'_>, bytes: u64) -> Result<StickLog> {
     let mut volume = Fat32::open(Span { read, bytes }).map_err(|error| anyhow!("{error}"))?;
     let file = volume
         .file(crate::efi::BOOT_LOG)
@@ -357,10 +404,30 @@ fn file_log(read: &mut Reader<'_>, bytes: u64) -> Result<Log> {
         }
     }
     ensure!(done == region.len(), "{} ends early", crate::efi::BOOT_LOG);
-    boot_log::read(&region).with_context(|| format!("{} has no boot log", crate::efi::BOOT_LOG))
+    match boot_log::read(&region) {
+        Ok(log) => Ok(StickLog::Whole(log)),
+        Err(error) => {
+            let stream: Vec<u8> = region[boot_log::HEADER_BYTES as usize..]
+                .iter()
+                .copied()
+                .filter(|&byte| byte != 0)
+                .collect();
+            if stream.is_empty() {
+                bail!("{} has no boot log: {error}", crate::efi::BOOT_LOG);
+            }
+            Ok(StickLog::Raw(
+                Log {
+                    boots: 0,
+                    head: stream.len() as u64,
+                    ring_bytes: boot_log::RING_BYTES,
+                    stream,
+                },
+                error,
+            ))
+        }
+    }
 }
 
-/// The boot log of the machine state that starts at byte `state`, when a
 /// log header is there: one block is read before the whole region.
 fn state_log(read: &mut Reader<'_>, state: u64) -> Result<Log> {
     let start = state + boot_log::OFFSET;
@@ -405,10 +472,15 @@ pub(crate) fn disk_logs(host: &dyn Host, disk: &Disk) -> Result<Logs> {
     let mut logs = Logs::default();
     let (mut refused, mut readable) = (None, false);
     for partition in &disk.partitions {
-        let Ok(info) = host.partition(&partition.identifier) else {
-            continue;
-        };
         let identifier = partition.identifier.as_str();
+        let info = match host.partition(identifier) {
+            Ok(info) => info,
+            Err(error) => {
+                logs.unread
+                    .push(format!("could not read partition {identifier}: {error:#}"));
+                continue;
+            }
+        };
         let mut read = |offset: u64, buffer: &mut [u8]| -> Result<()> {
             let bytes = host.read(identifier, offset, buffer.len())?;
             ensure!(bytes.len() == buffer.len(), "{identifier} read short");
@@ -416,6 +488,8 @@ pub(crate) fn disk_logs(host: &dyn Host, disk: &Disk) -> Result<Logs> {
             Ok(())
         };
         if let Err(error) = read(0, &mut [0; 512]) {
+            logs.unread
+                .push(format!("could not read partition {identifier}: {error:#}"));
             refused.get_or_insert(error);
             continue;
         }
@@ -449,10 +523,10 @@ pub(crate) fn scan(host: &dyn Host) -> Result<Vec<(String, Log)>> {
 /// the system disks too. No log anywhere is refused with the disks looked
 /// at and what to try. The notes say what the logs lack: the stick's own
 /// log, which alone holds every boot, and each disk that could not be read.
-pub(crate) fn scan_noted(host: &dyn Host) -> Result<(Vec<(String, Log)>, Vec<String>)> {
+pub(crate) fn scan_noted(host: &dyn Host) -> Result<Found> {
     let disks = host.disks()?;
     let (mut looked, mut unread) = (String::new(), String::new());
-    let mut notes = Vec::new();
+    let (mut notes, mut unread_parts) = (Vec::new(), Vec::new());
     for system in [false, true] {
         let mut logs = Vec::new();
         let mut stick = false;
@@ -460,8 +534,16 @@ pub(crate) fn scan_noted(host: &dyn Host) -> Result<(Vec<(String, Log)>, Vec<Str
             let name = describe(disk);
             let _ = writeln!(looked, "  {name}");
             match disk_logs(host, disk) {
-                Ok(found) => {
+                Ok(mut found) => {
                     stick |= !found.usb.is_empty();
+                    notes.extend(
+                        found
+                            .stick_notes
+                            .drain(..)
+                            .map(|note| format!("{name}: {note}")),
+                    );
+                    unread_parts
+                        .extend(found.unread.drain(..).map(|note| format!("{name}: {note}")));
                     logs.extend(
                         found
                             .all()
@@ -478,6 +560,7 @@ pub(crate) fn scan_noted(host: &dyn Host) -> Result<(Vec<(String, Log)>, Vec<Str
         if !logs.is_empty() {
             if !stick {
                 notes.insert(0, NO_STICK_LOG.to_owned());
+                notes.append(&mut unread_parts);
             }
             return Ok((logs, notes));
         }
@@ -851,7 +934,7 @@ pub(crate) mod tests {
         assert_eq!(raw, log);
 
         // Without a place the command finds the log itself.
-        let found = find(&path).unwrap();
+        let (found, _) = find(&path).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], (format!("partition {GUID}"), log.clone()));
         let error = format!(
@@ -942,7 +1025,7 @@ pub(crate) mod tests {
         let at = (2048 * 512 + tail + boot_log::OFFSET) as usize;
         bytes[at..at + boot_log::LOG_BYTES as usize].copy_from_slice(&region(&["in the tail\n"]));
         std::fs::write(&path, &bytes).unwrap();
-        let found = find(&path).unwrap();
+        let (found, _) = find(&path).unwrap();
         let places: Vec<_> = found
             .iter()
             .map(|(place, log)| (place.as_str(), log.boots))
@@ -964,7 +1047,7 @@ pub(crate) mod tests {
             &bytes[2048 * 512..2048 * 512 + partition_bytes as usize],
         )
         .unwrap();
-        let found = find(&raw).unwrap();
+        let (found, _) = find(&raw).unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].0, "the file");
     }
@@ -1077,7 +1160,7 @@ pub(crate) mod tests {
         let mut state = vec![0u8; boot_log::PARTITION_BYTES as usize];
         state[boot_log::OFFSET as usize..].copy_from_slice(&region(&["NOR persistent\n"]));
         disk_image(&path, &[(LINUX, &state), (ESP, &esp)]);
-        let found = find(&path).unwrap();
+        let (found, _) = find(&path).unwrap();
         let places: Vec<_> = found
             .iter()
             .map(|(place, log)| (place.as_str(), log.boots))
@@ -1099,7 +1182,7 @@ pub(crate) mod tests {
         // A raw EFI partition, and a stick whose log file was never made.
         let raw = dir.path().join("esp.img");
         std::fs::write(&raw, &esp).unwrap();
-        assert_eq!(find(&raw).unwrap()[0].0, "the file, EFI/stela/boot.log");
+        assert_eq!(find(&raw).unwrap().0[0].0, "the file, EFI/stela/boot.log");
         let bare = dir.path().join("bare.img");
         disk_image(&bare, &[(ESP, &fat_volume(None))]);
         let error = format!("{:#}", find(&bare).unwrap_err());
@@ -1110,11 +1193,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_stick_log_that_cannot_be_read_whole_is_said_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // A header that no longer decodes: the lines are read as they lie.
+        let mut torn = region(&["CHOICE 1 (macOS)\n"]);
+        torn[16] ^= 0xff;
+        let raw = dir.path().join("torn.img");
+        std::fs::write(&raw, fat_volume(Some(&torn))).unwrap();
+        let (found, notes) = find(&raw).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "the file, EFI/stela/boot.log, raw contents");
+        assert_eq!(
+            found[0].1.stream,
+            b"=== STELA BOOT 1 ===\nCHOICE 1 (macOS)\n"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("has no usable header (the log header's checksum does not match)"),
+            "{notes:?}"
+        );
+        // A log file no boot wrote: nothing to show, and the stick is named.
+        let blank = fat_volume(Some(&vec![0u8; boot_log::LOG_BYTES as usize]));
+        let mut read = |offset: u64, buffer: &mut [u8]| -> Result<()> {
+            buffer.copy_from_slice(&blank[offset as usize..offset as usize + buffer.len()]);
+            Ok(())
+        };
+        let logs = partition_logs(&mut read, blank.len() as u64, "partition sdb1");
+        assert!(logs.usb.is_empty());
+        assert_eq!(logs.stick_notes.len(), 1, "{:?}", logs.stick_notes);
+        assert!(
+            logs.stick_notes[0].starts_with(
+                "partition sdb1 is a Stela stick whose EFI/stela/boot.log could not be read: "
+            ) && logs.stick_notes[0].ends_with("the log region is blank"),
+            "{:?}",
+            logs.stick_notes
+        );
+        // A FAT32 volume that is no stick is passed over without a word.
+        let mut other = fat_volume(None);
+        let at = other.windows(11).position(|w| w == b"STELA      ").unwrap();
+        other[at..at + 11].copy_from_slice(b"OTHER      ");
+        let mut read = |offset: u64, buffer: &mut [u8]| -> Result<()> {
+            buffer.copy_from_slice(&other[offset as usize..offset as usize + buffer.len()]);
+            Ok(())
+        };
+        let logs = partition_logs(&mut read, other.len() as u64, "partition sdc1");
+        assert!(logs.is_empty() && logs.stick_notes.is_empty());
+    }
+
+    #[test]
     fn boot_log_reads_a_copied_log_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("boot.log");
         std::fs::write(&path, region(&["first\n", "second\n"])).unwrap();
-        let found = find(&path).unwrap();
+        let (found, _) = find(&path).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "the file");
         assert_eq!(found[0].1.boots, 2);

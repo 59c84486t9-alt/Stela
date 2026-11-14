@@ -6013,7 +6013,13 @@ fn boot_log_scan_reads_the_usb_raw_before_the_system_disk() {
     // said to lack the stick's own.
     raw_partition(&mut host, dir.path(), "disk5s1", &fat_volume(None));
     let (logs, notes) = crate::boot_log::scan_noted(&host).unwrap();
-    assert_eq!(notes, [crate::boot_log::NO_STICK_LOG]);
+    assert_eq!(notes[0], crate::boot_log::NO_STICK_LOG);
+    assert!(
+        notes[1..]
+            .iter()
+            .all(|note| note.starts_with(&format!("{usb}: could not read partition "))),
+        "only what could not be read follows: {notes:?}"
+    );
     assert_eq!(logs.len(), 1);
     assert_eq!(
         logs[0].0,
@@ -6025,10 +6031,11 @@ fn boot_log_scan_reads_the_usb_raw_before_the_system_disk() {
     // A stick that cannot be read is named beside the logs that were found.
     let (logs, notes) = crate::boot_log::scan_noted(&host).unwrap();
     assert_eq!(logs.len(), 1);
-    assert_eq!(notes.len(), 2, "{notes:?}");
     assert_eq!(notes[0], crate::boot_log::NO_STICK_LOG);
     assert!(
-        notes[1].starts_with(&format!("could not read {usb}: ")),
+        notes[1..]
+            .iter()
+            .any(|note| note.starts_with(&format!("could not read {usb}: "))),
         "{notes:?}"
     );
     fs::write(host.image("disk0s1").unwrap(), vec![0u8; 4096]).unwrap();
