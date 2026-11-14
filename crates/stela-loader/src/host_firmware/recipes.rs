@@ -1657,9 +1657,7 @@ mod tests {
                 .any(|name| name == "nvidia/tu104/acr/bl.bin")
         );
         assert!(
-            names("ga104")
-                .iter()
-                .all(|name| !name.contains("/acr/")),
+            names("ga104").iter().all(|name| !name.contains("/acr/")),
             "{:?}",
             names("ga104")
         );
