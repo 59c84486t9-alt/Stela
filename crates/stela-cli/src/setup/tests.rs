@@ -6004,9 +6004,16 @@ fn boot_log_scan_reads_the_usb_raw_before_the_system_disk() {
         format!("{usb}: partition disk5s1, EFI/stela/boot.log")
     );
     assert_eq!(logs[0].1.boots, 1);
-    // A USB without a log: the system disk is read too.
+    let (_, notes) = crate::boot_log::scan_noted(&host).unwrap();
+    assert!(
+        notes.is_empty(),
+        "the stick's own log lacks nothing: {notes:?}"
+    );
+    // A USB without a log: the system disk is read too, and the logs are
+    // said to lack the stick's own.
     raw_partition(&mut host, dir.path(), "disk5s1", &fat_volume(None));
-    let logs = crate::boot_log::scan(&host).unwrap();
+    let (logs, notes) = crate::boot_log::scan_noted(&host).unwrap();
+    assert_eq!(notes, [crate::boot_log::NO_STICK_LOG]);
     assert_eq!(logs.len(), 1);
     assert_eq!(
         logs[0].0,
@@ -6014,8 +6021,17 @@ fn boot_log_scan_reads_the_usb_raw_before_the_system_disk() {
     );
     // No log anywhere names the disks, the ones that could not be read,
     // and what to try.
-    fs::write(host.image("disk0s1").unwrap(), vec![0u8; 4096]).unwrap();
     host.partitions.get_mut("disk5s1").unwrap().1 = dir.path().join("gone.img");
+    // A stick that cannot be read is named beside the logs that were found.
+    let (logs, notes) = crate::boot_log::scan_noted(&host).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(notes[0], crate::boot_log::NO_STICK_LOG);
+    assert!(
+        notes[1].starts_with(&format!("could not read {usb}: ")),
+        "{notes:?}"
+    );
+    fs::write(host.image("disk0s1").unwrap(), vec![0u8; 4096]).unwrap();
     let error = format!("{:#}", crate::boot_log::scan(&host).unwrap_err());
     assert!(
         error.starts_with("no Stela boot log on this computer's disks."),

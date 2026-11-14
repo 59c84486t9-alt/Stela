@@ -58,16 +58,19 @@ pub(crate) struct BootLog {
 
 impl BootLog {
     pub(crate) fn run(&self) -> Result<()> {
-        let (logs, headings) = match &self.file {
-            None => (scan(&host::System)?, true),
+        let (logs, headings, notes) = match &self.file {
+            None => {
+                let (logs, notes) = scan_noted(&host::System)?;
+                (logs, true, notes)
+            }
             Some(file) if self.partition.is_none() && self.offset.is_none() => {
                 let logs = find(file)?;
                 let several = logs.len() > 1;
-                (logs, several)
+                (logs, several, Vec::new())
             }
-            Some(file) => (vec![(String::new(), self.load(file)?)], false),
+            Some(file) => (vec![(String::new(), self.load(file)?)], false, Vec::new()),
         };
-        write_logs(&logs, headings, self.output.as_deref())
+        write_logs(&logs, headings, &notes, self.output.as_deref())
     }
 
     fn load(&self, path: &Path) -> Result<Log> {
@@ -121,9 +124,13 @@ impl BootLog {
 /// `headings`, or write them to `output` and say where they went. Each
 /// stream is written as the boot wrote it, oldest boot first; each log's
 /// one-line summary goes to standard error.
+/// Write `logs` to `output` or standard output. Each of `notes` (what the
+/// logs lack, [`scan_noted`]) is the file's first lines, so a reader of an
+/// attached file sees it, and is said again after the summary.
 pub(crate) fn write_logs(
     logs: &[(String, Log)],
     headings: bool,
+    notes: &[String],
     output: Option<&Path>,
 ) -> Result<()> {
     let replaced = output.is_some_and(Path::exists);
@@ -133,6 +140,14 @@ pub(crate) fn write_logs(
         ),
         None => Box::new(std::io::stdout().lock()),
     };
+    for note in notes {
+        match writeln!(sink, "=== NOTE: {} ===", note.replace('\n', " ")) {
+            Err(error) if output.is_none() && error.kind() == std::io::ErrorKind::BrokenPipe => {
+                return Ok(());
+            }
+            result => result.context("cannot write the boot log")?,
+        }
+    }
     for (place, log) in logs {
         let mut written = Ok(());
         if headings {
@@ -157,6 +172,9 @@ pub(crate) fn write_logs(
         #[cfg(unix)]
         crate::setup::hand_to_invoker(path);
         eprintln!("{}", saved(logs.len(), path, replaced));
+    }
+    for note in notes {
+        eprintln!("Note: {note}");
     }
     Ok(())
 }
@@ -414,32 +432,54 @@ pub(crate) fn disk_logs(host: &dyn Host, disk: &Disk) -> Result<Logs> {
     }
 }
 
+/// What [`scan_noted`] says when the logs it found lack the stick's own.
+pub(crate) const NO_STICK_LOG: &str = "no Stela stick's own log (EFI/stela/boot.log) was found. \
+    These logs come only from the disk macOS is on, which an install writes and later boots do \
+    not: they do not show a boot that failed after the install. Plug in the stick Stela booted \
+    from and run this again.";
+
+/// Every boot log on `host`'s disks ([`scan_noted`]), without its notes.
+#[cfg(test)]
+pub(crate) fn scan(host: &dyn Host) -> Result<Vec<(String, Log)>> {
+    scan_noted(host).map(|(logs, _)| logs)
+}
+
 /// Every boot log on `host`'s disks, each placed by its disk and partition:
 /// the disks that do not run this computer first and, when they hold none,
 /// the system disks too. No log anywhere is refused with the disks looked
-/// at and what to try.
-pub(crate) fn scan(host: &dyn Host) -> Result<Vec<(String, Log)>> {
+/// at and what to try. The notes say what the logs lack: the stick's own
+/// log, which alone holds every boot, and each disk that could not be read.
+pub(crate) fn scan_noted(host: &dyn Host) -> Result<(Vec<(String, Log)>, Vec<String>)> {
     let disks = host.disks()?;
     let (mut looked, mut unread) = (String::new(), String::new());
+    let mut notes = Vec::new();
     for system in [false, true] {
         let mut logs = Vec::new();
+        let mut stick = false;
         for disk in disks.iter().filter(|disk| disk.system == system) {
             let name = describe(disk);
             let _ = writeln!(looked, "  {name}");
             match disk_logs(host, disk) {
-                Ok(found) => logs.extend(
-                    found
-                        .all()
-                        .into_iter()
-                        .map(|(place, log)| (format!("{name}: {place}"), log)),
-                ),
+                Ok(found) => {
+                    stick |= !found.usb.is_empty();
+                    logs.extend(
+                        found
+                            .all()
+                            .into_iter()
+                            .map(|(place, log)| (format!("{name}: {place}"), log)),
+                    );
+                }
                 Err(error) => {
                     let _ = writeln!(unread, "  {name}: {error:#}");
+                    notes.push(format!("could not read {name}: {error:#}"));
                 }
             }
         }
         if !logs.is_empty() {
-            return Ok(logs);
+            if !stick {
+                notes.insert(0, NO_STICK_LOG.to_owned());
+            }
+            return Ok((logs, notes));
         }
     }
     let rights = if cfg!(windows) {
@@ -1093,8 +1133,8 @@ pub(crate) mod tests {
             (String::from("USB"), log.clone()),
             (String::from("disk"), log),
         ];
-        write_logs(&logs, true, Some(&output)).unwrap();
-        let mut expected = b"=== USB ===\n".to_vec();
+        write_logs(&logs, true, &[String::from("first\nnote")], Some(&output)).unwrap();
+        let mut expected = b"=== NOTE: first note ===\n=== USB ===\n".to_vec();
         expected.extend_from_slice(&logs[0].1.stream);
         expected.extend_from_slice(b"=== disk ===\n");
         expected.extend_from_slice(&logs[1].1.stream);
@@ -1108,7 +1148,7 @@ pub(crate) mod tests {
             said.ends_with("log.txt, replacing the file that was there"),
             "{said}"
         );
-        let error = write_logs(&logs, false, Some(&dir.path().join("no/such/dir")));
+        let error = write_logs(&logs, false, &[], Some(&dir.path().join("no/such/dir")));
         assert!(format!("{:#}", error.unwrap_err()).contains("cannot create"));
     }
 }
