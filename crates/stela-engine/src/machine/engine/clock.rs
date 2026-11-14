@@ -28,7 +28,10 @@
 //!   the others' then (`Clock::mark`); one that waits looks at each pass.
 //!   Only a PE that fell behind makes them write the shared state, so with
 //!   no stall native reads share it unmodified. A PE that knows it stops
-//!   for host work in the kernel (`Clock::leave`) sets its own limit.
+//!   for host work in the kernel (`Clock::leave`) sets its own limit, from
+//!   the count of its last progress, and shows that count again when it
+//!   returns, until it marks progress: short stops with a few blocks
+//!   between them add up as one long stop.
 //!   Normal host work takes a few milliseconds and never reaches it.
 //! - A PE whose guest waits holds nothing, unless guest work comes for it
 //!   while it is out of its run loop serving the host (`Machine::serve_host`):
@@ -598,11 +601,21 @@ impl SharedClock {
     }
 
     /// PE `pe` stops in the kernel for host work: the count goes on at
-    /// most a stall limit past now until it runs again.
-    fn stop(&self, pe: usize, counter: &mut impl Counter) {
-        let (count, _) = self.read(counter);
+    /// most a stall limit past the count its slot showed, the count of its
+    /// last progress, until it runs again; with none shown, past now. The
+    /// count the stop holds from, which its slot shows again once it
+    /// resumes ([`Clock::resume`]).
+    fn stop(&self, pe: usize, counter: &mut impl Counter) -> u64 {
+        let (now, _) = self.read(counter);
+        let shown = self.slot(pe);
+        let count = if shown == IDLE || shown & STOPPED != 0 {
+            now
+        } else {
+            shown.min(now)
+        };
         self.publish(pe, count | STOPPED);
         self.settle(counter);
+        count
     }
 
     /// Make the sequence odd, waiting for another writer to finish; the even
@@ -661,6 +674,9 @@ struct Attachment {
     /// waits, so has no work the host keeps from it.
     stopped: bool,
     idle: bool,
+    /// While it stops in the kernel, the count its stop holds from
+    /// ([`SharedClock::stop`]); `None` at EL0.
+    held_from: Option<u64>,
     /// What it last read: the count stays at or below the host's counter
     /// past [`Seen::offset_by`].
     seen: Seen,
@@ -749,6 +765,7 @@ impl Clock {
             stopped: false,
             // It runs: a PE attaches as it enters parallel.
             idle: false,
+            held_from: None,
             seen,
             timers: TimerGate::default(),
             progress: Progress::default(),
@@ -1050,26 +1067,38 @@ impl Clock {
         match &mut self.shared {
             Some(attachment) if !attachment.idle && !attachment.stopped => {
                 attachment.stopped = true;
-                if at_el0 {
+                attachment.held_from = if at_el0 {
                     attachment.clock.publish(attachment.pe, IDLE);
+                    None
                 } else {
-                    attachment.clock.stop(attachment.pe, &mut counter);
-                }
+                    Some(attachment.clock.stop(attachment.pe, &mut counter))
+                };
                 true
             }
             _ => false,
         }
     }
 
-    /// The PE that [`Self::leave`]s returns to guest code. A count its stop
-    /// held becomes lag, so it continues from where it was held.
+    /// The PE that [`Self::leave`]s returns to guest code. From the kernel
+    /// it made no progress meanwhile, so its slot shows the count its stop
+    /// held from again, until its next mark publishes progress: a PE that
+    /// keeps stopping for short host work with a few blocks between, as the
+    /// boot PE between slices, holds the count as one long stop does,
+    /// instead of looking fresh at each return. Once lifted, the count a
+    /// stop held becomes lag, so it continues from where it was held. From
+    /// EL0 it held nothing, and shows the count now.
     pub(super) fn resume(&mut self, mut counter: impl Counter, _work: u64) {
         if let Some(attachment) = &mut self.shared
             && core::mem::take(&mut attachment.stopped)
         {
-            let (count, _) = attachment.clock.read(&mut counter);
-            attachment.clock.publish(attachment.pe, count);
-            attachment.progress.published = count;
+            match attachment.held_from.take() {
+                Some(count) => attachment.clock.publish(attachment.pe, count),
+                None => {
+                    let (count, _) = attachment.clock.read(&mut counter);
+                    attachment.clock.publish(attachment.pe, count);
+                    attachment.progress.published = count;
+                }
+            }
             attachment.clock.look(&mut counter);
         }
     }

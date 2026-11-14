@@ -199,10 +199,12 @@ fn a_pe_stopped_in_the_kernel_holds_the_count_only_past_the_stall_limit() {
     assert!(!first.leave(|| 2000, 0, false), "stopped once");
     assert_eq!(second.read(|| 2500), 2500);
     first.resume(|| 2600, 0);
+    first.mark(|| 2600, 1, None);
     assert_eq!(second.read(|| 3000), 3000);
     assert_eq!(shared.take_stalled(), 0);
-    // A long one stops the count 1200 counts (50 ms) after it began; the
-    // rest becomes lag, and the count goes on from there.
+    // A long one stops the count 1200 counts (50 ms) after its last
+    // progress; the rest becomes lag, and the count goes on from there.
+    first.mark(|| 4000, 2, None);
     assert!(first.leave(|| 4000, 0, false));
     assert_eq!(second.read(|| 6000), 5200);
     assert_eq!(
@@ -210,7 +212,10 @@ fn a_pe_stopped_in_the_kernel_holds_the_count_only_past_the_stall_limit() {
         7200,
         "looks again a limit later"
     );
+    // Back in guest code it shows no progress until its next mark.
     first.resume(|| 10_000, 0);
+    assert_eq!(second.read(|| 10_000), 5200);
+    first.mark(|| 10_000, 3, None);
     assert_eq!(shared.take_stalled(), 4800);
     assert_eq!(second.read(|| 10_000), 5200);
     assert_eq!(second.read(|| 10_100), 5300);
@@ -262,6 +267,52 @@ fn a_pe_with_guest_work_that_retires_nothing_holds_the_count_only_past_the_limit
     // second PE's 10-count gaps are too short to name.
     assert_eq!(shared.take_stalls(), [(LONG_STALL, STALL_UNKNOWN), (0, 0)]);
     assert_eq!(shared.take_stalls(), [(0, 0), (0, 0)]);
+}
+
+#[test]
+fn short_kernel_stops_with_no_progress_between_hold_the_count_as_one_long_stop() {
+    let (shared, mut first, mut second) = pair();
+    first.idle(|| 1000, 0, None);
+    first.busy(|| 1000, 0, None);
+    second.idle(|| 1000, 0, None);
+    second.busy(|| 1000, 0, None);
+    let limit = 1000 + FREQUENCY * STALL_MILLIS / 1000;
+    // For 200 ms the first PE stops in the kernel for 4 ms of host work at
+    // a time, as the boot PE does between slices, and runs a few blocks
+    // between, never the instructions of a progress mark; the second runs.
+    let mut retired = 0;
+    for host in (1000..1000 + LONG_STALL).step_by(120) {
+        assert!(first.leave(|| host, 0, false));
+        first.resume(|| host + 100, 0);
+        retired += 100;
+        second.mark(|| host + 110, retired, None);
+        assert_eq!(
+            second.read(|| host + 110),
+            (host + 110).min(limit),
+            "at {host}"
+        );
+    }
+    // Its next mark lifts the hold; only the excess became lag.
+    let end = 1000 + LONG_STALL;
+    first.mark(|| end, 1, None);
+    assert_eq!(shared.take_stalled(), end - limit);
+    assert_eq!(second.read(|| end + 100), limit + 100);
+    // Stops between progress marks cost the count nothing.
+    for host in (end..end + LONG_STALL).step_by(120) {
+        assert!(first.leave(|| host, 0, false));
+        first.resume(|| host + 100, 0);
+        first.mark(|| host + 110, host, None);
+        second.mark(|| host + 110, host, None);
+    }
+    assert_eq!(shared.take_stalled(), 0);
+    // Nor do stops at EL0, which hold nothing.
+    let later = end + LONG_STALL;
+    for host in (later..later + LONG_STALL).step_by(120) {
+        assert!(first.leave(|| host, 0, true));
+        first.resume(|| host + 100, 0);
+        second.mark(|| host + 110, host, None);
+    }
+    assert_eq!(shared.take_stalled(), 0);
 }
 
 #[test]
@@ -343,10 +394,12 @@ fn two_stops_hold_the_count_at_the_earlier_one_s_limit() {
     assert!(second.leave(|| 2500, 0, false));
     assert_eq!(shared.count(|| 9000), 3200);
     first.resume(|| 9000, 0);
+    first.mark(|| 9000, 1, None);
     // The second stop's limit, 3700, now holds the count from 3200.
     assert_eq!(shared.count(|| 9400), 3600);
     assert_eq!(shared.count(|| 9600), 3700);
     second.resume(|| 9600, 0);
+    second.mark(|| 9600, 1, None);
     assert_eq!(shared.count(|| 9700), 3800);
     assert_eq!(shared.take_stalled(), 5800 + 100);
 }
@@ -508,6 +561,7 @@ fn no_slew_runs_while_a_hold_is_in_force() {
     assert!(first.leave(|| 2000, 0, false));
     second.look(|| 8000);
     first.resume(|| 8000, 0);
+    first.mark(|| 8000, 1, None);
     let lag = shared.lag();
     assert_eq!(lag, 8000 - 3200);
     assert!(first.leave(|| 9000, 0, false));
@@ -516,6 +570,7 @@ fn no_slew_runs_while_a_hold_is_in_force() {
     }
     assert_eq!(shared.take_repaid(), 0);
     first.resume(|| 40_000, 0);
+    first.mark(|| 40_000, 2, None);
     assert!(shared.lag() > lag);
 }
 
