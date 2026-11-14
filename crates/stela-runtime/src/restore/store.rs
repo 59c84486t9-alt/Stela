@@ -24,7 +24,6 @@ use super::{
 };
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     collections::{BTreeMap, VecDeque},
     string::{String, ToString},
     vec::Vec,
@@ -98,11 +97,22 @@ struct Verified {
     /// reach.
     whole: Option<(u64, Sha384)>,
 }
-/// A few simultaneous streams can share one IPSW. Keep their positions
-/// separate, with bounded inflater buffers, so alternating reads do not
-/// replay each deflated member from byte zero.
+/// A few simultaneous streams can share one IPSW, and one member. Keep
+/// their positions separate, with bounded inflater buffers, so alternating
+/// reads do not replay each deflated member from byte zero.
 #[derive(Default)]
-struct Cursors(VecDeque<(String, Progress)>);
+struct Cursors(VecDeque<Cursor>);
+
+/// One position in a member.
+struct Cursor {
+    name: String,
+    progress: Progress,
+    /// The read that ran out of time at this cursor, by offset and length:
+    /// the cursor holds that read's bytes so far and waits for it to be
+    /// asked again. Another read of the member, such as the head a request
+    /// asked again reads first, takes another cursor.
+    pending: Option<(u64, usize)>,
+}
 
 impl Cursors {
     // Each deflate cursor owns a 64 KiB input buffer, a 32 KiB window,
@@ -119,13 +129,25 @@ impl Cursors {
         offset: u64,
         output: &mut [u8],
     ) -> Result<()> {
+        let read = (offset, output.len());
+        // The cursor this read left pending, else the member's free cursor
+        // that is furthest on without having passed the offset.
         let cached = self
             .0
             .iter()
-            .position(|(name, _)| *name == entry.name)
-            .and_then(|index| self.0.remove(index));
+            .enumerate()
+            .filter(|(_, cursor)| cursor.name == entry.name)
+            .filter_map(|(index, cursor)| match cursor.pending {
+                Some(pending) => (pending == read).then_some((index, u64::MAX)),
+                None => {
+                    let from = cursor.progress.resumes_from();
+                    (from <= offset).then_some((index, from))
+                }
+            })
+            .max_by_key(|&(_, rank)| rank)
+            .and_then(|(index, _)| self.0.remove(index));
         let (name, mut progress) = match cached {
-            Some((name, progress)) => (Some(name), Some(progress)),
+            Some(cursor) => (Some(cursor.name), Some(cursor.progress)),
             None => (None, None),
         };
         let result = archive
@@ -134,19 +156,30 @@ impl Cursors {
         // A pending read keeps its cursor, with the bytes it produced, so
         // asking again goes on from there instead of inflating the member's
         // prefix again; any other failure drops it.
-        let keep = match &result {
-            Ok(()) => true,
-            Err(error) => matches!(error, Error::Pending),
+        let pending = match &result {
+            Ok(()) => None,
+            Err(Error::Pending) => Some(read),
+            Err(_) => return result,
         };
-        if keep
-            && let Some(progress) = progress
+        if let Some(progress) = progress
             && progress.resumes_from() < entry.bytes
         {
+            // One free cursor for each position in a member.
+            let at = progress.produced();
+            self.0.retain(|kept| {
+                kept.name != entry.name
+                    || kept.pending.is_some()
+                    || pending.is_some()
+                    || kept.progress.produced() != at
+            });
             if self.0.len() == Self::LIMIT {
                 self.0.pop_front();
             }
-            self.0
-                .push_back((name.unwrap_or_else(|| entry.name.clone()), progress));
+            self.0.push_back(Cursor {
+                name: name.unwrap_or_else(|| entry.name.clone()),
+                progress,
+                pending,
+            });
         }
         result
     }
@@ -164,8 +197,28 @@ pub struct Store<R> {
     block_count: usize,
     verify: Verify,
     cursors: Cursors,
-    /// The member scan a pending read stopped ([`Store::verify`]).
-    scan: Option<Box<Scan>>,
+    /// The member scans pending reads stopped ([`Store::verify`]), oldest
+    /// first: two requests that scan different members each keep theirs.
+    scans: Vec<Scan>,
+    /// The check of a recorded member a pending read stopped
+    /// ([`Store::prepare`]): its path, next block and hash so far.
+    check: Option<(String, u64, Sha384)>,
+    /// The whole-member reads pending reads stopped, oldest first.
+    passes: Vec<Pass>,
+}
+/// Scans and whole-member reads kept at most while their reads are pending.
+const KEPT: usize = 4;
+/// A read of a member to its end that a pending read stopped: where it is,
+/// and what it gathered or hashed, so asking again reads no byte twice.
+struct Pass {
+    path: String,
+    /// The bytes hashed before the member's own, which also say where in
+    /// the member the read began.
+    head: Vec<u8>,
+    offset: u64,
+    /// The member's bytes so far, for a read that returns them.
+    bytes: Option<Vec<u8>>,
+    hash: Sha384,
 }
 /// A member's SHA-256 scan in progress: where it is in the member and what
 /// it has hashed, so a read that runs out of time costs no re-read.
@@ -290,7 +343,9 @@ impl<R: ReadAt> Store<R> {
             block_count: 0,
             verify: Verify::Full,
             cursors: Cursors::default(),
-            scan: None,
+            scans: Vec::new(),
+            check: None,
+            passes: Vec::new(),
         })
     }
     pub fn manifest(&self) -> &PayloadManifest {
@@ -464,10 +519,22 @@ impl<R: ReadAt> Store<R> {
     fn check_whole(&mut self, path: &str, buffer: &mut Vec<u8>) -> Result<()> {
         let blocks = self.verified[path].blocks.len() as u64;
         let run = (MAX_READ_BYTES / BLOCK_BYTES) as u64;
-        let mut hash = Sha384::new();
-        for first in (0..blocks).step_by(run as usize) {
-            self.read_blocks(path, first..(first + run).min(blocks), buffer)?;
+        // A check a pending read stopped goes on at the run it stopped at.
+        let (mut first, mut hash) = match self.check.take() {
+            Some((checked, first, hash)) if checked == path => (first, hash),
+            _ => (0, Sha384::new()),
+        };
+        while first < blocks {
+            match self.read_blocks(path, first..(first + run).min(blocks), buffer) {
+                Ok(()) => {}
+                Err(Error::Pending) => {
+                    self.check = Some((path.into(), first, hash));
+                    return Err(Error::Pending);
+                }
+                Err(error) => return Err(error),
+            }
             hash.update(&*buffer);
+            first += run;
         }
         let verified = self.verified.get_mut(path).expect("recorded");
         if Some(<[u8; 48]>::from(hash.finalize())) != verified.sha384 {
@@ -533,16 +600,16 @@ impl<R: ReadAt> Store<R> {
         if blocks > MAX_BLOCKS - self.block_count {
             return Err(Error::Limit("payload hash index"));
         }
-        // A scan a pending read stopped goes on where it stopped; any other
-        // member's is dropped.
-        let mut scan = match self.scan.take() {
-            Some(scan) if scan.path == path => scan,
-            _ => {
+        // A scan a pending read stopped goes on where it stopped.
+        let kept = self.scans.iter().position(|scan| scan.path == path);
+        let mut scan = match kept {
+            Some(at) => self.scans.remove(at),
+            None => {
                 let progress = self
                     .archive
                     .start_member(&mut self.reader, &entry)
                     .map_err(|error| source_error(&mut self.reader, error))?;
-                Box::new(Scan {
+                Scan {
                     path: path.into(),
                     progress,
                     sha256: Sha256::new(),
@@ -551,7 +618,7 @@ impl<R: ReadAt> Store<R> {
                     block: vec![0; BLOCK_BYTES],
                     filled: 0,
                     total: 0,
-                })
+                }
             }
         };
         loop {
@@ -565,7 +632,10 @@ impl<R: ReadAt> Store<R> {
                     Err(error) => {
                         let error = source_error(&mut self.reader, error);
                         if matches!(error, Error::Pending) {
-                            self.scan = Some(scan);
+                            if self.scans.len() == KEPT {
+                                self.scans.remove(0);
+                            }
+                            self.scans.push(scan);
                         }
                         return Err(error);
                     }
@@ -588,7 +658,7 @@ impl<R: ReadAt> Store<R> {
                 hashes,
                 block,
                 ..
-            } = &mut *scan;
+            } = &mut scan;
             hash.update(&block[..done]);
             hash384.update(&block[..done]);
             hashes.push(Sha256::digest(&block[..done]).into());
@@ -602,7 +672,7 @@ impl<R: ReadAt> Store<R> {
             hashes,
             total,
             ..
-        } = *scan;
+        } = scan;
         if total != member.bytes || hex::encode(hash.finalize()) != sha256 {
             return Err(Error::Payload(refuse!(
                 "{path}: immutable SHA-256/length mismatch",
@@ -689,6 +759,60 @@ impl<R: ReadAt> Store<R> {
         self.cursors
             .read(&self.archive, &mut self.reader, entry, offset, &mut bytes)?;
         Ok(bytes)
+    }
+    /// Read `path` from `head.len()` to its end in the store's largest
+    /// reads. A pending read keeps what was read, so asking again goes on
+    /// from there: a member longer than one bounded turn reads is still
+    /// read, and no byte twice.
+    fn pass(&mut self, path: &str, head: &[u8], gather: bool) -> Result<Pass> {
+        let size = self.member_len(path)?;
+        let kept = self.passes.iter().position(|pass| {
+            pass.path == path && pass.head == head && pass.bytes.is_some() == gather
+        });
+        let mut pass = match kept {
+            Some(at) => self.passes.remove(at),
+            None => {
+                let mut hash = Sha384::new();
+                hash.update(head);
+                Pass {
+                    path: path.into(),
+                    head: head.to_vec(),
+                    offset: head.len() as u64,
+                    bytes: gather.then(Vec::new),
+                    hash,
+                }
+            }
+        };
+        while pass.offset < size {
+            let n = (size - pass.offset).min(MAX_READ_BYTES as u64) as usize;
+            match self.read_at(path, pass.offset, n) {
+                Ok(read) => {
+                    match &mut pass.bytes {
+                        Some(bytes) => bytes.extend(read),
+                        None => pass.hash.update(&read),
+                    }
+                    pass.offset += n as u64;
+                }
+                Err(Error::Pending) => {
+                    if self.passes.len() == KEPT {
+                        self.passes.remove(0);
+                    }
+                    self.passes.push(pass);
+                    return Err(Error::Pending);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(pass)
+    }
+    /// A member's bytes, whole, read across pending reads.
+    pub fn read_whole(&mut self, path: &str) -> Result<Vec<u8>> {
+        Ok(self.pass(path, &[], true)?.bytes.unwrap_or_default())
+    }
+    /// SHA-384 of `head` and then the member's bytes after its first
+    /// `head.len()`, read across pending reads.
+    pub fn digest_after(&mut self, path: &str, head: &[u8]) -> Result<[u8; 48]> {
+        Ok(self.pass(path, head, false)?.hash.finalize().into())
     }
     pub fn read_component(&mut self, name: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         let path = self.identity().path(name)?.to_string();

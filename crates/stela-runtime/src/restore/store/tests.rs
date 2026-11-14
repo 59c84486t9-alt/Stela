@@ -592,6 +592,110 @@ fn a_scan_a_pending_read_stops_goes_on_without_reading_again() {
     }
 }
 
+/// A request that is asked again after a pending read reads its member's
+/// head again and then goes on with its read to the member's end: that read
+/// keeps what it has, and its own place in a deflated member, so a member
+/// longer than one bounded turn reads is read once, not from its start at
+/// every turn.
+#[test]
+fn a_whole_member_read_asked_again_goes_on_and_reads_no_byte_twice() {
+    use sha2::{Digest, Sha384};
+    /// Every fifth read runs out of time; counts the bytes it serves.
+    struct Stalling {
+        source: Memory,
+        reads: usize,
+        served: u64,
+        blocked: bool,
+        bounded: bool,
+    }
+    impl ReadAt for Stalling {
+        type Error = &'static str;
+
+        fn len(&self) -> u64 {
+            self.source.len()
+        }
+
+        fn read_at(
+            &mut self,
+            offset: u64,
+            buffer: &mut [u8],
+        ) -> core::result::Result<(), Self::Error> {
+            self.reads += 1;
+            if self.bounded && self.reads.is_multiple_of(5) {
+                self.blocked = true;
+                return Err("the read's time ran out");
+            }
+            self.served += buffer.len() as u64;
+            self.source.read_at(offset, buffer)
+        }
+
+        fn blocked(&mut self) -> bool {
+            core::mem::take(&mut self.blocked)
+        }
+    }
+
+    let mut state = 0x9e37_79b9_u32;
+    let data: Vec<u8> = (0..3 * MAX_READ_BYTES + 777)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect();
+    let digest: [u8; 48] = Sha384::digest(&data).into();
+    for deflate in [false, true] {
+        for gather in [false, true] {
+            let (source, manifest) = parts(&data, deflate, &[], &[], ERASE);
+            let archive = source.len();
+            let reader = Stalling {
+                source,
+                reads: 0,
+                served: 0,
+                blocked: false,
+                bounded: false,
+            };
+            let mut store = Store::open(reader, manifest, 0).unwrap();
+            store.prepare().unwrap();
+            store.reader.served = 0;
+            store.reader.bounded = true;
+            let mut pending = 0u64;
+            loop {
+                assert!(pending < 1000, "deflate={deflate} gather={gather}");
+                let head = match store.read_at("os.dmg", 0, 64) {
+                    Ok(head) => head,
+                    Err(Error::Pending) => {
+                        pending += 1;
+                        continue;
+                    }
+                    Err(error) => panic!("{error:?}"),
+                };
+                let done = match gather {
+                    true => store.read_whole("os.dmg").map(|bytes| bytes == data),
+                    false => store
+                        .digest_after("os.dmg", &head)
+                        .map(|hash| hash == digest),
+                };
+                match done {
+                    Ok(same) => break assert!(same, "deflate={deflate} gather={gather}"),
+                    Err(Error::Pending) => pending += 1,
+                    Err(error) => panic!("{error:?}"),
+                }
+            }
+            assert!(pending >= 2, "deflate={deflate} gather={gather}");
+            // The member once, and its first block for each time it was
+            // asked again.
+            let heads = (pending + 1) * (BLOCK_BYTES as u64 + 2 * 64 * 1024);
+            assert!(
+                store.reader.served < archive + heads,
+                "deflate={deflate} gather={gather}: served {} of {archive}, asked {pending}",
+                store.reader.served
+            );
+            assert!(store.passes.is_empty());
+        }
+    }
+}
+
 /// A remote image's device-verified members have no scan: their reads go
 /// straight to the cursors. A read longer than a few network refills that
 /// runs out of time again and again still goes on where it stopped, and

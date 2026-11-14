@@ -409,14 +409,7 @@ impl<R: ReadAt> Answers<R> {
         if size > MAX_REPLY_BYTES as u64 {
             return Err(Error::Limit("dictionary component bytes"));
         }
-        let mut bytes = Vec::new();
-        let mut offset = 0;
-        while offset < size {
-            let n = (size - offset).min(super::store::MAX_READ_BYTES as u64) as usize;
-            bytes.extend(self.store.read_at(path, offset, n)?);
-            offset += n as u64;
-        }
-        Ok(bytes)
+        self.store.read_whole(path)
     }
     fn personalized_stream(
         &mut self,
@@ -479,18 +472,9 @@ impl<R: ReadAt> Answers<R> {
         at: usize,
         tag: [u8; 4],
     ) -> Result<[u8; 48]> {
-        let size = self.store.member_len(path)?;
-        let mut hash = Sha384::new();
         let mut first = head.to_vec();
         first[at..at + 4].copy_from_slice(&tag);
-        hash.update(&first);
-        let mut offset = head.len() as u64;
-        while offset < size {
-            let n = (size - offset).min(super::store::MAX_READ_BYTES as u64) as usize;
-            hash.update(self.store.read_at(path, offset, n)?);
-            offset += n as u64;
-        }
-        Ok(hash.finalize().into())
+        self.store.digest_after(path, &first)
     }
     /// The component's IM4P stitched with the global ticket, typed as the
     /// ticket covers it (`Ticket::retype_covered`).
