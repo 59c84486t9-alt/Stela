@@ -165,13 +165,23 @@ static void *reserve(StelaStream *stream, size_t bytes)
 {
 	if (stream->capacity - stream->length < bytes) {
 		size_t capacity = stream->capacity ? stream->capacity : 4096;
+		/* A stream past half the address space is a corrupt size. Either
+		 * stop is named first, in the system log and the host's. */
+		if (bytes > SIZE_MAX / 4 - stream->length) {
+			StelaFailure failure = {.status = StelaStatusOutOfMemory, .reason = "the size is out of range"};
+			stela_report("a command stream entry", &failure);
+			abort();
+		}
 		while (capacity - stream->length < bytes) {
 			capacity *= 2;
 		}
-		stream->bytes = realloc(stream->bytes, capacity);
-		if (!stream->bytes) {
+		uint8_t *grown = realloc(stream->bytes, capacity);
+		if (!grown) {
+			StelaFailure failure = {.status = StelaStatusOutOfMemory, .reason = "out of memory"};
+			stela_report("a command stream's growth", &failure);
 			abort();
 		}
+		stream->bytes = grown;
 		stream->capacity = capacity;
 	}
 	void *at = stream->bytes + stream->length;

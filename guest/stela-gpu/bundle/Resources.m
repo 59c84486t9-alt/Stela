@@ -1082,9 +1082,13 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 {
 	StelaBufferResponse response;
 	StelaFailure failure;
+	/* A Mac answers nil here only out of memory, which callers such as
+	 * WindowServer may not survive: each failure is reported, once for each
+	 * reason, before the nil. */
 	if (!cpu_visible(options)) {
 		StelaNewBufferRequest request = {.length = length, .options = options};
 		if (STELA_CALL(&_gate, NewBuffer, &request, &response, &failure) != StelaStatusOk) {
+			stela_report("newBufferWithLength:options: (private)", &failure);
 			return nil;
 		}
 		return [[StelaGPUBuffer alloc] initWithDevice:self response:&response options:options length:length];
@@ -1097,10 +1101,12 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 	void *contents = NULL;
 	uint64_t memory = [self importLength:mapped contents:&contents failure:&failure];
 	if (memory == 0) {
+		stela_report("newBufferWithLength:options: (shared memory)", &failure);
 		return nil;
 	}
 	StelaNewImportedBufferRequest request = {.memory = memory, .length = length, .options = options};
 	if (STELA_CALL(&_gate, NewImportedBuffer, &request, &response, &failure) != StelaStatusOk) {
+		stela_report("newBufferWithLength:options: (shared)", &failure);
 		[self releaseHandle:memory];
 		mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)contents, mapped);
 		return nil;
@@ -1329,11 +1335,13 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 		mapped = page_aligned(request.size);
 		request.memory = [self importLength:mapped contents:&contents failure:&failure];
 		if (request.memory == 0) {
+			stela_report("a heap's shared memory", &failure);
 			return nil;
 		}
 	}
 	StelaHandle response;
 	if (STELA_CALL(&_gate, NewHeap, &request, &response, &failure) != StelaStatusOk) {
+		stela_report("a heap", &failure);
 		if (mapped) {
 			[self releaseHandle:request.memory];
 			mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)contents, mapped);

@@ -672,7 +672,10 @@ static void completed(void *reference, int result, void *count)
 	kern_return_t result =
 	    IOConnectCallScalarMethod(_gate.connect, kStelaGPUImportMemory, input, 2, &handle, &outputs);
 	if (result != KERN_SUCCESS) {
-		*failure = (StelaFailure){.status = StelaStatusOutOfMemory, .reason = "out of wired memory"};
+		/* The kext names its own refusal in the system log. */
+		*failure = (StelaFailure){.status = StelaStatusOutOfMemory};
+		snprintf(failure->reason, sizeof(failure->reason),
+			 "the kext did not wire the memory for the GPU: 0x%x", result);
 		return 0;
 	}
 	return handle;
