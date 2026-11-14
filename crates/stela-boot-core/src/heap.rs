@@ -35,6 +35,7 @@ use core::{
 // Explicit, so the NVIDIA LUT fixture can compile this file by path.
 #[path = "heap/failure.rs"]
 mod failure;
+pub use failure::{FailedHeap, Failure};
 #[path = "heap/tally.rs"]
 pub mod tally;
 
@@ -488,9 +489,11 @@ pub struct Heap {
     failures: AtomicU64,
     /// Where the first failed allocation is reported; it must not allocate.
     failure_sink: fn(core::fmt::Arguments<'_>),
-    /// The first failed allocation's bytes and alignment, for a report that
-    /// can no longer ask the heap ([`Heap::first_failure`]).
-    failed: [AtomicUsize; 2],
+    /// The first failed allocation's bytes and alignment, then the heap's
+    /// live, carved, largest free and total bytes when it failed (all zero
+    /// where the metadata was held), for a report that can no longer ask
+    /// the heap ([`Heap::first_failure`]).
+    failed: [AtomicUsize; 6],
     state: UnsafeCell<State>,
     /// Each tagged core's cache and counts.
     cores: [Core; CPUS],
@@ -528,11 +531,9 @@ impl Heap {
         }
     }
 
-    /// The bytes and alignment of the first allocation that found no
-    /// memory, once one has.
-    pub fn first_failure(&self) -> Option<(usize, usize)> {
-        let align = self.failed[1].load(Ordering::Acquire);
-        (align != 0).then(|| (self.failed[0].load(Ordering::Relaxed), align))
+    /// The first allocation that found no memory, once one has.
+    pub fn first_failure(&self) -> Option<Failure> {
+        failure::first(self)
     }
 
     pub const fn new() -> Self {
@@ -541,7 +542,7 @@ impl Heap {
             failure_reported: AtomicBool::new(false),
             failures: AtomicU64::new(0),
             failure_sink: |_| {},
-            failed: [const { AtomicUsize::new(0) }; 2],
+            failed: [const { AtomicUsize::new(0) }; 6],
             cores: [const { Core::new() }; CPUS],
             tagged: AtomicUsize::new(0),
             any_tagged: AtomicBool::new(false),

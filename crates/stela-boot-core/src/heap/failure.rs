@@ -20,8 +20,6 @@ fn capture(heap: &Heap, layout: Layout) -> Option<Report> {
     {
         return None;
     }
-    heap.failed[0].store(layout.size(), Ordering::Relaxed);
-    heap.failed[1].store(layout.align(), Ordering::Release);
     let usage = heap.try_lock().and_then(|guard| {
         // SAFETY: the successful one-shot guard owns heap metadata and masks
         // local IRQ reentry. No state borrow or guard reaches UART formatting.
@@ -30,6 +28,15 @@ fn capture(heap: &Heap, layout: Layout) -> Option<Report> {
         drop(guard);
         usage
     });
+    let snapshot = usage.map_or([0; 4], |usage| {
+        [usage.live, usage.carved, usage.largest, usage.total]
+    });
+    heap.failed[0].store(layout.size(), Ordering::Relaxed);
+    for (slot, value) in heap.failed[2..].iter().zip(snapshot) {
+        slot.store(value, Ordering::Relaxed);
+    }
+    // The alignment, never zero, publishes the rest.
+    heap.failed[1].store(layout.align(), Ordering::Release);
     let mut cores = [0; CPUS];
     let mut tagged = 0;
     for (slot, own) in cores.iter_mut().zip(heap.owned()) {
@@ -79,6 +86,69 @@ impl fmt::Display for Report {
             write!(f, " {}M", own >> 20)?;
         }
         writeln!(f)
+    }
+}
+
+/// The first allocation that found no memory, and the heap it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    pub bytes: usize,
+    pub align: usize,
+    /// None where another holder had the heap's metadata.
+    pub heap: Option<FailedHeap>,
+}
+
+/// The heap's bytes when an allocation failed: a largest free block under
+/// the request with much more free means fragmentation, both small means
+/// the heap was full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailedHeap {
+    pub live: usize,
+    pub carved: usize,
+    pub largest: usize,
+    pub total: usize,
+}
+
+pub(super) fn first(heap: &Heap) -> Option<Failure> {
+    let align = heap.failed[1].load(Ordering::Acquire);
+    if align == 0 {
+        return None;
+    }
+    let [live, carved, largest, total] =
+        core::array::from_fn(|index| heap.failed[2 + index].load(Ordering::Relaxed));
+    Some(Failure {
+        bytes: heap.failed[0].load(Ordering::Relaxed),
+        align,
+        heap: (total != 0).then_some(FailedHeap {
+            live,
+            carved,
+            largest,
+            total,
+        }),
+    })
+}
+
+/// ` (the heap had no room for 17609526 bytes aligned to 1: heap=2619M/3072M
+/// carved=2776M largest=16M)`, with BEAT's names, for the stop line the
+/// screen and boot log keep.
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            " (the heap had no room for {} bytes aligned to {}",
+            self.bytes, self.align
+        )?;
+        if let Some(heap) = self.heap {
+            write!(
+                f,
+                ": heap={}M/{}M carved={}M largest={}M",
+                heap.live >> 20,
+                heap.total >> 20,
+                heap.carved >> 20,
+                heap.largest >> 20
+            )?;
+        }
+        f.write_str(")")
     }
 }
 

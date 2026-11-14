@@ -186,16 +186,14 @@ impl core::fmt::Display for Callers {
     }
 }
 
-/// The heap's first failed allocation, as a failure message names it.
-struct Failed(Option<(usize, usize)>);
+/// The heap's first failed allocation and the heap it found, as a failure
+/// message names it.
+struct Failed(Option<stela_boot_core::heap::Failure>);
 
 impl core::fmt::Display for Failed {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.0 {
-            Some((bytes, align)) => write!(
-                f,
-                " (the heap had no room for {bytes} bytes aligned to {align})"
-            ),
+            Some(failure) => write!(f, "{failure}"),
             None => Ok(()),
         }
     }

@@ -56,11 +56,15 @@ fn first_exhaustion_reports_once_without_allocating() {
     assert!(reported.contains("live_estimate="));
     assert!(reported.contains("cpu_counters=relaxed total=4096"));
     assert!(reported.contains("largest=0\nHEAP AT FAILURE large classes 16:0M"));
-    assert_eq!(heap.first_failure(), Some((16, 16)));
+    let first = heap.first_failure().unwrap();
+    assert_eq!((first.bytes, first.align), (16, 16));
+    let found = first.heap.unwrap();
+    assert_eq!((found.total, found.largest), (4096, 0));
+    assert!(found.live <= found.carved && found.carved <= found.total);
     // SAFETY: as above; this second failure must not report again, and the
     // first stays the one named.
     assert!(unsafe { heap.alloc(Layout::from_size_align(64, 8).unwrap()) }.is_null());
-    assert_eq!(heap.first_failure(), Some((16, 16)));
+    assert_eq!(heap.first_failure(), Some(first));
     REPORTED.with(|text| assert_eq!(text.borrow().as_str(), reported));
     assert!(capture(&heap, layout).is_none());
 }
@@ -80,4 +84,56 @@ fn held_metadata_reports_unavailable_once() {
     );
     assert!(capture(&heap, Layout::new::<u8>()).is_none());
     drop(guard);
+}
+
+#[test]
+fn the_stop_line_names_the_heap_the_failure_found() {
+    let failure = Failure {
+        bytes: 17_609_526,
+        align: 1,
+        heap: Some(FailedHeap {
+            live: 2619 << 20,
+            carved: 2776 << 20,
+            largest: 16 << 20,
+            total: 3072 << 20,
+        }),
+    };
+    let mut text = Text::new();
+    write!(&mut text, "{failure}").unwrap();
+    assert_eq!(
+        text.as_str(),
+        " (the heap had no room for 17609526 bytes aligned to 1: heap=2619M/3072M \
+         carved=2776M largest=16M)"
+    );
+    let mut text = Text::new();
+    write!(
+        &mut text,
+        "{}",
+        Failure {
+            heap: None,
+            ..failure
+        }
+    )
+    .unwrap();
+    assert_eq!(
+        text.as_str(),
+        " (the heap had no room for 17609526 bytes aligned to 1)"
+    );
+}
+
+#[test]
+fn a_failure_under_held_metadata_keeps_no_heap() {
+    let heap = Heap::new();
+    let guard = heap.lock();
+    // The guard makes the failure's snapshot unavailable.
+    let _ = capture(&heap, Layout::from_size_align(32, 8).unwrap());
+    drop(guard);
+    assert_eq!(
+        heap.first_failure(),
+        Some(Failure {
+            bytes: 32,
+            align: 8,
+            heap: None
+        })
+    );
 }
