@@ -576,33 +576,36 @@ impl Snapshot {
         Ok(())
     }
 
+    /// What the installation writes of a memory-type register: all of it,
+    /// but for the legacy hole's DRAM routing, which stays each
+    /// processor's own.
+    fn installed(&self, msr: &Msr) -> (u32, u64) {
+        use crate::memory_types::amd;
+        if self.amd_fixed_raw && amd::legacy_hole(msr.index) {
+            (msr.index, msr.value & !amd::FIXED_ROUTING)
+        } else {
+            (msr.index, msr.value)
+        }
+    }
+
+    /// The observed memory-type registers ([`memory_type_register`]).
+    fn memory_registers(&self) -> impl Iterator<Item = &Msr> + '_ {
+        self.msrs
+            .get(..self.msr_count as usize)
+            .unwrap_or_default()
+            .iter()
+            .filter(|msr| memory_type_register(msr.index))
+    }
+
     /// Require the installed memory-type/routing image to equal the
     /// intended source image before sharing RAM or Stela metadata. Initial
     /// offline installation may establish this equality; TSC_ADJUST is separate.
     pub fn same_memory_types(&self, other: &Self) -> Result<(), CapabilityRefusal> {
-        use crate::memory_types::amd;
-        // What the installation writes of a register: all of it, but for
-        // the legacy hole's DRAM routing, which stays each processor's own.
-        let raw = self.amd_fixed_raw;
-        let installed = move |msr: &Msr| {
-            if raw && amd::legacy_hole(msr.index) {
-                (msr.index, msr.value & !amd::FIXED_ROUTING)
-            } else {
-                (msr.index, msr.value)
-            }
-        };
-        fn memory(index: u32) -> bool {
-            index == 0xfe
-                || index == 0x2ff
-                || (0x200..=0x21f).contains(&index)
-                || matches!(index, 0x250 | 0x258 | 0x259 | 0x268..=0x26f)
-                || matches!(index, 0xc001_0010 | 0xc001_0016..=0xc001_001a | 0xc001_001d)
-        }
         let left = self
             .msrs
             .get(..self.msr_count as usize)
             .ok_or(CapabilityRefusal::InvalidSnapshot)?;
-        let right = other
+        other
             .msrs
             .get(..other.msr_count as usize)
             .ok_or(CapabilityRefusal::InvalidSnapshot)?;
@@ -610,11 +613,10 @@ impl Snapshot {
             || !self.pat_valid
             || !other.pat_valid
             || self.pat != other.pat
-            || !left
-                .iter()
-                .filter(|msr| memory(msr.index))
-                .map(installed)
-                .eq(right.iter().filter(|msr| memory(msr.index)).map(installed))
+            || !self
+                .memory_registers()
+                .map(|msr| self.installed(msr))
+                .eq(other.memory_registers().map(|msr| self.installed(msr)))
             || !left.iter().any(|msr| msr.index == 0xfe)
             || !left.iter().any(|msr| msr.index == 0x2ff)
         {
@@ -622,6 +624,46 @@ impl Snapshot {
         }
         Ok(())
     }
+
+    /// Each memory-type register whose installed value differs between
+    /// `self` and `other`, or that only one of them holds, as (index,
+    /// `self`'s value, `other`'s value): `self`'s registers in order, then
+    /// the ones only `other` holds.
+    pub fn memory_type_differences<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl Iterator<Item = (u32, Option<u64>, Option<u64>)> + 'a {
+        let find = |snapshot: &'a Self, index: u32| {
+            snapshot
+                .memory_registers()
+                .find(move |msr| msr.index == index)
+        };
+        let changed = self.memory_registers().filter_map(move |msr| {
+            let theirs = find(other, msr.index);
+            (theirs.map(|theirs| self.installed(theirs)) != Some(self.installed(msr))).then(|| {
+                (
+                    msr.index,
+                    Some(msr.value),
+                    theirs.map(|theirs| theirs.value),
+                )
+            })
+        });
+        let added = other
+            .memory_registers()
+            .filter(move |msr| find(self, msr.index).is_none())
+            .map(|msr| (msr.index, None, Some(msr.value)));
+        changed.chain(added)
+    }
+}
+
+/// The MTRR, MTRRCAP and AMD memory routing registers a processor's
+/// memory types are made of ([`Snapshot::same_memory_types`]).
+fn memory_type_register(index: u32) -> bool {
+    index == 0xfe
+        || index == 0x2ff
+        || (0x200..=0x21f).contains(&index)
+        || matches!(index, 0x250 | 0x258 | 0x259 | 0x268..=0x26f)
+        || matches!(index, 0xc001_0010 | 0xc001_0016..=0xc001_001a | 0xc001_001d)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

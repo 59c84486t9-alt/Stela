@@ -900,6 +900,46 @@ fn mtrr_pat_equality_does_not_conflate_clock_adjustment() {
     );
 }
 
+/// The memory-type registers firmware changed after the capture are named
+/// each with both values, a register only one side holds too, and no other
+/// register or PAT.
+#[test]
+fn memory_type_differences_name_each_changed_register() {
+    let captured = native_snapshot();
+    assert_eq!(captured.memory_type_differences(&captured).count(), 0);
+    let mut now = captured;
+    now.pat ^= 1 << 8;
+    now.msrs[now.msr_count as usize] = Msr {
+        index: 0x3b,
+        value: 5,
+    };
+    now.msr_count += 1;
+    assert_eq!(now.memory_type_differences(&captured).count(), 0);
+    let mut now = captured;
+    now.msrs[1].value ^= 1;
+    now.msrs[now.msr_count as usize] = Msr {
+        index: 0x20f,
+        value: 0xff00_0800,
+    };
+    now.msr_count += 1;
+    let differences: Vec<_> = captured.memory_type_differences(&now).collect();
+    assert_eq!(
+        differences,
+        [
+            (
+                captured.msrs[1].index,
+                Some(captured.msrs[1].value),
+                Some(captured.msrs[1].value ^ 1)
+            ),
+            (0x20f, None, Some(0xff00_0800)),
+        ]
+    );
+    assert_eq!(
+        captured.same_memory_types(&now),
+        Err(CapabilityRefusal::MemoryTypes)
+    );
+}
+
 /// The legacy hole's DRAM routing is each processor's own on AMD: two
 /// processors that differ only there have the same installed memory types.
 #[test]

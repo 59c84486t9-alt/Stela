@@ -33,7 +33,14 @@ const ENTERED: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StartupFailure {
-    Resources,
+    /// A startup input that is missing or out of range, and which.
+    Resources(&'static str),
+    /// The live local APIC of the processor starting the others is not the
+    /// bootstrap processor the firmware listed.
+    BootProcessorApic {
+        live: u32,
+        captured: u64,
+    },
     Bootstrap(Refusal),
     FaultRecord {
         slot: usize,
@@ -134,13 +141,16 @@ impl Processor {
         }
         // SAFETY: the AP published this pinned read-only atomic reference before
         // READY. No Cpu, native frame, Host or recovery state is read here.
-        let counter = unsafe { (&*self.argument.doorbells.get()).as_ref().copied() }
-            .ok_or(StartupFailure::Resources)?;
+        let counter = unsafe { (&*self.argument.doorbells.get()).as_ref().copied() }.ok_or(
+            StartupFailure::Resources("the AP published no doorbell counter"),
+        )?;
         let before = counter.load(Ordering::Acquire);
         // SAFETY: caller owns the BSP ICR and this AP's private IDT is ready.
         unsafe {
             sender.notify(
-                u32::try_from(self.apic_id()).map_err(|_| StartupFailure::Resources)?,
+                u32::try_from(self.apic_id()).map_err(|_| {
+                    StartupFailure::Resources("the AP's APIC ID is wider than 32 bits")
+                })?,
                 interrupts::NATIVE_WAKE_VECTOR,
                 tsc_hz,
             )
@@ -344,12 +354,16 @@ pub(crate) unsafe fn quiesce_firmware_aps(
     let source = capture
         .processors
         .get(..capture.processor_count as usize)
-        .ok_or(StartupFailure::Resources)?;
+        .ok_or(StartupFailure::Resources(
+            "the processor capture counts more processors than it holds",
+        ))?;
     let selected = capture
         .selected
         .get(..capture.core_count as usize)
         .filter(|selected| !selected.is_empty())
-        .ok_or(StartupFailure::Resources)?;
+        .ok_or(StartupFailure::Resources(
+            "the processor capture selects no processor, or more than it holds",
+        ))?;
     // Validate the entire captured assignment before exposing any target. Only
     // the BSP is excluded from INIT at this boundary; selected APs still use
     // firmware idle code until their later owned INIT/SIPI sequence.
@@ -422,8 +436,15 @@ pub(crate) unsafe fn start(
     _fp_qualification: bool,
 ) -> Result<Executors, StartupFailure> {
     let cores = handoff.native_resources.cores as usize;
-    if cores == 0 || cores > capture.core_count as usize || handoff.tsc_hz == 0 {
-        return Err(StartupFailure::Resources);
+    if cores == 0 || cores > capture.core_count as usize {
+        return Err(StartupFailure::Resources(
+            "the reserved cores are none or more than the processor capture selects",
+        ));
+    }
+    if handoff.tsc_hz == 0 {
+        return Err(StartupFailure::Resources(
+            "the time-stamp counter rate is unknown",
+        ));
     }
     let sender = Apic::new(
         handoff.apic_base,
@@ -432,16 +453,35 @@ pub(crate) unsafe fn start(
     let mut processors = Vec::with_capacity(cores - 1);
     let mut started: Vec<Starting> = Vec::with_capacity(cores - 1);
     // SAFETY: CPL0, BSP; PAT exists under the validated native floor.
-    let memory_source = unsafe { firmware::observe() }.map_err(|_| StartupFailure::Resources)?;
-    let source_expected = topology::Snapshot {
+    let memory_source = unsafe { firmware::observe() }.map_err(|_| {
+        StartupFailure::Resources("the boot processor's controls could not be read")
+    })?;
+    let memory_types = super::memory_types::Image::from_snapshot(&memory_source)
+        .map_err(StartupFailure::Bootstrap)?;
+    let captured = topology::Snapshot {
         pat: memory_source.pat,
         ..capture.snapshots[0]
     };
-    memory_source
-        .same_memory_types(&source_expected)
-        .map_err(|_| StartupFailure::Resources)?;
-    let memory_types = super::memory_types::Image::from_snapshot(&memory_source)
-        .map_err(StartupFailure::Bootstrap)?;
+    // Firmware may change the memory types between Stela's capture and its
+    // exit (an exit handler, or a cache attribute set through its CPU
+    // driver). Every core takes the boot processor's current ones, as
+    // Linux copies the boot processor's MTRRs to each AP it starts; each
+    // change is named, and each AP is checked to hold them.
+    if memory_source.same_memory_types(&captured).is_err() {
+        for (index, was, now) in captured.memory_type_differences(&memory_source) {
+            crate::output::arguments(format_args!(
+                "NATIVE MEMORY TYPES msr={index:#x} {} at the firmware's capture, {} now: \
+                 every core takes the current value\n",
+                Register(was),
+                Register(now),
+            ));
+        }
+        for snapshot in &capture.snapshots[1..cores] {
+            memory_types
+                .compatible(snapshot)
+                .map_err(StartupFailure::Bootstrap)?;
+        }
+    }
     if memory_types.amd.is_some() {
         for range in ram {
             memory_types
@@ -471,16 +511,18 @@ pub(crate) unsafe fn start(
     }
     let effective_pat = memory_source.pat;
     let bsp = sender.id();
-    if u64::from(bsp) != capture.processors[capture.selected[0] as usize].apic_id {
-        return Err(StartupFailure::Resources);
+    let captured_bsp = capture.processors[capture.selected[0] as usize].apic_id;
+    if u64::from(bsp) != captured_bsp {
+        return Err(StartupFailure::BootProcessorApic {
+            live: bsp,
+            captured: captured_bsp,
+        });
     }
     // The BSP's host and handlers are installed. Publish its local slot
     // before any AP can run or issue a retirement.
-    host::join_shootdown(
-        crate::native_mmio::PROCESSORS
-            .join_bsp(bsp)
-            .ok_or(StartupFailure::Resources)?,
-    );
+    host::join_shootdown(crate::native_mmio::PROCESSORS.join_bsp(bsp).ok_or(
+        StartupFailure::Resources("the boot processor already shares the MMIO aperture"),
+    )?);
     // An AP that does not start ends the startup of the ones after it, and
     // the guest runs on the cores before it (`Executors::failure`).
     let mut failed: Vec<(usize, StartupFailure)> = Vec::new();
@@ -491,10 +533,12 @@ pub(crate) unsafe fn start(
         let attempt = (|| -> Result<(), StartupFailure> {
             let part =
                 resources::partition(cores, cores, slot, handoff.code.bytes, handoff.pool.bytes)
-                    .map_err(|_| StartupFailure::Resources)?;
+                    .map_err(|_| {
+                        StartupFailure::Resources("the code and pool do not divide into its part")
+                    })?;
             let processor = capture.processors[capture.selected[slot] as usize];
-            let destination =
-                u32::try_from(processor.apic_id).map_err(|_| StartupFailure::Resources)?;
+            let destination = u32::try_from(processor.apic_id)
+                .map_err(|_| StartupFailure::Resources("its APIC ID is wider than 32 bits"))?;
             let config = host::Config {
                 ram: ram.to_vec(),
                 pool_physical: handoff.pool.physical + part.pool_offset,
@@ -575,7 +619,7 @@ pub(crate) unsafe fn start(
                     bootstrap::Entry {
                         processor_signature: capture.snapshots[slot]
                             .get(1, 0)
-                            .ok_or(StartupFailure::Resources)?
+                            .ok_or(StartupFailure::Resources("its capture has no CPUID leaf 1"))?
                             .eax,
                         root: handoff.root,
                         five_level: matches!(
@@ -606,9 +650,11 @@ pub(crate) unsafe fn start(
             // so it shares the aperture's shootdowns from now on, and answers
             // them while it waits for an engine or driver lock whose holder may
             // be retiring.
-            crate::native_mmio::PROCESSORS
-                .join_ap(destination)
-                .ok_or(StartupFailure::Resources)?;
+            crate::native_mmio::PROCESSORS.join_ap(destination).ok_or(
+                StartupFailure::Resources(
+                    "it already shares the MMIO aperture, or the aperture is full",
+                ),
+            )?;
             stela_engine::platform::sync::set_wait(crate::native_mmio::shootdown::service);
             stela_drivers::on_spin(crate::native_mmio::shootdown::service);
             // SAFETY: validated physical AP and pinned complete startup resources.
@@ -805,6 +851,18 @@ fn serve(
             _ => {}
         }
         index += 1;
+    }
+}
+
+/// A memory-type register's value, or that the observation lacks it.
+struct Register(Option<u64>);
+
+impl core::fmt::Display for Register {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(value) => write!(f, "{value:#x}"),
+            None => f.write_str("absent"),
+        }
     }
 }
 
