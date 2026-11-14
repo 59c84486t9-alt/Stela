@@ -32,6 +32,21 @@ pub const HEAP_CEILING: u64 = 16 * GIB;
 /// An eighth gives that host 4.5 GiB of heap and takes a twentieth of the
 /// guest's DRAM; hosts near the guest's floor keep the heap's floor.
 const HEAP_SHARE: u64 = 8;
+/// The heap a desktop session needs, with room for the large allocations a
+/// fragmented heap must still place, at [`FLOOR_WINDOW`]. A macOS desktop
+/// holds 2.3 to 2.7 GiB live from about 80 s on, whatever the host, and
+/// carved at most 2924 MiB on a 16 GiB PC and 3168 MiB on a 32 GiB PC, both
+/// with a 768 MiB window. The 16 GiB PC ran on the floor (3072 MiB): with
+/// 450 MiB free in extents of at most 16 MiB it failed a 17 609 526 byte
+/// allocation, and an earlier boot a 267 386 880 byte one with 192 MiB
+/// extents. The 32 GiB PC's 4666 MiB kept extents of 1.2 GiB. Hosts between
+/// the floor and their share take the heap up to this from the guest, as
+/// far as [`GUEST_ROOM`] allows.
+const HEAP_TARGET: u64 = 4 * GIB;
+/// The guest DRAM [`HEAP_TARGET`] leaves at least: twice [`GUEST_FLOOR`].
+/// A guest under it keeps the heap's share or floor, so 8 GiB hosts boot
+/// with what they had.
+const GUEST_ROOM: u64 = 2 * GUEST_FLOOR;
 /// Heap bytes per byte of the board's code window: the shared block records,
 /// successors, recovery rows, index and lookup of the blocks it holds,
 /// once for the board since the block store is shared. An 8-PE 26A434
@@ -170,7 +185,8 @@ impl Shortfall {
 /// - the heap a twenty-fourth, [`HEAP_PER_WINDOW`] byte per byte of the board's
 ///   code window and [`PE_HEAP`] per runner, within
 ///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`], the floor moved by the window's
-///   difference from [`FLOOR_WINDOW`];
+///   difference from [`FLOOR_WINDOW`]; below [`HEAP_TARGET`] (moved the
+///   same way), as much more as leaves the guest [`GUEST_ROOM`];
 /// - the code arena what `code_reservation` gives: [`WINDOW_PER_RUNNER`]
 ///   per runner within free RAM / 16, or [`SMALL_WINDOW_PER_RUNNER`] where
 ///   the larger window would leave the guest under its floor;
@@ -228,13 +244,45 @@ fn estimate(free: u64, cores: usize, runners: usize) -> Result<Sizes> {
 
 fn estimate_with(free: u64, cores: usize, runners: usize, per_runner: u64) -> Result<Sizes> {
     let code = code_reservation_per_runner(free, cores, runners, per_runner)?;
+    let shared = shared_heap(free, runners, code.window);
+    let base = split(free, shared, code, cores, runners);
+    let target = at_window(HEAP_TARGET, code.window).min(HEAP_CEILING.max(shared));
+    if target <= shared || base.guest <= GUEST_ROOM {
+        return Ok(base);
+    }
+    // The guest shrinks as the heap grows: the most heap up to the target
+    // that leaves the guest its room, in whole alignments.
+    let fits = |heap: u64| split(free, heap, code, cores, runners).guest >= GUEST_ROOM;
+    let (mut low, mut high) = (shared / ALIGNMENT, target / ALIGNMENT);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(middle * ALIGNMENT) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok(split(free, low * ALIGNMENT, code, cores, runners))
+}
+
+/// `bytes` measured with [`FLOOR_WINDOW`], moved by [`HEAP_PER_WINDOW`] per
+/// byte a `window` differs from it, in whole alignments.
+fn at_window(bytes: u64, window: u64) -> u64 {
+    (bytes + HEAP_PER_WINDOW * window).saturating_sub(HEAP_PER_WINDOW * FLOOR_WINDOW) / ALIGNMENT
+        * ALIGNMENT
+}
+
+/// The heap's share of `free` for `runners` PEs and a `window`, between its
+/// floor and ceiling.
+fn shared_heap(free: u64, runners: usize, window: u64) -> u64 {
+    let heap = free / HEAP_SHARE + HEAP_PER_WINDOW * window + runners as u64 * PE_HEAP;
+    let floor = at_window(HEAP_FLOOR, window);
+    (heap / ALIGNMENT * ALIGNMENT).clamp(floor, HEAP_CEILING.max(floor))
+}
+
+/// The pool and the guest for `heap` and `code`, of `free`.
+fn split(free: u64, heap: u64, code: CodeReservation, cores: usize, runners: usize) -> Sizes {
     let running = runners as u64;
-    let heap = free / HEAP_SHARE + HEAP_PER_WINDOW * code.window + running * PE_HEAP;
-    let floor = (HEAP_FLOOR + HEAP_PER_WINDOW * code.window)
-        .saturating_sub(HEAP_PER_WINDOW * FLOOR_WINDOW)
-        / ALIGNMENT
-        * ALIGNMENT;
-    let heap = (heap / ALIGNMENT * ALIGNMENT).clamp(floor, HEAP_CEILING.max(floor));
     let rest = free.saturating_sub(heap).saturating_sub(code.bytes);
     let sharers = u128::from(running.min(POOL_SHARERS));
     let rest = u128::from(rest);
@@ -253,12 +301,12 @@ fn estimate_with(free: u64, cores: usize, runners: usize, per_runner: u64) -> Re
     );
     let (_, parked) = parked_reserve(cores, runners);
     let pool = pool + parked;
-    Ok(Sizes {
+    Sizes {
         heap,
         code,
         pool,
         guest: rest.saturating_sub(pool),
-    })
+    }
 }
 
 /// The bytes a runner's pool keeps for each guest half's shadow tables, for
