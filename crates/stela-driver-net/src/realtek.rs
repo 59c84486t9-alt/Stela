@@ -160,9 +160,7 @@ pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
 /// Candidate selection from copied identity DATA; owned attachment still
 /// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
-    function.vendor == 0x10ec
-        && revision::pci_candidate(function.device)
-        && function.class == [2, 0, 0]
+    revision::pci_device(function.vendor, function.device).is_some() && function.class == [2, 0, 0]
 }
 trait Registers {
     fn read8(&self, offset: usize) -> u8;
@@ -314,7 +312,10 @@ impl Realtek {
             map_registers(handoff, bar, 0, bytes).map(|_| ())
         })?;
         let device = widen(handoff, bar, device, register_aperture(revision))?;
-        admit_revision(function.device, pcie_link_control, revision)?;
+        let family = revision::pci_device(function.vendor, function.device).ok_or(
+            BlockError::Unsupported("not a Realtek Ethernet ID this driver takes"),
+        )?;
+        admit_revision(family, pcie_link_control, revision)?;
         if tbi_mode(revision, device.read8(PHY_STATUS)) {
             return Err(BlockError::Unsupported("Realtek TBI/fiber mode").into());
         }

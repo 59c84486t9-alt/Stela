@@ -182,8 +182,31 @@ const PRIMARY_PCI_DEVICES: usize = 5;
 // Same-vendor aliases use the pinned donor's common XID dispatch; they are
 // candidates, not a claim that any unknown or unsupported revision can run.
 const PCI_ALIASES: &[u16] = PCI_DEVICES.split_at(PRIMARY_PCI_DEVICES).1;
-pub(super) fn pci_candidate(device: u16) -> bool {
-    PCI_DEVICES.contains(&device)
+/// Boards other vendors sell with a Realtek chip under their own IDs, which
+/// Linux's r8169 lists in its table and starts by the chip's XID alone, as
+/// it does Realtek's own IDs: the vendor, the device, and the Realtek ID
+/// whose rules [`pci_family`] applies. D-Link's DGE-528T and DGE-530T rev C,
+/// Allied Telesyn's and US Robotics' cards carry the PCI RTL8169SC, Realtek's
+/// 8167 alias; NCube's board is an RTL8168. Linux's two entries that also
+/// need a subsystem ID are left out: the identity carries none.
+const OTHER_VENDORS: &[(u16, u16, u16)] = &[
+    (0x1186, 0x4300, 0x8167),
+    (0x1186, 0x4302, 0x8167),
+    (0x1259, 0xc107, 0x8167),
+    (0x16ec, 0x0116, 0x8167),
+    (0x10ff, 0x8168, 0x8168),
+];
+
+/// The Realtek ID whose family rules apply to PCI function `vendor`:`device`,
+/// where this driver takes it as a candidate.
+pub(super) fn pci_device(vendor: u16, device: u16) -> Option<u16> {
+    if vendor == 0x10ec {
+        return PCI_DEVICES.contains(&device).then_some(device);
+    }
+    OTHER_VENDORS
+        .iter()
+        .find(|&&(v, d, _)| (v, d) == (vendor, device))
+        .map(|&(_, _, realtek)| realtek)
 }
 
 /// Every implemented revision that loads a firmware file, once for each
