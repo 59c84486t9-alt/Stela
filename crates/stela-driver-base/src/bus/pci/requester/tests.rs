@@ -984,6 +984,16 @@ fn containment_plan(config: &Config) -> Result<containment::Plan, ClaimError> {
 
 /// The census of a function on a root bus, or behind a bridge.
 fn containment_plan_on(config: &Config, root_bus: bool) -> Result<containment::Plan, ClaimError> {
+    containment_plan_placed(config, root_bus, false)
+}
+
+/// The census of a function, `unrouted` when as a Type 1 bridge it
+/// forwards no granted bus.
+fn containment_plan_placed(
+    config: &Config,
+    root_bus: bool,
+    unrouted: bool,
+) -> Result<containment::Plan, ClaimError> {
     containment::Plan::read(
         |offset, width| {
             Ok(match width {
@@ -994,6 +1004,7 @@ fn containment_plan_on(config: &Config, root_bus: bool) -> Result<containment::P
             })
         },
         root_bus,
+        unrouted,
     )
 }
 
@@ -1273,6 +1284,57 @@ fn containment_refuses_a_hardwired_bus_master_off_the_root_bus() {
     assert!(!config.master_sealed);
 }
 
+/// A Type 1 function on the root bus, class 0604, whose Bus Master bit is
+/// hard-wired set. When its bus fields forward no granted bus, nothing can
+/// sit behind it: the seal proves the bit hard-wired and accepts it, as a
+/// host bridge's. When it forwards a granted bus, sits behind a port, or
+/// has a header other than Type 1, it is refused; a bit that clears is
+/// sealed as clear.
+#[test]
+fn containment_seals_an_unrouted_root_bus_bridge_whose_bus_master_is_hardwired() {
+    fn bridge(command: u16, fixed: u16, header: u8) -> Function<Config> {
+        let mut function = host_bridge(0, 0);
+        let config = function.config();
+        config.write32(8, 0x0604_0000).unwrap();
+        config.write8(regs::HEADER_TYPE, header).unwrap();
+        config.write16(regs::COMMAND, command).unwrap();
+        config.command_fixed = fixed;
+        function
+    }
+    let contain_placed = |config: &mut Config, root_bus, unrouted| {
+        let plan = containment_plan_placed(config, root_bus, unrouted).unwrap();
+        plan.apply(config)?;
+        plan.seal(config).map(|()| plan)
+    };
+    let mut function = bridge(0x0006, u16::MAX, 1);
+    let config = function.config();
+    config.command_writes.clear();
+    let plan = contain_placed(config, true, true).unwrap();
+    assert_eq!(config.read16(regs::COMMAND), Ok(0x0006));
+    assert!(config.master_sealed);
+    assert!(plan.master_stopped(0x0006));
+    assert_eq!(config.command_writes, [0x0402, 0x0402]);
+    assert!(config.write16(regs::COMMAND, 0x0006).is_err());
+    // A multifunction Type 1 header is the same layout.
+    let mut function = bridge(0x0006, u16::MAX, 0x81);
+    assert!(contain_placed(function.config(), true, true).is_ok());
+    // Forwarding a granted bus, behind a port, or another header: refused.
+    for (root_bus, unrouted, header) in [(true, false, 1), (false, true, 1), (true, true, 0)] {
+        let mut function = bridge(0x0006, u16::MAX, header);
+        let config = function.config();
+        assert!(contain_placed(config, root_bus, unrouted).is_err());
+        assert!(!config.master_sealed);
+        let plan = containment_plan_placed(config, root_bus, unrouted).unwrap();
+        assert!(!plan.master_stopped(0x0006));
+    }
+    // A writable bit is cleared and sealed as clear.
+    let mut function = bridge(0x0007, 0, 1);
+    let config = function.config();
+    assert!(contain_placed(config, true, true).is_ok());
+    assert_eq!(config.read16(regs::COMMAND), Ok(0x0403));
+    assert!(config.master_sealed);
+}
+
 /// An ISA/LPC bridge on the root bus, class 0601 with no INTx pin, as the
 /// chipsets report it. Intel's PCH reads 0x0007 and implements no INTx
 /// Disable; AMD's FCH reads 0x040f. Both hold Bus Master set: the seal
@@ -1408,6 +1470,7 @@ fn containment_plan_refuses_when_the_interrupt_pin_cannot_be_read() {
             })
         },
         true,
+        false,
     );
     assert!(matches!(result, Err(error) if error == refused));
 }

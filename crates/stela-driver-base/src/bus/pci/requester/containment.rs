@@ -25,7 +25,8 @@ struct Control {
     /// regs::command_optional_bits); every other bit must read back exactly.
     optional: u16,
     /// Bits of `original` that `disabled` clears and hardware may hold set:
-    /// only the Bus Master bit of a root-bus host bridge or ISA bridge.
+    /// only the Bus Master bit of a root-bus host bridge or ISA bridge, or
+    /// of a root-bus Type 1 bridge that forwards no granted bus.
     hardwired: u16,
 }
 
@@ -85,10 +86,13 @@ impl Plan {
     }
 
     /// Census the function `read` reaches. `root_bus`: it sits on a root
-    /// complex's own bus, which no bridge forwards to.
+    /// complex's own bus, which no bridge forwards to. `unrouted`: as a
+    /// Type 1 bridge, its bus fields forward no bus a root bridge grants
+    /// (`stela_boot_core::ecam::forwards_granted_bus`).
     pub fn read(
         read: impl FnMut(u16, u8) -> Result<u32, ClaimError>,
         root_bus: bool,
+        unrouted: bool,
     ) -> Result<Self, ClaimError> {
         let reader = RefCell::new(read);
         let read = |offset, width| reader.borrow_mut()(offset, width);
@@ -114,12 +118,22 @@ impl Plan {
         // hardware's, and the seal proves it ([`Plan::seal`]). A function
         // of those classes behind a downstream port is contained like any
         // other.
+        //
+        // A Type 1 bridge on a root bus whose bus fields forward no bus a
+        // root bridge grants holds no requester behind it: the firmware
+        // enumerates and enables only functions on granted buses, and a
+        // function comes out of reset with Bus Master clear. Its own
+        // requests are MSI and MSI-X messages, whose enables the plan
+        // clears and checks like any other control. Linux never clears a
+        // bridge's Bus Master. Its bit is accepted the same way.
         let class = read(regs::CLASS_REVISION, 4)? >> 8;
-        let hardwired = if root_bus && matches!(class >> 8, HOST_BRIDGE | ISA_BRIDGE) {
-            command & regs::COMMAND_MASTER
-        } else {
-            0
-        };
+        let isolated_bridge = unrouted && read(regs::HEADER_TYPE, 1)? & 0x7f == 1;
+        let hardwired =
+            if root_bus && (matches!(class >> 8, HOST_BRIDGE | ISA_BRIDGE) || isolated_bridge) {
+                command & regs::COMMAND_MASTER
+            } else {
+                0
+            };
         let pin = read(regs::INTERRUPT_PIN, 1)? as u8;
         plan.push(
             regs::COMMAND,
@@ -295,8 +309,8 @@ impl Plan {
 
     /// Whether a function whose COMMAND reads `command` masters no DMA
     /// this plan has not accounted for: its Bus Master bit reads clear, or
-    /// it is a bit this plan lets hardware hold set (a root-bus host bridge
-    /// or ISA bridge, see [`Plan::read`]). A function that fails its stop
+    /// it is a bit this plan lets hardware hold set (a root-bus host bridge,
+    /// ISA bridge or unrouted Type 1 bridge, see [`Plan::read`]). A function that fails its stop
     /// is judged by this, whatever else it left running.
     pub fn master_stopped(&self, command: u16) -> bool {
         command & regs::COMMAND_MASTER == 0
@@ -319,7 +333,8 @@ impl Plan {
     /// Acknowledge a contained function: its controls read back stopped,
     /// then its Bus Master bit is sealed. A clear bit is sealed as clear.
     /// A set bit is accepted only where this plan lets hardware hold it
-    /// (a root-bus host bridge or ISA bridge whose bit was set) and only
+    /// (a root-bus host bridge, ISA bridge or unrouted Type 1 bridge whose
+    /// bit was set) and only
     /// once the seal proves it hard-wired; anything else is refused.
     pub fn seal(&self, config: &mut impl MasterSeal) -> Result<(), ConfigError> {
         self.check_disabled(|offset| config.read16(offset))?;
@@ -345,8 +360,9 @@ pub trait MasterSeal: ConfigSpace {
     /// Seal a function whose Bus Master bit hardware holds set, proven
     /// by writing the plan's stopped COMMAND, `disabled`, again
     /// ([`hardwired_master`]): it cannot be cleared, and the chipset's own
-    /// host bridge or ISA bridge masters no DMA Stela has not set up, so
-    /// it is left as Linux leaves it. A bit that clears is sealed as clear
+    /// host bridge or ISA bridge, or a bridge with no granted bus behind
+    /// it, masters no DMA Stela has not set up, so it is left as Linux
+    /// leaves it. A bit that clears is sealed as clear
     /// instead.
     fn seal_hardwired_bus_master(&mut self, disabled: u16) -> Result<(), ConfigError>;
 }

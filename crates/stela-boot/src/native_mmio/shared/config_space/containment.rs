@@ -868,6 +868,13 @@ impl Input {
                 return Ok(Observed::Left { layout, behind });
             }
         };
+        let unrouted = bridge.is_some_and(|buses| {
+            !stela_boot_core::ecam::forwards_granted_bus(
+                reader.source.platform.wire().roots(),
+                address,
+                buses,
+            )
+        });
         let plan = Plan::read(
             |offset, width| {
                 reader
@@ -875,6 +882,7 @@ impl Input {
                     .map_err(ClaimError::Mapping)
             },
             root_bus,
+            unrouted,
         )?;
         let (window, span) = reader
             .geometry

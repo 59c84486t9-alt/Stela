@@ -100,6 +100,23 @@ pub fn root_decodes(roots: &[RootWindow], segment: u16, bus: u8) -> bool {
     })
 }
 
+/// Whether the Type 1 bridge at `address`, whose bus dword reads `buses`,
+/// forwards a bus that a root bridge of its segment grants. An unconfigured
+/// bridge forwards none, and neither does one whose secondary..subordinate
+/// range lies wholly outside the grants: the firmware enumerates only
+/// granted buses, so no function behind such a bridge was ever enabled.
+/// Stale numbers (`census::Route::Invalid`) may name buses in use, so they
+/// count as forwarding.
+pub fn forwards_granted_bus(roots: &[RootWindow], address: Address, buses: u32) -> bool {
+    match census::route(address.bus, buses) {
+        census::Route::Unconfigured => false,
+        census::Route::Invalid => true,
+        census::Route::Forwards { buses, .. } => buses
+            .into_iter()
+            .any(|bus| root_decodes(roots, address.segment, bus)),
+    }
+}
+
 /// Whether a configuration read of `offset` at `address` ends at the root
 /// complex, which completes it with all ones: no root bridge forwards the
 /// bus, and the request still leaves the processor. That is the case for a
@@ -401,6 +418,32 @@ mod tests {
             ..root(0, 0x40, 0x7f)
         };
         assert!(!root_decodes(&[memory], 0, 0x40));
+    }
+
+    #[test]
+    fn a_bridge_forwards_a_granted_bus_only_when_one_of_its_buses_is_granted() {
+        let at = Address {
+            segment: 0,
+            bus: 0,
+            device: 0,
+            function: 0,
+        };
+        let roots = [parent(0, 0xfe)];
+        let dword = |primary: u8, secondary: u8, subordinate: u8| {
+            u32::from_le_bytes([primary, secondary, subordinate, 0])
+        };
+        // A wrong primary and buses 0xff..0xff, past a 0x00-0xfe grant.
+        assert!(!forwards_granted_bus(&roots, at, dword(0xff, 0xff, 0xff)));
+        assert!(!forwards_granted_bus(&roots, at, 0xffff_ffff));
+        assert!(!forwards_granted_bus(&roots, at, 0));
+        assert!(forwards_granted_bus(&roots, at, dword(0, 1, 1)));
+        // Partly granted counts as forwarding.
+        assert!(forwards_granted_bus(&roots, at, dword(0, 0xfe, 0xff)));
+        // Stale numbers may name buses in use.
+        assert!(forwards_granted_bus(&roots, at, dword(0, 0, 5)));
+        // Another segment's grant does not count.
+        let other = Address { segment: 1, ..at };
+        assert!(!forwards_granted_bus(&roots, other, dword(0, 1, 1)));
     }
 
     #[test]
