@@ -31,6 +31,26 @@ fn failed<T>(_: T) -> Error {
     Error::Unavailable
 }
 
+/// Refuse the aperture's activation at `check`, named in the log: most of
+/// its checks answer `Unavailable` alone, which does not say which one
+/// refused, and this line reaches the stick or a stop's record in the
+/// firmware where the host devices then cannot start. A step whose own
+/// error is foreign to this module names it through `shared::refused`.
+fn refuse(check: &str) -> Error {
+    crate::output::arguments(format_args!("HOST MMIO aperture refused: {check}\n"));
+    Error::Unavailable
+}
+
+/// [`refuse`] for a step that answers this module's error, which is kept.
+fn named(check: &'static str) -> impl FnOnce(Error) -> Error {
+    move |error| {
+        crate::output::arguments(format_args!(
+            "HOST MMIO aperture refused: {check}: {error:?}\n"
+        ));
+        error
+    }
+}
+
 /// Borrow only the reserved capture produced by this handoff.
 ///
 /// # Safety

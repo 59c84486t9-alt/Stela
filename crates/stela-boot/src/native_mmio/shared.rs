@@ -473,17 +473,22 @@ impl Source {
         owner: &mut HostOwner,
     ) -> Result<Self, Error> {
         if !PROCESSORS.alone() {
-            return Err(Error::Unavailable);
+            return Err(refuse("another host processor already shares the aperture"));
         }
         // SAFETY: the caller supplies the original boot handoff and physmap.
-        let (wire, origin) = unsafe { super::claim_capture(handoff) }?;
+        let (wire, origin) =
+            unsafe { super::claim_capture(handoff) }.map_err(named("the loader's capture"))?;
         let tsc_hz = handoff.tsc_hz;
         let (catalog, snapshot, identity) = {
-            let execution = owner.enter_root().map_err(failed)?;
+            let execution = owner
+                .enter_root()
+                .map_err(refused("MMIO aperture: entering the boot processor's root"))?;
             let context = execution.context();
             (
                 context.roots().clone(),
-                context.memory_snapshot().map_err(failed)?,
+                context.memory_snapshot().map_err(refused(
+                    "MMIO aperture: the boot processor's control registers",
+                ))?,
                 context.identity().clone(),
             )
         };
@@ -501,10 +506,17 @@ impl Source {
             ));
             Error::UnsupportedCache
         })?;
-        if !snapshot.pat_valid || !catalog.roots().contains(&wire.root) {
-            return Err(Error::Unavailable);
+        if !snapshot.pat_valid {
+            return Err(refuse("the boot processor's PAT is not valid"));
         }
-        let image = Image::from_snapshot(&snapshot).map_err(failed)?;
+        if !catalog.roots().contains(&wire.root) {
+            return Err(refuse(&alloc::format!(
+                "the capture's page root {:#x} is not one of the engine's roots",
+                wire.root
+            )));
+        }
+        let image = Image::from_snapshot(&snapshot)
+            .map_err(refused("MMIO aperture: the boot processor's memory types"))?;
         let space = AddressSpace {
             identity: wire.root,
             physical_bits: image.physical_bits,
@@ -513,7 +525,14 @@ impl Source {
         let shift = 12 + 9 * (wire.levels - 1);
         let slot = ((wire.virtual_base >> shift) & 511) as usize;
         // SAFETY: the loader root is an owned table page.
-        let loader_entry = unsafe { owned_table(wire, wire.root)?.add(slot).read_volatile() };
+        let loader_entry = unsafe {
+            owned_table(wire, wire.root)
+                .map_err(named(
+                    "the loader root is not a table page the capture owns",
+                ))?
+                .add(slot)
+                .read_volatile()
+        };
         let platform = Arc::new(Platform {
             captured: Arc::new(Captured {
                 _origin: origin,
@@ -531,14 +550,17 @@ impl Source {
         });
         // SAFETY: the original installed BSP and retained loader root above
         // own the relocated immutable engine image and its final handoff.
-        let code = unsafe { handoff.native_image.pin(handoff) }.map_err(failed)?;
+        let code = unsafe { handoff.native_image.pin(handoff) }
+            .map_err(refused("MMIO aperture: pinning the engine's image"))?;
         let aperture = Assignment::from_owned(ApertureProduct {
             _capture: platform.captured.clone(),
             _code: code,
             identity: identity.clone(),
         });
         let mut written = Vec::new();
-        written.try_reserve_exact(LEAVES + 1).map_err(failed)?;
+        written
+            .try_reserve_exact(LEAVES + 1)
+            .map_err(refused("MMIO aperture: room for the aperture's table list"))?;
         written.extend_from_slice(&wire.leaves);
         written.push(wire.directory);
         for &table in &written {
@@ -548,49 +570,77 @@ impl Source {
                 PAGE as usize,
                 crate::layout::physical(0),
             )
-            .map_err(failed)?;
+            .map_err(refused(
+                "MMIO aperture: the write-back check of its table pages",
+            ))?;
         }
-        let aliases = aliases(wire, &catalog, &snapshot, space, &written)?;
+        let aliases = aliases(wire, &catalog, &snapshot, space, &written)
+            .map_err(named("the existing mappings of the engine's roots"))?;
         // How many mappings the permission imports, which its activation
         // time and every map's conflict check scale with.
         crate::output::arguments(format_args!("NATIVE MMIO aliases={}\n", aliases.len()));
-        platform.check_context(space)?;
+        platform.check_context(space).map_err(named(
+            "the boot processor's root does not share the aperture",
+        ))?;
         for root in catalog.roots() {
             let mut table = *root;
             for level in (2..wire.levels).rev() {
                 let slot = ((wire.virtual_base >> (12 + 9 * level)) & 511) as usize;
                 // SAFETY: an owned table page.
-                let entry = unsafe { owned_table(wire, table)?.add(slot).read_volatile() };
+                let entry = unsafe {
+                    owned_table(wire, table)
+                        .map_err(named("a root's aperture path leaves the capture's tables"))?
+                        .add(slot)
+                        .read_volatile()
+                };
                 if entry & (PRESENT | HUGE) != PRESENT {
-                    return Err(Error::Unavailable);
+                    return Err(refuse(&alloc::format!(
+                        "root {root:#x} has entry {entry:#x} at level {level} of the aperture's path"
+                    )));
                 }
                 table = entry & ADDRESS;
             }
             if table != wire.directory {
-                return Err(Error::Unavailable);
+                return Err(refuse(&alloc::format!(
+                    "root {root:#x} reaches {table:#x}, not the aperture's directory {:#x}",
+                    wire.directory
+                )));
             }
         }
-        let directory = owned_table(wire, wire.directory)?;
+        let directory = owned_table(wire, wire.directory).map_err(named(
+            "the aperture's directory is not a table page the capture owns",
+        ))?;
         for (index, &leaf) in wire.leaves.iter().enumerate() {
             // SAFETY: the owned directory.
             let entry = unsafe { directory.add(index).read_volatile() };
             if entry & (PRESENT | WRITABLE | HUGE) != (PRESENT | WRITABLE)
                 || entry & ADDRESS != leaf
             {
-                return Err(Error::Unavailable);
+                return Err(refuse(&alloc::format!(
+                    "the aperture's directory entry {index} is {entry:#x}, not leaf {leaf:#x}"
+                )));
             }
         }
         for size in [Size::Page, Size::Large] {
             for index in size.slots() {
                 // SAFETY: the owned aperture tables.
-                if unsafe { platform.entry(size, index)?.read_volatile() } != 0 {
-                    return Err(Error::Unavailable);
+                let entry = unsafe {
+                    platform
+                        .entry(size, index)
+                        .map_err(named("an aperture slot outside its tables"))?
+                        .read_volatile()
+                };
+                if entry != 0 {
+                    return Err(refuse(&alloc::format!(
+                        "aperture slot {index} already maps {entry:#x}"
+                    )));
                 }
             }
         }
         // SAFETY: the inventory holds every root's and the guest RAM's
         // aliases; the leaf table is owned and shared by every root.
-        let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }?;
+        let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }
+            .map_err(named("registering the existing mappings"))?;
         // SAFETY: this boot's capture, checked above.
         let window = unsafe { super::Window::new(wire, snapshot.pat, tsc_hz) };
         Ok(Self {

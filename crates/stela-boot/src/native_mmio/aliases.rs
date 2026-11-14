@@ -29,7 +29,10 @@ pub(super) fn aliases(
 ) -> Result<Vec<ExistingAlias>, Error> {
     let roots = catalog.roots();
     if !roots.contains(&(snapshot.cr3 & ADDRESS)) {
-        return Err(Error::Unavailable);
+        return Err(refuse(&alloc::format!(
+            "the boot processor's root {:#x} is not one of the engine's roots",
+            snapshot.cr3 & ADDRESS
+        )));
     }
     let mut visited = Vec::new();
     let mut aliases = Vec::new();
@@ -57,7 +60,11 @@ pub(super) fn aliases(
         visited.try_reserve(1).map_err(failed)?;
         visited.push((table, level));
         p.image.writeback_ram(table, PAGE).map_err(failed)?;
-        let address = owned_table(p.wire, table)?;
+        let address = owned_table(p.wire, table).map_err(|_| {
+            refuse(&alloc::format!(
+                "table page {table:#x} at level {level} is not one the capture owns"
+            ))
+        })?;
         for index in 0..ENTRIES {
             // SAFETY: `owned_table` admitted this table page and `index` is below `ENTRIES`.
             let entry = unsafe { address.add(index).read_volatile() };
@@ -69,7 +76,10 @@ pub(super) fn aliases(
                     || (level != 0
                         && entry & ADDRESS & ((1u64 << (12 + 9 * level)) - 1) & !(1 << 12) != 0)
                 {
-                    return Err(Error::Unavailable);
+                    return Err(refuse(&alloc::format!(
+                        "table {table:#x} entry {index} ({entry:#x}) at level {level} is a large \
+                         page above 1 GiB or not aligned to its size"
+                    )));
                 }
                 let bytes = 1u64 << (12 + 9 * level);
                 let physical = entry & ADDRESS & !(bytes - 1);
@@ -137,12 +147,17 @@ pub(super) fn aliases(
             // SAFETY: `owned_table` admitted this table page and `slot` is below 512.
             let entry = unsafe { owned_table(wire, table)?.add(slot).read_volatile() };
             if entry & (PRESENT | WRITABLE | HUGE) != (PRESENT | WRITABLE) {
-                return Err(Error::Unavailable);
+                return Err(refuse(&alloc::format!(
+                    "root {root:#x} has entry {entry:#x} at level {level} of the aperture's path"
+                )));
             }
             table = entry & ADDRESS;
         }
         if table != wire.leaf {
-            return Err(Error::Unavailable);
+            return Err(refuse(&alloc::format!(
+                "root {root:#x} reaches {table:#x}, not the aperture's leaf table {:#x}",
+                wire.leaf
+            )));
         }
     }
     Ok(aliases)
