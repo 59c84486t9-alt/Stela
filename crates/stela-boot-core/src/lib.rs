@@ -72,6 +72,7 @@ pub mod pm_timer;
 pub mod poll_timer;
 pub mod posted_call;
 pub mod power_button;
+pub mod process_fault;
 pub mod ram;
 pub mod random;
 pub mod record;

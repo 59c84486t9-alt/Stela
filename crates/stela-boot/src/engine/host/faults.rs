@@ -212,12 +212,19 @@ pub(crate) fn page_fault(
     saved: &super::super::interrupts::SavedState<'_>,
 ) {
     let write = frame.error & 2 != 0;
-    #[cfg(feature = "nvk")]
-    if super::super::gpu::client::serve_fault(address, write) {
-        return;
-    }
     let state = state();
     if !in_code(state, frame.rip) {
+        // A client's mapping Linux moved: its refault may sleep, which only
+        // the faulting context may do, never this handler.
+        #[cfg(feature = "nvk")]
+        if super::super::gpu::client::client_fault(address) {
+            match super::process_fault::redirect(frame, address) {
+                Ok(()) => return,
+                Err(refused) => {
+                    super::super::gpu::client::note_unserved(address, frame.rip, refused)
+                }
+            }
+        }
         super::super::interrupts::fatal(frame);
     }
     state.follow_native();

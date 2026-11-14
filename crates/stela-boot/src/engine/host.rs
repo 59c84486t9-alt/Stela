@@ -61,6 +61,8 @@ mod bare_host;
 pub(crate) mod chain_check;
 mod faults;
 pub(crate) mod pmu;
+#[cfg(feature = "nvk")]
+mod process_fault;
 mod signals;
 pub use bare_host::BareHost;
 use faults::*;

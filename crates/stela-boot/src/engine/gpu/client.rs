@@ -1373,14 +1373,64 @@ pub(in crate::engine) fn vram_bytes(index: u32) -> Option<u64> {
     (result == 0 && parameter.value != 0).then_some(parameter.value)
 }
 
-/// Serve a fault on a mapping that moved, as Linux unmaps a buffer it evicts.
-/// False when `address` is not one a client mapped.
-pub(in crate::engine) fn serve_fault(address: u64, write: bool) -> bool {
-    installed().is_some_and(|gpu| {
-        gpu.window.contains(address)
-            && MAPPINGS.load(Ordering::Relaxed) != 0
-            && submit(Operation::Fault { address, write }) == 0
-    })
+/// Whether a fault at `address` may be on a client's mapping, which Linux
+/// unmaps as it moves the buffer behind it: for the #PF handler, which
+/// leaves the refault to the faulting context ([`serve_moved`]).
+pub(in crate::engine) fn client_fault(address: u64) -> bool {
+    installed()
+        .is_some_and(|gpu| gpu.window.contains(address) && MAPPINGS.load(Ordering::Relaxed) != 0)
+}
+
+/// Client faults served so far, for the report of the first and of each
+/// power of two after it.
+static CLIENT_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// `rip` as an offset in this image.
+fn image_offset(rip: u64) -> u64 {
+    unsafe extern "C" {
+        static __ImageBase: u8;
+    }
+    rip.wrapping_sub((&raw const __ImageBase).addr() as u64)
+}
+
+/// Serve the fault at `address` that the code at `rip` took, in that code's
+/// own context, as Linux's fault handler runs in the faulting task: a Mesa
+/// thread refaults on its task, which may sleep; other code posts the
+/// refault, and the boot CPU runs Linux for it, as at any posted call.
+pub(in crate::engine) fn serve_moved(address: u64, write: bool, rip: u64) {
+    let thread = installed().and_then(current_thread).is_some();
+    let count = CLIENT_FAULTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if count.is_power_of_two() {
+        output::arguments(format_args!(
+            "GPU CLIENT FAULT address={address:#x} write={write} rip=+{:#x} processor={} \
+             thread={} count={count}\n",
+            image_offset(rip),
+            host::processor(),
+            if thread { "mesa" } else { "host" },
+        ));
+    }
+    let result = submit(Operation::Fault { address, write });
+    if result != 0 {
+        output::fatal(format_args!(
+            "a GPU client fault at {address:#x} from +{:#x} on processor {} was not \
+             served: {result}",
+            image_offset(rip),
+            host::processor()
+        ));
+    }
+}
+
+/// Say why the fault at `address` from `rip` cannot reach its server, before
+/// the handler stops on it.
+pub(in crate::engine) fn note_unserved(
+    address: u64,
+    rip: u64,
+    refused: stela_boot_core::process_fault::Refused,
+) {
+    output::arguments(format_args!(
+        "GPU client fault at {address:#x} from +{:#x} not served: {refused:?}\n",
+        image_offset(rip)
+    ));
 }
 
 fn text(pointer: *const c_char) -> &'static str {
