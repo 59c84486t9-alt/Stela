@@ -160,6 +160,11 @@ fn setup_lines_parse_and_serialize_identically() {
     assert!(options.bundle && options.external_disks);
     assert_eq!(options.ecid, Some(0x1234));
     assert_eq!(options.to_string(), preboot);
+    assert!(options.guest_network && !options.guest_network_ecm);
+    // ECM instead of NCM: the flag alone gives the guest the adapter too.
+    let ecm = round_trip(&format!("{preboot}-ecm"));
+    assert!(ecm.guest_network && ecm.guest_network_ecm);
+    assert_eq!(ecm.to_string(), format!("{preboot} --guest-network-ecm"));
     let bundle = format!("--system --storage {DISK} --nor {DISK} --bundle \\EFI\\stela\\r");
     assert_eq!(round_trip(&bundle).to_string(), bundle);
 }

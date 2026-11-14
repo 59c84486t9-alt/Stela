@@ -35,6 +35,15 @@
 //! Ethernet header are discarded and counted, never truncated. Each direction's queue holds at most
 //! [`QUEUE_FRAMES`]; a frame arriving at a full queue is dropped and
 //! counted, as a NIC's full ring drops.
+//!
+//! The same adapter can instead present the Network Control Model
+//! ([`Model::Ncm`], the `ncm` framing): the station address, link,
+//! filters, statistics and notifications stay the same, while the data
+//! interface moves NCM transfer blocks that each carry many frames, so the
+//! guest takes one bulk transfer, and one interrupt, per block rather than
+//! per frame.
+mod ncm;
+
 use super::{
     BusPeer, Function, Reply, Token,
     control::{
@@ -56,12 +65,19 @@ const FULL_SPEED_PACKET: u16 = 64;
 const NOTIFY_PACKET: u16 = 16;
 const CONTROL_INTERFACE: u16 = 0;
 const DATA_INTERFACE: u16 = 1;
+/// The communications interface subclass of ECM.
+const ECM_SUBCLASS: u8 = 6;
+/// The Interface Association descriptor type (IAD ECN).
+const INTERFACE_ASSOCIATION: u8 = 0x0b;
 /// The Ethernet header: destination, source and EtherType.
 const HEADER_BYTES: usize = 14;
 /// The Ethernet maximum segment: header and payload, no FCS.
 pub const MAX_SEGMENT: usize = 1514;
-/// Frames each direction holds.
+/// Frames each direction holds in the ECM model; NCM holds
+/// [`NCM_QUEUE_FRAMES`], enough to fill a transfer block.
 pub const QUEUE_FRAMES: usize = 64;
+/// Frames each direction holds in the NCM model.
+pub const NCM_QUEUE_FRAMES: usize = 256;
 const LINK_BITS_PER_SECOND: u32 = 1_000_000_000;
 
 const SET_ETHERNET_MULTICAST_FILTERS: u8 = 0x40;
@@ -109,6 +125,18 @@ pub struct Counters {
     pub oversized: u64,
     pub filtered: u64,
     pub overflowed: u64,
+    /// NCM OUT transfer blocks that did not decode, discarded whole.
+    pub malformed: u64,
+}
+
+/// The USB Ethernet class the adapter presents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Model {
+    /// The Network Control Model (CDC NCM 1.0): many frames per transfer.
+    #[default]
+    Ncm,
+    /// The Ethernet Control Model (CDC ECM 1.2): one frame per transfer.
+    Ecm,
 }
 
 /// The destination of a frame of at least [`HEADER_BYTES`].
@@ -181,22 +209,30 @@ struct State {
     zero_length_due: bool,
     counters: Counters,
     statistics: Statistics,
+    /// The NCM framing and its negotiated parameters; `None` is ECM.
+    ncm: Option<ncm::Ncm>,
 }
 
+/// The USB Ethernet adapter, in either [`Model`].
 pub struct Ecm {
     control: Control,
     state: State,
 }
 
-fn descriptors(mac: Mac) -> Descriptors {
+fn descriptors(mac: Mac, model: Model) -> Descriptors {
+    let ncm = model == Model::Ncm;
+    // NCM's two interfaces are one function under an Interface Association
+    // (IAD ECN), which makes the device Miscellaneous / Common Class /
+    // Interface Association; ECM's device is the communications class.
+    let (class, subclass, protocol) = if ncm { (0xef, 2, 1) } else { (2, 0, 0) };
     let device = [
         18,
         DEVICE,
         0x00,
         0x02,
-        2, // communications device class
-        0,
-        0,
+        class,
+        subclass,
+        protocol,
         control::EP0_PACKET as u8,
         0x09,
         0x12,
@@ -212,50 +248,68 @@ fn descriptors(mac: Mac) -> Descriptors {
     let [segment_low, segment_high] = (MAX_SEGMENT as u16).to_le_bytes();
     let [filters_low, filters_high] = MULTICAST_FILTERS.to_le_bytes();
     let statistics = STATISTICS.to_le_bytes();
+    let (communications, data_protocol) = if ncm {
+        (ncm::SUBCLASS, ncm::DATA_PROTOCOL)
+    } else {
+        (ECM_SUBCLASS, 0)
+    };
+    // Header: CDC 1.20 for ECM, the 1.10 NCM 1.0 names (5.2.1).
+    let header: [u8; 5] = if ncm {
+        [5, 0x24, 0x00, 0x10, 0x01]
+    } else {
+        [5, 0x24, 0x00, 0x20, 0x01]
+    };
     let configuration = |bulk: u16, interval: u8| {
         let [low, high] = bulk.to_le_bytes();
-        control::configuration(
-            1,
+        let association = [8, INTERFACE_ASSOCIATION, 0, 2, 2, communications, 0, 0];
+        let mut parts: Vec<&[u8]> = Vec::new();
+        if ncm {
+            parts.push(&association);
+        }
+        let control_interface = [9, INTERFACE, 0, 0, 1, 2, communications, 0, 0];
+        // Union (control 0, data 1), Ethernet Networking: MAC string 4, the
+        // statistics it counts, 1514-byte segments, perfect multicast
+        // filters, no power filters.
+        let ethernet = [
+            13,
+            0x24,
+            0x0f,
+            4,
+            statistics[0],
+            statistics[1],
+            statistics[2],
+            statistics[3],
+            segment_low,
+            segment_high,
+            filters_low,
+            filters_high,
             0,
-            &[
-                &[9, INTERFACE, 0, 0, 1, 2, 6, 0, 0],
-                // Header (CDC 1.20), Union (control 0, data 1), Ethernet
-                // Networking: MAC string 4, the statistics it counts,
-                // 1514-byte segments, perfect multicast filters, no power
-                // filters.
-                &[5, 0x24, 0x00, 0x20, 0x01],
-                &[5, 0x24, 0x06, 0, 1],
-                &[
-                    13,
-                    0x24,
-                    0x0f,
-                    4,
-                    statistics[0],
-                    statistics[1],
-                    statistics[2],
-                    statistics[3],
-                    segment_low,
-                    segment_high,
-                    filters_low,
-                    filters_high,
-                    0,
-                ],
-                &[7, ENDPOINT, NOTIFY, 3, NOTIFY_PACKET as u8, 0, interval],
-                &[9, INTERFACE, 1, 0, 0, 10, 0, 0, 0],
-                &[9, INTERFACE, 1, 1, 2, 10, 0, 0, 0],
-                &[7, ENDPOINT, BULK_IN, 2, low, high, 0],
-                &[7, ENDPOINT, BULK_OUT, 2, low, high, 0],
-            ],
-        )
+        ];
+        parts.extend([
+            &control_interface[..],
+            &header[..],
+            &[5, 0x24, 0x06, 0, 1][..],
+            &ethernet[..],
+        ]);
+        if ncm {
+            parts.push(&ncm::FUNCTIONAL);
+        }
+        let notify = [7, ENDPOINT, NOTIFY, 3, NOTIFY_PACKET as u8, 0, interval];
+        let idle = [9, INTERFACE, 1, 0, 0, 10, 0, data_protocol, 0];
+        let active = [9, INTERFACE, 1, 1, 2, 10, 0, data_protocol, 0];
+        let bulk_in = [7, ENDPOINT, BULK_IN, 2, low, high, 0];
+        let bulk_out = [7, ENDPOINT, BULK_OUT, 2, low, high, 0];
+        parts.extend([&notify[..], &idle, &active, &bulk_in, &bulk_out]);
+        control::configuration(1, 0, &parts)
     };
     let qualifier = [
         10,
         DEVICE_QUALIFIER,
         0x00,
         0x02,
-        2,
-        0,
-        0,
+        class,
+        subclass,
+        protocol,
         control::EP0_PACKET as u8,
         1,
         0,
@@ -285,16 +339,23 @@ fn notification(code: u8, value: u16, data: &[u8]) -> Vec<u8> {
 }
 
 impl Ecm {
-    /// The adapter whose station address is `mac`, a unicast address.
+    /// The ECM adapter whose station address is `mac`, a unicast address.
     pub fn new(mac: Mac) -> Result<Self> {
+        Self::with_model(mac, Model::Ecm)
+    }
+
+    /// The adapter whose station address is `mac`, a unicast address,
+    /// presenting `model`.
+    pub fn with_model(mac: Mac, model: Model) -> Result<Self> {
         if mac.is_multicast() || mac.0 == [0; 6] {
             return Err(refuse!(
                 "the USB Ethernet address must be a unicast address"
             ));
         }
         Ok(Self {
-            control: Control::new(descriptors(mac)),
+            control: Control::new(descriptors(mac, model)),
             state: State {
+                ncm: (model == Model::Ncm).then(ncm::Ncm::new),
                 mac,
                 alternate: 0,
                 filter: DIRECTED | BROADCAST | ALL_MULTICAST,
@@ -321,6 +382,14 @@ impl Ecm {
 
     pub fn counters(&self) -> Counters {
         self.state.counters
+    }
+
+    pub fn model(&self) -> Model {
+        if self.state.ncm.is_some() {
+            Model::Ncm
+        } else {
+            Model::Ecm
+        }
     }
 
     /// A frame from the host network for the guest. Dropped (and counted)
@@ -357,7 +426,7 @@ impl Ecm {
             self.state.counters.filtered += 1;
             return;
         }
-        if self.state.inbound.len() >= QUEUE_FRAMES {
+        if !self.has_room() {
             self.state.counters.overflowed += 1;
             self.state.statistics.no_buffer += 1;
             return;
@@ -373,7 +442,7 @@ impl Ecm {
 
     /// Whether the guest's receive queue has room for another frame.
     pub fn has_room(&self) -> bool {
-        self.state.inbound.len() < QUEUE_FRAMES
+        self.state.inbound.len() < self.state.queue_frames()
     }
 
     /// The next frame the guest sent, for the host network.
@@ -383,6 +452,10 @@ impl Ecm {
 
     /// Reuse storage after the host link has finished borrowing the frame.
     pub(crate) fn recycle_outbound(&mut self, mut frame: Vec<u8>) {
+        if let Some(ncm) = &mut self.state.ncm {
+            ncm.recycle(frame);
+            return;
+        }
         let assembling = &mut self.state.assembling;
         if assembling.is_empty()
             && frame.capacity() > assembling.capacity()
@@ -395,7 +468,19 @@ impl Ecm {
 }
 
 impl State {
+    /// Frames each direction's queue holds.
+    fn queue_frames(&self) -> usize {
+        if self.ncm.is_some() {
+            NCM_QUEUE_FRAMES
+        } else {
+            QUEUE_FRAMES
+        }
+    }
+
     fn select(&mut self, alternate: u8) {
+        if let Some(ncm) = &mut self.ncm {
+            ncm.select();
+        }
         self.alternate = alternate;
         self.assembling.clear();
         self.discarding = false;
@@ -427,6 +512,9 @@ impl State {
     }
 
     fn bulk_in(&mut self, packet: &mut [u8]) -> Reply {
+        if self.ncm.is_some() {
+            return self.bulk_in_ncm(packet);
+        }
         let Some(frame) = self.inbound.front() else {
             return Reply::Nak;
         };
@@ -454,9 +542,12 @@ impl State {
     }
 
     fn bulk_out(&mut self, packet: &[u8], max: usize) -> Reply {
-        if self.outbound.len() >= QUEUE_FRAMES {
+        if self.outbound.len() >= self.queue_frames() {
             // The host retries until the owner drains the queue.
             return Reply::Nak;
+        }
+        if self.ncm.is_some() {
+            return self.bulk_out_ncm(packet, max);
         }
         if !self.discarding {
             if self.assembling.len() + packet.len() > MAX_SEGMENT {
@@ -530,10 +621,16 @@ impl Requests for State {
         self.inbound.clear();
         self.sent = 0;
         self.zero_length_due = false;
+        if let Some(ncm) = &mut self.ncm {
+            ncm.reset();
+        }
         Ok(())
     }
 
     fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, Stall> {
+        if let Some(outcome) = self.ncm.as_mut().and_then(|ncm| ncm.request(setup, data)) {
+            return outcome;
+        }
         let read = setup.device_to_host();
         match (setup.kind(), setup.recipient(), setup.request, read) {
             (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_PACKET_FILTER, false)
@@ -645,7 +742,11 @@ impl Function for Ecm {
         let configured = self.control.configuration() != 0;
         let ready = match endpoint {
             NOTIFY => configured && !self.state.notifications.is_empty(),
-            BULK_IN => self.up() && !self.state.inbound.is_empty(),
+            BULK_IN => {
+                self.up()
+                    && (!self.state.inbound.is_empty()
+                        || self.state.ncm.as_ref().is_some_and(ncm::Ncm::sending))
+            }
             _ => false,
         };
         ready.then_some(0)

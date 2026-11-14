@@ -32,7 +32,7 @@
 //! flight across link calls, and no call waits for the device: a frame
 //! sent while the last is in flight is refused as busy, and a failed
 //! transfer's endpoint reset runs a command or poll per call.
-mod ntb;
+pub mod ntb;
 
 use super::descriptor::{
     DEVICE_TO_HOST, Endpoint, Interface, RECIPIENT_INTERFACE, SET_INTERFACE, TYPE_CLASS, setup,

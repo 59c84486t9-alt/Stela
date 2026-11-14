@@ -317,7 +317,7 @@ pub struct Run {
     static_ipv4: bool,
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
-    /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
+    /// mount bridges to the guest's CDC-NCM adapter: adds `--guest-network`.
     /// A `--usb-image` boot takes `--guest-network` from the stick's options
     /// instead.
     #[arg(long, conflicts_with_all = ["module", "payload"])]

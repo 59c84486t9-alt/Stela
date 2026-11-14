@@ -315,6 +315,10 @@ pub struct System {
     /// Give the guest a USB Ethernet adapter bridged to a host network
     /// adapter of its own (`--guest-network`).
     pub guest_network: bool,
+    /// That adapter presents the CDC Ethernet Control Model, one frame per
+    /// USB transfer, instead of the default Network Control Model
+    /// (`--guest-network-ecm`, which also gives the guest the adapter).
+    pub guest_network_ecm: bool,
     /// Join this Wi-Fi network for the mount's network (`--wifi SSID`). The
     /// line writes `%`, whitespace and control characters as `%XX`.
     pub ssid: Option<String>,
@@ -405,6 +409,7 @@ impl Default for System {
             usb4_approved: Vec::new(),
             external_disks: false,
             guest_network: false,
+            guest_network_ecm: false,
             ssid: None,
             wifi_key: None,
             wifi_country: None,
@@ -822,6 +827,10 @@ impl fmt::Display for System {
         }
         line.flag(EXTERNAL_DISKS, self.external_disks)?;
         line.flag("--guest-network", self.guest_network)?;
+        line.flag(
+            "--guest-network-ecm",
+            self.guest_network && self.guest_network_ecm,
+        )?;
         line.value(WIFI, self.ssid.as_deref().map(Ssid))?;
         line.value(
             WIFI_KEY,
