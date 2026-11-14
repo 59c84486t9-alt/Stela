@@ -6,7 +6,8 @@
 //! one boot kernel collection. The Metal plugin links here, into
 //! `target/guest/StelaGPU.bundle`. No released `ld64.lld` links arm64e's
 //! authenticated pointers, so `stela-loader` links both. The kext also
-//! carries Stela.app when a built package is present ([`app`]).
+//! carries Stela.app when a built package is present ([`app`]), and the job
+//! that tells CoreVideo the guest has no buffer compression ([`compression`]).
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -17,6 +18,7 @@ use std::{
 use stela_loader::{aux_kc::TRUSTED_CODE_FILE, trust_cache::CodeHash};
 
 pub mod app;
+pub mod compression;
 pub mod sdk;
 pub mod wire;
 
@@ -46,6 +48,7 @@ pub fn run() -> Result<()> {
     println!("StelaGPU bundle: {}", bundle.display());
     fs::write(include.join("stela/bundle.h"), bundle_header(&bundle)?)?;
     fs::write(include.join("stela/app.h"), app_header(root)?)?;
+    fs::write(include.join("stela/compression.h"), compression::header()?)?;
     let kext = build_kext(&component, &output, &xnu, &include)?;
     let code = stela_loader::plugin::code_hashes(&fs::read(bundle.join(BUNDLE_EXECUTABLE))?)?;
     fs::write(kext.join(TRUSTED_CODE_FILE), code.concat())?;

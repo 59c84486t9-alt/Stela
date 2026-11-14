@@ -312,7 +312,12 @@ fn kext_test(name: &str, built: &Path) -> PathBuf {
 #[test]
 fn the_kext_c_code_passes_its_host_tests() {
     let built = tempfile::tempdir().unwrap();
-    for name in ["app_policy", "host_record", "plugin_report"] {
+    for name in [
+        "app_policy",
+        "compression_policy",
+        "host_record",
+        "plugin_report",
+    ] {
         let output = Command::new(kext_test(name, built.path()))
             .output()
             .unwrap();

@@ -1,6 +1,7 @@
 /*
  * Whole-file reads, digests and in-place writes through the vnode KPI, shared
- * by the Metal plugin's installer (install.cpp) and Stela.app's (app.cpp).
+ * by the Metal plugin's installer (install.cpp), Stela.app's (app_delivery.cpp)
+ * and the buffer compression job's (compression.cpp).
  *
  * The kernel exports vnode_open, vn_rdwr and vnode_lookup to kexts, but
  * nothing that creates, renames or removes a directory or a name: a kext can
@@ -47,3 +48,10 @@ int stelaWriteFile(const char *path, const unsigned char *bytes, unsigned long l
  * when it holds more. The final component is never followed.
  */
 int stelaReadFile(const char *path, char *buffer, int capacity, int *length, vfs_context_t context);
+
+/*
+ * Writes `length` bytes to `path` unless it holds them already, created with
+ * `mode`, and checks them against `sha256`, through `buffer`.
+ */
+int stelaStage(const char *path, const unsigned char *bytes, unsigned long length,
+    const unsigned char sha256[SHA256_DIGEST_LENGTH], unsigned mode, vfs_context_t context, char *buffer);

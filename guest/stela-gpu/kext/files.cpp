@@ -127,3 +127,22 @@ stelaReadFile(const char *path, char *buffer, int capacity, int *length, vfs_con
 	}
 	return error;
 }
+
+int
+stelaStage(const char *path, const unsigned char *bytes, unsigned long length,
+    const unsigned char sha256[SHA256_DIGEST_LENGTH], unsigned mode, vfs_context_t context, char *buffer)
+{
+	bool same = false;
+	int error = stelaMatches(path, sha256, length, context, buffer, &same);
+	if (same) {
+		return 0;
+	}
+	if (error && error != ENOENT) {
+		return error;
+	}
+	error = stelaWriteFile(path, bytes, length, mode, context);
+	if (!error) {
+		error = stelaMatches(path, sha256, length, context, buffer, &same);
+	}
+	return !error && !same ? EIO : error;
+}

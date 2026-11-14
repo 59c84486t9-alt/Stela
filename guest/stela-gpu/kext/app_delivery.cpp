@@ -66,26 +66,6 @@ inspect(struct stela_app_installed *installed, char identifier[kStringBytes], ch
 	return 0;
 }
 
-/* Writes `length` bytes to `path` unless it holds them already, and checks them. */
-static int
-stage(const char *path, const unsigned char *bytes, unsigned long length, const unsigned char sha256[32], unsigned mode,
-    vfs_context_t context, char *buffer)
-{
-	bool same = false;
-	int error = stelaMatches(path, sha256, length, context, buffer, &same);
-	if (same) {
-		return 0;
-	}
-	if (error && error != ENOENT) {
-		return error;
-	}
-	error = stelaWriteFile(path, bytes, length, mode, context);
-	if (!error) {
-		error = stelaMatches(path, sha256, length, context, buffer, &same);
-	}
-	return !error && !same ? EIO : error;
-}
-
 const char *
 stelaDeliverApp(vfs_context_t context, char *buffer)
 {
@@ -113,11 +93,11 @@ stelaDeliverApp(vfs_context_t context, char *buffer)
 	}
 	// The archive first: the job installs only after this boot's report,
 	// which follows both files' checks.
-	error = stage(STELA_APP_ARCHIVE_PATH, stela_app_archive, sizeof stela_app_archive, stela_app_archive_sha256, 0600,
-	    context, buffer);
+	error = stelaStage(STELA_APP_ARCHIVE_PATH, stela_app_archive, sizeof stela_app_archive,
+	    stela_app_archive_sha256, 0600, context, buffer);
 	if (!error) {
-		error = stage(STELA_APP_JOB_PATH, stela_app_job, sizeof stela_app_job, stela_app_job_sha256, 0644, context,
-		    buffer);
+		error = stelaStage(STELA_APP_JOB_PATH, stela_app_job, sizeof stela_app_job, stela_app_job_sha256, 0644,
+		    context, buffer);
 	}
 	if (error) {
 		IOLog("StelaGPU: staging Stela.app failed: %d\n", error);
