@@ -2124,6 +2124,11 @@ pub unsafe fn probe_observed(
                     Ok(attached) => attached,
                     Err(failure) => {
                         devices
+                            .device_failures
+                            .extend(failure.port_failures().iter().map(|(port, error)| {
+                                (alloc::format!("{address} port {port}"), error.clone())
+                            }));
+                        devices
                             .failures
                             .push((address, Error::Device(failure.error.clone())));
                         devices.owners.push(Box::new(failure));

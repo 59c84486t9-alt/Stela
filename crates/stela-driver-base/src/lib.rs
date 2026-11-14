@@ -348,6 +348,10 @@ pub struct Deadline {
 }
 
 impl Deadline {
+    /// The counter it started at, for [`Clock::try_elapsed_us`].
+    pub fn started(&self) -> u64 {
+        self.start
+    }
     /// Whether `counter` lies at least the deadline's ticks after its
     /// start. A counter before the start, as another core's may read by a
     /// few cycles, has not passed it: intervals span at most a quarter of

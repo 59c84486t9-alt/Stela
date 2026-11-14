@@ -270,11 +270,13 @@ fn whole_controller_refusal_keeps_prior_disks_and_partial_port() {
                 },
                 hba: Some(port),
                 disks: vec![disk],
-                failures: Vec::new(),
+                failures: vec![(2, BlockError::Timeout)],
                 remapped_nvme: 0,
             })),
         );
         assert_eq!(failure.error, timing());
+        // A port that failed before the controller did is still reported.
+        assert_eq!(failure.port_failures(), [(2, BlockError::Timeout)]);
     }
     drop(control);
     drop(timer);

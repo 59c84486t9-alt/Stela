@@ -69,13 +69,43 @@ pub enum BlockError {
         step: &'static str,
         error: Box<BlockError>,
     },
+    /// A command or register wait reached its deadline: what it waited
+    /// for, and the registers' last values.
+    Expired(Box<Expired>),
+}
+
+/// A wait that reached its deadline ([`BlockError::Expired`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expired {
+    /// The command or wait, with the register and the value it waited for.
+    pub step: &'static str,
+    /// How long it waited.
+    pub waited_us: u64,
+    /// The registers read once the deadline passed, by name.
+    pub registers: Vec<(&'static str, u32)>,
+}
+
+impl fmt::Display for Expired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: not done after {} ms",
+            self.step,
+            self.waited_us / 1000
+        )?;
+        for (index, (name, value)) in self.registers.iter().enumerate() {
+            let separator = if index == 0 { "; " } else { " " };
+            write!(f, "{separator}{name}={value:#x}")?;
+        }
+        Ok(())
+    }
 }
 impl BlockError {
     /// This error as met at `step`. One that already names its step keeps
     /// it: the innermost name is the command that failed.
     pub fn at(self, step: &'static str) -> Self {
         match self {
-            Self::Step { .. } => self,
+            Self::Step { .. } | Self::Expired(_) => self,
             error => Self::Step {
                 step,
                 error: Box::new(error),
@@ -252,6 +282,7 @@ impl fmt::Display for BlockError {
             Self::PciPower(error) => write!(f, "PCI power/timing: {error}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
             Self::Step { step, error } => write!(f, "{step}: {error}"),
+            Self::Expired(expired) => expired.fmt(f),
         }
     }
 }

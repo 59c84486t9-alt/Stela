@@ -11,8 +11,8 @@
 use crate::{
     Clock, Deadline, Handoff,
     block::{
-        BlockDevice, BlockError, Command, DiscardLimits, Extent, Features, Finished, Identity,
-        Rotation, Sense, SenseCompletion, Transport, ascii,
+        BlockDevice, BlockError, Command, DiscardLimits, Expired, Extent, Features, Finished,
+        Identity, Rotation, Sense, SenseCompletion, Transport, ascii,
     },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -21,7 +21,7 @@ use crate::{
     },
     registers,
 };
-use alloc::{format, rc::Rc, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use core::sync::atomic::{Ordering, fence};
 
@@ -614,6 +614,7 @@ struct AtaRequest {
 struct Launched {
     slot: usize,
     queued: bool,
+    command: u8,
     deadline: Deadline,
 }
 

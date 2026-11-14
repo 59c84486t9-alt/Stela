@@ -185,12 +185,18 @@ pub(super) struct Build {
 /// Default Drop retains function, timer, partial port and all prior disks.
 pub struct AttachRefusal {
     pub error: BlockError,
-    _kept: crate::Retained<Box<Build>>,
+    kept: crate::Retained<Box<Build>>,
 }
 impl AttachRefusal {
     pub(super) fn new(error: BlockError, kept: crate::Retained<Box<Build>>) -> Self {
         kept.host.control.fail(error.clone());
-        Self { error, _kept: kept }
+        Self { error, kept }
+    }
+
+    /// The ports that failed on their own before the controller did, by
+    /// index: often what its own failure followed from.
+    pub fn port_failures(&self) -> &[(u32, BlockError)] {
+        &self.kept.failures
     }
 }
 impl core::fmt::Debug for AttachRefusal {

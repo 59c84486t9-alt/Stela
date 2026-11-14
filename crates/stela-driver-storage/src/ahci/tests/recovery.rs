@@ -250,3 +250,42 @@ fn repeated_interface_faults_reduce_link_speed() {
     assert_eq!(fixture.disk.speed_limit, 0b1);
     assert_eq!(controls(&link), [0x304, 0x314, 0x311, 0x310]);
 }
+
+#[test]
+fn an_expired_command_is_named_with_the_registers_it_ended_with() {
+    let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+    let link = Link::new(&[Fault::Timeout]);
+    let buffer = fixture.disk.bounce.bus_address();
+    let Err(failure) = fixture
+        .disk
+        .internal(&link, ATA_IDENTIFY, 0, 0, 512, buffer)
+    else {
+        panic!("a dropped IDENTIFY fails");
+    };
+    assert_ne!(failure.mask & ERR_TIMEOUT, 0);
+    let BlockError::Expired(expired) = &failure.error else {
+        panic!("{:?}", failure.error);
+    };
+    assert_eq!(
+        expired.step,
+        "ATA IDENTIFY DEVICE (0xec), waiting for its PxCI bit to clear"
+    );
+    assert!(expired.waited_us >= fixture.disk.command_timeout_us);
+    assert_eq!(
+        expired
+            .registers
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        [
+            "PxCI", "PxSACT", "PxTFD", "PxSSTS", "PxIS", "PxSERR", "PxCMD"
+        ]
+    );
+    assert_eq!(expired.registers[0].1, 1);
+    assert_eq!(expired.registers[2].1, 0xd0);
+    let line = alloc::format!("{}", failure.error);
+    assert!(
+        line.starts_with("ATA IDENTIFY DEVICE (0xec), waiting for its PxCI bit to clear: not done after 1 ms; PxCI=0x1 PxSACT=0x0 PxTFD=0xd0 PxSSTS="),
+        "{line}"
+    );
+}

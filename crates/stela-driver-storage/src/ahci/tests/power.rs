@@ -47,10 +47,10 @@ fn link_power_policy_follows_port_and_device_features() {
     // (The revalidation's IDENTIFY data reported no DIPM.)
     fixture.disk.lpm.dipm = true;
     let link = Link::new(&[Fault::Timeout]);
-    assert_eq!(
+    assert!(matches!(
         fixture.disk.set_lpm(&link, LPM_MAX_POWER, 2),
-        Err(BlockError::Timeout)
-    );
+        Err(BlockError::Expired(expired)) if expired.step.starts_with("ATA SET FEATURES (0xef)")
+    ));
     assert!(!fixture.disk.lpm.allowed);
     assert_eq!(fixture.disk.lpm.policy, LPM_MED_POWER_WITH_DIPM);
 }
