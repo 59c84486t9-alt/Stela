@@ -3020,6 +3020,17 @@ fn start_devices(
                 {
                     crate::status::info(&format!("{rest} more network adapters not started."));
                 }
+            } else if !links.devices.is_empty() {
+                // A wired adapter left off beside one that started is named
+                // too, with its IDs: otherwise a card no driver takes looks
+                // as if it was not found.
+                for line in network_account
+                    .iter()
+                    .filter(|line| line.contains(" Ethernet: "))
+                    .take(NETWORK_ACCOUNT_LINES)
+                {
+                    crate::status::info(&format!("Ethernet adapter not started: {line}."));
+                }
             }
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
