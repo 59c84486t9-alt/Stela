@@ -1632,7 +1632,6 @@ pub unsafe fn open(
     services: Option<&dyn NativeServices>,
     selection: &Selection<'_>,
 ) -> Result<Opened, Refused> {
-    stela_drivers::usb::xhci::diagnostic_loader_root(root);
     let Selection {
         targets,
         pending,
