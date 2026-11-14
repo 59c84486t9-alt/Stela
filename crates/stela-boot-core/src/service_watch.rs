@@ -46,6 +46,60 @@ impl<const N: usize> Default for SlowParts<N> {
     }
 }
 
+/// Which single host steps of any part get a line of their own: XNU on
+/// another core times a lock the stepping PE's guest may hold, a mutex
+/// interlock for 0.5 s, so a step of half that is worth naming. The first
+/// [`LongSteps::FIRST`] such steps of a boot each get one, and after them
+/// only a step at least twice the longest reported, so a host that is slow
+/// throughout costs a few lines.
+pub struct LongSteps {
+    /// The long steps so far, and the longest reported.
+    reported: AtomicU64,
+    longest: AtomicU64,
+}
+
+impl LongSteps {
+    /// The long steps of a boot reported whatever their length.
+    pub const FIRST: u64 = 16;
+
+    pub const fn new() -> Self {
+        Self {
+            reported: AtomicU64::new(0),
+            longest: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether a step of `ticks` is reported, with `floor` the least that
+    /// is: a call below it costs one comparison.
+    pub fn worth(&self, ticks: u64, floor: u64) -> bool {
+        if ticks < floor {
+            return false;
+        }
+        let first = self.reported.fetch_add(1, Ordering::Relaxed) < Self::FIRST;
+        let mut longest = self.longest.load(Ordering::Relaxed);
+        loop {
+            if !first && ticks < longest.saturating_mul(2) {
+                return false;
+            }
+            match self.longest.compare_exchange_weak(
+                longest,
+                longest.max(ticks),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(now) => longest = now,
+            }
+        }
+    }
+}
+
+impl Default for LongSteps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Why a service turn ended before its last part ([`Turn`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnEnd {
@@ -332,6 +386,20 @@ mod tests {
         assert!(!slow.worth(1, 500, 100));
         // The seconds-long turn after many slow ones still gets its line.
         assert!(slow.worth(1, 5258, 100));
+    }
+
+    #[test]
+    fn the_first_long_steps_are_reported_then_only_one_twice_as_long() {
+        let long = LongSteps::new();
+        assert!(!long.worth(99, 100));
+        for _ in 0..LongSteps::FIRST {
+            assert!(long.worth(300, 100));
+        }
+        assert!(!long.worth(300, 100));
+        assert!(!long.worth(599, 100));
+        assert!(long.worth(600, 100));
+        assert!(!long.worth(1000, 100));
+        assert!(long.worth(2000, 100));
     }
 
     #[test]

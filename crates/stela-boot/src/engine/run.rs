@@ -827,7 +827,7 @@ pub(super) fn run<H: Host>(
         // The host's work between slices runs outside the boot PE's run: it
         // uses none of its translations, and another PE's maintenance
         // broadcast need not wait for it to end (it reads its mail first).
-        let (waiting, quiet) = host_work(machine, |machine| {
+        let (waiting, quiet) = host_work(machine, "slice end", |machine| {
             // One hold of the devices' lock, which every PE's device accesses
             // take, for everything they left for the reports. A PE whose access
             // waits on the host (a disk's MMIO) can hold it for milliseconds:
@@ -916,6 +916,18 @@ pub(super) fn run<H: Host>(
         let now = host::rdtsc();
         if !sliced {
             service.report(tsc_hz);
+            // The interval before the stop, which no beat reports: whether a
+            // PE was kept from guest code, and whether the count held for it.
+            if machine.runs_parallel() {
+                report_stalls(machine);
+                let hub = machine.devices.hub();
+                let millis = |counts: u64| u128::from(counts) * 1000 / u128::from(host::COUNTER_HZ);
+                output::arguments(format_args!(
+                    "CLOCK AT STOP stalled_ms={} lag_ms={}\n",
+                    millis(hub.clock_stalled()),
+                    millis(hub.clock_lag().0),
+                ));
+            }
             output::report_log_stores();
             return stop;
         }
@@ -926,9 +938,11 @@ pub(super) fn run<H: Host>(
         let due = now - heartbeat.beat.at;
         if heartbeat.stage.is_some() {
             // The beat's later reports, one bounded stage per boundary.
-            host_work(machine, |machine| heartbeat.step(machine, tsc_hz));
+            host_work(machine, "beat step", |machine| {
+                heartbeat.step(machine, tsc_hz)
+            });
         } else if due >= BEAT_SECONDS * tsc_hz && (quiet || due >= 2 * BEAT_SECONDS * tsc_hz) {
-            host_work(machine, |machine| {
+            host_work(machine, "beat", |machine| {
                 heartbeat.beat(machine, &mut service, now, tsc_hz)
             });
             output::arguments(format_args!("{}", cursor.report(now, tsc_hz)));
@@ -944,16 +958,54 @@ const DRAIN_MILLIS: u64 = 50;
 /// pump and beat; an AP's reports, service and serial drain) outside the
 /// PE's run, so that maintenance broadcasts do not wait for it. It uses
 /// none of the PE's translations, which the PE's mail updates before its
-/// next block.
+/// next block. A call of `part` that held the PE [`LONG_STEP_MILLIS`] gets
+/// a `HOST STEP LONG` line
+/// ([`stela_boot_core::service_watch::LongSteps`]).
 pub(super) fn host_work<H: Host, R>(
     machine: &mut Machine<H, parallel::Board>,
+    part: &'static str,
     work: impl FnOnce(&mut Machine<H, parallel::Board>) -> R,
 ) -> R {
+    let started = host::fresh_counter();
     // Out of its run loop, the PE stays reachable for guest work: a wake
     // with an interrupt for it kicks its core, and the shared count holds
     // for it a stall limit past that or its own timer's deadline.
-    machine.serve_host(work)
+    let result = machine.serve_host(work);
+    let took = host::fresh_counter().wrapping_sub(started);
+    if LONG_STEPS.worth(took, host::COUNTER_HZ / 1000 * LONG_STEP_MILLIS) {
+        let pstate = &machine.cpu.pstate;
+        output::arguments(format_args!(
+            "HOST STEP LONG part={part} pe={} us={} el={} irqs_masked={}\n",
+            machine.processor(),
+            u128::from(took) * 1_000_000 / u128::from(host::COUNTER_HZ),
+            pstate.el,
+            pstate.daif & stela_engine::machine::exception::DAIF_I != 0,
+        ));
+    }
+    result
 }
+
+/// Per PE: its longest gap between two progress marks with guest work since
+/// the last report, and the engine phase that took most of it (`host`
+/// outside the step loop, `?` without `--profile`); a PE that shows no
+/// progress for 50 ms holds the count (`stalled_ms`).
+fn report_stalls<H: Host>(machine: &Machine<H, parallel::Board>) {
+    let mut stalls = String::from("PES STALLS longest_ms/phase");
+    for (pe, (ticks, phase)) in machine.devices.hub().clock_stalls().iter().enumerate() {
+        let millis = u128::from(*ticks) * 1000 / u128::from(host::COUNTER_HZ);
+        stalls.push_str(&format!(" {pe}:{millis}/{phase}"));
+    }
+    output::arguments(format_args!("{stalls}\n"));
+}
+
+/// A single host step that kept its PE from guest code this long is named:
+/// XNU on another core times a lock that PE's guest may hold, a mutex
+/// interlock for 0.5 s (`lock_mtx.c`).
+const LONG_STEP_MILLIS: u64 = 250;
+
+/// The long host steps of the boot, of every PE.
+static LONG_STEPS: stela_boot_core::service_watch::LongSteps =
+    stela_boot_core::service_watch::LongSteps::new();
 
 /// What the boot PE runs at a slice's end, for the GPUs' pump: `quiet` as
 /// for the service, else whether its IRQs are masked, as XNU's spinlocks
@@ -1519,16 +1571,7 @@ impl Heartbeat {
             }
             self.clock_count = count;
             output::arguments(format_args!("CLOCK count={count:#x}\n"));
-            // Per PE: its longest gap with guest work and no instruction
-            // retired since the last beat, and the engine phase that took
-            // most of it (`host` outside the step loop, `?` without
-            // `--profile`); one past 50 ms held the count (`stalled_ms`).
-            let mut stalls = String::from("PES STALLS longest_ms/phase");
-            for (pe, (ticks, phase)) in machine.devices.hub().clock_stalls().iter().enumerate() {
-                let millis = u128::from(*ticks) * 1000 / u128::from(host::COUNTER_HZ);
-                stalls.push_str(&format!(" {pe}:{millis}/{phase}"));
-            }
-            output::arguments(format_args!("{stalls}\n"));
+            report_stalls(machine);
         }
         let per_pe = parallel::counts(machine);
         let retired = per_pe

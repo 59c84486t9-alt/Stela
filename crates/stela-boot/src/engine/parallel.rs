@@ -249,7 +249,7 @@ impl Pe {
             // devices it reaches can take milliseconds (a VM's port I/O
             // waits on the hypervisor), which no other PE's maintenance
             // broadcast waits for. The PE reads its mail before it runs.
-            super::run::host_work(&mut machine, |machine| {
+            super::run::host_work(&mut machine, "reports", |machine| {
                 if observing {
                     report_diagnostics(machine);
                 }
@@ -262,7 +262,7 @@ impl Pe {
                 // gives the screen the frames the DCP model presented and a
                 // staged guest disk its host I/O.
                 stop if machine.yielded_for_interrupt(&stop) => {
-                    super::run::host_work(&mut machine, |machine| {
+                    super::run::host_work(&mut machine, "idle service", |machine| {
                         let watch = machine.guest_watch();
                         super::service::serve(false, false, &watch);
                         super::display::flush(super::display::Turn::Idle);
@@ -281,7 +281,7 @@ impl Pe {
                 Stop::Budget | Stop::Waiting => {
                     let now = host::rdtsc();
                     if screen.allows(now) {
-                        let spent = super::run::host_work(&mut machine, |_| {
+                        let spent = super::run::host_work(&mut machine, "display", |_| {
                             super::display::flush(super::display::Turn::Busy)
                         });
                         screen.spent(spent, now.wrapping_add(spent));
@@ -293,7 +293,7 @@ impl Pe {
                     // waits for it.
                     #[cfg(feature = "nvk")]
                     if machine.cpu.pstate.el == 0 && super::gpu::gate::busy_job_due() {
-                        super::run::host_work(&mut machine, |_| {
+                        super::run::host_work(&mut machine, "gpu job", |_| {
                             super::gpu::gate::run_job(super::gpu::gate::Taker::Busy)
                         });
                     }
@@ -309,7 +309,7 @@ impl Pe {
                     hub.add_hot_samples(|hot| machine.take_hot_samples(hot));
                 }
             }
-            super::run::host_work(&mut machine, |_| output::drain_some());
+            super::run::host_work(&mut machine, "drain", |_| output::drain_some());
         }
     }
 }
