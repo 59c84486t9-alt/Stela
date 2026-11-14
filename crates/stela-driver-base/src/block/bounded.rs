@@ -12,14 +12,21 @@ pub struct ReadBound(Rc<BoundState>);
 
 #[derive(Default)]
 struct BoundState {
-    /// Time-stamp counter ticks a read waits at most; `None` waits.
+    /// Time-stamp counter ticks the reads wait at most, counted from
+    /// `since`; `None` waits.
     ticks: Cell<Option<u64>>,
+    /// The counter when the bound was last set.
+    since: Cell<u64>,
     blocked: Cell<bool>,
 }
 
 impl ReadBound {
-    /// Have every later read wait at most `ticks` of the time-stamp counter.
+    /// Have the later reads wait, all together, at most `ticks` of the
+    /// time-stamp counter from now. A caller sets it at the start of each
+    /// turn it reads in: many reads the device answers quickly then end at
+    /// the bound as one slow read does.
     pub fn set(&self, ticks: u64) {
+        self.0.since.set(crate::Clock::ticks());
         self.0.ticks.set(Some(ticks));
     }
 
@@ -40,7 +47,10 @@ const KEPT: usize = 8;
 /// [`BlockError::Timeout`], marks the bound blocked and leaves its command
 /// running: the same read asked again takes its result. A storage stick
 /// that holds one write for seconds then holds no caller for longer than
-/// the bound, as a network source bounded for its caller holds none. A
+/// the bound, as a network source bounded for its caller holds none. The
+/// bound runs from when it was set, not from each read: past it, a read
+/// takes only a result the device already has, so a caller that reads a
+/// whole file in pieces ends its turn at the bound too. A
 /// device without queued commands, and every read before a bound is set,
 /// is read directly. Every other call goes to the device unchanged.
 pub struct Bounded {
@@ -87,11 +97,16 @@ impl Bounded {
         }
     }
 
-    /// The bounded read of `buffer` at `lba`, waiting `limit` ticks at most.
+    /// The bounded read of `buffer` at `lba`, waiting until `limit` ticks
+    /// after the bound was set at most. Past them it takes a result the
+    /// device has by now, or starts its command and fails as blocked.
     fn read_within(&mut self, lba: u64, buffer: &mut [u8], limit: u64) -> Result<(), BlockError> {
         self.device.identity().check(lba, buffer.len())?;
         let bytes = buffer.len();
-        let started = crate::Clock::ticks();
+        let started = self.bound.0.since.get();
+        // A read the bound has passed for takes no result its own command
+        // brings at once: its caller would go on reading.
+        let late = crate::Clock::ticks().wrapping_sub(started) >= limit;
         loop {
             self.collect();
             if let Some(at) = self
@@ -118,7 +133,9 @@ impl Bounded {
                     Some(finished) => self.keep(lba, bytes, finished),
                     None => self.running.push((lba, bytes, submission)),
                 }
-                continue;
+                if !late {
+                    continue;
+                }
             }
             if crate::Clock::ticks().wrapping_sub(started) >= limit {
                 self.bound.0.blocked.set(true);

@@ -820,6 +820,39 @@ fn a_bounded_read_waits_only_its_bound_and_takes_its_command_later() {
     assert!(!bound.blocked());
 }
 
+/// The bound runs from when it was set: reads the disk answers at once go
+/// on only until then, the read past it is started and blocked, and a new
+/// bound takes its result.
+#[test]
+fn bounded_reads_the_disk_answers_at_once_end_at_the_bound_together() {
+    // Each counter read is 100 virtual ticks.
+    let _clock = crate::test_clock::virtualize();
+    let (delayed, (released, reads, given)) = Delayed::new(numbered(64), 4);
+    released.set(usize::MAX);
+    let mut device = Bounded::new(Box::new(delayed));
+    let bound = device.bound();
+    let mut block = [0; 512];
+    bound.set(1_000);
+    let mut lba = 0;
+    while device.read(lba, &mut block).is_ok() {
+        assert_eq!(u64::from(block[0]), lba);
+        lba += 1;
+        assert!(lba <= 10, "the reads went on past the bound");
+    }
+    assert!(lba >= 2, "no read fitted the bound");
+    assert!(bound.blocked(), "the read past the turn's bound is blocked");
+    assert_eq!(given.borrow().len() as u64, lba + 1, "its command started");
+    assert_eq!(device.read(lba + 1, &mut block), Err(BlockError::Timeout));
+    assert!(bound.blocked());
+    bound.set(1_000);
+    device.read(lba, &mut block).unwrap();
+    assert_eq!(u64::from(block[0]), lba);
+    device.read(lba + 1, &mut block).unwrap();
+    assert_eq!(given.borrow().len() as u64, lba + 2);
+    assert_eq!(reads.get(), 0, "no read went to the disk directly");
+    assert!(!bound.blocked());
+}
+
 /// A read the device completed while its caller asked for another is kept
 /// for its own caller, and a failed read is a failure, not a blocked one.
 #[test]
