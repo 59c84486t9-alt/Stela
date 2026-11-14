@@ -65,15 +65,107 @@ pub fn failed(adapters: &[Adapter], error: &str) -> String {
 /// The reason the boot stops when Linux's GPU driver stops for good, `stop`
 /// naming what it could not do. `failed_start` is the first error Linux
 /// reported while the GPUs started, when the stop came before the start
-/// finished: it says why the GPU did not start.
-pub fn driver_stopped(stop: &str, failed_start: Option<&str>) -> String {
-    match failed_start {
-        Some(error) => format!(
+/// finished: it says why the GPU did not start. `firmware` is what the
+/// GPU's own firmware said about that start ([`GspStart::failure`]).
+pub fn driver_stopped(stop: &str, failed_start: Option<&str>, firmware: Option<&str>) -> String {
+    match (failed_start, firmware) {
+        (Some(error), Some(firmware)) => format!(
+            "the NVIDIA GPU did not start ({error}). {firmware}. Stela cannot yet finish the GPU \
+             driver's cleanup after that ({stop})"
+        ),
+        (Some(error), None) => format!(
             "the NVIDIA GPU did not start ({error}), and Stela cannot yet finish the GPU \
              driver's cleanup after that ({stop})"
         ),
-        None => format!("the GPU driver stopped: {stop}"),
+        (None, _) => format!("the GPU driver stopped: {stop}"),
     }
+}
+
+/// `NV_VGPU_MSG_EVENT_GSP_INIT_DONE`: GSP-RM's report that its own start
+/// ended (nouveau `rm/r535/nvrm/msgfn.h` and `rm/r570/nvrm/msgfn.h`).
+const GSP_INIT_DONE: u32 = 0x1001;
+
+/// What GSP-RM, the firmware an NVIDIA GPU runs its driver core on, said
+/// about its start, read from the lines nouveau prints: `gsp: RM version:
+/// <v>` names the firmware nouveau loaded (`nvkm/subdev/gsp/base.c`), and
+/// `gsp:msg fn:<n> ... res:0x<r>` is a reply GSP-RM ended with result `r`,
+/// which nouveau prints before it turns it into -EINVAL
+/// (`r535_gsp_msg_recv`). nouveau's own error for a failed start is then
+/// only "gsp: init failed, -22".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GspStart {
+    version: Option<String>,
+    /// The nonzero NV_STATUS GSP-RM ended its start with.
+    init_result: Option<u32>,
+}
+
+impl GspStart {
+    /// Take one line Linux printed, without its log level.
+    pub fn observe(&mut self, line: &str) {
+        if let Some((_, version)) = line.split_once("gsp: RM version: ") {
+            self.version
+                .get_or_insert_with(|| String::from(version.trim()));
+            return;
+        }
+        let Some((_, reply)) = line.split_once("gsp:msg ") else {
+            return;
+        };
+        let field = |name: &str| {
+            reply
+                .split_ascii_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+        };
+        let function = field("fn:").and_then(|value| value.parse::<u32>().ok());
+        let result = field("res:")
+            .and_then(|value| value.strip_prefix("0x"))
+            .and_then(|value| u32::from_str_radix(value, 16).ok());
+        match (function, result) {
+            (Some(GSP_INIT_DONE), Some(result)) if result != 0 => {
+                self.init_result.get_or_insert(result);
+            }
+            _ => {}
+        }
+    }
+
+    /// The words for a start GSP-RM itself ended with an error, or None
+    /// when it reported none.
+    pub fn failure(&self) -> Option<String> {
+        let result = self.init_result?;
+        let firmware = match &self.version {
+            Some(version) => format!("GSP-RM {version}"),
+            None => String::from("GSP-RM"),
+        };
+        Some(match nv_status(result) {
+            Some((name, meaning)) => format!(
+                "The GPU's own firmware, {firmware}, ended its start with {name} \
+                 ({result:#x}): {meaning} inside that firmware"
+            ),
+            None => format!(
+                "The GPU's own firmware, {firmware}, ended its start with NV_STATUS {result:#x}"
+            ),
+        })
+    }
+}
+
+/// The name and meaning of an NV_STATUS code GSP-RM's start can end with
+/// (NVIDIA's `nvstatuscodes.h`).
+fn nv_status(code: u32) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        0x0f => ("NV_ERR_GPU_IS_LOST", "the GPU stopped answering on the bus"),
+        0x40 => (
+            "NV_ERR_INVALID_STATE",
+            "a step found the GPU in a state it did not expect",
+        ),
+        0x51 => ("NV_ERR_NO_MEMORY", "a step ran out of memory"),
+        0x56 => (
+            "NV_ERR_NOT_SUPPORTED",
+            "a step is not supported on this GPU",
+        ),
+        0x62 => ("NV_ERR_RESET_REQUIRED", "a step asked for a GPU reset"),
+        0x65 => ("NV_ERR_TIMEOUT", "a step timed out"),
+        0x70 => ("NV_ERR_FLCN_ERROR", "a microcontroller halted"),
+        _ => return None,
+    })
 }
 
 /// How the screen names a display adapter: its maker, PCI address and
@@ -180,13 +272,65 @@ mod tests {
         assert_eq!(
             driver_stopped(
                 "IRQ action retirement unavailable; request retained",
-                Some("nouveau 0000:01:00.0: gsp: init failed, -22")
+                Some("nouveau 0000:01:00.0: gsp: init failed, -22"),
+                None
             ),
             "the NVIDIA GPU did not start (nouveau 0000:01:00.0: gsp: init failed, -22), and \
              Stela cannot yet finish the GPU driver's cleanup after that (IRQ action retirement \
              unavailable; request retained)"
         );
-        assert_eq!(driver_stopped("x", None), "the GPU driver stopped: x");
+        assert_eq!(driver_stopped("x", None, None), "the GPU driver stopped: x");
+        assert_eq!(
+            driver_stopped("x", None, Some("y")),
+            "the GPU driver stopped: x"
+        );
+    }
+
+    #[test]
+    fn a_start_gsp_rm_ended_itself_names_the_firmware_and_its_result() {
+        // The lines of an RTX 5060 (GB206) whose GSP-RM timed out in its
+        // own start, in the order nouveau printed them.
+        let mut start = GspStart::default();
+        for line in [
+            "nouveau 0000:01:00.0: NVIDIA GB206 (1b6000a1)",
+            "nouveau 0000:01:00.0: gsp: RM version: 570.144",
+            "nouveau 0000:01:00.0: gsp:msg fn:4130 len:0x28/0x8 res:0x0 resp:0x0",
+            "6msg: 00000000: 00 00 00 00 00 00 00 00                          ........",
+        ] {
+            start.observe(line);
+        }
+        assert_eq!(start.failure(), None);
+        start.observe("nouveau 0000:01:00.0: gsp:msg fn:4097 len:0x20/0x0 res:0x65 resp:0x65");
+        // A later reply's error does not replace the start's.
+        start.observe("nouveau 0000:01:00.0: gsp:msg fn:4097 len:0x20/0x0 res:0x51 resp:0x0");
+        let failure = start.failure().unwrap();
+        assert_eq!(
+            failure,
+            "The GPU's own firmware, GSP-RM 570.144, ended its start with NV_ERR_TIMEOUT (0x65): \
+             a step timed out inside that firmware"
+        );
+        assert_eq!(
+            driver_stopped(
+                "IRQ action retirement unavailable; request retained",
+                Some("nouveau 0000:01:00.0: gsp: init failed, -22"),
+                Some(&failure)
+            ),
+            "the NVIDIA GPU did not start (nouveau 0000:01:00.0: gsp: init failed, -22). The \
+             GPU's own firmware, GSP-RM 570.144, ended its start with NV_ERR_TIMEOUT (0x65): a \
+             step timed out inside that firmware. Stela cannot yet finish the GPU driver's \
+             cleanup after that (IRQ action retirement unavailable; request retained)"
+        );
+
+        // An error reply to any other call is not the start's result, and
+        // an unknown code is named by its number.
+        let mut other = GspStart::default();
+        other.observe("nouveau 0000:01:00.0: gsp:msg fn:76 len:0x20/0x0 res:0x56 resp:0x0");
+        assert_eq!(other.failure(), None);
+        other.observe("nouveau 0000:01:00.0: gsp:msg fn:4097 len:0x20/0x0 res:0x1234 resp:0x0");
+        assert_eq!(
+            other.failure().unwrap(),
+            "The GPU's own firmware, GSP-RM, ended its start with NV_STATUS 0x1234"
+        );
     }
 
     #[test]

@@ -379,6 +379,8 @@ struct Host {
     /// The first error Linux reported, which a stop before the start
     /// finished names as the reason the GPU did not start.
     first_error: RefCell<Option<String>>,
+    /// What GSP-RM said about its start, which that reason then names.
+    gsp_start: RefCell<stela_boot_core::gpu_status::GspStart>,
 }
 
 impl Host {
@@ -474,6 +476,7 @@ impl Platform for Host {
         let message = message.to_str().unwrap_or("(not UTF-8)").trim_end();
         self.report(format_args!("<{level}> {message}"));
         // KERN_ALERT to KERN_ERR; KERN_EMERG is a terminal stop's own report.
+        self.gsp_start.borrow_mut().observe(message);
         if (1..=3).contains(&level) {
             let mut first = self.first_error.borrow_mut();
             if first.is_none() {
@@ -488,13 +491,17 @@ impl Platform for Host {
         let message = message.to_str().unwrap_or("(not UTF-8)").trim_end();
         // Before the start finished, its first error is why the GPU did not
         // start; after it, an error is a running GPU's and names nothing.
-        let failed_start = match installed() {
-            None => self.first_error.borrow().clone(),
-            Some(_) => None,
+        let (failed_start, firmware) = match installed() {
+            None => (
+                self.first_error.borrow().clone(),
+                self.gsp_start.borrow().failure(),
+            ),
+            Some(_) => (None, None),
         };
         output::fatal(stela_boot_core::gpu_status::driver_stopped(
             message,
             failed_start.as_deref(),
+            firmware.as_deref(),
         ))
     }
 
@@ -1748,6 +1755,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         lines: RefCell::new(lines),
         reported: RefCell::new(BTreeSet::new()),
         first_error: RefCell::new(None),
+        gsp_start: RefCell::new(Default::default()),
     };
     // SAFETY: boot's original code and allocator remain installed permanently.
     unsafe {
