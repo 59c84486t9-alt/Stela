@@ -388,11 +388,19 @@ void pci_disable_device(struct pci_dev *dev)
 void pci_set_master(struct pci_dev *dev)
 {
     u16 command;
-    if (pci_read_config_word(dev, PCI_COMMAND, &command))
+    int error = pci_read_config_word(dev, PCI_COMMAND, &command);
+    if (error)
         stela_linux_fatal("PCI bus-master access failed without completion");
-    if (!(command & PCI_COMMAND_MASTER) &&
-        pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER))
-        stela_linux_fatal("PCI bus-master access failed without completion");
+    if (!(command & PCI_COMMAND_MASTER)) {
+        error = pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER);
+        if (error)
+            stela_linux_fatal("PCI bus-master access failed without completion");
+    }
+    error = pci_read_config_word(dev, PCI_COMMAND, &command);
+    if (error)
+        stela_linux_fatal("PCI bus-master readback failed without completion");
+    if (!(command & PCI_COMMAND_MASTER))
+        stela_linux_fatal("PCI bus-master enable did not stick");
     dev->is_busmaster = 1;
 }
 
