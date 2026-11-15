@@ -13,7 +13,8 @@
 //! the AIR compiler's NIR by the digest of what each compilation read
 //! ([`NirEntries`]), which a warm boot deserializes instead of lowering AIR
 //! again; the header gives the NIR's length and digest after the cache's,
-//! zero for none. The
+//! zero for none. The cache's snapshots take at most half the file, and the
+//! NIR the rest, so a newer snapshot always has room in it. The
 //! header names a [`Key`]: the build identity of the compiler that turns NIR
 //! into machine code, and the GPU's vendor, device, driver and pipeline cache
 //! UUID. NVK's pipeline cache UUID is the same for every Stela build
@@ -44,6 +45,9 @@ const LENGTH_AT: usize = 48;
 const CHECKSUM_AT: usize = 56;
 const NIR_LENGTH_AT: usize = 88;
 const NIR_CHECKSUM_AT: usize = 96;
+/// The alignment of each blob in the boot's file (the journal's `ALIGN`):
+/// the cache and the NIR each round up to it there.
+const BLOB_ALIGN: u64 = 4096;
 /// The most bytes of NIR a store keeps.
 pub const MAX_NIR_BYTES: u64 = 96 << 20;
 /// The largest store kept, header included, whatever the file allows: the
@@ -295,6 +299,8 @@ impl Seed {
 pub struct Claim {
     generation: u64,
     pub key: Key,
+    /// The most bytes its cache's snapshots take, header included
+    /// ([`Store::cache_bound`]).
     pub bound: u64,
     pub seed: Seed,
     /// Why the stored bytes seed nothing, unless they are blank.
@@ -371,17 +377,22 @@ impl Store {
         }
     }
 
-    /// The bytes of NIR added this boot that the file can still hold: its
-    /// bound less the header, the newest cache and the stored NIR, and at
-    /// most [`MAX_NIR_BYTES`]. NIR past it could never be written, and
-    /// would only be held in the heap.
+    /// The most bytes the cache's snapshots take, header included: half the
+    /// bound. The cache grows all boot and each snapshot replaces the
+    /// written one, so its room is kept from the NIR ([`Self::nir_room`]):
+    /// NIR budgeted against the cache of its moment filled the file, and
+    /// every later, larger snapshot found no room and was not kept.
+    pub fn cache_bound(&self) -> u64 {
+        self.bound / 2
+    }
+
+    /// The bytes of NIR added this boot that the file can still hold: the
+    /// bound less the cache's ([`Self::cache_bound`]), the stored NIR and
+    /// the file's alignment of the two blobs, and at most
+    /// [`MAX_NIR_BYTES`]. NIR past it could never be written beside a cache
+    /// of the cache's bound, and would only be held in the heap.
     fn nir_room(&self) -> u64 {
-        let cache = match (&self.kept, self.matched) {
-            (Some((_, kept)), _) => kept.len(),
-            (None, Some(key)) => payload(self.stored, &key, self.bound).map_or(0, <[u8]>::len),
-            (None, None) => 0,
-        };
-        let held = HEADER_BYTES as u64 + cache as u64 + self.stored_nir().0.len() as u64;
+        let held = self.cache_bound() + 2 * BLOB_ALIGN + self.stored_nir().0.len() as u64;
         self.bound.saturating_sub(held).min(MAX_NIR_BYTES)
     }
 
@@ -416,7 +427,7 @@ impl Store {
         Some(Claim {
             generation: self.claims,
             key,
-            bound: self.bound,
+            bound: self.cache_bound(),
             seed,
             refused,
         })

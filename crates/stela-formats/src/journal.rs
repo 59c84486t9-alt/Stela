@@ -547,6 +547,31 @@ pub fn plan<'a>(
     }
 }
 
+/// [`plan`] for `change`, or, when it drops a blob, for `whole`: the same
+/// content as one blob per kind, each replacing every committed blob of its
+/// kind. Blobs appended into the gaps between earlier ones can leave free
+/// space in no run long enough for a replacement; `whole` frees those blobs
+/// with the ones it replaces, so its blobs land in the space they leave.
+/// Its plan is taken only when it drops nothing.
+pub fn plan_or_rewrite<'a>(
+    current: Option<&Commit>,
+    domain: [u8; 8],
+    key: [u8; 32],
+    file_bytes: u64,
+    change: Change<'a>,
+    whole: impl FnOnce() -> Change<'a>,
+) -> Plan<'a> {
+    let planned = plan(current, domain, key, file_bytes, change);
+    if planned.dropped.is_empty() {
+        return planned;
+    }
+    let rewritten = plan(current, domain, key, file_bytes, whole());
+    match rewritten.dropped.is_empty() {
+        true => rewritten,
+        false => planned,
+    }
+}
+
 /// The largest blob an update of `domain` and `key` can place beside every
 /// blob of `current` in a file of `file_bytes`, so its first commit keeps
 /// them all ([`plan`]): the longest free run of the data area.

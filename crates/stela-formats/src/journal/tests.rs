@@ -573,6 +573,87 @@ fn a_shared_blob_is_read_without_a_copy_of_its_own() {
     assert_eq!(into, [2, 3]);
 }
 
+/// The pipeline store's updates over a boot, in blocks: the cache, which each
+/// update replaces, grows by one block up to half the data area, and pieces
+/// of three blocks are appended to the other half. Returns the updates whose
+/// cache was dropped and the file's content at the end.
+fn store_updates(rewrite: bool) -> (Vec<usize>, Vec<Found>) {
+    const BLOCKS: u64 = 64;
+    let block = ALIGN as usize;
+    let mut file = File::new(DATA_START + BLOCKS * ALIGN);
+    let size = file.bytes.len() as u64;
+    let start = Change {
+        replace: vec![CACHE, LOG],
+        remove: Vec::new(),
+        blobs: blobs![(CACHE, blob(0, 5 * block)), (LOG, blob(0, 4 * block))],
+    };
+    let mut commit = run(&mut file, plan(None, DOMAIN, KEY, size, start)).unwrap();
+    let (mut cache, mut log) = (5, 4);
+    let mut dropped = Vec::new();
+    for update in 0..40u8 {
+        cache = (cache + 1).min(BLOCKS as usize / 2);
+        let piece = (log + 3 < BLOCKS as usize / 2).then_some(3);
+        let mut change = Change {
+            replace: vec![CACHE],
+            remove: Vec::new(),
+            blobs: blobs![(CACHE, blob(update, cache * block))],
+        };
+        if let Some(piece) = piece {
+            change
+                .blobs
+                .push(Blob::new(LOG, blob(update, piece * block)));
+            log += piece;
+        }
+        // The whole content: the newest cache and every piece as one blob.
+        let whole = || Change {
+            replace: vec![CACHE, LOG],
+            remove: Vec::new(),
+            blobs: blobs![
+                (LOG, blob(9, log * block)),
+                (CACHE, blob(update, cache * block))
+            ],
+        };
+        let planned = match rewrite {
+            true => plan_or_rewrite(commit.as_ref(), DOMAIN, KEY, size, change, whole),
+            false => plan(commit.as_ref(), DOMAIN, KEY, size, change),
+        };
+        if planned
+            .dropped
+            .iter()
+            .any(|&index| planned.blobs[index].kind == CACHE)
+        {
+            dropped.push(usize::from(update));
+        }
+        commit = run(&mut file, planned).unwrap();
+    }
+    (dropped, sorted(content(&file.bytes).unwrap().1))
+}
+
+#[test]
+fn a_replacement_split_from_its_room_by_appended_blobs_rewrites_the_content_whole() {
+    // Appended pieces land between the cache's old places: half the file
+    // stays free, but in no run the next cache fits.
+    let (dropped, _) = store_updates(false);
+    assert!(!dropped.is_empty(), "the pattern splits the free space");
+    let (dropped, blobs) = store_updates(true);
+    assert_eq!(dropped, Vec::<usize>::new(), "every cache is kept");
+    let lengths: Vec<_> = blobs
+        .iter()
+        .map(|(kind, bytes)| (*kind, bytes.len()))
+        .collect();
+    let block = ALIGN as usize;
+    assert!(
+        lengths.contains(&(CACHE, 32 * block)),
+        "the newest cache: {lengths:?}"
+    );
+    let log: usize = lengths
+        .iter()
+        .filter(|(kind, _)| *kind == LOG)
+        .map(|(_, length)| length)
+        .sum();
+    assert_eq!(log, 31 * block, "every piece is kept");
+}
+
 #[test]
 fn placed_bytes_count_only_the_blobs_a_plan_writes() {
     let size = DATA_START + 4 * ALIGN;
