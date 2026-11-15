@@ -418,7 +418,8 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                 let Some((&start, &(mapping, pages))) = found else {
                     return EFAULT;
                 };
-                if address >= start + pages as u64 * PAGE || !client::fault(mapping, address, write)
+                if address >= start + pages as u64 * PAGE
+                    || !client::fill_around(mapping, address, write)
                 {
                     return EFAULT;
                 }
@@ -1449,9 +1450,11 @@ pub(in crate::engine) fn vram_bytes(index: u32) -> Option<u64> {
     (result == 0 && parameter.value != 0).then_some(parameter.value)
 }
 
-/// Whether a fault at `address` may be on a client's mapping, which Linux
-/// unmaps as it moves the buffer behind it: for the #PF handler, which
-/// leaves the refault to the faulting context ([`serve_moved`]).
+/// Whether a fault at `address` may be on a client's mapping: a page past
+/// the window a map or an earlier fault filled, or one Linux unmapped as it
+/// moved the buffer behind it. For the #PF handler, which leaves the fault,
+/// and the fill of the rest of its window, to the faulting context
+/// ([`serve_moved`]).
 pub(in crate::engine) fn client_fault(address: u64) -> bool {
     installed()
         .is_some_and(|gpu| gpu.window.contains(address) && MAPPINGS.load(Ordering::Relaxed) != 0)

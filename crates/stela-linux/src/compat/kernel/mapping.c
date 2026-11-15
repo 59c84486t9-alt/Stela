@@ -145,6 +145,47 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 	return 0;
 }
 
+/* Fills [from, to) of the mapping, each fault from its page on, the next
+ * past what it filled; whether every fault put its page back. A fault
+ * another task serves meanwhile may move the cursor past a page: that page
+ * then faults on its first touch, as any page Linux unmapped does. */
+static bool fill(struct stela_linux_mapping *mapping, unsigned long from, unsigned long to)
+{
+	for (unsigned long at = from; at < to;) {
+		WRITE_ONCE(mapping->filled, at);
+		if (!stela_linux_refault(mapping, at, true))
+			return false;
+		at = max(at + PAGE_SIZE, READ_ONCE(mapping->filled));
+	}
+	return true;
+}
+
+/* The window around address that a map or a client's fault fills. */
+static void fill_window(const struct stela_linux_mapping *mapping, unsigned long address,
+			unsigned long *from, unsigned long *to)
+{
+	const struct vm_area_struct *vma = &mapping->vma;
+	unsigned long start = ALIGN_DOWN(address, STELA_LINUX_FILL_BYTES);
+
+	*from = max(start, vma->vm_start);
+	*to = start > vma->vm_end - STELA_LINUX_FILL_BYTES ? vma->vm_end :
+							       min(start + STELA_LINUX_FILL_BYTES,
+								   vma->vm_end);
+}
+
+bool stela_linux_fill_around(struct stela_linux_mapping *mapping, unsigned long address,
+			     bool write)
+{
+	if (!stela_linux_refault(mapping, address, write))
+		return false;
+	unsigned long from, to;
+
+	fill_window(mapping, address, &from, &to);
+	/* The faulting page is back: the rest of its window only saves faults. */
+	fill(mapping, from, to);
+	return true;
+}
+
 int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64 offset,
 		    struct stela_linux_mapping **result)
 {
@@ -159,13 +200,15 @@ int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64
 	fput(file);
 	if (error)
 		return error;
-	/* Each fault fills from its page on; the next starts past what it filled. */
-	for (unsigned long at = address; at < address + size;
-	     at = max(at + PAGE_SIZE, (*result)->filled)) {
-		if (!stela_linux_refault(*result, at, true)) {
-			stela_linux_munmap(*result);
-			return -EFAULT;
-		}
+	/* The first window now; the rest as the client touches it, a window
+	 * per fault (stela_linux_fill_around). Filling a large buffer whole
+	 * took 40 ms for 64 MiB, mostly pages nobody touched yet. */
+	unsigned long from, to;
+
+	fill_window(*result, address, &from, &to);
+	if (!fill(*result, from, to)) {
+		stela_linux_munmap(*result);
+		return -EFAULT;
 	}
 	return 0;
 }
@@ -726,6 +769,20 @@ int main(void)
 	fd_install((unsigned int)fd, get_file(file));
 	assert(!stela_linux_map(fd, SPACE, BASE, 10 * PAGE_SIZE, 0, &mapping));
 	assert(prefaults == 3 && inserted_address == BASE + 9 * PAGE_SIZE);
+	stela_linux_munmap(mapping);
+
+	/* A mapping past the window fills its first window at the map, and a
+	 * fault fills the window around it, from its own page on. */
+	unsigned long window = STELA_LINUX_FILL_BYTES, big = 2 * window;
+	prefaults = 0;
+	assert(!stela_linux_map(fd, SPACE, big, 3 * window, 0, &mapping));
+	assert(prefaults == window / (4 * PAGE_SIZE));
+	assert(inserted_address == big + window - PAGE_SIZE);
+	prefaults = 0;
+	assert(stela_linux_fill_around(mapping, big + 2 * window + 5 * PAGE_SIZE + 9, false));
+	assert(inserted_address == big + 3 * window - PAGE_SIZE);
+	/* The faulting page's own fault, then the window from its start. */
+	assert(prefaults == 1 + window / (4 * PAGE_SIZE));
 	stela_linux_munmap(mapping);
 	assert(!close_fd((unsigned int)fd));
 	fput(file);

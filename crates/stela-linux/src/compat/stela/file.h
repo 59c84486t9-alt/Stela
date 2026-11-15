@@ -59,10 +59,20 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 		     u64 offset, bool writable, struct stela_linux_mapping **mapping);
 void stela_linux_munmap(struct stela_linux_mapping *mapping);
 
-/* stela_linux_mmap of a descriptor, writable, with every page faulted in: a
- * client that shares Stela's address space has no fault to take first. */
+/* The bytes a map fills at once, and a client's fault around its page. */
+#define STELA_LINUX_FILL_BYTES (2UL << 20)
+
+/* stela_linux_mmap of a descriptor, writable, with its first
+ * STELA_LINUX_FILL_BYTES faulted in; the client faults the rest in a window
+ * at a time (stela_linux_fill_around). */
 int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64 offset,
 		    struct stela_linux_mapping **mapping);
+
+/* Serves a client's first touch of, or return to, the page at address:
+ * faults it back, then fills the rest of its STELA_LINUX_FILL_BYTES window.
+ * Whether the page itself came back. */
+bool stela_linux_fill_around(struct stela_linux_mapping *mapping, unsigned long address,
+			     bool write);
 
 /* Serves a client's fault at address within the mapping, which installs pages
  * through map_user; a VM_FAULT_ result. The caller holds the mapping live
