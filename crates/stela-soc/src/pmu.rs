@@ -441,6 +441,12 @@ impl Pmu {
 
     /// The counter value of the enabled alarm's time.
     fn alarm_time(&mut self) -> Option<u64> {
+        let upcount = self.alarm_upcount()?;
+        self.clock.counter_for(upcount)
+    }
+
+    /// The enabled alarm's time, as an upcount.
+    fn alarm_upcount(&mut self) -> Option<u64> {
         let rtc = self.rtc?;
         if self.alarm_control & rtc.alarm_enable == 0 {
             return None;
@@ -449,19 +455,29 @@ impl Pmu {
         for (i, byte) in time.iter_mut().enumerate() {
             *byte = *self.byte(rtc.alarm_offset + i as u16);
         }
-        let upcount = u64::from(u32::from_le_bytes(time)) << SECOND_SHIFT;
-        self.clock.counter_for(upcount)
+        Some(u64::from(u32::from_le_bytes(time)) << SECOND_SHIFT)
     }
 
-    /// Latch the alarm's event once its time is reached, and drive the
-    /// interrupt output.
+    /// Whether the guest has seen the upcount reach `upcount`: reads may
+    /// run ahead of the counter ([`RtcClock::shown_ticks`]).
+    fn shown(&self, upcount: u64) -> bool {
+        self.clock.shown_ticks().is_ok_and(|shown| shown >= upcount)
+    }
+
+    /// Latch the alarm's event once its time is reached, by the counter or
+    /// by what the guest's reads returned, and drive the interrupt output.
     fn update(&mut self, now: u64) {
         let Some(rtc) = self.rtc else {
             return;
         };
-        if self
-            .alarm_deadline()
-            .is_some_and(|deadline| now >= deadline)
+        let read_past = self.alarm_deadline().is_some()
+            && self
+                .alarm_upcount()
+                .is_some_and(|upcount| self.shown(upcount));
+        if read_past
+            || self
+                .alarm_deadline()
+                .is_some_and(|deadline| now >= deadline)
         {
             self.alarm_event |= rtc.event_mask;
             self.armed = false;
@@ -525,7 +541,10 @@ impl SpmiSlave for Pmu {
                 .iter()
                 .any(|(_, cell)| matches!(cell, Byte::Upcount(_)))
         {
-            (self.clock.read_ticks().map_err(SlaveError::Unsupported)? << 1).to_le_bytes()
+            let ticks = self.clock.read_ticks().map_err(SlaveError::Unsupported)?;
+            // A read that ran ahead to the alarm's time fires it now.
+            self.update(now);
+            (ticks << 1).to_le_bytes()
         } else {
             [0; 8]
         };
@@ -678,7 +697,12 @@ impl SpmiSlave for Pmu {
             self.histories[index].acknowledge(address, data.len());
         }
         if programmed {
-            self.armed = self.alarm_time().is_some_and(|time| time > now);
+            // Armed for a time still ahead of the counter and of what the
+            // guest's reads returned.
+            self.armed = self.alarm_time().is_some_and(|time| time > now)
+                && self
+                    .alarm_upcount()
+                    .is_some_and(|upcount| !self.shown(upcount));
         }
         self.update(now);
         Ok(())

@@ -677,6 +677,48 @@ fn an_enabled_alarm_latches_its_event_at_its_second_and_interrupts_until_cleared
     aux.write(0xa7ff, &[9], 0).unwrap();
     assert_eq!(aux.advance(0), None);
 }
+/// The upcount a read of the PMU's RTC returns.
+fn read_upcount(pmu: &mut Pmu, now: u64) -> u64 {
+    let mut up = [0u8; 8];
+    pmu.read(RTC.upcount, &mut up[..6], now).unwrap();
+    u64::from_le_bytes(up) >> 1
+}
+
+#[test]
+fn the_alarm_compares_against_what_reads_of_a_held_count_returned() {
+    let mut pmu = stowe(None);
+    let interrupt = pmu.interrupt();
+    // The counter holds a tick short of second 30 while the guest reads
+    // on: its reads run ahead to second 30, so the alarm it programmed for
+    // then fires at that read, not a tick of the counter later.
+    let held = 30 * FREQUENCY_HZ - FREQUENCY_HZ / RTC_HZ;
+    program(&mut pmu, 30, FREQUENCY_HZ);
+    assert_eq!(read_upcount(&mut pmu, held), 30 * RTC_HZ - 1);
+    assert!(!interrupt.asserted());
+    assert_eq!(read_upcount(&mut pmu, held), 30 * RTC_HZ);
+    assert!(interrupt.asserted());
+    let mut event = [0];
+    pmu.read(RTC.alarm_event, &mut event, held).unwrap();
+    assert_eq!(event, [RTC.event_mask]);
+    assert_eq!(pmu.advance(held), None);
+    // An alarm for a second the reads already showed is a time passed: it
+    // is not armed, though the counter has not reached it.
+    program(&mut pmu, 0, held);
+    for _ in 0..crate::pmu::clock::READ_LEAD {
+        read_upcount(&mut pmu, held);
+    }
+    assert!(read_upcount(&mut pmu, held) < 31 * RTC_HZ);
+    program(&mut pmu, 30, held);
+    assert!(!pmu.interrupt_armed());
+    assert_eq!(pmu.advance(held), None);
+    // A later one is armed and fires at its counter time.
+    program(&mut pmu, 31, held);
+    assert!(pmu.interrupt_armed());
+    assert_eq!(pmu.advance(held), Some(31 * FREQUENCY_HZ));
+    assert_eq!(pmu.advance(31 * FREQUENCY_HZ), None);
+    assert!(interrupt.asserted());
+}
+
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
 fn original_primary_service_rtc_registers_alarm_and_edge_contract_are_source_pinned() {
