@@ -185,11 +185,14 @@ pub(crate) fn undelivered_doorbells() -> u64 {
     UNDELIVERED.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Join this processor to the aperture shootdown at `slot`.
+/// Join this processor to the aperture shootdown at `slot`. Its own
+/// interrupt tables are installed, whose NMI gate answers a retirement's
+/// NMI (`native_mmio::shootdown::answer_nmi`).
 pub(crate) fn join_shootdown(slot: usize) {
     local::shootdown()
         .0
         .store(slot + 1, core::sync::atomic::Ordering::Relaxed);
+    crate::native_mmio::PROCESSORS.set_reachable(slot);
 }
 
 /// This processor's aperture shootdown slot and the generation it flushed.

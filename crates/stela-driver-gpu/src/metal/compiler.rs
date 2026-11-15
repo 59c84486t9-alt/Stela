@@ -74,7 +74,7 @@ use core::{
 use triomphe::Arc;
 
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
-pub use nir_cache::{CompileGuard, CompileLock};
+pub use nir_cache::{CompileGuard, CompileLock, SharedHold};
 use nir_cache::{NirCache, ReflectionCache, ReflectionKey, Returned};
 
 /// The shader stages the AIR frontend lowers completely; other constructs
@@ -772,6 +772,7 @@ impl Compiler for AirCompiler {
 
     fn stop_deferring(&mut self) {
         self.deferring = false;
+        self.lock.set_may_defer(false);
     }
 
     fn deferred(&self) -> bool {
@@ -779,6 +780,7 @@ impl Compiler for AirCompiler {
             || self.reflecting.is_some()
             || self.stitching.is_some()
             || self.waiting.job.is_some()
+            || self.lock.waited()
     }
 
     fn defer_compiles(&mut self, deferring: bool) {

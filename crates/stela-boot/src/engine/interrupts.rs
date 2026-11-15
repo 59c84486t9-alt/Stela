@@ -313,6 +313,55 @@ extern "sysv64" fn terminal_interrupt(frame: *mut Frame, image: *const u8) -> ! 
     saved_state::terminal(frame, image)
 }
 
+// The NMI gate: an NMI a TLB shootdown sent (`native_mmio::shootdown`) is
+// answered and returns; any other goes on to vector 2's terminal stub with
+// the stack as the processor left it. The answer runs soft-float Rust that
+// takes no lock and touches no extended state, on the NMI's own stack, so it
+// saves only the registers the call may clobber. The processor's frame
+// leaves RSP 8 bytes past a 16-byte boundary and nine pushes realign it.
+global_asm!(
+    r#"
+.global stela_nmi_gate
+stela_nmi_gate:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    cld
+    mov rdi, [rsp + 72]
+    call {answer}
+    test al, al
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    jz stela_vector_2
+    iretq
+"#,
+    answer = sym nmi_answer,
+);
+
+/// Whether the NMI at `rip` was a shootdown's, now answered: the gate then
+/// returns. The step watchdog's keeps its stop even when a shootdown's came
+/// with it, as two NMIs pending at once are taken as one.
+extern "sysv64" fn nmi_answer(rip: u64) -> bool {
+    if !crate::native_mmio::shootdown::take_poke() || super::step_watchdog::nmi_is_watchdog() {
+        return false;
+    }
+    crate::native_mmio::shootdown::answer_nmi(rip);
+    true
+}
+
 // One stub per vector: push a zero error code when the CPU pushes none,
 // then the vector, and join the common path. The table lists them in order.
 macro_rules! vectors {
@@ -376,6 +425,7 @@ const _: () = assert!(
 
 unsafe extern "C" {
     static stela_vector_table: [usize; VECTOR_NUMBERS.len()];
+    fn stela_nmi_gate();
 }
 
 fn gate(handler: usize, ist: u8) -> [u64; 2] {
@@ -535,6 +585,8 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
             let ist = if matches!(vector, 2 | 8 | 18) { 2 } else { 1 };
             (*idt)[vector] = gate(handler, ist);
         }
+        // An NMI first asks whether a shootdown sent it, then reaches its stub.
+        (*idt)[2] = gate(stela_nmi_gate as *const () as usize, 2);
         let pointer = Pointer {
             limit: (size_of::<[[u64; 2]; 256]>() - 1) as u16,
             base: idt as u64,
@@ -558,6 +610,8 @@ fn cr3() -> u64 {
 }
 
 pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_>) {
+    // A processor woken from an idle wait flushes what it skipped first.
+    crate::native_mmio::shootdown::wake();
     if crate::native_irq::dispatch(frame.vector as u8) {
         return;
     }

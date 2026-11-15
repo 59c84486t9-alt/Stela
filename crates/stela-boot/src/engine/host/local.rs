@@ -279,6 +279,13 @@ pub(crate) unsafe fn configure_xstate(
 /// How many processors have become active.
 static ACTIVE: AtomicU32 = AtomicU32::new(0);
 
+/// How many processors have become active: each one's [`processor`] is
+/// below it.
+#[cfg(feature = "nvk")]
+pub(crate) fn processors() -> u32 {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 unsafe fn set_base(base: u64) {
     // SAFETY: the executor owns this processor's GS, and its descriptor/IST
     // setup has already finished. The base remains mapped in every root.

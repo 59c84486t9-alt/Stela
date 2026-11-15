@@ -27,6 +27,8 @@ mod kext {
     ));
 }
 #[cfg(feature = "nvk")]
+mod slice;
+#[cfg(feature = "nvk")]
 mod stack;
 #[cfg(feature = "nvk")]
 mod waiter;

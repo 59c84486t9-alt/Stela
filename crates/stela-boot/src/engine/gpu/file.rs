@@ -153,19 +153,22 @@ static TABLE: Locked = Locked {
 };
 
 /// Runs `body` over the table. Page table work waits on other processors, so
-/// it stays outside.
+/// it stays outside. A job's slice does not end while it holds the table,
+/// whose allocations would otherwise be points to end at.
 fn with<T>(body: impl FnOnce(&mut Table) -> T) -> T {
-    while TABLE
-        .held
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    // SAFETY: the held lock; nothing below re-enters it.
-    let result = body(unsafe { &mut *TABLE.table.get() }.get_or_insert_default());
-    TABLE.held.store(false, Ordering::Release);
-    result
+    super::slice::without_yields(|| {
+        while TABLE
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the held lock; nothing below re-enters it.
+        let result = body(unsafe { &mut *TABLE.table.get() }.get_or_insert_default());
+        TABLE.held.store(false, Ordering::Release);
+        result
+    })
 }
 
 fn install(window: &Window, address: u64, pages: &[u64]) -> bool {
@@ -306,7 +309,8 @@ extern "C" fn stela_libc_file_mmap(
     size: usize,
     address: *mut c_void,
 ) -> *mut c_void {
-    let mapped = (|| {
+    // Its page table work takes the window's locks.
+    let mapped = super::slice::without_yields(|| {
         let gpu = installed().ok_or(ENODEV)?;
         let address = address as u64;
         if size == 0 || !offset.is_multiple_of(PAGE) || !address.is_multiple_of(PAGE) {
@@ -318,7 +322,7 @@ extern "C" fn stela_libc_file_mmap(
         } else {
             map_fixed(gpu.window, fd, offset, address, count)
         }
-    })();
+    });
     match mapped {
         Ok(address) => address as *mut c_void,
         Err(error) => -(error as isize) as *mut c_void,
@@ -327,7 +331,11 @@ extern "C" fn stela_libc_file_mmap(
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_file_munmap(address: *mut c_void, size: usize) -> c_int {
-    let address = address as u64;
+    // Its page table work takes the window's locks.
+    super::slice::without_yields(|| unmap(address as u64, size))
+}
+
+fn unmap(address: u64, size: usize) -> c_int {
     let Some(gpu) = installed() else {
         return 0;
     };
