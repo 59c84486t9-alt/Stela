@@ -1608,7 +1608,7 @@ impl NativeBackend {
                 .map_err(|(_, error)| failure(error))
             })
         })?;
-        deferral::CREATED.note((self.ticks)().wrapping_sub(started));
+        deferral::note_created(info.source, (self.ticks)().wrapping_sub(started));
         self.report_executables(pipeline);
         Ok(pipeline)
     }
@@ -2716,7 +2716,7 @@ impl Backend for NativeBackend {
                 .map_err(|(_, error)| failure(error))
             })
         });
-        deferral::CREATED.note((self.ticks)().wrapping_sub(started));
+        deferral::note_created(info.source, (self.ticks)().wrapping_sub(started));
         created.map(|pipeline| {
             self.report_executables(pipeline);
             Pipeline(raw(pipeline))

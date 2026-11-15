@@ -72,17 +72,30 @@ impl Counted {
     }
 }
 
-/// Pipeline jobs a turn left, most of whose time is copying each stage's
-/// NIR for the job.
+/// Pipeline jobs a turn left, and the time to set each up (its key was
+/// taken before): pinning its stages' NIR, which `copy_us` in the report
+/// still names from when the stages were copied.
 static LEFT: Counted = Counted::new();
 /// Pipelines a turn created itself: none deferred, as a call that may not
 /// defer, a full store's lookup or a key whose job failed creates.
-pub(super) static CREATED: Counted = Counted::new();
+static CREATED: Counted = Counted::new();
+/// Binary archives a turn looked in for a pipeline, failing on a miss: the
+/// creation's next source depends on the answer, so it stays in the turn.
+static LOOKED: Counted = Counted::new();
 
-/// Since the last call, cleared: the pipeline jobs turns left, then the
-/// pipelines turns created, each as count, ticks in all and longest ticks.
-pub fn take_turn_work() -> [[u64; 3]; 2] {
-    [LEFT.take(), CREATED.take()]
+/// Counts a creation of `source` a turn made itself, which took `ticks`.
+pub(super) fn note_created(source: PipelineSource, ticks: u64) {
+    match source {
+        PipelineSource::Archived(_) => LOOKED.note(ticks),
+        _ => CREATED.note(ticks),
+    }
+}
+
+/// Since the last call, cleared: the pipeline jobs turns left, the
+/// pipelines turns created, and the archive lookups turns made, each as
+/// count, ticks in all and longest ticks.
+pub fn take_turn_work() -> [[u64; 3]; 3] {
+    [LEFT.take(), CREATED.take(), LOOKED.take()]
 }
 
 /// Keys a backend remembers as failed; past this it forgets them all, which
