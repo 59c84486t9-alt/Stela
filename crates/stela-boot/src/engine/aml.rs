@@ -83,7 +83,9 @@ const AML_BOUND_MS: u32 = 10_000;
 /// then, and `then`, what follows.
 fn bounded<T>(what: &str, then: &str, call: impl FnOnce() -> T) -> (T, bool) {
     let bound = Bound::begin(AML_BOUND_MS);
+    IN_AML.store(true, Ordering::Relaxed);
     let value = call();
+    IN_AML.store(false, Ordering::Relaxed);
     match bound.end() {
         Ok(()) => (value, true),
         Err(overrun) => {
@@ -94,6 +96,20 @@ fn bounded<T>(what: &str, then: &str, call: impl FnOnce() -> T) -> (T, bool) {
             (value, false)
         }
     }
+}
+
+/// A [`bounded`] call into the firmware's AML runs on the boot processor.
+static IN_AML: AtomicBool = AtomicBool::new(false);
+
+/// Where the firmware's AML runs on this processor, for a stop's reason
+/// (the step watchdog's NMI): `None` outside a call into it.
+pub(super) fn running_here() -> Option<stela_drivers::platform::acpi::Location> {
+    if !IN_AML.load(Ordering::Relaxed) {
+        return None;
+    }
+    // SAFETY: ACPICA runs only on the boot processor, inside `bounded`; the
+    // caller is that processor's NMI handler, which stopped it where it runs.
+    unsafe { stela_drivers::platform::acpi::running() }
 }
 
 /// What the provider reports once, as unsupported.

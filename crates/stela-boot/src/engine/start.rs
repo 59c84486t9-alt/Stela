@@ -2679,6 +2679,10 @@ fn start_platform(
         }
     };
     crate::status::progress("ACPI tables");
+    // The step watchdog's stop names this step: its AML calls are bounded
+    // (`aml::bounded`), but an access that never completes is not.
+    static ACPI_TABLES: &str = "the firmware's ACPI tables";
+    super::step_watchdog::stage(&ACPI_TABLES);
     let host_acpi = aml::HostAcpi::start(
         handoff.rsdp,
         handoff.root,
@@ -2695,6 +2699,7 @@ fn start_platform(
     crate::native_idle::install(
         host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
     );
+    super::step_watchdog::clear_stage();
     crate::status::done("");
     Platform {
         acpi: host_acpi,

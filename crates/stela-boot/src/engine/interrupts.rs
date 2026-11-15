@@ -663,8 +663,14 @@ pub fn fatal(frame: &Frame) -> ! {
     if frame.vector == 2
         && let Some(reason) = super::step_watchdog::nmi_reason()
     {
+        // Firmware AML the boot processor ran then, which an access that
+        // never completed (one into system management mode, say) holds
+        // past the AML's own bound.
+        let aml = super::aml::running_here()
+            .map(|at| alloc::format!(" AML in {at}"))
+            .unwrap_or_default();
         output::fatal(format_args!(
-            "{reason}: rip={:#x} (image+{:#x}) code={} drivers={drivers} stack={callers}",
+            "{reason}:{aml} rip={:#x} (image+{:#x}) code={} drivers={drivers} stack={callers}",
             frame.rip,
             frame.rip.wrapping_sub(&raw const __ImageBase as u64),
             output::Code::at(frame.rip),
