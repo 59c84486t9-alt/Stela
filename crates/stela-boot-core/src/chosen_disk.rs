@@ -91,13 +91,14 @@ impl Stale {
     }
 }
 
-/// Which partition the macOS choice starts from when the USB's record does
-/// not start one: a USB made new, or made again, has no record, yet the PC
-/// may hold the macOS an earlier USB installed. Offering only Install macOS
-/// there offers only to erase it.
+/// Which partition the macOS choice starts from when the USB holds no
+/// record: a USB made new, or made again, has none, yet the PC may hold the
+/// macOS an earlier USB installed. Offering only Install macOS there offers
+/// only to erase it. A USB with a record keeps it whatever it starts: its
+/// disk may be out for now or its install unfinished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Adopted {
-    /// The recorded partition starts macOS: nothing is looked for.
+    /// The USB holds a record: nothing is looked for.
     Recorded,
     /// The one partition on this PC's disks that starts macOS, by its place
     /// among those found. The record names it once the macOS choice is
@@ -110,8 +111,8 @@ pub enum Adopted {
     Several(usize),
 }
 
-/// What the macOS choice starts from. `recorded` is whether the USB's
-/// record starts macOS; `found` holds, for each of Stela's macOS partitions
+/// What the macOS choice starts from. `recorded` is whether the USB holds
+/// a record; `found` holds, for each of Stela's macOS partitions
 /// on this PC's disks, whether macOS can start from it.
 pub fn adopt(recorded: bool, found: &[bool]) -> Adopted {
     if recorded {
@@ -122,6 +123,17 @@ pub fn adopt(recorded: bool, found: &[bool]) -> Adopted {
         (None, _) => Adopted::None,
         (Some((index, _)), 0) => Adopted::One(index),
         (Some(_), more) => Adopted::Several(more + 1),
+    }
+}
+
+/// The disk a startup choice takes: `disk` as the record names it, or as
+/// it was `found` on the PC's disks. A found partition is the macOS
+/// choice's alone (`mac`), so no other choice, an update among them,
+/// changes a disk nobody chose for it.
+pub fn disk_for(mac: bool, disk: Option<&str>, found: bool) -> Option<&str> {
+    match found && !mac {
+        true => None,
+        false => disk,
     }
 }
 
@@ -246,6 +258,16 @@ mod tests {
             controller: None,
         }];
         assert_eq!(picker_refusal(&disks, 0, 60_000_000_000), None);
+    }
+
+    #[test]
+    fn a_found_partition_goes_to_the_macos_choice_alone() {
+        assert_eq!(disk_for(true, Some("A:1"), true), Some("A:1"));
+        assert_eq!(disk_for(false, Some("A:1"), true), None);
+        // A recorded one goes to every choice, as before.
+        assert_eq!(disk_for(true, Some("A:1"), false), Some("A:1"));
+        assert_eq!(disk_for(false, Some("A:1"), false), Some("A:1"));
+        assert_eq!(disk_for(false, None, false), None);
     }
 
     #[test]

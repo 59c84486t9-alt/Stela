@@ -188,7 +188,10 @@ fn startup_disk(
         .entries
         .iter()
         .any(|entry| entry.kind() == ChoiceKind::Mac && unchosen(entry.options.as_bytes()));
-    if !takes || starts(recorded.as_deref()) {
+    // A record is kept whatever it starts: a disk taken out for now or an
+    // install not finished yet is still the one this USB was set up for, and
+    // Install macOS's picker is where another is chosen.
+    if !takes || recorded.is_some() {
         return (recorded, false);
     }
     let found = crate::installer::installed();
@@ -196,20 +199,25 @@ fn startup_disk(
     match adopt(false, &ready) {
         Adopted::One(index) => {
             output::arguments(format_args!(
-                "CHOSEN DISK found: the USB's record starts no macOS and one partition on \
-                 this PC does; the macOS choice starts from it\n"
+                "CHOSEN DISK found: the USB holds no record and one partition on this PC \
+                 starts macOS; the macOS choice starts from it\n"
             ));
             (found.get(index).cloned(), true)
         }
         Adopted::Several(count) => {
             output::arguments(format_args!(
                 "CHOSEN DISK not found: {count} partitions on this PC start macOS and the \
-                 USB's record names none of them\n"
+                 USB holds no record of one\n"
             ));
             (recorded, false)
         }
         Adopted::None | Adopted::Recorded => (recorded, false),
     }
+}
+
+/// The disk a choice of `kind` takes ([`chosen_disk::disk_for`]).
+fn disk_for(kind: ChoiceKind, disk: Option<&str>, found: bool) -> Option<&str> {
+    stela_boot_core::chosen_disk::disk_for(kind == ChoiceKind::Mac, disk, found)
 }
 
 /// Record `disk` as the partition macOS starts from, once a macOS choice
@@ -307,7 +315,12 @@ impl<'a> Menu<'a> {
         let resolved: Vec<Option<String>> = choices
             .entries
             .iter()
-            .map(|entry| with_disk(&entry.options, disk.as_deref()))
+            .map(|entry| {
+                with_disk(
+                    &entry.options,
+                    disk_for(entry.kind(), disk.as_deref(), found),
+                )
+            })
             .collect();
         let readiness: Vec<Readiness> = choices
             .entries
@@ -547,7 +560,8 @@ fn menu(volume: &mut FileSystem, choices: &Choices, mut menu: Menu<'_>) -> Optio
                 if let (true, ChoiceKind::Mac, Some(disk)) = (menu.found, kind, &menu.disk) {
                     record(volume, disk);
                 }
-                return Some(chosen(choices, *n, menu.disk.as_deref()).into());
+                let disk = disk_for(*kind, menu.disk.as_deref(), menu.found);
+                return Some(chosen(choices, *n, disk).into());
             }
             Item::Firmware(entry) => {
                 output::arguments(format_args!("CHOICE firmware entry ({})\n", entry.name));
@@ -595,14 +609,15 @@ pub fn choose(
     // The first choice as it starts with no menu, recording a found disk
     // when it is a macOS choice.
     let first = |volume: &mut FileSystem, n: usize| {
-        if let (true, Some(ChoiceKind::Mac), Some(disk)) = (
-            found,
-            choices.entries.get(n).map(|entry| entry.kind()),
-            &disk,
-        ) {
+        let kind = choices.entries.get(n).map(|entry| entry.kind());
+        if let (true, Some(ChoiceKind::Mac), Some(disk)) = (found, kind, &disk) {
             record(volume, disk);
         }
-        chosen(&choices, n, disk.as_deref())
+        let disk = match kind {
+            Some(kind) => disk_for(kind, disk.as_deref(), found),
+            None => disk.as_deref(),
+        };
+        chosen(&choices, n, disk)
     };
     // Only a key pressed before the menu opens asks for it.
     if choices.timeout_seconds == 0 && pressed().is_none() {

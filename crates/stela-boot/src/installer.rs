@@ -608,7 +608,8 @@ fn disks() -> Vec<Disk> {
 
 /// Stela's macOS partitions on this PC's disks, each as the record names
 /// one (`SERIAL:GUID`), in the disks' order. A disk without a serial number
-/// of its own is passed over: Stela could not find it again.
+/// of its own is passed over, as is one the picker refuses: Stela could not
+/// find it again, or its drivers cannot reach it.
 pub fn installed() -> Vec<String> {
     let disks = disks();
     let mut found = Vec::new();
@@ -621,7 +622,11 @@ pub fn installed() -> Vec<String> {
             .filter(|other| other.serial.as_deref() == Some(serial))
             .count()
             == 1;
-        if !alone || serial.is_empty() || serial.contains(char::is_whitespace) {
+        if !alone
+            || disk.refusal.is_some()
+            || serial.is_empty()
+            || serial.contains(char::is_whitespace)
+        {
             continue;
         }
         for partition in &table.partitions {
