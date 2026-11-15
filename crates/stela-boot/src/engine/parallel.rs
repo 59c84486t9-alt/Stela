@@ -309,7 +309,12 @@ impl Pe {
                     hub.add_hot_samples(|hot| machine.take_hot_samples(hot));
                 }
             }
-            super::run::host_work(&mut machine, "drain", |_| output::drain_some());
+            // A PE whose guest waits sends the serial queue in its wait; one
+            // whose guest runs only once none did for a while: each burst is
+            // a port access, which a hypervisor can hold for milliseconds.
+            if output::drain_due() {
+                super::run::host_work(&mut machine, "drain", |_| output::drain_some());
+            }
         }
     }
 }

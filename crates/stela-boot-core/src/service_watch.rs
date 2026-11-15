@@ -100,6 +100,14 @@ impl Default for LongSteps {
     }
 }
 
+/// Whether work that waits for others to do it has waited `limit` counter
+/// ticks: since `since`, at counter `now`. A `since` after `now`, as
+/// another core's counter may read, has not waited.
+pub fn starved(now: u64, since: u64, limit: u64) -> bool {
+    let waited = now.wrapping_sub(since) as i64;
+    waited >= 0 && waited as u64 >= limit
+}
+
 /// Why a service turn ended before its last part ([`Turn`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnEnd {
@@ -400,6 +408,14 @@ mod tests {
         assert!(long.worth(600, 100));
         assert!(!long.worth(1000, 100));
         assert!(long.worth(2000, 100));
+    }
+
+    #[test]
+    fn work_is_starved_once_its_limit_passed_and_never_before_it_began() {
+        assert!(!starved(1_099, 1_000, 100));
+        assert!(starved(1_100, 1_000, 100));
+        assert!(!starved(990, 1_000, 100), "a lagging core's counter");
+        assert!(starved(5, u64::MAX - 200, 100), "across the counter's wrap");
     }
 
     #[test]
