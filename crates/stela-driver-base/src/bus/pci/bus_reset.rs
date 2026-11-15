@@ -136,10 +136,16 @@ where
     let mut saved = Vec::with_capacity(siblings.len());
     for sibling in siblings.iter() {
         let express = sibling.express_offset()?;
-        saved.push(Saved::save(&sibling.config, express)?);
+        // A sibling's restore stays within the writes it admits
+        // (`admit_restore`), which name no Resizable BAR control.
+        saved.push(Saved::save(&sibling.config, express, None)?);
     }
     let own = function.express_offset()?;
-    let first = Saved::save(&function.config, own)?;
+    let rebar = match own {
+        Some(_) => function.extended_capability(super::EXTENDED_REBAR)?,
+        None => None,
+    };
+    let first = Saved::save(&function.config, own, rebar)?;
     first.disable(&mut function.config)?;
     let slot = match express {
         Some(express) => mask_slot(bridge, express)?,

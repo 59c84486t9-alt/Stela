@@ -951,12 +951,15 @@ impl Address {
     }
 }
 
-/// A function a reset empties, silent for `silence` reads after one.
+/// A function a reset empties, silent for `silence` reads after one. A
+/// Resizable BAR capability at 0x100 goes back to its default size (256 MiB)
+/// at a reset, and keeps that size against writes when `rebar_fixed`.
 struct Resettable {
-    words: [u32; 64],
+    words: [u32; 1024],
     silence: u32,
     busy: core::cell::Cell<u32>,
     resets: u32,
+    rebar_fixed: bool,
 }
 
 impl ConfigSpace for Resettable {
@@ -972,6 +975,9 @@ impl ConfigSpace for Resettable {
 
     fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let before = self.words[usize::from(offset / 4)];
+        if offset == 0x108 && self.rebar_fixed {
+            return Ok(());
+        }
         self.words[usize::from(offset / 4)] = value;
         let soft_reset = offset == 0x84
             && before & 3 == 3
@@ -987,6 +993,10 @@ impl ConfigSpace for Resettable {
             self.words[0x50 / 4] = 0;
             self.words[0x68 / 4] = 0;
             self.words[0x70 / 4] = 0;
+            if self.words[0x100 / 4] & 0xffff == 0x15 {
+                let control = &mut self.words[0x108 / 4];
+                *control = *control & !(0x3f << 8) | 8 << 8;
+            }
             self.busy.set(self.silence);
             self.resets += 1;
         }
@@ -1015,7 +1025,7 @@ impl ConfigSpace for Resettable {
 }
 
 fn resettable(capabilities: u32, silence: u32) -> Function<Resettable> {
-    let mut words = [0; 64];
+    let mut words = [0; 1024];
     words[0] = 0x1234_8086;
     words[1] = 0x0010_0006;
     words[4] = 0xfe00_0000;
@@ -1037,8 +1047,53 @@ fn resettable(capabilities: u32, silence: u32) -> Function<Resettable> {
             silence,
             busy: core::cell::Cell::new(0),
             resets: 0,
+            rebar_fixed: false,
         },
     }
+}
+
+/// [`resettable`] with FLR and a Resizable BAR capability for BAR 1, which
+/// firmware set to 16 GiB (BAR Size 14) where its default is 256 MiB.
+fn resizable() -> Function<Resettable> {
+    let mut function = resettable(1 << 28, 0);
+    let words = &mut function.config.words;
+    words[0x100 / 4] = 0x0001_0015;
+    words[0x104 / 4] = 0x0000_7ff0;
+    words[0x108 / 4] = 1 << 5 | 14 << 8 | 1;
+    function
+}
+
+#[test]
+fn a_reset_puts_back_the_resizable_bar_size_firmware_set() {
+    let mut function = resizable();
+    assert_eq!(
+        function.reset_with(|_| Ok(())),
+        Ok(Some(ResetMethod::FunctionLevel))
+    );
+    let config = &function.config;
+    assert_eq!(config.resets, 1);
+    assert_eq!(config.words[0x108 / 4], 1 << 5 | 14 << 8 | 1);
+    assert_eq!(config.words[4], 0xfe00_0000);
+}
+
+#[test]
+fn a_resizable_bar_that_keeps_its_default_size_after_a_reset_is_an_error() {
+    let mut function = resizable();
+    function.config.rebar_fixed = true;
+    let error = function.reset_with(|_| Ok(())).unwrap_err();
+    assert_eq!(
+        error,
+        BlockError::Config(ConfigError::write_may_have_applied(
+            0x108,
+            4,
+            ConfigFailure::Readback {
+                offset: 0x108,
+                width: 4,
+                expected: 1 << 5 | 14 << 8 | 1,
+                observed: 1 << 5 | 8 << 8 | 1,
+            },
+        ))
+    );
 }
 
 #[test]

@@ -31,7 +31,14 @@ impl ConfigSpace for Child {
             self.0.silence.set(self.0.silence.get() - 1);
             return Ok(u32::MAX);
         }
-        Ok(self.0.words.borrow()[usize::from(offset / 4)])
+        // No extended configuration space: it reads as zero.
+        Ok(self
+            .0
+            .words
+            .borrow()
+            .get(usize::from(offset / 4))
+            .copied()
+            .unwrap_or(0))
     }
     fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
         Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
