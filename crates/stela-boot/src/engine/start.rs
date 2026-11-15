@@ -1416,12 +1416,14 @@ fn open_gpus(
                         &first.address,
                         first.device,
                         first.reason,
+                        &first.why,
                     ));
                     for gpu in rest {
                         crate::status::info(&gpu_status::refused(
                             &gpu.address,
                             gpu.device,
                             gpu.reason,
+                            &gpu.why,
                         ));
                     }
                 }

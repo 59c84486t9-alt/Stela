@@ -1365,6 +1365,8 @@ pub(super) struct Refused {
     pub(super) address: String,
     pub(super) device: u16,
     pub(super) reason: stela_boot_core::gpu_status::Reason,
+    /// The refusal's own words, for the screen as for the log.
+    pub(super) why: String,
 }
 
 /// Claim every NVIDIA adapter, each reported if it cannot be, and the ones
@@ -1376,10 +1378,11 @@ pub(super) fn claim_all(
     catalog: Option<&Arc<Catalog>>,
 ) -> (Vec<Claimed>, Vec<Refused>) {
     use stela_boot_core::gpu_status::Reason;
-    let refused_as = |adapter: &gpu::Adapter, reason| Refused {
+    let refused_as = |adapter: &gpu::Adapter, reason, why: &dyn core::fmt::Display| Refused {
         address: format!("{}", adapter.address),
         device: adapter.device,
         reason,
+        why: format!("{why}"),
     };
     for adapter in adapters
         .iter()
@@ -1399,11 +1402,12 @@ pub(super) fn claim_all(
     if !cfg!(feature = "nvk") {
         let mut refused = Vec::new();
         for adapter in nvidia {
+            let why = "this image has no GPU driver: build it with `cargo xtask boot build`";
             output::arguments(format_args!(
-                "GPU {} left with firmware: build the image with `cargo xtask boot build`\n",
+                "GPU {} left with firmware: {why}\n",
                 adapter.address
             ));
-            refused.push(refused_as(adapter, Reason::Other));
+            refused.push(refused_as(adapter, Reason::Other, &why));
         }
         return (Vec::new(), refused);
     }
@@ -1414,7 +1418,7 @@ pub(super) fn claim_all(
         Err(why) => {
             for adapter in nvidia {
                 output::arguments(format_args!("GPU {} refused: {why}\n", adapter.address));
-                refused.push(refused_as(adapter, Reason::Other));
+                refused.push(refused_as(adapter, Reason::Other, &why));
             }
             return (claimed, refused);
         }
@@ -1439,7 +1443,7 @@ pub(super) fn claim_all(
                     ServiceError::Refused(NO_FIRMWARE) => Reason::MissingFirmware,
                     _ => Reason::Other,
                 };
-                refused.push(refused_as(adapter, reason));
+                refused.push(refused_as(adapter, reason, &error));
             }
         }
     }

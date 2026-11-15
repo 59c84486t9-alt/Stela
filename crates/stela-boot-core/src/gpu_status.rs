@@ -18,8 +18,9 @@ pub enum Reason {
 }
 
 /// The screen line for the NVIDIA GPU `device` at PCI `address` that did
-/// not start for `reason`.
-pub fn refused(address: &str, device: u16, reason: Reason) -> String {
+/// not start for `reason`, `why` the refusal's own words (empty without
+/// any): a screen is often all a report brings.
+pub fn refused(address: &str, device: u16, reason: Reason, why: &str) -> String {
     match (nvidia_chip(device), reason) {
         (None, _) => format!(
             "the NVIDIA GPU at {address} (device {device:04x}) is not supported: Stela needs \
@@ -29,8 +30,12 @@ pub fn refused(address: &str, device: u16, reason: Reason) -> String {
             "the USB has no firmware for this PC's NVIDIA {chip} GPU. On another computer, plug \
              in this USB and run `stela repair`"
         ),
-        (Some(chip), Reason::Other) => format!(
+        (Some(chip), Reason::Other) if why.is_empty() => format!(
             "the NVIDIA {chip} GPU at {address} did not start; the boot log on this USB says why"
+        ),
+        (Some(chip), Reason::Other) => format!(
+            "the NVIDIA {chip} GPU at {address} did not start: {why}. The boot log on this USB \
+             has the rest"
         ),
     }
 }
@@ -215,20 +220,33 @@ mod tests {
 
     #[test]
     fn a_refused_gpu_is_named_with_its_fix() {
-        let missing = refused("01:00.0", 0x2484, Reason::MissingFirmware);
+        let missing = refused("01:00.0", 0x2484, Reason::MissingFirmware, "");
         assert!(missing.contains("NVIDIA ga104 GPU"), "{missing}");
         assert!(missing.ends_with("run `stela repair`"), "{missing}");
-        let other = refused("03:00.0", 0x2b85, Reason::Other);
+        let other = refused("03:00.0", 0x2b85, Reason::Other, "");
         assert_eq!(
             other,
             "the NVIDIA gb202 GPU at 03:00.0 did not start; the boot log on this USB says why"
+        );
+        // The refusal's words reach the screen, which is often all a report
+        // brings.
+        let named = refused(
+            "01:00.0",
+            0x28a0,
+            Reason::Other,
+            "the GPU's register BAR does not decode",
+        );
+        assert_eq!(
+            named,
+            "the NVIDIA ad107 GPU at 01:00.0 did not start: the GPU's register BAR does not \
+             decode. The boot log on this USB has the rest"
         );
     }
 
     #[test]
     fn an_older_gpu_or_none_names_what_is_supported() {
         // A GeForce GTX 1080 (Pascal, gp104).
-        let pascal = refused("01:00.0", 0x1b80, Reason::MissingFirmware);
+        let pascal = refused("01:00.0", 0x1b80, Reason::MissingFirmware, "");
         assert_eq!(
             pascal,
             "the NVIDIA GPU at 01:00.0 (device 1b80) is not supported: Stela needs an NVIDIA \
