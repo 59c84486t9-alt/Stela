@@ -13,8 +13,12 @@
 //!
 //! A slice gives its processor back only where it may: in the job's own
 //! code with interrupts on (never in an interrupt handler), on the compile
-//! stack, and outside the host callbacks that take a lock of their own
-//! ([`without_yields`]). Elsewhere it runs on to the next such point.
+//! stack, and holding no spin lock: neither inside the host callbacks that
+//! take a lock of their own ([`without_yields`]) nor inside a driver's
+//! (`deferred::hold_lock`, [`enter_lock`]). Elsewhere it runs on to the
+//! next such point. The lock holds are the fiber's own: a job resumed on a
+//! processor starts with none of the processor's, and a processor that
+//! holds one resumes no job ([`help`]), which might wait for it.
 //!
 //! While a slice runs, the C library sees the job as a core of its own
 //! ([`job_core`]), so its thread-local values and lock owners stay the
@@ -46,7 +50,8 @@ struct Slot {
     top: AtomicU64,
     /// The C library's core for it, `u32::MAX` for the processor's own.
     core: AtomicU32,
-    /// Host callbacks entered that a slice may not end in.
+    /// Spin locks and host callbacks held that a slice may not end in: the
+    /// running fiber's while it runs one, else the processor's.
     held: AtomicU32,
 }
 
@@ -111,11 +116,16 @@ impl Sliced for Job {
                 .store(self.fiber.handle().address(), Ordering::Relaxed);
             SLICING.fetch_add(1, Ordering::AcqRel);
         }
+        // The fiber counts its own locks, from none: it suspended or began
+        // holding none, and the processor's are not its own.
+        let outside = slot.map_or(0, |slot| slot.held.swap(0, Ordering::Relaxed));
         // SAFETY: a job runs where long host work is allowed, from a run
         // loop or a wait that holds nothing the doorbell's or the
         // shootdown's handler takes; it leaves IF and CR8 as they were.
         let step = unsafe { crate::native_mmio::shootdown::job(|| self.fiber.resume()) };
         if let Some(slot) = slot {
+            let inside = slot.held.swap(outside, Ordering::Relaxed);
+            debug_assert_eq!(inside, 0, "a job's slice ended holding a spin lock");
             slot.fiber.store(0, Ordering::Relaxed);
             SLICING.fetch_sub(1, Ordering::AcqRel);
         }
@@ -165,8 +175,22 @@ pub(super) fn allocation_point() {
     };
     if host::rdtsc() >= slot.deadline.load(Ordering::Relaxed) {
         // SAFETY: the running job's own frame, on its stack, interrupts on.
-        unsafe { handle.suspend() };
+        unsafe { suspend(slot, handle) };
     }
+}
+
+/// End the running slice: the job holds no spin lock ([`may_end`]).
+///
+/// # Safety
+/// As [`Handle::suspend`]: the running job's own frame, on its stack.
+unsafe fn suspend(slot: &Slot, handle: Handle) {
+    debug_assert_eq!(
+        slot.held.load(Ordering::Relaxed),
+        0,
+        "a job's slice would end holding a spin lock"
+    );
+    // SAFETY: the caller's contract.
+    unsafe { handle.suspend() };
 }
 
 /// A moment of a wait in a job's slice: past the slice's time, or on the
@@ -180,7 +204,7 @@ pub(super) fn wait_point() -> bool {
         || host::rdtsc() >= slot.deadline.load(Ordering::Relaxed)
     {
         // SAFETY: as in `allocation_point`.
-        unsafe { handle.suspend() };
+        unsafe { suspend(slot, handle) };
     }
     true
 }
@@ -216,28 +240,47 @@ pub(super) fn job_core() -> Option<c_uint> {
 /// Runs `body`, a host callback that takes a lock of its own, with no slice
 /// ending inside it.
 pub(super) fn without_yields<R>(body: impl FnOnce() -> R) -> R {
-    let slot = (SLICING.load(Ordering::Relaxed) != 0)
-        .then(|| SLOTS.get(host::processor() as usize))
-        .flatten();
-    if let Some(slot) = slot {
-        slot.held.fetch_add(1, Ordering::Relaxed);
-    }
+    enter_lock();
     let result = body();
     // No slice ended in it, so it ends on the processor it began on.
-    if let Some(slot) = slot {
-        slot.held.fetch_sub(1, Ordering::Relaxed);
-    }
+    leave_lock();
     result
+}
+
+/// A spin lock or a callback that takes one is entered here
+/// (`deferred::set_lock_hooks`): no slice ends until [`leave_lock`], so the
+/// fiber that holds it stays on this processor.
+pub(super) fn enter_lock() {
+    if let Some(slot) = SLOTS.get(host::processor() as usize) {
+        slot.held.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The lock [`enter_lock`] counted is let go.
+pub(super) fn leave_lock() {
+    if let Some(slot) = SLOTS.get(host::processor() as usize) {
+        let held = slot.held.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(held != 0, "a spin lock let go that was never counted");
+    }
+}
+
+/// Whether this processor, outside a job, holds a counted lock.
+fn holds_lock() -> bool {
+    SLOTS
+        .get(host::processor() as usize)
+        .is_some_and(|slot| slot.held.load(Ordering::Relaxed) != 0)
 }
 
 /// A moment of a wait outside a job: resumes a job that waits between
 /// slices, as the wait may be for the compile lock or a lock the job
-/// holds. Never from a job's own slice, and only where the slice would
-/// run with interrupts on and can end.
+/// holds. Never from a job's own slice, only where the slice would run
+/// with interrupts on and can end, and never while this processor holds a
+/// counted lock, which the job might spin on below this wait's frame.
 pub(super) fn help() {
     if BETWEEN.load(Ordering::Relaxed) == 0
         || in_job()
         || !crate::native_mmio::shootdown::job_opens()
+        || holds_lock()
     {
         return;
     }

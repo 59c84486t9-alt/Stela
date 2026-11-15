@@ -69,7 +69,7 @@ use super::{
 };
 use crate::metal::{
     compiler::{self, AirCompiler, CompileLock, SharedHold},
-    deferred::{Done, Job, JobLock, Made, Owner, Sliced, Slicer},
+    deferred::{self, Done, Job, JobLock, Made, Owner, Sliced, Slicer},
     shader::Compiler,
     timing::CallPhases,
     vulkan::{
@@ -358,7 +358,11 @@ impl<T> Spin<T> {
         }
     }
 
+    /// Runs `body` on the value under the lock, which counts as held
+    /// ([`deferred::hold_lock`]): a job's body publishes what it made
+    /// through one, and bodies allocate.
     fn with<R>(&self, body: impl FnOnce(&mut T) -> R) -> R {
+        let _held = deferred::hold_lock();
         while self
             .held
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)

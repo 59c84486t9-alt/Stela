@@ -15,7 +15,10 @@
 //! end.
 use super::compiler::CompileLock;
 use alloc::{boxed::Box, sync::Arc};
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 pub(crate) mod kept;
 
@@ -98,6 +101,54 @@ pub type Slicer = fn(u64, Box<dyn FnOnce() + Send>) -> Box<dyn Sliced>;
 pub struct JobLock {
     pub lock: Arc<CompileLock>,
     pub relax: fn(),
+}
+
+/// The platform's count of the spin locks the running code holds
+/// ([`set_lock_hooks`]): enter, then leave.
+static LOCK_HOOKS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+/// Gives a platform that runs jobs in slices ([`Sliced`]) the count of the
+/// spin locks its processors hold ([`hold_lock`]): `enter` as one is taken,
+/// `leave` once it is let go. A slice never ends while its job holds one,
+/// as the lock's other users spin without resuming the job, and the
+/// platform resumes no job on a processor that holds one, as the job may
+/// take that very lock. Set once, before any job runs.
+pub fn set_lock_hooks(enter: fn(), leave: fn()) {
+    LOCK_HOOKS[1].store(leave as usize, Ordering::Release);
+    LOCK_HOOKS[0].store(enter as usize, Ordering::Release);
+}
+
+/// A spin lock held ([`hold_lock`]) until this drops.
+#[must_use]
+pub struct LockHeld(Option<fn()>);
+
+impl Drop for LockHeld {
+    fn drop(&mut self) {
+        if let Some(leave) = self.0 {
+            leave();
+        }
+    }
+}
+
+/// Counts a spin lock the caller is about to take, for as long as the
+/// returned value lives: take it before the lock and drop it after the
+/// lock's release. Without hooks it counts nothing.
+pub fn hold_lock() -> LockHeld {
+    let enter = LOCK_HOOKS[0].load(Ordering::Acquire);
+    if enter == 0 {
+        return LockHeld(None);
+    }
+    let leave = LOCK_HOOKS[1].load(Ordering::Acquire);
+    // SAFETY: only `set_lock_hooks` stores nonzero values, `fn()`s, the
+    // leave before the enter.
+    let (enter, leave) = unsafe {
+        (
+            core::mem::transmute::<usize, fn()>(enter),
+            core::mem::transmute::<usize, fn()>(leave),
+        )
+    };
+    enter();
+    LockHeld(Some(leave))
 }
 
 /// Which processor offers to run a deferred job, between two slices of its

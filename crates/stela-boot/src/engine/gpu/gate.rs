@@ -1254,7 +1254,12 @@ fn open_gpu(
                     free.store(compiling.top(), Ordering::Relaxed);
                 }
                 service.set_compile_stack(compiling.top());
-                // Jobs run in slices there; their allocations end them.
+                // Jobs run in slices there; their allocations end them,
+                // but never while they hold a driver's spin lock.
+                stela_drivers::gpu::metal::deferred::set_lock_hooks(
+                    slice::enter_lock,
+                    slice::leave_lock,
+                );
                 service.set_job_slicer(slice::start);
                 stela_boot_core::heap::set_allocation_hook(slice::allocation_point);
                 core::mem::forget(compiling);

@@ -38,7 +38,11 @@ static PINS: Pins = Pins {
     pins: UnsafeCell::new(Vec::new()),
 };
 
+/// Runs `f` on the list, under its lock, which counts as held
+/// ([`crate::metal::deferred::hold_lock`]): a job drops its pins, and a pin
+/// allocates.
 fn with<R>(f: impl FnOnce(&mut Vec<Pin>) -> R) -> R {
+    let _held = crate::metal::deferred::hold_lock();
     while PINS
         .held
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)

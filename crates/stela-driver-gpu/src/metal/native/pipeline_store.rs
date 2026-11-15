@@ -610,7 +610,14 @@ static STORE: Cell = Cell {
     store: UnsafeCell::new(None),
 };
 
+/// Runs `f` on the store, under its lock. A deferred job reaches it
+/// ([`recall_nir`], from its restore), and `f` allocates: the lock is
+/// counted ([`deferred::hold_lock`]), so no job's slice ends while it holds
+/// it and leaves the turns and the boot's writer spinning.
+///
+/// [`deferred::hold_lock`]: crate::metal::deferred::hold_lock
 fn with_store<R>(f: impl FnOnce(&mut Option<Store>) -> R) -> R {
+    let _held = crate::metal::deferred::hold_lock();
     while STORE
         .held
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)

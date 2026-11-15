@@ -2102,6 +2102,8 @@ impl NativeOutside {
     }
 
     fn with_state<T>(&self, body: impl FnOnce(&mut Upkeep) -> T) -> T {
+        // A job's pipeline creation may free through it; its bodies allocate.
+        let _held = crate::metal::deferred::hold_lock();
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)

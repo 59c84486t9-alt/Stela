@@ -323,3 +323,28 @@ fn lookups_count_hits_and_compiles_apart_and_clear_when_taken() {
     );
     assert_eq!(lookups.take(), LookupCounts::default());
 }
+
+/// The store's lock, which a job's NIR restore takes ([`recall_nir`]) and
+/// whose holder allocates, counts as held for as long as it is: a platform
+/// that runs jobs in slices ends none inside it.
+#[test]
+fn the_store_lock_counts_as_held_while_a_job_could_reach_it() {
+    extern crate std;
+    use core::cell::Cell;
+    std::thread_local! {
+        static HELD: Cell<u32> = const { Cell::new(0) };
+    }
+    fn enter() {
+        HELD.with(|held| held.set(held.get() + 1));
+    }
+    fn leave() {
+        HELD.with(|held| held.set(held.get() - 1));
+    }
+    crate::metal::deferred::set_lock_hooks(enter, leave);
+    let inside = with_store(|_| HELD.with(Cell::get));
+    assert_eq!(inside, 1);
+    assert_eq!(HELD.with(Cell::get), 0);
+    // The job's own path through it.
+    assert_eq!(recall_nir(&[9; 32]), None);
+    assert_eq!(HELD.with(Cell::get), 0);
+}
