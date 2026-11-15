@@ -161,6 +161,19 @@ pub(super) fn resolve(
     write: bool,
     unprivileged: bool,
 ) -> Result<(mmu::Translation, u64), FaultCause> {
+    resolve_recording(state, address, write, unprivileged, true)
+}
+
+/// [`resolve`], caching a device translation in the helper's software TLB
+/// only with `record_device`: a fault-around walk ([`map_around`]) leaves
+/// the TLB as no access touched it.
+fn resolve_recording(
+    state: &mut State,
+    address: u64,
+    write: bool,
+    unprivileged: bool,
+    record_device: bool,
+) -> Result<(mmu::Translation, u64), FaultCause> {
     let regime = state.regime.as_ref().ok_or(FaultCause::NonCanonical)?;
     let access = if write { Access::Write } else { Access::Read };
     let requester = mmu::Requester {
@@ -197,7 +210,9 @@ pub(super) fn resolve(
     let page = translation.physical & !(PAGE - 1);
     let Some(host) = state.host_physical(page) else {
         // This walker makes no AF or dirty descriptor updates.
-        state.tlb.record_device(address, requester, translation);
+        if record_device {
+            state.tlb.record_device(address, requester, translation);
+        }
         return Err(FaultCause::Device {
             physical: translation.physical,
         });
@@ -251,15 +266,7 @@ pub(crate) fn page_fault(
         Ok(resolved) => resolved,
         Err(cause) => return abandon(state, frame, address, write, cause, saved),
     };
-    // EL1 and PAN share a root. SMAP guards a leaf if a read with PAN set
-    // would be denied by either stage, or by stage 1's PAN rules.
-    let guarded = state.contexts.pan_flag
-        && state.current % VIEWS == EL1_VIEW
-        && (!translation.readable || translation.pan_sensitive);
-    let rights = PRESENT
-        | NX
-        | if translation.writable { WRITABLE } else { 0 }
-        | if guarded { tables::USER } else { 0 };
+    let rights = shadow_rights(state, &translation);
     let root = state.roots[state.root_of(state.current)];
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
@@ -354,8 +361,94 @@ pub(crate) fn page_fault(
             page += PAGE;
         }
     }
+    // The window's other leaves, when the guest's are smaller than it. A
+    // protection fault replaced a present page, whose neighbours its own
+    // fill already mapped.
+    if frame.error & 1 == 0 {
+        let table = slot.wrapping_sub(tables::index(virtual_page, 0));
+        for beside in shadow::around(address, translation.size, FILL_WINDOW) {
+            map_around(state, table, half, beside);
+        }
+    }
     state.fills += 1;
     state.fill_ticks += rdtsc().wrapping_sub(entered);
+}
+
+/// The shadow entry bits for `translation` in the current view. EL1 and
+/// PAN share a root. SMAP guards a leaf if a read with PAN set would be
+/// denied by either stage, or by stage 1's PAN rules.
+fn shadow_rights(state: &State, translation: &mmu::Translation) -> u64 {
+    let guarded = state.contexts.pan_flag
+        && state.current % VIEWS == EL1_VIEW
+        && (!translation.readable || translation.pan_sensitive);
+    PRESENT
+        | NX
+        | if translation.writable { WRITABLE } else { 0 }
+        | if guarded { tables::USER } else { 0 }
+}
+
+/// Fault-around: map the leaf at `address` in the window of a fault just
+/// filled through `table` (the live leaf table that holds the whole
+/// window) exactly as a read fault at `address` would fill it, from its own
+/// walk in the current regime and view. Arm lets a TLB walk and cache any
+/// valid translation before an access needs it, and a fault-around entry
+/// is recorded in the half's extents like a demand fill's, so the same
+/// TLBIs, context switches and resets remove it. Every walk outcome a read
+/// fill would not map is left to the leaf's own fault: translation, Access
+/// flag (no hardware AF update) and permission faults, watchpoints, Tag
+/// Checks, Tagged leaves under checks and devices, whose translation is not
+/// cached either. Lower-half global leaves are left to their fault too (the
+/// shared span widens there), and pages already present are kept, so every
+/// entry written was absent and needs no flush.
+fn map_around(state: &mut State, table: *mut u64, half: usize, address: u64) {
+    if !state.placement.native(address) {
+        return;
+    }
+    let Ok((translation, _)) = resolve_recording(state, address, false, false, false) else {
+        return;
+    };
+    let tag_checks = state
+        .regime
+        .as_ref()
+        .is_some_and(|regime| regime.tag_checks[half]);
+    if (half == LOWER && translation.global)
+        || (tag_checks && translation.attributes == mmu::attributes::TAGGED)
+    {
+        return;
+    }
+    let rights = shadow_rights(state, &translation);
+    let (first, last) = shadow::window(address, translation.size, FILL_WINDOW);
+    let physical = translation
+        .physical
+        .wrapping_sub(address)
+        .wrapping_add(first);
+    let watch = &state.regime.as_ref().expect("a fault was filled").watch;
+    let mut page = first;
+    let mut mapped = false;
+    loop {
+        // SAFETY: the window lies in the aligned fill window of the fault
+        // just filled, inside the one leaf table `table` names: the live
+        // table that fault's slot belongs to, which only this host manages.
+        let entry = unsafe { table.add(tables::index(page, 0)) };
+        // SAFETY: as above.
+        let absent = unsafe { entry.read_volatile() } & PRESENT == 0;
+        if absent
+            && !watch.blocks(page)
+            && let Some(host) = state.host_physical(physical.wrapping_add(page - first))
+        {
+            // SAFETY: as above.
+            unsafe { entry.write_volatile((host & tables::ADDRESS) | rights) };
+            state.around += 1;
+            mapped = true;
+        }
+        if page >= last & !(PAGE - 1) {
+            break;
+        }
+        page += PAGE;
+    }
+    if mapped {
+        state.extents[half].record(address, translation.size, translation.global);
+    }
 }
 
 /// #GP or #UD inside native code ends the block; elsewhere it is fatal.

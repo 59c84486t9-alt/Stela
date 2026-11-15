@@ -40,6 +40,26 @@ pub fn window(address: u64, size: u64, window: u64) -> (u64, u64) {
     (first.max(start), last.min(end))
 }
 
+/// The first byte of each other `size`-byte leaf in the aligned `window`
+/// around `address`, nearest first and the following one before the
+/// preceding at each distance: the leaves a fill may map beside its own,
+/// each after its own walk. None when the leaf fills the window.
+pub fn around(address: u64, size: u64, window: u64) -> impl Iterator<Item = u64> {
+    let size = size.max(PAGE).next_power_of_two();
+    let (start, end) = leaf(address, window);
+    let own = address & !(size - 1);
+    let leaves = if size > end - start {
+        0
+    } else {
+        (end - start + 1) / size
+    };
+    (1..leaves).flat_map(move |distance| {
+        let after = own.checked_add(distance * size).filter(|&a| a <= end);
+        let before = own.checked_sub(distance * size).filter(|&b| b >= start);
+        after.into_iter().chain(before)
+    })
+}
+
 /// The leaves one half of a shadow was filled from since it was last
 /// emptied, and the global ones apart, each by its own extent: a TLBI by VA
 /// of another ASID reaches only those of a kept half ([`Kept::invalidate`]),
@@ -754,6 +774,87 @@ mod tests {
         kept.switch(key(1), alloc::vec![(0x1000, 0, 2)], Extents::new(), key(2));
         assert_eq!(kept.clear(), 1);
         assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn a_fill_maps_the_other_leaves_of_its_window_nearest_first() {
+        let leaves = |address, size| around(address, size, 1 << 16).collect::<Vec<_>>();
+        // A 16 KiB leaf in a 64 KiB window: the three others.
+        assert_eq!(leaves(0x1_4123, 1 << 14), [0x1_8000, 0x1_0000, 0x1_c000]);
+        assert_eq!(leaves(0x1_0000, 1 << 14), [0x1_4000, 0x1_8000, 0x1_c000]);
+        assert_eq!(leaves(0x1_fff8, 1 << 14), [0x1_8000, 0x1_4000, 0x1_0000]);
+        // 4 KiB leaves: fifteen, all within the window and distinct.
+        let small = leaves(0x2_3456, 1 << 12);
+        assert_eq!(small.len(), 15);
+        assert!(small.iter().all(|&a| (0x2_0000..0x3_0000).contains(&a)));
+        assert!(!small.contains(&0x2_3000));
+        // A leaf as large as the window or larger has no neighbours in it.
+        assert!(leaves(0x5_0000, 1 << 16).is_empty());
+        assert!(leaves(0x20_0000, 1 << 21).is_empty());
+        // The top of the address space does not wrap.
+        assert_eq!(
+            leaves(u64::MAX, 1 << 14),
+            [
+                0xffff_ffff_ffff_8000,
+                0xffff_ffff_ffff_4000,
+                0xffff_ffff_ffff_0000
+            ]
+        );
+    }
+
+    /// A fault-around fill records each other leaf it maps as a demand fill
+    /// of that leaf would, so a TLBI by address of any page it mapped, of
+    /// either ASID for a global leaf, reaches that page's whole leaf.
+    #[test]
+    fn a_tlbi_reaches_every_page_fault_around_mapped() {
+        const WINDOW: u64 = 1 << 16;
+        for (fault, size, half) in [
+            (0x1_4123, 1u64 << 14, LOWER),
+            (0x2_3456, 1 << 12, LOWER),
+            (0xffff_fe00_0001_8008, 1 << 14, UPPER),
+        ] {
+            for global in [false, true] {
+                // The fault's own leaf, then each other leaf of the window.
+                let mut demand = Extents::new();
+                let mut around_fill = Extents::new();
+                demand.record(fault, size, global);
+                around_fill.record(fault, size, global);
+                let others: Vec<u64> = around(fault, size, WINDOW).collect();
+                for &beside in &others {
+                    demand.record(beside, size, global);
+                    around_fill.record(beside, size, global);
+                }
+                assert_eq!(demand, around_fill);
+                for &beside in &others {
+                    let (first, last) = window(beside, size, WINDOW);
+                    for page in (first..=last).step_by(PAGE as usize) {
+                        let mut extents = around_fill.clone();
+                        let ranges = extents
+                            .ranges(Reach::Containing(page + 8), half)
+                            .expect("a TLBI by address keeps the half");
+                        assert!(
+                            ranges.iter().any(|&(low, high)| low <= first && last <= high),
+                            "{page:#x} {ranges:x?}"
+                        );
+                        let mut extents = around_fill.clone();
+                        let mut global_ranges = Vec::new();
+                        assert!(extents.visit_global_ranges(
+                            Reach::Containing(page),
+                            half,
+                            |low, high| global_ranges.push((low, high)),
+                        ));
+                        assert_eq!(
+                            global_ranges
+                                .iter()
+                                .any(|&(low, high)| low <= first && last <= high),
+                            global,
+                            "{page:#x}"
+                        );
+                    }
+                }
+                assert_eq!(around_fill.private(), !global);
+            }
+        }
     }
 
     #[test]

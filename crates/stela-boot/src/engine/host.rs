@@ -563,6 +563,9 @@ pub struct State {
     pub scoped: u64,
     /// Pages mapped beside a fault's from the same leaf.
     pub prefills: u64,
+    /// Pages mapped beside a fault's from the window's other leaves
+    /// (fault-around), each from its own walk.
+    pub around: u64,
     /// TSC ticks from a filled #PF's handler entry to its return.
     pub fill_ticks: u64,
     pub stray: u64,
@@ -763,6 +766,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             kept_dropped: 0,
             scoped: 0,
             prefills: 0,
+            around: 0,
             fill_ticks: 0,
             stray: 0,
             placement: config.placement,
@@ -785,10 +789,11 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
 
 /// The host's counters for the statistics line.
 pub struct Statistics {
-    /// Shadow faults filled, and the pages beside them mapped from the
-    /// same leaves.
+    /// Shadow faults filled, the pages beside them mapped from the same
+    /// leaves, and those mapped from the window's other leaves.
     pub fills: u64,
     pub prefills: u64,
+    pub around: u64,
     /// Nanoseconds the filled faults' handlers took, entry to return
     /// (without the exception's delivery and IRETQ).
     pub fill_ns: u64,
@@ -838,6 +843,7 @@ pub fn statistics() -> Statistics {
     Statistics {
         fills: state.fills,
         prefills: state.prefills,
+        around: state.around,
         fill_ns: (u128::from(state.fill_ticks) * 1_000_000_000 / u128::from(state.tsc_hz.max(1)))
             as u64,
         resets: state.resets,
