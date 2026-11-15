@@ -325,10 +325,10 @@ fn main() -> Status {
         host_firmware::read(&mut firmware_root).unwrap_or_else(|e| output::fatal(e));
     drop(firmware_root);
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
-    let options = choice::resolve(&mut volume, options);
     // What this start changes on a PC disk is pending until Stela's own
     // drivers run: before the firmware exits, a PC disk is only read.
     let mut pending = stela_runtime::pc::disk_writes::Pending::default();
+    let options = choice::resolve(&mut volume, options, &pending);
     status::done("");
     let held = system::held_at_start(&options, &pending);
     let choice::Chosen { options, plan } = choice::choose(&mut volume, options, held, &pending);

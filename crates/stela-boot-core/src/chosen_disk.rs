@@ -91,6 +91,40 @@ impl Stale {
     }
 }
 
+/// Which partition the macOS choice starts from when the USB's record does
+/// not start one: a USB made new, or made again, has no record, yet the PC
+/// may hold the macOS an earlier USB installed. Offering only Install macOS
+/// there offers only to erase it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Adopted {
+    /// The recorded partition starts macOS: nothing is looked for.
+    Recorded,
+    /// The one partition on this PC's disks that starts macOS, by its place
+    /// among those found. The record names it once the macOS choice is
+    /// taken.
+    One(usize),
+    /// No partition found starts macOS: only Install macOS is offered.
+    None,
+    /// This many partitions start macOS, so none can be told to be the one
+    /// meant: only Install macOS is offered, and its picker shows them.
+    Several(usize),
+}
+
+/// What the macOS choice starts from. `recorded` is whether the USB's
+/// record starts macOS; `found` holds, for each of Stela's macOS partitions
+/// on this PC's disks, whether macOS can start from it.
+pub fn adopt(recorded: bool, found: &[bool]) -> Adopted {
+    if recorded {
+        return Adopted::Recorded;
+    }
+    let mut ready = found.iter().enumerate().filter(|(_, ready)| **ready);
+    match (ready.next(), ready.count()) {
+        (None, _) => Adopted::None,
+        (Some((index, _)), 0) => Adopted::One(index),
+        (Some(_), more) => Adopted::Several(more + 1),
+    }
+}
+
 /// A whole disk Install macOS's picker lists, as far as whether it can be
 /// chosen goes.
 #[derive(Clone, Copy, Debug)]
@@ -178,6 +212,21 @@ pub const UNREADABLE_STORE: &str = "NVRAM on the disk chosen for macOS cannot be
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_usb_without_a_usable_record_takes_the_one_macos_on_the_pc() {
+        // The record starts macOS: the disks are not looked at.
+        assert_eq!(adopt(true, &[true, true]), Adopted::Recorded);
+        assert_eq!(adopt(true, &[]), Adopted::Recorded);
+        // A new USB on a PC with one installed macOS, beside a partition
+        // an interrupted install left.
+        assert_eq!(adopt(false, &[true]), Adopted::One(0));
+        assert_eq!(adopt(false, &[false, true]), Adopted::One(1));
+        // Nothing to start, or no way to tell which is meant.
+        assert_eq!(adopt(false, &[]), Adopted::None);
+        assert_eq!(adopt(false, &[false, false]), Adopted::None);
+        assert_eq!(adopt(false, &[true, false, true]), Adopted::Several(2));
+    }
+
     use super::*;
 
     #[test]

@@ -598,6 +598,33 @@ fn disks() -> Vec<Disk> {
     disks
 }
 
+/// Stela's macOS partitions on this PC's disks, each as the record names
+/// one (`SERIAL:GUID`), in the disks' order. A disk without a serial number
+/// of its own is passed over: Stela could not find it again.
+pub fn installed() -> Vec<String> {
+    let disks = disks();
+    let mut found = Vec::new();
+    for disk in &disks {
+        let (Some(serial), Some(table)) = (disk.serial.as_deref(), disk.table.as_ref()) else {
+            continue;
+        };
+        let alone = disks
+            .iter()
+            .filter(|other| other.serial.as_deref() == Some(serial))
+            .count()
+            == 1;
+        if !alone || serial.is_empty() || serial.contains(char::is_whitespace) {
+            continue;
+        }
+        for partition in &table.partitions {
+            if partition.role() == Some(Role::AppleRegion) {
+                found.push(format!("{serial}:{}", partition.unique_guid));
+            }
+        }
+    }
+    found
+}
+
 /// A partition type's name and colour.
 fn kind(partition: &gpt::Partition) -> (&'static str, u32) {
     if let Some(role) = partition.role() {
