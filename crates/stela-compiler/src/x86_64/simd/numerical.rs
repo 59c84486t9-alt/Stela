@@ -1115,25 +1115,6 @@ pub(super) fn nonfinite_lane(
     branch(code, Condition::NotZero)
 }
 
-/// Accumulate IXC and UFC from ECX's MXCSR status (`commit_inexact` with
-/// underflow), leaving ECX with only those fresh FPSR flags.
-pub(super) fn commit_inexact_underflow(code: &mut Code) {
-    let mut asm = code.asm();
-    asm.alu_imm32(
-        Alu::And,
-        Size::Dword,
-        Rcx,
-        (MXCSR_INEXACT | MXCSR_UNDERFLOW) as i32,
-    );
-    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, MXCSR_TO_FPSR_INEXACT_SHIFT);
-    asm.alu(
-        Alu::Or,
-        Size::Dword,
-        state(core::mem::offset_of!(GuestState, fpsr)),
-        Rcx,
-    );
-}
-
 /// The status a guest-visible result rejects ([`reject_other_status`])
 /// except underflow.
 pub(super) fn reject_other_status_but_underflow(code: &mut Code) -> usize {

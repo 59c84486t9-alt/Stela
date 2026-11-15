@@ -1,4 +1,4 @@
-//! Products below the minimum normal (`tiny_product_status` and the sticky
+//! Products below the minimum normal (the full path's `rounded_path` and the sticky
 //! path's known-underflow check) against the reference arithmetic, on every
 //! target the host runs: every inline completion matches the reference in
 //! its lanes and FPSR, every exit leaves the state unchanged, and covered
