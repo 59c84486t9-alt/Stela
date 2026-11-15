@@ -158,7 +158,7 @@ impl Processor {
             _bsp: core::marker::PhantomData,
         };
         mailbox.state.store(PENDING, Ordering::Release);
-        // SAFETY: the selected AP's descriptors/GS and vector0x60 are online.
+        // SAFETY: the selected AP's descriptors/GS and doorbell vector are online.
         // A delivery failure cannot return borrowed ownership: pending waits
         // for completion or stops permanently keeping all resources.
         let delivered = unsafe {

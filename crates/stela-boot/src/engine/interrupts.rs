@@ -12,11 +12,18 @@ mod saved_state;
 pub(crate) use saved_state::SavedState;
 pub(crate) type Handler = for<'image> extern "sysv64" fn(&mut Frame, &SavedState<'image>);
 
-pub const TIMER_VECTOR: u8 = 0x40;
-/// Native worker doorbell; host-device IRQs own 0x50..=0x5f.
-pub(crate) const NATIVE_WAKE_VECTOR: u8 = 0x60;
-/// The MMIO aperture's TLB shootdown (`native_mmio::shootdown`).
-pub(crate) const SHOOTDOWN_VECTOR: u8 = 0x61;
+/// The engine's local APIC timer, in a priority class above every device
+/// and completion vector, as Linux's `LOCAL_TIMER_VECTOR` (0xec,
+/// arch/x86/include/asm/irq_vectors.h): a device vector left in service, or
+/// one that keeps coming, cannot hold it off. Below it the timer waited
+/// behind any of them, and one left in service stopped it for good.
+pub const TIMER_VECTOR: u8 = 0xec;
+/// Native worker doorbell, above the timer as Linux's reschedule IPI
+/// (0xfd); host-device IRQs own 0x50..=0x5f.
+pub(crate) const NATIVE_WAKE_VECTOR: u8 = 0xfd;
+/// The MMIO aperture's TLB shootdown (`native_mmio::shootdown`), above the
+/// timer as Linux's function-call IPI (0xfb) that its TLB shootdowns use.
+pub(crate) const SHOOTDOWN_VECTOR: u8 = 0xfb;
 /// A host device's completion signal (`host::completion_signal`): a
 /// doorbell that also counts the signals apart from other cores' doorbells.
 pub(crate) const SIGNAL_VECTOR: u8 = 0x62;
@@ -399,7 +406,7 @@ vectors!(
     64 none,
     80 none, 81 none, 82 none, 83 none, 84 none, 85 none, 86 none, 87 none,
     88 none, 89 none, 90 none, 91 none, 92 none, 93 none, 94 none, 95 none,
-    96 none, 97 none, 98 none, 99 none, 255 none,
+    96 none, 97 none, 98 none, 99 none, 236 none, 251 none, 253 none, 255 none,
 );
 
 /// Whether the table gives `vector` a stub, and so a gate: an interrupt on
@@ -421,6 +428,18 @@ const _: () = assert!(
         && has_stub(SIGNAL_VECTOR)
         && has_stub(NETWORK_VECTOR)
         && has_stub(SPURIOUS_VECTOR)
+);
+// The timer's class is above every device and completion vector's, so none
+// of them in service holds it off; the doorbell's and the shootdown's are
+// above the timer's, so a compile job's task priority can block the timer
+// and still take them (`native_mmio::shootdown::JOB_PRIORITY`).
+const _: () = assert!(
+    TIMER_VECTOR >> 4 > 0x5f >> 4
+        && TIMER_VECTOR >> 4 > SIGNAL_VECTOR >> 4
+        && TIMER_VECTOR >> 4 > NETWORK_VECTOR >> 4
+        && NATIVE_WAKE_VECTOR >> 4 > TIMER_VECTOR >> 4
+        && SHOOTDOWN_VECTOR >> 4 > TIMER_VECTOR >> 4
+        && TIMER_VECTOR < SPURIOUS_VECTOR
 );
 
 unsafe extern "C" {

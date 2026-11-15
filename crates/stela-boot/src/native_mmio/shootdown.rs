@@ -24,7 +24,9 @@
 //! [`aperture::Processors::request`]: stela_boot_core::aperture::Processors::request
 //! [`Processors::plan`]: stela_boot_core::aperture::Processors::plan
 use super::PROCESSORS;
-use crate::engine::interrupts::{NATIVE_WAKE_VECTOR, SHOOTDOWN_VECTOR, TIMER_VECTOR};
+use crate::engine::interrupts::{
+    NATIVE_WAKE_VECTOR, NETWORK_VECTOR, SHOOTDOWN_VECTOR, SIGNAL_VECTOR, TIMER_VECTOR,
+};
 use core::{
     arch::{asm, x86_64::__cpuid_count},
     ops::Range,
@@ -59,12 +61,18 @@ const ONE_ADDRESS: u64 = 0;
 /// (Intel SDM Vol. 2A, INVPCID).
 const ALL_CONTEXTS: u64 = 2;
 /// The task priority a compile job runs at: it blocks every class up to the
-/// host devices' and the timer's, so only the doorbell and the shootdown
-/// reach it (Intel SDM Vol. 3A 11.8.3.1; CR8 holds TPR bits 7:4).
+/// host devices', the completion signals' and the timer's, so only the
+/// doorbell and the shootdown reach it (Intel SDM Vol. 3A 11.8.3.1; CR8
+/// holds TPR bits 7:4).
 const JOB_PRIORITY: u64 = (SHOOTDOWN_VECTOR as u64 >> 4) - 1;
 const _: () = assert!(NATIVE_WAKE_VECTOR >> 4 == SHOOTDOWN_VECTOR >> 4);
 // Host device interrupts use 0x50..=0x5f.
-const _: () = assert!((TIMER_VECTOR >> 4) as u64 <= JOB_PRIORITY && 0x5f >> 4 <= JOB_PRIORITY);
+const _: () = assert!(
+    (TIMER_VECTOR >> 4) as u64 <= JOB_PRIORITY
+        && (SIGNAL_VECTOR >> 4) as u64 <= JOB_PRIORITY
+        && (NETWORK_VECTOR >> 4) as u64 <= JOB_PRIORITY
+        && 0x5f >> 4 <= JOB_PRIORITY
+);
 
 /// Whether INVPCID is available: 0 unknown, 1 absent, 2 present.
 static INVPCID_PRESENT: AtomicU8 = AtomicU8::new(0);

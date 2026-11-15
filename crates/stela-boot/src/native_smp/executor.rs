@@ -316,7 +316,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                     continue;
                 }
                 // SAFETY: interrupts are disabled and this AP's IDT takes its
-                // 0x60 doorbell, which ends the wait even when already pending.
+                // doorbell, which ends the wait even when already pending.
                 unsafe { crate::native_idle::wait(|| None) };
             }
         }
