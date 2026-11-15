@@ -179,6 +179,23 @@ impl<B: Backend> Nonces<B> {
         })
     }
 
+    /// Whether the store in `backend` is `roots`' own: its record's MAC
+    /// verifies under their key. A missing store refuses as [`Self::open`]
+    /// does; nothing is changed.
+    pub fn authentic(roots: &Roots, mut backend: B) -> Result<bool> {
+        let key = roots.uid(PURPOSE)?;
+        let head = backend.load()?.ok_or(refuse!(
+            "SEP nonce store is missing; explicit provisioning required"
+        ))?;
+        let bytes = head.record.as_slice();
+        let Some(end) = bytes.len().checked_sub(MAC_BYTES) else {
+            return Err(refuse!("SEP nonce store record length is invalid"));
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(&*key).expect("HMAC accepts 256-bit keys");
+        mac.update(&bytes[..end]);
+        Ok(mac.verify_slice(&bytes[end..]).is_ok())
+    }
+
     fn state(&self) -> Result<&State> {
         self.state.as_ref().ok_or(refuse!(
             "SEP nonce store commit outcome is uncertain; reopen required"

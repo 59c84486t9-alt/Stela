@@ -456,6 +456,31 @@ fn open_host(
             &reason.to_string().replace('\n', " "),
         ));
     }
+    // An installed macOS starts only as the machine it was installed as,
+    // which its machine state names; the USB's `--ecid` is its own, for the
+    // installs it makes, and differs when the USB was made again since.
+    if devices.preboot.is_some() && options.install.is_none() && options.nor.is_some() {
+        let at = match state_in_storage {
+            true => 0,
+            false => {
+                usize::from(options.storage.is_some())
+                    + usize::from(options.restore_source.is_some())
+            }
+        };
+        let recorded = devices
+            .services
+            .get_mut(at)
+            .and_then(|device| nor::recorded_ecid(&mut **device, state_in_storage));
+        if let Some(recorded) = recorded
+            && options.ecid != Some(recorded)
+        {
+            output::arguments(format_args!(
+                "IDENTITY the installed macOS's machine state names another ECID than this \
+                 USB's options, which a USB made again has: this start uses the install's\n"
+            ));
+            options.ecid = Some(recorded);
+        }
+    }
     let built = devices.preboot.take().map(|partition| {
         from_disk(
             partition,
@@ -648,6 +673,21 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
         ));
         let mut opened = nor::HostNor::open(device);
         crate::status::done("");
+        // Before macOS starts: its `seputil` ends without a reason on a
+        // machine that is not the one it was installed as, and the kernel
+        // panics on that.
+        if options.install.is_none()
+            && let Some(ecid) = options.ecid
+            && let Ok(stela_soc::machine::sep_state::Owner::Other(_)) =
+                stela_soc::machine::sep_state::owner(&opened.3, ecid)
+        {
+            output::fatal(
+                "this macOS was installed by a Stela USB with another machine identity (ECID) \
+                 than this USB's, and its disk does not name it. Start it with the USB that \
+                 installed it once, or put that USB's --ecid (the ecid line of a boot log it \
+                 wrote) on the macOS line of EFI\\stela\\choices.cfg. Install macOS replaces it.",
+            );
+        }
         bundle_repair::nvram(&opened.2.proxy);
         bundle_repair::take(&mut opened.0, &mut opened.1, &mut opened.2);
         opened

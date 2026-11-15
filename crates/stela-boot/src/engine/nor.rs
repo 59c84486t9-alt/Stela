@@ -42,6 +42,28 @@ pub fn split(partition: Box<dyn BlockDevice>) -> (Box<dyn BlockDevice>, Box<dyn 
     (Box::new(namespace), Box::new(state))
 }
 
+/// The ECID the machine state on `device` names as its machine's
+/// ([`sep_state::recorded_ecid`]), read without changing anything: `device`
+/// is the machine-state partition, or with `in_storage` the Apple region
+/// that keeps it in its tail. None when it names none or cannot be read.
+pub fn recorded_ecid(device: &mut dyn BlockDevice, in_storage: bool) -> Option<u64> {
+    let block = u64::from(device.identity().block_size);
+    let state = match in_storage {
+        true => machine_state::split(device.identity().bytes())
+            .ok()?
+            .state_offset(),
+        false => 0,
+    };
+    let (roots, bytes) = sep_state::roots_area(CAPACITY as u64);
+    let at = state.checked_add(roots)?;
+    if block == 0 || !at.is_multiple_of(block) || !(bytes as u64).is_multiple_of(block) {
+        return None;
+    }
+    let mut area = alloc::vec![0; bytes];
+    device.read(at / block, &mut area).ok()?;
+    sep_state::recorded_ecid(&area)
+}
+
 /// The longest the stop waits for the NOR's stores, and then for the RTC
 /// anchor's: a disk that never completes a command must not keep the PC at
 /// the stop.
