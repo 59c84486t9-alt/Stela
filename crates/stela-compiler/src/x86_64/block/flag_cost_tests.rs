@@ -288,7 +288,7 @@ fn flag_costs_are_as_recorded() {
 /// stela-compiler --lib time_compare_loop -- --ignored --nocapture`.
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 #[test]
-#[ignore = "a timing, not a check"]
+#[ignore = "manual: opt-in"]
 fn time_compare_loop() {
     use crate::{GuestState, state::Limit, x86_64::pinned};
     const WORDS: [u32; 8] = [

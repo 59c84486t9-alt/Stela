@@ -4,11 +4,13 @@
 //! emitter, which stores NZCV at each setter; and the word a fault, an
 //! exit and a frame-bound emitter find.
 use super::{emit_for_target, emit_system_mode};
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+use crate::x86_64::flag_word;
 use crate::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{Decoder, Instruction},
     state::Limit,
-    x86_64::{MemoryChecks, NativeSystem, flag_word, native, pinned},
+    x86_64::{MemoryChecks, NativeSystem, native, pinned},
 };
 use alloc::{vec, vec::Vec};
 
@@ -284,9 +286,11 @@ fn a_fault_after_a_setter_finds_its_nzcv() {
     assert!(faults >= 600, "{faults}");
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 /// The Arm NZCV of a setter from its operands.
 type Model = fn(u64, u64) -> u32;
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 /// Arm NZCV of the 64-bit subtraction `left - right`.
 fn nzcv_of_subtract(left: u64, right: u64) -> u32 {
     let (result, borrow) = left.overflowing_sub(right);
@@ -294,6 +298,7 @@ fn nzcv_of_subtract(left: u64, right: u64) -> u32 {
     nzcv(result, !borrow, overflow)
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 /// Arm NZCV of the 64-bit addition `left + right`.
 fn nzcv_of_add(left: u64, right: u64) -> u32 {
     let (result, carry) = left.overflowing_add(right);
@@ -301,6 +306,7 @@ fn nzcv_of_add(left: u64, right: u64) -> u32 {
     nzcv(result, carry, overflow)
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 fn nzcv(result: u64, carry: bool, overflow: bool) -> u32 {
     u32::from(result >> 63 != 0) << 31
         | u32::from(result == 0) << 30

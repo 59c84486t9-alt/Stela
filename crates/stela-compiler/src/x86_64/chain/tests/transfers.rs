@@ -698,7 +698,7 @@ fn a_linked_scanner_counts_every_transfer_and_instruction() {
 /// The host time and instructions the scanner takes per guest instruction
 /// on this host: a measurement, run on demand.
 #[test]
-#[ignore = "a measurement: prints host time and instructions per guest instruction"]
+#[ignore = "manual: opt-in"]
 fn scanner_time_on_this_host() {
     const REPEATS: usize = 2000;
     let text = text(4096);
