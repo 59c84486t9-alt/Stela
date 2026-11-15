@@ -7,8 +7,13 @@
 //! `DEFERRED` and leaves a job that creates the pipeline from its stages'
 //! NIR, through the pipeline store's cache while that grows, else the full
 //! store's and then the backend's own: NIR to machine code, when no cache
-//! holds it, runs in the job too. The job keeps the pipeline, and the call's
-//! next run takes it with no driver work.
+//! holds it, runs in the job too. A creation through a binary archive's
+//! cache that adds what it lacks (`PipelineSource::Cached`, as an archived
+//! pipeline's variants are) runs in a job through that same cache, which the
+//! archive's destruction then leaves to the job ([`SharedCache`]); a lookup
+//! that fails on a miss (`Archived`) stays in the turn, whose next source
+//! depends on it. The job keeps the pipeline, and the call's next run takes
+//! it with no driver work.
 //!
 //! The job shares the compiler's NIR rather than copying it in the turn
 //! (copies took 15-35 ms): it pins each stage ([`pin_nir`]), which the
@@ -108,6 +113,8 @@ pub(super) struct Deferral {
     failed: BTreeSet<[u8; 32]>,
     /// Pipelines jobs made, with their stages pinned.
     made: Kept<MadePipeline>,
+    /// Archives' caches jobs were given, while their archives stay.
+    shared: Vec<Arc<SharedCache>>,
 }
 
 impl Default for Kept<MadePipeline> {
@@ -135,8 +142,29 @@ struct Ran {
     into_store: bool,
     hit: bool,
     pins: Vec<PinnedNir>,
+    /// The archive's cache it created through, kept until it is adopted.
+    _cache: Option<Arc<SharedCache>>,
     gone: Arc<AtomicBool>,
     device: ash::Device,
+}
+
+/// A binary archive's pipeline cache that jobs create through: destroyed by
+/// the last of the archive and those jobs ([`NativeBackend::cache_in_use`]).
+pub(super) struct SharedCache {
+    cache: vk::PipelineCache,
+    /// The archive is gone: the last holder destroys the cache.
+    doomed: AtomicBool,
+    gone: Arc<AtomicBool>,
+    device: ash::Device,
+}
+
+impl Drop for SharedCache {
+    fn drop(&mut self) {
+        if self.doomed.load(Ordering::Acquire) && !self.gone.load(Ordering::Acquire) {
+            // SAFETY: its archive and every job that used it are gone.
+            unsafe { self.device.destroy_pipeline_cache(self.cache, None) };
+        }
+    }
 }
 
 impl Drop for Ran {
@@ -148,6 +176,15 @@ impl Drop for Ran {
             unsafe { self.device.destroy_pipeline(pipeline, None) };
         }
     }
+}
+
+/// Takes the hold `matches` finds out of `holds`: `Some` while a job holds
+/// it too, `None` when nothing else does or there is none. Jobs take holds
+/// only in a turn, as this runs, so none appears meanwhile.
+fn still_held<T>(holds: &mut Vec<Arc<T>>, matches: impl Fn(&T) -> bool) -> Option<Arc<T>> {
+    let at = holds.iter().position(|hold| matches(hold))?;
+    let hold = holds.swap_remove(at);
+    (Arc::strong_count(&hold) > 1).then_some(hold)
 }
 
 /// A pipeline creation a call asks for.
@@ -245,6 +282,8 @@ impl Deferral {
     /// # Safety
     /// The device is idle and no job runs ([`Self::retire`]).
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
+        // Their archives' caches stay their owners'.
+        self.shared.clear();
         for made in self.made.drain() {
             // SAFETY: the caller's; no call took the pipeline.
             unsafe { device.destroy_pipeline(made.pipeline, None) };
@@ -265,11 +304,12 @@ impl Deferral {
 }
 
 impl NativeBackend {
-    /// A compiled creation: the pipeline a job made for it, else, while the
-    /// call may defer, `DEFERRED` with the job that makes it left. `None`
-    /// creates in the call as without deferral.
+    /// A compiled creation, or one an archive's cache adds: the pipeline a
+    /// job made for it, else, while the call may defer, `DEFERRED` with the
+    /// job that makes it left. `None` creates in the call as without
+    /// deferral.
     pub(super) fn deferred_creation(&mut self, wanted: Wanted<'_>) -> Option<Result<vk::Pipeline>> {
-        if wanted.source() != PipelineSource::Compiled {
+        if let PipelineSource::Archived(_) = wanted.source() {
             return None;
         }
         let key = wanted.key();
@@ -333,12 +373,50 @@ impl NativeBackend {
         Some(self.deferral.own)
     }
 
+    /// Whether `cache`'s destruction waits for the jobs that create through
+    /// it, the last of which destroys it; false when none holds it.
+    pub(super) fn cache_in_use(&mut self, cache: vk::PipelineCache) -> bool {
+        match still_held(&mut self.deferral.shared, |shared| shared.cache == cache) {
+            Some(shared) => {
+                shared.doomed.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A hold of the archive cache `cache` for a job.
+    fn share_cache(&mut self, cache: vk::PipelineCache) -> Arc<SharedCache> {
+        if let Some(shared) = self
+            .deferral
+            .shared
+            .iter()
+            .find(|shared| shared.cache == cache)
+        {
+            return shared.clone();
+        }
+        let shared = Arc::new(SharedCache {
+            cache,
+            doomed: AtomicBool::new(false),
+            gone: self.deferral.gone.clone(),
+            device: self.device.clone(),
+        });
+        self.deferral.shared.push(shared.clone());
+        shared
+    }
+
     /// A job that creates `wanted` from its stages' NIR, pinned, and keeps
     /// the pipeline, or `None` when no cache can be made.
     fn pipeline_job(&mut self, wanted: Wanted<'_>, key: [u8; 32]) -> Option<Job> {
         // A growing store's cache takes what the job compiles; a full one is
-        // looked in, and the backend's own takes what it lacks.
+        // looked in, and the backend's own takes what it lacks. An archive's
+        // creation goes through the archive's cache alone, as in its turn.
+        let archive = match wanted.source() {
+            PipelineSource::Cached(cache) => Some(self.share_cache(super::handle(cache.0))),
+            _ => None,
+        };
         let (first, into_store, then) = match self.store.cache() {
+            _ if archive.is_some() => (wanted.source(), false, None),
             Some((store, true)) => (
                 PipelineSource::Cached(PipelineCache(raw(store))),
                 true,
@@ -372,6 +450,7 @@ impl NativeBackend {
         let device = self.device.clone();
         let layout = self.layout;
         let gone = self.deferral.gone.clone();
+        let from_archive = archive.is_some();
         Some(Job::new(key, Owner::Backend, move || {
             let wanted = owned.wanted();
             let mut feedback = vk::PipelineCreationFeedback::default();
@@ -390,7 +469,10 @@ impl NativeBackend {
                         vk::PipelineCreationFeedbackFlags::VALID
                             | vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT,
                     );
-                    super::pipeline_store::note_lookup(hit, feedback.duration);
+                    // The store's lookups, not an archive's, as in a turn.
+                    if !from_archive {
+                        super::pipeline_store::note_lookup(hit, feedback.duration);
+                    }
                     created.ok()
                 })
                 .flatten();
@@ -400,6 +482,7 @@ impl NativeBackend {
                 into_store,
                 hit,
                 pins,
+                _cache: archive,
                 gone,
                 device,
             }) as Made
@@ -470,7 +553,8 @@ fn create(
 
 #[cfg(test)]
 mod tests {
-    use super::Counted;
+    use super::{Counted, still_held};
+    use alloc::{sync::Arc, vec};
 
     #[test]
     fn counted_work_is_taken_once_with_its_longest() {
@@ -479,5 +563,20 @@ mod tests {
         counted.note(70);
         assert_eq!(counted.take(), [2, 100, 70]);
         assert_eq!(counted.take(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn an_archive_cache_a_job_holds_outlives_its_archive_until_the_job_drops_it() {
+        let job = Arc::new(7u32);
+        let mut holds = vec![Arc::new(3u32), job.clone()];
+        let kept = still_held(&mut holds, |&cache| cache == 7).expect("the job holds it");
+        assert_eq!(holds.len(), 1, "the backend's hold is gone");
+        drop(job);
+        assert_eq!(Arc::strong_count(&kept), 1, "the last holder destroys it");
+        // Nothing but the backend holds this one: destroyed at once.
+        assert!(still_held(&mut holds, |&cache| cache == 3).is_none());
+        assert!(holds.is_empty());
+        // One no job was given is destroyed at once too.
+        assert!(still_held(&mut holds, |&cache| cache == 9).is_none());
     }
 }
