@@ -87,11 +87,17 @@ const CPUID_BMI2: u32 = 1 << 8;
 const CPUID_FMA: u32 = 1 << 12;
 const CPUID_F16C: u32 = 1 << 29;
 const CPUID_AVX2: u32 = 1 << 5;
+/// CPUID.7.0:EBX AVX-512F: EVEX recipes, which also need the OS to enable
+/// opmask and ZMM state ([`XCR0_ZMM`]) beside YMM state.
+const CPUID_AVX512F: u32 = 1 << 16;
 /// CR4.OSXSAVE, which makes XGETBV and XCR0 usable.
 const CR4_OSXSAVE: u64 = 1 << 18;
 /// XCR0's SSE and AVX bits: XMM and YMM state, which the host's interrupt
 /// entries save whenever XCR0 enables it.
 const XCR0_YMM: u64 = 0x6;
+/// XCR0's opmask, ZMM_Hi256 and Hi16_ZMM bits: the AVX-512 state, which the
+/// host's interrupt entries save whenever XCR0 enables it.
+const XCR0_ZMM: u64 = 0xe0;
 /// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
 const FAST_PDEP_FAMILY: u32 = 0x19;
 #[cfg(any(
@@ -239,8 +245,16 @@ impl Observation {
             if d.cpuid7_ebx & CPUID_AVX2 != 0 {
                 target = target.with_avx2();
             }
+            // EVEX recipes: AVX-512F hardware whose opmask and ZMM state
+            // this core's XCR0 also enables (Stela's `enable_avx` turns it
+            // on where XSAVE manages it, as Linux does).
+            if c.xcr0 & XCR0_ZMM == XCR0_ZMM && d.cpuid7_ebx & CPUID_AVX512F != 0 {
+                target = target
+                    .with_avx512f()
+                    .with_avx512_extensions(d.cpuid7_ebx, d.cpuid7_ecx);
+            }
         }
-        // No AVX-512, cache-line atomicity or DOIT recipe is admitted.
+        // No cache-line atomicity or DOIT recipe is admitted.
         Ok(target)
     }
 }
@@ -536,8 +550,14 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
             cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
             extended_ecx: ext.ecx & CPUID_LZCNT,
             extended_edx: ext.edx & CPUID_LONG_NX,
-            cpuid7_ebx: leaf7.ebx & (CPUID_SHA | CPUID_BMI1 | CPUID_BMI2 | CPUID_AVX2),
-            cpuid7_ecx: leaf7.ecx & ((1 << 16) | CPUID_GFNI),
+            cpuid7_ebx: leaf7.ebx
+                & (CPUID_SHA
+                    | CPUID_BMI1
+                    | CPUID_BMI2
+                    | CPUID_AVX2
+                    | CPUID_AVX512F
+                    | TargetCpu::AVX512_EXTENSION_BITS.0),
+            cpuid7_ecx: leaf7.ecx & ((1 << 16) | CPUID_GFNI | TargetCpu::AVX512_EXTENSION_BITS.1),
             family: display_family(basic.eax),
             identity: probe,
         },

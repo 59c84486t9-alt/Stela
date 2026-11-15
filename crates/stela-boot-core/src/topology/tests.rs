@@ -715,6 +715,52 @@ fn common_target_keeps_vex_vector_recipes_only_with_every_worker_ymm_state() {
     assert!(!common.supports(TargetCpu::Avx2));
 }
 
+/// AVX-512F and its extensions need opmask and ZMM state that every
+/// installed worker's XCR0 enables beside its YMM state, and the CPUID bits
+/// on every worker.
+#[test]
+fn common_target_keeps_evex_recipes_only_with_every_worker_zmm_state() {
+    use stela_compiler::TargetCpu;
+    const AVX2: u32 = 1 << 5;
+    const AVX512F: u32 = 1 << 16;
+    const AVX512_EBX: u32 = (1 << 17) | (1 << 28) | (1 << 30) | (1 << 31);
+    let mut rich = target_snapshot(TargetCpu::AMD_VENDOR);
+    rich.records[2].ebx |= AVX2 | AVX512F | AVX512_EBX;
+    rich.records[2].ecx |= 1 << 14;
+    rich.xcr0 = 0xe7;
+    rich.xcr0_valid = true;
+    let common = common_native_target(&[&rich]).unwrap();
+    assert!(common.supports(TargetCpu::Baseline.with_avx2()));
+    assert!(common.supports(TargetCpu::Baseline.with_avx512f().with_avx512vl()));
+    assert!(common.supports(TargetCpu::Avx512vpopcntdq));
+    assert!(!common.supports(TargetCpu::Avx512vbmi));
+    let mut ymm_only = rich;
+    ymm_only.xcr0 = 0x7;
+    let mut unobserved = rich;
+    unobserved.xcr0_valid = false;
+    let mut without_avx = rich;
+    without_avx.records[0].ecx &= !(1 << 28);
+    let mut fused_off = rich;
+    fused_off.records[2].ebx &= !AVX512F;
+    for worker in [ymm_only, unobserved, without_avx, fused_off] {
+        let common = common_native_target(&[&rich, &worker]).unwrap();
+        for excluded in [
+            TargetCpu::Avx512f,
+            TargetCpu::Avx512vl,
+            TargetCpu::Avx512bw,
+            TargetCpu::Avx512vpopcntdq,
+        ] {
+            assert!(!common.supports(excluded), "{excluded:?}");
+        }
+    }
+    // A worker without one extension removes only that one.
+    let mut without_vl = rich;
+    without_vl.records[2].ebx &= !(1 << 31);
+    let common = common_native_target(&[&rich, &without_vl]).unwrap();
+    assert!(common.supports(TargetCpu::Avx512f.with_avx512bw()));
+    assert!(!common.supports(TargetCpu::Avx512vl));
+}
+
 /// BMI1 and BMI2 need VEX decoding, which an Intel worker without AVX
 /// lacks, and fast PDEP a Zen 3 or later AMD core on every worker.
 #[test]

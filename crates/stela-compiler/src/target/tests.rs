@@ -345,6 +345,44 @@ const RICH: HostCpuid = HostCpuid {
     avx512_on_demand: false,
 };
 
+/// The bare-metal boot's AVX-512 extensions from leaf 7 alone match the
+/// probes', for each bit on its own and for none.
+#[test]
+fn avx512_extensions_from_leaf_7_match_the_probes() {
+    let (ebx_bits, ecx_bits) = TargetCpu::AVX512_EXTENSION_BITS;
+    let mut cases = alloc::vec![(1u32 << 16, 0u32), (u32::MAX, u32::MAX)];
+    cases.extend((0..32).map(|bit| (1 << 16 | 1 << bit, 0)));
+    cases.extend((0..32).map(|bit| (1 << 16, 1 << bit)));
+    for (ebx, ecx) in cases {
+        let probed = TargetCpu::from_cpuid(&HostCpuid {
+            leaf7_ebx: ebx,
+            leaf7_ecx: ecx,
+            leaf7_edx: 0,
+            leaf7_1_eax: 0,
+            leaf7_1_edx: 0,
+            ..RICH
+        });
+        let evex = |target: TargetCpu| {
+            [
+                TargetCpu::Avx512f,
+                TargetCpu::Avx512dq,
+                TargetCpu::Avx512cd,
+                TargetCpu::Avx512bw,
+                TargetCpu::Avx512vl,
+                TargetCpu::Avx512vbmi,
+                TargetCpu::Avx512vnni,
+                TargetCpu::Avx512bitalg,
+                TargetCpu::Avx512vpopcntdq,
+            ]
+            .map(|feature| target.supports(feature))
+        };
+        let declared = TargetCpu::Baseline
+            .with_avx512f()
+            .with_avx512_extensions(ebx & ebx_bits, ecx & ecx_bits);
+        assert_eq!(evex(declared), evex(probed), "{ebx:#x} {ecx:#x}");
+    }
+}
+
 #[test]
 fn a_rich_host_has_every_feature_and_the_psabi_levels() {
     let rich = TargetCpu::from_cpuid(&RICH);

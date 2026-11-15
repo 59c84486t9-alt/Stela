@@ -350,8 +350,11 @@ pub fn common_native_target(
     const FMA: u32 = 1 << 12;
     const F16C: u32 = 1 << 29;
     const AVX2: u32 = 1 << 5;
+    const AVX512F: u32 = 1 << 16;
     /// XCR0's SSE and AVX bits: the OS saves XMM and YMM state.
     const XCR0_YMM: u64 = 0x6;
+    /// XCR0's opmask, ZMM_Hi256 and Hi16_ZMM bits: the AVX-512 state.
+    const XCR0_ZMM: u64 = 0xe0;
     /// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
     const FAST_PDEP_FAMILY: u32 = 0x19;
     if observations.is_empty() || observations.len() > MAX_CORES {
@@ -367,6 +370,9 @@ pub fn common_native_target(
     // VEX vector recipes: AVX hardware whose XMM and YMM state the
     // installed worker's XCR0 enables, which the interrupt entries save.
     let mut ymm = true;
+    // EVEX recipes: AVX-512F hardware whose opmask and ZMM state every
+    // installed worker's XCR0 also enables.
+    let mut zmm = true;
     // AMD's Zen 1 and Zen 2, and Hygon's Zen-derived cores, microcode PDEP
     // and PEXT; the display family tells them apart.
     let mut fast_pdep = true;
@@ -396,7 +402,10 @@ pub fn common_native_target(
         let vendor = [vendor.ebx, vendor.edx, vendor.ecx];
         atomic16 &= TargetCpu::atomic_load16_guaranteed(vendor, basic.ecx);
         vex &= vendor != TargetCpu::INTEL_VENDOR || basic.ecx & AVX != 0;
-        ymm &= basic.ecx & AVX != 0 && snapshot.xcr0_valid && snapshot.xcr0 & XCR0_YMM == XCR0_YMM;
+        let worker_ymm =
+            basic.ecx & AVX != 0 && snapshot.xcr0_valid && snapshot.xcr0 & XCR0_YMM == XCR0_YMM;
+        ymm &= worker_ymm;
+        zmm &= worker_ymm && snapshot.xcr0 & XCR0_ZMM == XCR0_ZMM;
         let base_family = (basic.eax >> 8) & 0xf;
         let family = if base_family == 0xf {
             base_family + ((basic.eax >> 20) & 0xff)
@@ -437,6 +446,11 @@ pub fn common_native_target(
         if present {
             target = with(target);
         }
+    }
+    if zmm && structured_ebx & AVX512F != 0 {
+        target = target
+            .with_avx512f()
+            .with_avx512_extensions(structured_ebx, structured_ecx);
     }
     Ok(target)
 }

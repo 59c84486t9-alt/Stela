@@ -61,6 +61,62 @@ fn vex_vector_recipes_require_live_ymm_state() {
     assert!(!actual.target().unwrap().supports(TargetCpu::Avx2));
 }
 
+/// AVX-512F and its extensions need AVX-512F hardware whose opmask and ZMM
+/// state this core's XCR0 enables beside YMM state; a later change of XCR0
+/// refuses entry.
+#[test]
+fn evex_recipes_require_live_zmm_state() {
+    let mut actual = baseline();
+    actual.declarations.vendor = TargetCpu::AMD_VENDOR;
+    actual.declarations.cpuid1_ecx = CPUID_AVX | CPUID_FMA | CPUID_F16C;
+    actual.declarations.cpuid7_ebx =
+        CPUID_AVX2 | CPUID_AVX512F | TargetCpu::AVX512_EXTENSION_BITS.0;
+    actual.declarations.cpuid7_ecx = 1 << 14;
+    actual.controls.cr4 |= CR4_OSXSAVE;
+    actual.controls.xcr0 = 0x7;
+    assert!(!actual.target().unwrap().supports(TargetCpu::Avx512f));
+    actual.controls.xcr0 = 0xe7;
+    let target = actual.target().unwrap();
+    let evex = TargetCpu::Baseline
+        .with_avx512f()
+        .with_avx512vl()
+        .with_avx512bw()
+        .with_avx512cd()
+        .with_avx512dq()
+        .with_avx512vpopcntdq();
+    assert!(target.supports(evex));
+    assert!(!target.supports(TargetCpu::Avx512vbmi));
+    let proof = NativeSystemTarget {
+        observed: actual,
+        lease: None,
+        target,
+    };
+    assert_eq!(proof.revalidate_observation(actual), Ok(()));
+    let mut narrower = actual;
+    narrower.controls.xcr0 = 0x7;
+    assert_eq!(
+        proof.revalidate_observation(narrower),
+        Err(Refusal::TargetChanged)
+    );
+    // Partial ZMM state, AVX-512 fused off, or no AVX: no EVEX recipe.
+    let mut partial = actual;
+    partial.controls.xcr0 = 0x67;
+    let mut fused_off = actual;
+    fused_off.declarations.cpuid7_ebx &= !CPUID_AVX512F;
+    let mut without_avx = actual;
+    without_avx.declarations.cpuid1_ecx &= !CPUID_AVX;
+    for observation in [partial, fused_off, without_avx] {
+        let target = observation.target().unwrap();
+        for excluded in [
+            TargetCpu::Avx512f,
+            TargetCpu::Avx512vl,
+            TargetCpu::Avx512vpopcntdq,
+        ] {
+            assert!(!target.supports(excluded), "{excluded:?}");
+        }
+    }
+}
+
 #[test]
 fn optional_legacy_extensions_require_live_declarations_without_osxsave() {
     let mut actual = baseline();

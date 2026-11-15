@@ -469,6 +469,47 @@ impl TargetCpu {
         .with_avx512bw()
         .with_avx512cd()
         .with_avx512dq();
+    /// `self` with the AVX-512 extensions beside AVX-512F that the
+    /// CPUID.(EAX=07H,ECX=0) `ebx` and `ecx` values enumerate, as this
+    /// type's own probes read them: EBX DQ (17), CD (28), BW (30) and VL
+    /// (31); ECX VBMI (1), VNNI (11), BITALG (12) and VPOPCNTDQ (14). For a
+    /// caller that admitted [`Self::Avx512f`] with OS-enabled opmask and ZMM
+    /// state, such as the bare-metal boot from each processor's CPUID and
+    /// XCR0.
+    pub const fn with_avx512_extensions(self, ebx: u32, ecx: u32) -> Self {
+        let mut target = self;
+        if ebx & (1 << 17) != 0 {
+            target = target.with_avx512dq();
+        }
+        if ebx & (1 << 28) != 0 {
+            target = target.with_avx512cd();
+        }
+        if ebx & (1 << 30) != 0 {
+            target = target.with_avx512bw();
+        }
+        if ebx & (1 << 31) != 0 {
+            target = target.with_avx512vl();
+        }
+        if ecx & (1 << 1) != 0 {
+            target = target.with_avx512vbmi();
+        }
+        if ecx & (1 << 11) != 0 {
+            target = target.with_avx512vnni();
+        }
+        if ecx & (1 << 12) != 0 {
+            target = target.with_avx512bitalg();
+        }
+        if ecx & (1 << 14) != 0 {
+            target = target.with_avx512vpopcntdq();
+        }
+        target
+    }
+    /// The CPUID.(EAX=07H,ECX=0) EBX and ECX bits
+    /// [`Self::with_avx512_extensions`] reads.
+    pub const AVX512_EXTENSION_BITS: (u32, u32) = (
+        (1 << 17) | (1 << 28) | (1 << 30) | (1 << 31),
+        (1 << 1) | (1 << 11) | (1 << 12) | (1 << 14),
+    );
     /// The host tiers whose data-independent-timing lowerings the DIT unit
     /// tests check (`x86_64::{integer_math, integer_unary, crc}`), largest
     /// first: each psABI level with PCLMULQDQ, AES, SHA and aligned 16-byte
