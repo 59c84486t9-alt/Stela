@@ -347,13 +347,8 @@ pub fn write() {
                 return Ok(bytes);
             }
             let running = writer.running.as_mut().expect("started");
-            bytes += running
-                .execution
-                .plan()
-                .blobs
-                .iter()
-                .map(Blob::length)
-                .sum::<u64>();
+            // A dropped blob is not written ("PIPELINES full" names it).
+            bytes += running.execution.plan().placed_bytes();
             let done = translations::with_store_file(NAME, |device, extents| {
                 let mut target = Direct { device, extents };
                 while !running.execution.advance(&mut target, PIECE_BYTES)? {}

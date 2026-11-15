@@ -572,3 +572,28 @@ fn a_shared_blob_is_read_without_a_copy_of_its_own() {
     blob.source.read_at(1, &mut into);
     assert_eq!(into, [2, 3]);
 }
+
+#[test]
+fn placed_bytes_count_only_the_blobs_a_plan_writes() {
+    let size = DATA_START + 4 * ALIGN;
+    let change = Change {
+        replace: vec![CACHE],
+        remove: Vec::new(),
+        blobs: blobs![(CACHE, blob(1, 5000)), (LOG, blob(2, 5 * ALIGN as usize))],
+    };
+    let planned = plan(None, DOMAIN, KEY, size, change);
+    assert_eq!(planned.dropped, vec![1]);
+    assert_eq!(planned.placed_bytes(), 5000);
+    let none = plan(
+        None,
+        DOMAIN,
+        KEY,
+        size,
+        Change {
+            replace: vec![CACHE],
+            remove: Vec::new(),
+            blobs: blobs![(CACHE, blob(1, 5 * ALIGN as usize))],
+        },
+    );
+    assert_eq!(none.placed_bytes(), 0, "a dropped blob writes nothing");
+}

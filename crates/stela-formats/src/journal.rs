@@ -332,6 +332,19 @@ pub struct Plan<'a> {
     pub last: Option<Commit>,
 }
 
+impl Plan<'_> {
+    /// The bytes of the blobs the plan writes: none of a dropped blob.
+    pub fn placed_bytes(&self) -> u64 {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Data { blob, .. } => self.blobs.get(*blob).map(Blob::length),
+                _ => None,
+            })
+            .sum()
+    }
+}
+
 /// First fit for `length` bytes among the data area of `end` bytes less
 /// `taken`, kept sorted.
 fn place(taken: &mut Vec<(u64, u64)>, end: u64, length: u64) -> Option<u64> {
