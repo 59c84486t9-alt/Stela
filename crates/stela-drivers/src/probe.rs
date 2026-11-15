@@ -60,6 +60,8 @@ pub enum Error {
     /// The original root refused a driver's quiescence receipt.
     Preparation(crate::bus::pci::requester::preparation::Error),
     Vmd(crate::bus::vmd::Error),
+    /// A refusal of a VMD host's own BARs or bus range, with what it read.
+    VmdResource(crate::bus::vmd::Error, native::VmdWords),
     Tg3(net::tg3::Error),
     Aqtion(net::aqtion::native::Error),
     Sfh(input::sfh::Error),
@@ -92,6 +94,7 @@ impl fmt::Display for Error {
             Self::Native(error) => error.fmt(f),
             Self::Preparation(error) => write!(f, "cold requester preparation: {error}"),
             Self::Vmd(error) => write!(f, "VMD: {error}"),
+            Self::VmdResource(error, words) => write!(f, "VMD: {error}; {words}"),
             Self::Tg3(error) => write!(f, "tg3: {error}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error}"),
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
@@ -960,7 +963,7 @@ impl Devices {
         };
         match error {
             Error::Enumeration(_) => "PCI",
-            Error::Vmd(_) => "storage",
+            Error::Vmd(_) | Error::VmdResource(..) => "storage",
             // The r8169 Ethernet driver's; a Realtek card reader fails as a
             // device.
             Error::Realtek(_) | Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
