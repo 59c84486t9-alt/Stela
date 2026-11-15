@@ -104,6 +104,9 @@ const CSTS: u64 = 0x1c;
 /// How long a shutdown sends queued discards to the disk before it gives up
 /// the rest: 10 s of the 24 MHz counter, under half its driver's limit.
 const SHUTDOWN_DISCARDS: u64 = 240_000_000;
+/// The host key of a shutdown's flush ([`host::HostDisk::submit`]), apart
+/// from every command's queue and tag.
+const SHUTDOWN_FLUSH: u32 = u32::MAX;
 const AQA: u64 = 0x24;
 const ASQ: u64 = 0x28;
 const ACQ: u64 = 0x30;
@@ -284,6 +287,9 @@ pub struct Ans {
     shutdown: bool,
     /// When the shutdown in progress was first run, in counter ticks.
     shutdown_since: Option<u64>,
+    /// Whether a shutdown's flush runs on the host disk
+    /// ([`SHUTDOWN_FLUSH`]): the notification completes once it has.
+    flushing: bool,
     /// NVMe feature state, indexed by the small standard feature IDs.
     features: [u32; 12],
     debug: debug::DebugService,
@@ -365,6 +371,7 @@ impl Ans {
             auto_queue: false,
             shutdown: false,
             shutdown_since: None,
+            flushing: false,
             features,
             debug: debug::DebugService::default(),
             timestamp: 0,
@@ -402,16 +409,16 @@ impl Ans {
     /// or it is time to look for it.
     pub fn pending(&self, now: u64) -> bool {
         self.executing()
-            && (self.shutdown
+            && ((self.shutdown && !self.flushing)
                 || !self.pending.is_empty()
                 || !self.completed.is_empty()
                 || (self.host_work() && (now >= self.look || self.medium.device.posted())))
     }
 
-    /// Whether the host disk runs anything: a command's transfers or its
-    /// background discards.
+    /// Whether the host disk runs anything: a command's transfers, its
+    /// background discards or a shutdown's flush.
     fn host_work(&self) -> bool {
-        !self.inflight.is_empty() || self.medium.device.discarding()
+        !self.inflight.is_empty() || self.flushing || self.medium.device.discarding()
     }
 
     /// When to look for the running host transfers, if any run: at once
@@ -816,7 +823,12 @@ impl Ans {
         } else {
             self.shutdown_since = None;
         }
+        let mut flushed = None;
         for (key, done) in self.medium.device.poll(now) {
+            if key == SHUTDOWN_FLUSH {
+                flushed = Some(done);
+                continue;
+            }
             let Some(inflight) = self.inflight.remove(&key) else {
                 return Err(refusal(1, refuse!("ANS host transfer for no command")));
             };
@@ -830,6 +842,10 @@ impl Ans {
                 outcome,
                 after_host: true,
             });
+        }
+        if let Some(done) = flushed {
+            self.flushing = false;
+            self.flushed(done.map(drop))?;
         }
         // Submitted commands execute in order; a host transfer runs while
         // the next ones execute.
@@ -979,25 +995,53 @@ impl Ans {
         // Discards still queued for a pause in transfers go to the disk
         // before the shutdown completes: its flush does not send them, and
         // the guest was told their blocks read as deallocated.
+        // The flush is submitted, as a guest's Flush is, and the
+        // notification completes once the host disk's has: a spinning
+        // disk's flush can take seconds, which no processor waits out
+        // under the devices' lock.
         if self.shutdown
+            && !self.flushing
             && self.pending.is_empty()
             && self.inflight.is_empty()
             && self.completed.is_empty()
             && !self.medium.device.discarding()
         {
-            self.medium.device.flush().map_err(|_| {
-                refuse(
-                    NAME,
-                    CC,
-                    Width::Word,
-                    Direction::Write,
-                    "ANS backing flush failed during shutdown",
-                )
-            })?;
+            match self.medium.device.submit(
+                SHUTDOWN_FLUSH,
+                stela_drivers::block::Request::Flush,
+                now,
+            ) {
+                Some(done) => self.flushed(done.map(drop))?,
+                None => {
+                    self.flushing = true;
+                    self.look = self.medium.device.next_look(now);
+                }
+            }
+        }
+        refused.map_or(Ok(()), Err)
+    }
+
+    /// A shutdown's flush ended: the notification completes, unless the
+    /// flush failed, which the next run sends again, or the driver reset
+    /// the controller meanwhile.
+    fn flushed(
+        &mut self,
+        done: core::result::Result<(), stela_drivers::block::BlockError>,
+    ) -> Result<(), MmioError> {
+        done.map_err(|_| {
+            refuse(
+                NAME,
+                CC,
+                Width::Word,
+                Direction::Write,
+                "ANS backing flush failed during shutdown",
+            )
+        })?;
+        if self.shutdown {
             self.shutdown = false;
             self.status = READY | SHUTDOWN_COMPLETE;
         }
-        refused.map_or(Ok(()), Err)
+        Ok(())
     }
 }
 
@@ -1012,7 +1056,7 @@ impl Ans {
                 "ANS power loss before its driver's shutdown notification completed"
             ));
         }
-        if self.outstanding().next().is_some() || self.medium.device.discarding() {
+        if self.outstanding().next().is_some() || self.flushing || self.medium.device.discarding() {
             return Err(refuse!(
                 "ANS power loss with commands or discards outstanding"
             ));

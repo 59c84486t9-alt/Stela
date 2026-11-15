@@ -1,5 +1,6 @@
 use super::*;
-use alloc::{vec, vec::Vec};
+use alloc::{rc::Rc, vec, vec::Vec};
+use core::cell::RefCell;
 use stela_drivers::block::{BlockError, RamDisk};
 use {
     crate::sart::Sart, stela_contracts::dma::Memory, stela_contracts::dma::Physical,
@@ -1647,4 +1648,129 @@ fn power_loss_with_work_outstanding_or_before_the_shutdown_completes_is_refused(
             .to_string()
             .contains("physical reset")
     );
+}
+
+/// A host disk with a write cache whose commands complete once the test
+/// lets them, recording what it was given: a spinning disk whose flush
+/// takes seconds. A flush that is not let through completes only after
+/// `polls` looks, so a caller that waits for it ends.
+struct SlowFlush {
+    disk: RamDisk,
+    log: Rc<RefCell<SlowLog>>,
+}
+
+#[derive(Default)]
+struct SlowLog {
+    started: Vec<stela_drivers::block::Command>,
+    done: Vec<u32>,
+    polls: usize,
+    failing: bool,
+}
+
+impl BlockDevice for SlowFlush {
+    fn identity(&self) -> &stela_drivers::block::Identity {
+        self.disk.identity()
+    }
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.disk.read(lba, buffer)
+    }
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.disk.write(lba, data)
+    }
+    fn depth(&self) -> usize {
+        4
+    }
+    fn room(&self) -> bool {
+        true
+    }
+    fn start(&mut self, command: stela_drivers::block::Command) -> Result<u32, BlockError> {
+        let mut log = self.log.borrow_mut();
+        log.started.push(command);
+        Ok(log.started.len() as u32 - 1)
+    }
+    fn finish(&mut self, tag: u32) -> Option<stela_drivers::block::Finished> {
+        let mut log = self.log.borrow_mut();
+        log.polls += 1;
+        let flush = matches!(
+            log.started[tag as usize],
+            stela_drivers::block::Command::Flush
+        );
+        let done = log.done.contains(&tag) || (flush && log.polls > 1000);
+        if !done {
+            return None;
+        }
+        if flush && log.failing {
+            return Some(Err(BlockError::Timeout));
+        }
+        if let stela_drivers::block::Command::Write { lba, data, .. } = &log.started[tag as usize] {
+            let (lba, data) = (*lba, data.clone());
+            drop(log);
+            self.disk.write(lba, &data).unwrap();
+        }
+        Some(Ok(None))
+    }
+}
+
+/// The shutdown notification's flush is submitted after every accepted
+/// write completed and no run waits for it: CSTS.SHST reports the
+/// notification complete only once the host disk's flush has, and a
+/// failed flush is refused and sent again. Before, the run flushed the
+/// host disk where it was, under the devices' lock, for as long as the
+/// disk took.
+#[test]
+fn a_shutdown_flush_runs_on_the_host_disk_without_holding_the_run() {
+    use stela_drivers::block::Command as Host;
+    let log: Rc<RefCell<SlowLog>> = Rc::default();
+    let mut disk = RamDisk::new("partition-id", 32, 4096);
+    disk.identity.features.write_cache = true;
+    let mut rig = Rig::with_disk(
+        Box::new(SlowFlush {
+            disk,
+            log: log.clone(),
+        }),
+        QueueGeometry::DEFAULT,
+    );
+    rig.io_queues();
+    // A write whose host transfer runs, then the notification.
+    rig.submit(1, 0, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+    rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 1 << 14))
+        .unwrap();
+    rig.run().unwrap();
+    assert_eq!(log.borrow().started.len(), 1, "no flush before the write");
+    assert_eq!(rig.read(CSTS), u64::from(READY));
+    // The write completes; the flush goes to the disk after it.
+    log.borrow_mut().done.push(0);
+    log.borrow_mut().polls = 0;
+    rig.run().unwrap();
+    rig.retire(1, 0);
+    rig.run().unwrap();
+    assert!(matches!(
+        log.borrow().started[..],
+        [Host::Write { .. }, Host::Flush]
+    ));
+    assert!(log.borrow().polls < 10, "a run waited for the flush");
+    assert_eq!(rig.read(CSTS), u64::from(READY));
+    assert!(rig.ans.pending(u64::MAX));
+    let off = LifecycleState {
+        powered: false,
+        clocked: false,
+        ..rig.ans.lifecycle
+    };
+    assert!(rig.ans.check_lifecycle(off).is_err());
+    // A failed flush is refused and the next run sends another.
+    log.borrow_mut().failing = true;
+    log.borrow_mut().done.push(1);
+    assert!(rig.run().is_err());
+    assert_eq!(rig.read(CSTS), u64::from(READY));
+    log.borrow_mut().failing = false;
+    rig.run().unwrap();
+    assert!(matches!(
+        log.borrow().started[..],
+        [Host::Write { .. }, Host::Flush, Host::Flush]
+    ));
+    assert_eq!(rig.read(CSTS), u64::from(READY));
+    log.borrow_mut().done.push(2);
+    rig.run().unwrap();
+    assert_eq!(rig.read(CSTS), u64::from(READY | SHUTDOWN_COMPLETE));
+    rig.ans.check_lifecycle(off).unwrap();
 }

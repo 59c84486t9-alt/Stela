@@ -23,8 +23,9 @@
 //! a write the model saw complete is on the host disk before any command the
 //! model started after that, so a later read sees it and a later flush makes
 //! it durable, and a flush completes only once the host disk's has. The
-//! model's synchronous calls ([`BlockDevice::read`] and the like, a shutdown's
-//! flush) wait for every queued command first, then run on the host disk.
+//! model's synchronous calls ([`BlockDevice::read`] and the like) wait for
+//! every queued command first, then run on the host disk: only before the PEs
+//! run, as the ANS model's shutdown flush is queued as any other command.
 use alloc::{boxed::Box, collections::BTreeMap, collections::VecDeque, sync::Arc, vec::Vec};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

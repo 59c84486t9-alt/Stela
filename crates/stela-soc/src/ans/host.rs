@@ -208,10 +208,6 @@ impl HostDisk {
         self.device.write(address, data)
     }
 
-    pub(super) fn flush(&mut self) -> Result<(), BlockError> {
-        self.device.flush()
-    }
-
     /// Tell the disk to deallocate `blocks` blocks from `lba`, in the
     /// background, if it takes that and has not refused it.
     pub(super) fn discard(&mut self, lba: u64, blocks: u64) {
