@@ -296,6 +296,21 @@ pub(super) fn resume_job() {
     }
 }
 
+/// A host call of the guest call served on this stack was withdrawn, as no
+/// task took it in time: whether that guest call, a turn of the service
+/// whose stack this is, will be made again if it fails
+/// ([`SharedService::defer_for_wait`]).
+pub(super) fn defer_for_wait() -> bool {
+    let pointer = stack::pointer();
+    shared()
+        .iter()
+        .find(|service| {
+            let top = service.stack();
+            pointer < top && top - pointer < STACK_BYTES as u64
+        })
+        .is_some_and(|service| service.defer_for_wait())
+}
+
 /// The C library's core for the jobs on the compile stack at `top`: one
 /// past every processor's from the top of the processors' range, one for
 /// each compile stack, so that a job keeps its thread-local values on

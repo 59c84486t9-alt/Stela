@@ -169,11 +169,20 @@ impl Deferral {
     }
 
     pub(super) fn stop(&mut self) {
-        self.deferring = None;
+        if let Some(lock) = self.deferring.take() {
+            lock.lock.set_may_defer(false);
+        }
     }
 
+    /// Whether the call served now runs again: it left a job, or a host
+    /// call of it was withdrawn while it could
+    /// ([`CompileLock::defer_for_wait`](crate::metal::compiler::CompileLock::defer_for_wait)).
     pub(super) fn deferred(&self) -> bool {
         self.job.is_some()
+            || self
+                .deferring
+                .as_ref()
+                .is_some_and(|lock| lock.lock.waited())
     }
 
     pub(super) fn take(&mut self) -> Option<Job> {

@@ -503,3 +503,69 @@ fn a_long_job_runs_in_bounded_slices_and_its_call_completes_as_before() {
     assert_eq!(turn.device().compiler_mut().adopted, 1);
     assert!(submitted(&mut turn).contains(&Command::Dispatch([4, 1, 1])));
 }
+
+/// The test's shared service, which the mock's withdrawn allocation tells
+/// as the platform's withdrawal of a host call does.
+static WITHDRAWING: std::sync::Mutex<
+    Option<std::sync::Weak<SharedService<MockBackend, MockCompiler>>>,
+> = std::sync::Mutex::new(None);
+
+fn withdraw() -> bool {
+    WITHDRAWING
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade)
+        .is_some_and(|shared| shared.defer_for_wait())
+}
+
+/// A host call no task took in time is withdrawn, and the driver fails the
+/// allocation behind it. A call that may be made again is answered
+/// `Pending` and completes when made again, instead of failing with out of
+/// memory for what was only a wait; one that cannot keeps the failure.
+#[test]
+fn a_call_whose_host_call_no_task_took_runs_again_instead_of_failing() {
+    use crate::metal::service::wire::{BufferResponse, NewBufferRequest, TextureResponse};
+    let mut service = service_on(MockBackend::new());
+    let a = connect(&mut service);
+    service.device().backend().withdrawn_allocation = Some(withdraw);
+    let shared = Arc::new(SharedService::new(service, host(|_| {})));
+    shared.set_compile_stack(1);
+    *WITHDRAWING.lock().unwrap() = Some(Arc::downgrade(&shared));
+    let mut memory = Memory::default();
+    let texture = gate_call(
+        &mut memory,
+        Operation::NewTexture,
+        &super::texture(StorageMode::Private),
+        size_of::<TextureResponse>(),
+    );
+    shared.serve(a, texture, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, texture), Status::Pending);
+    shared.serve(a, texture, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, texture), Status::Pending);
+    assert!(shared.run_job(0, 0).is_some());
+    shared.serve(a, texture, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, texture), Status::Ok);
+    assert!(!shared.jobs_waiting());
+
+    // A new buffer is never made again: its failure stays the answer.
+    shared
+        .try_turn()
+        .unwrap()
+        .device()
+        .backend()
+        .withdrawn_allocation = Some(withdraw);
+    let buffer = gate_call(
+        &mut memory,
+        Operation::NewBuffer,
+        &NewBufferRequest {
+            length: 64 << 20,
+            options: super::options(StorageMode::Private),
+        },
+        size_of::<BufferResponse>(),
+    );
+    shared.serve(a, buffer, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, buffer), Status::OutOfMemory);
+    assert!(!shared.jobs_waiting());
+    *WITHDRAWING.lock().unwrap() = None;
+}

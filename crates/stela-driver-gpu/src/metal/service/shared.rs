@@ -69,7 +69,7 @@ use super::{
 };
 use crate::metal::{
     compiler::{self, AirCompiler, CompileLock, SharedHold},
-    deferred::{Done, Job, JobLock, Owner, Sliced, Slicer},
+    deferred::{Done, Job, JobLock, Made, Owner, Sliced, Slicer},
     shader::Compiler,
     timing::CallPhases,
     vulkan::{
@@ -132,6 +132,8 @@ pub struct SharedService<B: Backend, C: Compiler> {
     compile_stack: AtomicU64,
     /// The platform's [`Slicer`], as an address, zero while jobs run whole.
     slicer: AtomicUsize,
+    /// Calls made again after a withdrawn host call, which name their jobs.
+    waited_calls: AtomicU64,
     /// The longest a frontend call waits for the turn before it is answered
     /// `Pending`, in ticks; 0 waits for as long as the holder holds it.
     wait_bound: AtomicU64,
@@ -743,6 +745,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             early: [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PENDING],
             compile_stack: AtomicU64::new(0),
             slicer: AtomicUsize::new(0),
+            waited_calls: AtomicU64::new(0),
             wait_bound: AtomicU64::new(0),
             job_lock: JobLock {
                 lock: compile_lock.unwrap_or_default(),
@@ -771,6 +774,19 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     /// [`Self::run_job`].
     pub fn set_compile_stack(&self, stack: u64) {
         self.compile_stack.store(stack, Ordering::Release);
+    }
+
+    /// The top of the stack this service's turns run on.
+    pub fn stack(&self) -> u64 {
+        self.host.stack
+    }
+
+    /// The platform withdrew a host call of the call this service serves
+    /// now on this processor, as no task took it in time: whether that call
+    /// will be made again if it fails ([`CompileLock::defer_for_wait`]),
+    /// rather than failing for a wait.
+    pub fn defer_for_wait(&self) -> bool {
+        self.job_lock.lock.defer_for_wait()
     }
 
     /// Runs jobs in slices that `slicer` starts on the compile stack
@@ -1741,6 +1757,8 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         let mut answer = None;
         let mut read_back = None;
         self.job_lock.lock.set_deferred(false);
+        self.job_lock.lock.take_waited();
+        self.job_lock.lock.set_may_defer(deferring);
         (self.host.run)(self.host.stack, &mut || {
             self.free_read_backs(&mut turn);
             self.adopt_jobs(&mut turn);
@@ -1784,8 +1802,24 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 jobs,
             ));
         });
-        let (mut served, mut refused, noted, (mut operation, mut status), jobs) =
+        let (mut served, mut refused, mut noted, (mut operation, mut status), mut jobs) =
             answer.expect("the platform runs what it is given");
+        self.job_lock.lock.set_may_defer(false);
+        // A call that failed only because a host call it made was withdrawn,
+        // no task having taken it in time, waited and did not fail: it is
+        // answered `Pending` and made again once a job that does nothing
+        // ran, as a call that waits for the compile lock is.
+        if self.job_lock.lock.take_waited()
+            && jobs.is_empty()
+            && !matches!(status, Status::Ok | Status::Pending)
+        {
+            let count = self.waited_calls.fetch_add(1, Ordering::Relaxed) + 1;
+            let mut key = [0xfd; 32];
+            key[..8].copy_from_slice(&count.to_le_bytes());
+            jobs.push(Job::new(key, Owner::Compiler, || Box::new(()) as Made));
+            refused.clear();
+            noted = None;
+        }
         if let Some((started, epoch)) = read_back {
             self.started_read_back(connection, record, caller, started, epoch);
         }

@@ -957,7 +957,9 @@ static WITHDRAWN: AtomicU64 = AtomicU64::new(0);
 
 /// Posts `request` and waits for its result, within the bounds of
 /// [`posted_call`]: None when it was withdrawn, no task having taken it by
-/// [`posted_call::WITHDRAW_MS`]; it then stays with the task that meets it.
+/// [`posted_call::WITHDRAW_MS`]; it then stays with the task that meets it,
+/// which never performs it, and the guest call it was made for is made
+/// again if it fails and may be ([`super::gate::defer_for_wait`]).
 /// A call a task performs past that is reported and waited for, and one
 /// still running at [`posted_call::STOP_MS`] stops the boot, naming it.
 fn posted_wait(gpu: &Installed, request: &Request, code: u32) -> Option<i64> {
@@ -972,13 +974,21 @@ fn posted_wait(gpu: &Installed, request: &Request, code: u32) -> Option<i64> {
     wait(gpu, request, withdraw_at);
     if !done() {
         if request.withdrawable() && request.claim.withdraw() {
+            // The call never ran: a guest call that can be made again is,
+            // rather than failing for a wait.
+            let again = super::gate::defer_for_wait();
             let count = WITHDRAWN.fetch_add(1, Ordering::Relaxed) + 1;
             if count.is_power_of_two() {
                 output::arguments(format_args!(
                     "GPU call {code:#x} withdrawn after {} ms on PE {}: no task took it; \
-                     answered ETIMEDOUT ({count} withdrawn)\n",
+                     answered ETIMEDOUT, {} ({count} withdrawn)\n",
                     ms(),
-                    host::processor()
+                    host::processor(),
+                    if again {
+                        "and the guest call runs again if it fails"
+                    } else {
+                        "which fails the guest call"
+                    }
                 ));
                 // The pool's state is the boot CPU's to read.
                 if host::processor() == BOOT_CPU.load(Ordering::Relaxed)

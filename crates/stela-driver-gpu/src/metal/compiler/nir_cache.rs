@@ -243,6 +243,13 @@ pub struct CompileLock {
     /// A compilation deferred in the call served now: its later writes to
     /// the caller are dropped, as the call runs again.
     deferred: AtomicBool,
+    /// The call served now may still be made again: it defers, and changed
+    /// nothing a second run would change again.
+    may_defer: AtomicBool,
+    /// A host call of the call served now was withdrawn, no task having
+    /// taken it in time, while the call could be made again
+    /// ([`Self::defer_for_wait`]).
+    waited: AtomicBool,
 }
 
 impl CompileLock {
@@ -250,6 +257,8 @@ impl CompileLock {
         Self {
             held: AtomicBool::new(false),
             deferred: AtomicBool::new(false),
+            may_defer: AtomicBool::new(false),
+            waited: AtomicBool::new(false),
         }
     }
 
@@ -291,6 +300,36 @@ impl CompileLock {
     /// Marks the call served now as having deferred a compilation.
     pub fn set_deferred(&self, deferred: bool) {
         self.deferred.store(deferred, Ordering::Release);
+    }
+
+    /// Whether the call served now may be made again, from its turn's
+    /// start until it stops deferring.
+    pub fn set_may_defer(&self, may_defer: bool) {
+        self.may_defer.store(may_defer, Ordering::Release);
+    }
+
+    /// A host call of the call served now was withdrawn for want of a task
+    /// to take it, so the call failed only for a wait: whether the call may
+    /// be made again, answered `Pending` if it fails, rather than fail.
+    /// From then on it defers what would need more such calls, as after a
+    /// deferral.
+    pub fn defer_for_wait(&self) -> bool {
+        let again = self.may_defer.load(Ordering::Acquire);
+        if again {
+            self.waited.store(true, Ordering::Release);
+        }
+        again
+    }
+
+    /// Whether a host call of the call served now was withdrawn while it
+    /// could be made again.
+    pub fn waited(&self) -> bool {
+        self.waited.load(Ordering::Acquire)
+    }
+
+    /// [`Self::waited`], cleared for the next call.
+    pub fn take_waited(&self) -> bool {
+        self.waited.swap(false, Ordering::AcqRel)
     }
 
     #[cfg(test)]

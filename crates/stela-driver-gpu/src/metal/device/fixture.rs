@@ -179,6 +179,10 @@ pub(crate) struct MockBackend {
     /// a job that runs until this opens, as the driver's kernel allocation
     /// waits for Linux.
     pub(crate) image_gate: Option<Arc<AtomicBool>>,
+    /// The next allocation's kernel call is withdrawn, no task having taken
+    /// it in time: the allocation tells the platform's hook, as the
+    /// platform's withdrawal does, and fails as the driver then does.
+    pub(crate) withdrawn_allocation: Option<fn() -> bool>,
     deferring: Option<JobLock>,
     job: Option<Job>,
     /// Pipeline jobs adopted.
@@ -272,6 +276,10 @@ impl Backend for MockBackend {
         self.physical.as_ref().unwrap()
     }
     fn allocate_memory(&mut self, _: u64, _: MemoryRequest, _: u32) -> Result<Memory> {
+        if let Some(withdrawn) = self.withdrawn_allocation.take() {
+            withdrawn();
+            return Err(Error::OutOfMemory);
+        }
         Ok(Memory(self.id()))
     }
     fn buffer_requirements(&mut self, info: &BufferInfo) -> Result<Requirements> {
@@ -290,6 +298,10 @@ impl Backend for MockBackend {
         })
     }
     fn create_buffer(&mut self, info: &BufferInfo, _: MemoryRequest) -> Result<BufferAllocation> {
+        if let Some(withdrawn) = self.withdrawn_allocation.take() {
+            withdrawn();
+            return Err(Error::OutOfMemory);
+        }
         let id = self.id();
         Ok(BufferAllocation {
             buffer: Buffer(id),
