@@ -2248,6 +2248,20 @@ pub unsafe fn probe_observed(
         handoff,
         &mut devices,
     );
+    // A port whose device ACPI keeps powered off is named, never turned on.
+    #[cfg(feature = "native-acpi")]
+    if let Some(session) = services.and_then(|services| services.acpi()) {
+        for address in native::powered_off_ports(session, &bridges, &devices.classes) {
+            let class = devices
+                .classes
+                .iter()
+                .find(|(found, _)| *found == address)
+                .map_or([6, 4, 0], |&(_, class)| class);
+            devices
+                .unsupported
+                .push((address, class, native::POWERED_OFF_PORT));
+        }
+    }
     attach_usb4_hosts(usb4_hosts, services, &bridges, handoff, &mut devices);
     attach_broadcom_bluetooth(
         broadcom_bluetooth,
