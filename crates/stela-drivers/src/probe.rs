@@ -1571,6 +1571,17 @@ fn first_of(scanned: Vec<Vec<Function>>, first: Option<Address>) -> (Vec<Vec<Fun
     (rest, found)
 }
 
+/// The handoff a wired network adapter attaches with: it signals arriving
+/// frames with [`Handoff::network`] where the engine gave one, which makes
+/// the host's service due, rather than with a disk's completion signal,
+/// which only sends the disks looking for completions.
+fn network_handoff(handoff: &Handoff) -> Handoff {
+    Handoff {
+        completion: handoff.network.or(handoff.completion),
+        ..handoff.clone()
+    }
+}
+
 /// [`probe_with_provider`], with `observer` told of each start.
 ///
 /// # Safety
@@ -1586,6 +1597,7 @@ pub unsafe fn probe_observed(
     wifi: Option<&Network>,
     observer: &mut dyn Observer,
 ) -> Devices {
+    let network_handoff = network_handoff(handoff);
     let mut devices = Devices {
         bluetooth_platform: captures.bluetooth,
         native_services: services.is_some(),
@@ -1943,13 +1955,8 @@ pub unsafe fn probe_observed(
                 continue;
             } else if net::virtio::matches(&function) {
                 let minimum = minimum_for_function!().clone();
-                // Arriving frames ask for the host's service at once
-                // (`Handoff::network`), not only wake the core a disk's would.
-                let signalled = Handoff {
-                    completion: handoff.network.or(handoff.completion),
-                    ..handoff.clone()
-                };
-                let attached = VirtioNet::new(&mut function, &signalled, dma, minimum.as_ref());
+                let attached =
+                    VirtioNet::new(&mut function, &network_handoff, dma, minimum.as_ref());
                 if attached.is_err() {
                     start.quiesce(&mut function);
                 }
@@ -1958,7 +1965,8 @@ pub unsafe fn probe_observed(
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller grants exclusive post-EBS controller,
                 // segment configuration and firmware/ASPM policy ownership.
-                let attached = unsafe { Igc::new(&mut function, handoff, dma, minimum.clone()) };
+                let attached =
+                    unsafe { Igc::new(&mut function, &network_handoff, dma, minimum.clone()) };
                 if attached.is_err() {
                     start.quiesce(&mut function);
                 }
@@ -1967,7 +1975,8 @@ pub unsafe fn probe_observed(
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller granted exclusive ownership of all mapped PCI
                 // functions and controllers after ExitBootServices.
-                let attached = unsafe { E1000e::new(&mut function, handoff, dma, minimum.clone()) };
+                let attached =
+                    unsafe { E1000e::new(&mut function, &network_handoff, dma, minimum.clone()) };
                 if attached.is_err() {
                     start.quiesce(&mut function);
                 }
@@ -2013,7 +2022,8 @@ pub unsafe fn probe_observed(
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: as for e1000e, the caller granted exclusive ownership
                 // of the mapped PCI functions and their controllers.
-                let attached = unsafe { Igb::new(&mut function, handoff, dma, minimum.clone()) };
+                let attached =
+                    unsafe { Igb::new(&mut function, &network_handoff, dma, minimum.clone()) };
                 if let Ok(device) = &attached {
                     if device.warnings.nvm_autoload_timeout {
                         devices.warnings.push((
@@ -2056,8 +2066,15 @@ pub unsafe fn probe_observed(
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller granted exclusive post-EBS ownership of
                 // mapped PCI/MMIO and DMA, including upstream ASPM configuration.
-                let attached =
-                    unsafe { Realtek::new(&mut function, handoff, dma, firmware, minimum.clone()) };
+                let attached = unsafe {
+                    Realtek::new(
+                        &mut function,
+                        &network_handoff,
+                        dma,
+                        firmware,
+                        minimum.clone(),
+                    )
+                };
                 if let Ok(device) = &attached {
                     devices.warnings.extend(
                         device
@@ -2893,6 +2910,37 @@ fn attach_platform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wired adapter signals frames on the engine's network message, or
+    /// on the disks' completion message when the engine gave none.
+    #[test]
+    fn wired_adapters_signal_on_the_network_message() {
+        use crate::bus::irq::MsiMessage;
+        let disk = MsiMessage {
+            address: 0xfee0_0000,
+            data: 0x62,
+        };
+        let frames = MsiMessage {
+            address: 0xfee0_0000,
+            data: 0x63,
+        };
+        let mut handoff = Handoff {
+            ecam: Vec::new(),
+            mapped: alloc::vec![0x1000..0x2000],
+            dma: 0..0,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: Some(disk),
+            network: Some(frames),
+        };
+        let wired = network_handoff(&handoff);
+        assert_eq!(wired.completion, Some(frames));
+        assert_eq!(wired.mapped, handoff.mapped);
+        handoff.network = None;
+        assert_eq!(network_handoff(&handoff).completion, Some(disk));
+    }
 
     /// The boot of issue 18: the mount refused both HD Audio controllers
     /// before their driver ran, and they are filed as audio, not with the

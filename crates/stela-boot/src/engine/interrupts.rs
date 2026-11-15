@@ -21,7 +21,8 @@ pub(crate) const SHOOTDOWN_VECTOR: u8 = 0x61;
 /// doorbell that also counts the signals apart from other cores' doorbells.
 pub(crate) const SIGNAL_VECTOR: u8 = 0x62;
 /// A host network adapter's frames arrived (`host::network_signal`): a
-/// doorbell that also makes the host's service due (`network::signalled`).
+/// doorbell that also makes the host's service due
+/// (`host::take_network_signal`).
 /// Apart from [`SIGNAL_VECTOR`], so a disk does not look for completions
 /// each time a frame comes.
 pub(crate) const NETWORK_VECTOR: u8 = 0x63;
