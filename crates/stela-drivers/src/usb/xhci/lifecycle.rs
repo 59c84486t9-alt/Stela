@@ -72,6 +72,10 @@ pub struct Host {
     /// The connection after boot under way, and those waiting their turn.
     attaching: Option<after_boot::Attaching>,
     queued: alloc::collections::VecDeque<after_boot::Queued>,
+    /// The storage interfaces on this controller whose disks are in use,
+    /// started again when their device leaves the bus and comes back after
+    /// boot ([`Self::keep_storage`]).
+    storage: Vec<storage::UsbStorage>,
 }
 impl Host {
     /// Whether the controller stopped answering commands (Linux
@@ -134,9 +138,25 @@ impl Host {
             settling: Vec::new(),
             attaching: None,
             queued: Default::default(),
+            storage: Vec::new(),
         };
         host.register_hubs(devices, dma, failures);
         host
+    }
+
+    /// Keep those of `storage`, the interfaces whose disks the boot uses,
+    /// that are on this controller: a device of theirs that leaves the bus
+    /// and comes back after boot, at the same port path and with the same
+    /// vendor, product and serial number, is started again in steps and
+    /// their disks go on with it. Any other storage device that arrives
+    /// after boot stays unused until the next boot.
+    pub fn keep_storage(&mut self, storage: &[storage::UsbStorage]) {
+        let controller = &self.controller;
+        self.storage = storage
+            .iter()
+            .filter(|storage| storage.on(controller))
+            .cloned()
+            .collect();
     }
 
     fn register_hubs(

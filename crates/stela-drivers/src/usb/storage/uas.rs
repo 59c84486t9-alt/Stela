@@ -329,6 +329,10 @@ impl Host {
     pub(super) fn device(&self) -> &Device {
         &self.device
     }
+    /// Whether the device is on `controller`.
+    pub(super) fn on(&self, controller: &super::Shared) -> bool {
+        alloc::rc::Rc::ptr_eq(&self.engine.io.controller, controller)
+    }
     pub(super) fn interface(&self) -> u8 {
         self.binding.interface()
     }

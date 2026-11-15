@@ -21,6 +21,7 @@ use core::{
     cell::{Cell, RefCell},
     sync::atomic::{AtomicU32, Ordering},
 };
+use stela_driver_base::stepped::block_on;
 mod media;
 pub use media::UsbStorage;
 mod bot;
@@ -40,6 +41,7 @@ const SD_MAX_RETRIES: u32 = 5;
 const SD_RUNTIME_US: u64 = (SD_MAX_RETRIES as u64 + 1) * 30_000_000;
 
 mod binding;
+pub(super) mod resume;
 pub mod settle;
 pub use binding::Binding;
 pub(super) use binding::discover as discover_binding;
@@ -876,6 +878,71 @@ fn discover_units<T: Scsi<Lun = u8>>(
     Ok(disks)
 }
 
+/// A transport's commands as a unit's probe runs them, written once: to
+/// completion through [`Scsi`] ([`Now`]), or in steps from a service turn
+/// for a device that came back after boot ([`resume`]).
+trait Commands {
+    type Lun: Copy + Default + PartialEq + core::fmt::Display;
+    async fn command(
+        &mut self,
+        lun: Self::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<Vec<u8>, BlockError>;
+    async fn delay(&mut self, micros: u64) -> Result<(), BlockError>;
+    async fn read_before_mode_sense(
+        &mut self,
+        lun: Self::Lun,
+        block_size: usize,
+    ) -> Result<(), BlockError>;
+    fn poisoned(&self) -> bool;
+    fn capacity16_first(&self) -> bool;
+    fn adjust_capacity(&self, blocks: u64) -> Option<u64>;
+    fn max_transfer_bytes(&self) -> usize;
+    fn write_protect_page(&self) -> Option<u8>;
+}
+
+/// A [`Scsi`] transport whose commands run to completion: its futures are
+/// ready at their first poll.
+struct Now<'a, T>(&'a mut T);
+
+impl<T: Scsi> Commands for Now<'_, T> {
+    type Lun = T::Lun;
+    async fn command(
+        &mut self,
+        lun: T::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<Vec<u8>, BlockError> {
+        self.0.command(lun, cdb, data)
+    }
+    async fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        self.0.delay(micros)
+    }
+    async fn read_before_mode_sense(
+        &mut self,
+        lun: T::Lun,
+        block_size: usize,
+    ) -> Result<(), BlockError> {
+        self.0.read_before_mode_sense(lun, block_size)
+    }
+    fn poisoned(&self) -> bool {
+        self.0.poisoned()
+    }
+    fn capacity16_first(&self) -> bool {
+        self.0.capacity16_first()
+    }
+    fn adjust_capacity(&self, blocks: u64) -> Option<u64> {
+        self.0.adjust_capacity(blocks)
+    }
+    fn max_transfer_bytes(&self) -> usize {
+        self.0.max_transfer_bytes()
+    }
+    fn write_protect_page(&self) -> Option<u8> {
+        self.0.write_protect_page()
+    }
+}
+
 /// The unit's identity and whether its medium is removable.
 fn probe<T: Scsi>(
     bot: &mut T,
@@ -883,13 +950,26 @@ fn probe<T: Scsi>(
     location: &str,
     serial: &str,
 ) -> Result<(Identity, bool), BlockError> {
-    let inquiry = inquiry(bot, lun)?;
-    probe_identified(bot, lun, &inquiry, location, serial)
+    block_on(probe_with(&mut Now(bot), lun, location, serial))
+}
+async fn probe_with<C: Commands>(
+    bot: &mut C,
+    lun: C::Lun,
+    location: &str,
+    serial: &str,
+) -> Result<(Identity, bool), BlockError> {
+    let inquiry = inquiry_with(bot, lun).await?;
+    probe_identified_with(bot, lun, &inquiry, location, serial).await
 }
 fn inquiry<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<Vec<u8>, BlockError> {
+    block_on(inquiry_with(&mut Now(bot), lun))
+}
+async fn inquiry_with<C: Commands>(bot: &mut C, lun: C::Lun) -> Result<Vec<u8>, BlockError> {
     let mut result = Err(BlockError::Unsupported("INQUIRY did not complete"));
     for _ in 0..3 {
-        result = bot.command(lun, &scsi::inquiry(), Data::In(scsi::INQUIRY_BYTES));
+        result = bot
+            .command(lun, &scsi::inquiry(), Data::In(scsi::INQUIRY_BYTES))
+            .await;
         if !matches!(&result, Err(BlockError::Sense(sense)) if sense.key == Sense::UNIT_ATTENTION
             && matches!(sense.asc, Sense::MEDIUM_CHANGED | Sense::RESET_OCCURRED))
         {
@@ -909,6 +989,21 @@ fn probe_identified<T: Scsi>(
     location: &str,
     serial: &str,
 ) -> Result<(Identity, bool), BlockError> {
+    block_on(probe_identified_with(
+        &mut Now(bot),
+        lun,
+        inquiry,
+        location,
+        serial,
+    ))
+}
+async fn probe_identified_with<C: Commands>(
+    bot: &mut C,
+    lun: C::Lun,
+    inquiry: &[u8],
+    location: &str,
+    serial: &str,
+) -> Result<(Identity, bool), BlockError> {
     if inquiry[0] != 0 {
         return Err(BlockError::Unsupported(
             "USB LUN is not an attached direct-access block device",
@@ -918,7 +1013,10 @@ fn probe_identified<T: Scsi>(
     let mut ready = false;
     let mut started = false;
     for attempt in 0..READY_TRIES {
-        match bot.command(lun, &[scsi::TEST_UNIT_READY, 0, 0, 0, 0, 0], Data::None) {
+        match bot
+            .command(lun, &[scsi::TEST_UNIT_READY, 0, 0, 0, 0, 0], Data::None)
+            .await
+        {
             Ok(_) => {
                 ready = true;
                 break;
@@ -937,7 +1035,7 @@ fn probe_identified<T: Scsi>(
                     && sense.ascq == Sense::INITIALIZING_COMMAND_REQUIRED =>
             {
                 started = true;
-                bot.command(lun, &scsi::start_unit(), Data::None)?;
+                bot.command(lun, &scsi::start_unit(), Data::None).await?;
             }
             // The command has already completed same-LUN REQUEST SENSE.
             Err(BlockError::Sense(sense))
@@ -947,7 +1045,7 @@ fn probe_identified<T: Scsi>(
                         && !matches!(sense.ascq, 3 | 0xb | 0xc | 0x1b | 0x24 | 0x25) =>
             {
                 if attempt + 1 < READY_TRIES {
-                    bot.delay(READY_DELAY_US)?;
+                    bot.delay(READY_DELAY_US).await?;
                 }
             }
             Err(error) => return Err(error),
@@ -957,17 +1055,17 @@ fn probe_identified<T: Scsi>(
         return Err(BlockError::Unsupported("USB storage never became ready"));
     }
     let (reported, block_size) = if bot.capacity16_first() {
-        capacity16(bot, lun)?
+        capacity16_with(bot, lun).await?
     } else {
         let mut cdb = [0; 10];
         cdb[0] = scsi::READ_CAPACITY_10;
-        let capacity = bot.command(lun, &cdb, Data::In(8))?;
+        let capacity = bot.command(lun, &cdb, Data::In(8)).await?;
         if capacity.len() < 8 {
             return Err(BlockError::Unsupported("short READ CAPACITY data"));
         }
         let last = u32::from_be_bytes(capacity[..4].try_into().unwrap());
         if last == u32::MAX {
-            capacity16(bot, lun)?
+            capacity16_with(bot, lun).await?
         } else {
             (
                 u64::from(last) + 1,
@@ -989,15 +1087,18 @@ fn probe_identified<T: Scsi>(
             "USB storage block size or capacity",
         ));
     }
-    bot.read_before_mode_sense(lun, block_size as usize)?;
+    bot.read_before_mode_sense(lun, block_size as usize).await?;
     let read_only = match bot.write_protect_page() {
         None => false,
         Some(page) => {
-            match bot.command(
-                lun,
-                &scsi::mode_sense(page),
-                Data::In(scsi::MODE_SENSE_BYTES),
-            ) {
+            match bot
+                .command(
+                    lun,
+                    &scsi::mode_sense(page),
+                    Data::In(scsi::MODE_SENSE_BYTES),
+                )
+                .await
+            {
                 Ok(mode) => scsi::write_protected(&mode)
                     .ok_or(BlockError::Unsupported("short MODE SENSE data"))?,
                 // MODE SENSE is optional only when the unit reports an
@@ -1013,7 +1114,7 @@ fn probe_identified<T: Scsi>(
         model: format!("{} {}", text(&inquiry[8..16]), text(&inquiry[16..32]))
             .trim()
             .into(),
-        serial: if lun == T::Lun::default() {
+        serial: if lun == C::Lun::default() {
             serial.into()
         } else {
             format!("{serial}:lun{lun}")
@@ -1027,12 +1128,12 @@ fn probe_identified<T: Scsi>(
     Ok((identity, inquiry[1] & 0x80 != 0))
 }
 
-fn capacity16<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(u64, u32), BlockError> {
+async fn capacity16_with<C: Commands>(bot: &mut C, lun: C::Lun) -> Result<(u64, u32), BlockError> {
     let mut cdb = [0; 16];
     cdb[0] = scsi::SERVICE_ACTION_IN_16;
     cdb[1] = scsi::READ_CAPACITY_16;
     cdb[13] = 32;
-    let bytes = bot.command(lun, &cdb, Data::In(32))?;
+    let bytes = bot.command(lun, &cdb, Data::In(32)).await?;
     if bytes.len() < 12 {
         return Err(BlockError::Unsupported("short READ CAPACITY (16) data"));
     }
@@ -1040,6 +1141,37 @@ fn capacity16<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(u64, u32), BlockErro
         .checked_add(1)
         .ok_or(BlockError::Unsupported("USB storage capacity overflow"))?;
     Ok((blocks, u32::from_be_bytes(bytes[8..12].try_into().unwrap())))
+}
+
+/// A Bulk-Only unit's block zero, read before MODE SENSE as Linux sd's
+/// probe reaches it: twice where the device's `INITIAL_READ10` quirk asks
+/// (`initial_read`), the first result discarded.
+async fn read_block_zero<C: Commands<Lun = u8>>(
+    bot: &mut C,
+    lun: u8,
+    block_size: usize,
+    initial_read: bool,
+) -> Result<(), BlockError> {
+    let mut cdb = [0; 10];
+    cdb[0] = scsi::READ_10;
+    cdb[8] = 1;
+    if initial_read {
+        // This workaround runs only while probing metadata before
+        // publication, never on a caller's data command or after an
+        // observed media change.
+        match bot.command(lun, &cdb, Data::In(block_size)).await {
+            Err(BlockError::Sense(sense)) if media::changed(&sense, true) => {
+                return Err(BlockError::Sense(sense));
+            }
+            Err(error) if bot.poisoned() => return Err(error),
+            _ => {}
+        }
+    }
+    let bytes = bot.command(lun, &cdb, Data::In(block_size)).await?;
+    if bytes.len() != block_size {
+        return Err(BlockError::Protocol("short USB block-zero read"));
+    }
+    Ok(())
 }
 
 impl<T: Scsi> Disk<T> {

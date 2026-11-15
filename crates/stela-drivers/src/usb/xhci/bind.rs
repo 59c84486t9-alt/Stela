@@ -220,9 +220,15 @@ pub(crate) fn bind_with_provider(
 }
 
 /// [`bind_with_provider`] for a device that arrived after boot, in steps:
-/// only its input interfaces start, each request a step's control transfer;
-/// every other interface is reported unused.
-pub(super) async fn bind_after_boot_with(a: &Access<'_>, device: &Device, found: &mut Found) {
+/// only its input interfaces start, each request a step's control transfer,
+/// and the storage device of a disk in use (`kept`) that left the bus and
+/// came back ([`storage::resume`]); every other interface is reported unused.
+pub(super) async fn bind_after_boot_with(
+    a: &Access<'_>,
+    device: &Device,
+    found: &mut Found,
+    kept: &[storage::UsbStorage],
+) {
     let Some(shared) = a.shared().cloned() else {
         return;
     };
@@ -232,6 +238,16 @@ pub(super) async fn bind_after_boot_with(a: &Access<'_>, device: &Device, found:
             BlockError::Unsupported("USB bind descriptor slot identity mismatch"),
         ));
         return;
+    }
+    match a.with(|c| storage::resume::returning(kept, c, device)) {
+        storage::resume::Return::Other => {}
+        storage::resume::Return::Resume(returning) => {
+            return resume_storage(a, shared, device, returning, found).await;
+        }
+        storage::resume::Return::Unused(why) => {
+            found.unused.push((device.location.clone(), why));
+            return;
+        }
     }
     let all = interfaces(&device.configuration);
     let mut endpoints = Vec::new();
@@ -318,6 +334,75 @@ pub(super) async fn bind_after_boot_with(a: &Access<'_>, device: &Device, found:
             .push((format!("{} HID++ receiver", device.location), error));
     }
     found.inputs.extend(hid_inputs);
+}
+
+/// Configure the storage device of a disk in use that came back after
+/// boot with its Bulk-Only setting, each request a step's command or
+/// control transfer, and start it again for the disk ([`storage::resume`]).
+async fn resume_storage(
+    a: &Access<'_>,
+    shared: Shared,
+    device: &Device,
+    returning: storage::resume::Returning,
+    found: &mut Found,
+) {
+    let configured = async {
+        let slot = during(
+            "claim native USB device",
+            a.with(|c| {
+                c.claim_native(device.id)?;
+                c.validate_id(device.id)
+            }),
+        )?;
+        let value = device.configuration_value();
+        during(
+            format!("slot {slot} EP0 SET_CONFIGURATION value={value}"),
+            Controller::set_configuration_with(a, slot, value).await,
+        )?;
+        during(
+            format!("slot {slot} Configure Endpoint"),
+            Controller::configure_with(a, slot, &returning.endpoints, None).await,
+        )?;
+        let setting = &returning.interface;
+        if setting.alternate != 0 {
+            let request = setup(
+                RECIPIENT_INTERFACE,
+                SET_INTERFACE,
+                u16::from(setting.alternate),
+                u16::from(setting.number),
+                0,
+            );
+            during(
+                format!("slot {slot} SET_INTERFACE"),
+                a.device_control(device.id, request, &[]).await,
+            )?;
+        }
+        during(
+            "Bulk-Only buffers",
+            a.with_dma(|_, dma| storage::resume::buffers(dma))
+                .and_then(|buffers| buffers),
+        )
+    }
+    .await;
+    let buffers = match configured {
+        Ok(buffers) => buffers,
+        Err((operation, error)) => {
+            found.failures.push((
+                format!("{} {} {operation}", device.location, device.name()),
+                error,
+            ));
+            return;
+        }
+    };
+    match storage::resume::resume(shared, device, returning, buffers).await {
+        Ok(0) => found
+            .unused
+            .push((device.location.clone(), storage::resume::OTHER_IDENTITY)),
+        Ok(units) => found.resumed.push((device.location.clone(), units)),
+        Err((operation, error)) => found
+            .failures
+            .push((format!("{} {operation}", device.location), error)),
+    }
 }
 
 /// What a class driver will use of an interface.

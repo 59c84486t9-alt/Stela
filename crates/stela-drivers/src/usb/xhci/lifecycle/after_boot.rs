@@ -3,7 +3,8 @@
 //! service turns, as Linux's hub_event thread brings them up apart from the
 //! interrupt that found them. A port's reset, its device's address,
 //! descriptors and configuration, a hub's port power and power-good wait
-//! with each of its children, and an input device's start each end a step
+//! with each of its children, and the start of an input device or of a disk
+//! in use whose device came back ([`storage::resume`]) each end a step
 //! at every wait, under the same deadlines as at boot, so no turn holds its
 //! processor for one of them. One connection runs at a time; the others
 //! wait their turn, and the hubs' own status work waits for it, so two
@@ -104,11 +105,13 @@ impl Host {
         added.inputs.append(&mut found.inputs);
         added.unused.append(&mut found.unused);
         added.failures.append(&mut found.failures);
+        added.resumed.append(&mut found.resumed);
     }
 
     fn start(&self, queued: Queued) -> Attaching {
         let access = Rc::new(Access::stepped(self.controller.clone()));
         let a = access.clone();
+        let kept = self.storage.clone();
         let Queued {
             location,
             parent,
@@ -127,7 +130,7 @@ impl Host {
             )
             .await;
             for device in found.devices.clone() {
-                bind::bind_after_boot_with(&a, &device, &mut found).await;
+                bind::bind_after_boot_with(&a, &device, &mut found, &kept).await;
             }
             Attached { found, connected }
         });

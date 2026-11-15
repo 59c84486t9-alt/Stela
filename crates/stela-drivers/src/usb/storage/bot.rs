@@ -430,6 +430,44 @@ impl Io for Native {
     }
 }
 
+/// GET_MAX_LUN for `interface`.
+pub(super) fn max_lun_request(interface: u8) -> [u8; 8] {
+    setup(
+        DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
+        GET_MAX_LUN,
+        0,
+        u16::from(interface),
+        1,
+    )
+}
+
+/// The max LUN a GET_MAX_LUN answer gives, or `None` where it means one
+/// LUN: Linux `usb_stor_Bulk_max_lun` takes a stall, no data, a timeout or
+/// nonsense for one, and EP0 must still be usable afterwards.
+pub(super) fn max_lun_answer(answer: Result<Vec<u8>, BlockError>) -> Option<u8> {
+    match answer {
+        Ok(bytes) if bytes.len() == 1 && bytes[0] <= MAX_LUN => Some(bytes[0]),
+        _ => None,
+    }
+}
+
+/// The two buffers of a transport for a device that came back after boot,
+/// taken in the step that has the allocator ([`Bot::resumed`]).
+pub(in crate::usb) struct ResumeBuffers {
+    data: DmaBuffer,
+    wrapper: DmaBuffer,
+}
+
+/// Take a resumed transport's buffers, as [`Bot::native`] takes its own.
+pub(in crate::usb) fn resume_buffers(
+    dma: &mut dyn DmaAllocator,
+) -> Result<ResumeBuffers, BlockError> {
+    Ok(ResumeBuffers {
+        data: dma.allocate(MAX_TD, MAX_TD)?,
+        wrapper: dma.allocate(64, 64)?,
+    })
+}
+
 /// The unique owner can move to a fresh transport only after whole-device
 /// retirement and successful native reconstruction. Old media aliases
 /// keep their poisoned Bot, whose buffer slots are then permanently empty.
@@ -580,22 +618,12 @@ impl<I: Io> Bot<I> {
     /// Perform transport admission before committing any moved buffers.
     fn startup(io: &mut I, interface: u8, flags: quirks::Flags) -> Result<u8, BlockError> {
         io.ready()?;
-        let request = setup(
-            DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
-            GET_MAX_LUN,
-            0,
-            u16::from(interface),
-            1,
-        );
         Ok(if flags.single_lun() {
             0
         } else {
-            match io.control(request) {
-                Ok(bytes) if bytes.len() == 1 && bytes[0] <= MAX_LUN => bytes[0],
-                // Linux `usb_stor_Bulk_max_lun`: devices stall this request, send
-                // nothing, time out or answer nonsense; all mean one LUN. EP0
-                // must still be usable afterwards.
-                _ => {
+            match max_lun_answer(io.control(max_lun_request(interface))) {
+                Some(max_lun) => max_lun,
+                None => {
                     io.ready()?;
                     0
                 }
@@ -705,27 +733,18 @@ impl<I: Io> Bot<I> {
         self.flags.max_transfer_bytes()
     }
     pub fn read_before_mode_sense(&mut self, lun: u8, block_size: usize) -> Result<(), BlockError> {
-        let mut cdb = [0; 10];
-        cdb[0] = scsi::READ_10;
-        cdb[8] = 1;
-        if self.initial_read {
-            // Linux INITIAL_READ10 discards the first result. This workaround
-            // runs only while probing metadata before publication, never on a
-            // caller's data command or after an observed media change.
-            self.initial_read = false;
-            match self.command(lun, &cdb, Data::In(block_size)) {
-                Err(BlockError::Sense(sense)) if super::media::changed(&sense, true) => {
-                    return Err(BlockError::Sense(sense));
-                }
-                Err(error) if self.poisoned => return Err(error),
-                _ => {}
-            }
-        }
-        let bytes = self.command(lun, &cdb, Data::In(block_size))?;
-        if bytes.len() != block_size {
-            return Err(BlockError::Protocol("short USB block-zero read"));
-        }
-        Ok(())
+        let initial_read = self.take_initial_read();
+        stela_driver_base::stepped::block_on(super::read_block_zero(
+            &mut super::Now(self),
+            lun,
+            block_size,
+            initial_read,
+        ))
+    }
+    /// Whether the next block-zero read is the `INITIAL_READ10` one whose
+    /// result is discarded; asked once.
+    pub(super) fn take_initial_read(&mut self) -> bool {
+        core::mem::take(&mut self.initial_read)
     }
 
     fn ready(&mut self) -> Result<(), BlockError> {
@@ -939,6 +958,21 @@ impl<I: Io> Bot<I> {
             crate::waiting();
             core::hint::spin_loop();
         }
+    }
+
+    /// Whether a reset recovery is under way, moved on as far as it goes,
+    /// for a caller that runs commands in steps.
+    pub(super) fn settling(&mut self) -> bool {
+        self.recovering()
+    }
+    /// Whether a failed command's class reset is still unanswered, which a
+    /// caller waits for to see the generation it leaves.
+    pub(super) fn resetting(&mut self) -> bool {
+        matches!(self.recovery, Some(Recovery::Resetting(_))) && self.recovering()
+    }
+    /// The minimum timer's failure, which ends every later command.
+    pub(super) fn minimum_error(&self) -> Option<BlockError> {
+        self.minimum_error.clone()
     }
 
     /// Whether a begun command has not ended, or a reset recovery settles.
@@ -1294,6 +1328,42 @@ impl Bot<Native> {
         let mut bot = Self::with_flags(io, setting.number, endpoints, dma, flags)?;
         bot.attachment = Some((device.clone(), setting.clone()));
         Ok(bot)
+    }
+    /// A transport for `device`, configured with `setting`, that came back
+    /// after boot as the device another transport had: the buffers
+    /// [`resume_buffers`] took, and the max LUN the device answered in
+    /// steps, so nothing here waits.
+    pub(super) fn resumed(
+        io: Native,
+        device: &Device,
+        setting: &Interface,
+        buffers: ResumeBuffers,
+        max_lun: u8,
+    ) -> Result<Self, BlockError> {
+        let flags = quirks::Flags::from_device(device).map_err(BlockError::Unsupported)?;
+        let endpoints = io.endpoints;
+        let mut bot = Self::with_buffers(
+            io,
+            setting.number,
+            endpoints,
+            TransportBuffer::new(buffers.data),
+            TransportBuffer::new(buffers.wrapper),
+            flags,
+            max_lun,
+        );
+        bot.attachment = Some((device.clone(), setting.clone()));
+        Ok(bot)
+    }
+    /// Whether the device answers more than one LUN: false where its quirks
+    /// say it has one and is not asked ([`Self::startup`]).
+    pub(super) fn asks_max_lun(device: &Device) -> Result<bool, BlockError> {
+        quirks::Flags::from_device(device)
+            .map(|flags| !flags.single_lun())
+            .map_err(BlockError::Unsupported)
+    }
+    /// The device and setting this transport was bound to.
+    pub(super) fn attached(&self) -> Option<&(Device, Interface)> {
+        self.attachment.as_ref()
     }
     pub fn device(&self) -> &Device {
         &self.attachment.as_ref().expect("native BOT attachment").0

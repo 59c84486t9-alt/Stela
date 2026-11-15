@@ -1259,6 +1259,10 @@ pub struct Found {
     /// Bulk-Only interfaces configured and waiting out their settle time,
     /// discovered by the device start or the [`Host`] that bound them.
     pub(crate) settling: Vec<settle::Settling>,
+    /// Storage devices of disks in use that left the bus after boot and
+    /// came back, started again: each one's location and how many of its
+    /// units go on ([`Host::keep_storage`]).
+    pub resumed: Vec<(String, usize)>,
 }
 /// What an xHCI controller was doing when it stopped answering commands:
 /// the command left unanswered and the registers read before the halt.

@@ -88,6 +88,8 @@ pub(in super::super) struct Node {
     pub after_power_status: Option<u16>,
     bot: Option<bot::Disk>,
     pub hid: Option<HidPeer>,
+    /// The serial number its string descriptor 3 gives, in English (US).
+    pub serial: Option<&'static str>,
 }
 
 /// A boot keyboard (protocol 1) or mouse (2): its interrupt IN endpoint
@@ -128,6 +130,7 @@ impl Node {
             after_power_status: None,
             bot: None,
             hid: None,
+            serial: None,
         }
     }
     pub fn leaf(speed: u8) -> Self {
@@ -152,6 +155,7 @@ impl Node {
             after_power_status: None,
             bot: None,
             hid: None,
+            serial: None,
         }
     }
     /// A full-speed boot keyboard (`protocol` 1) or mouse (2).
@@ -205,6 +209,9 @@ impl Node {
             } else {
                 1
             };
+        }
+        if self.serial.is_some() {
+            out[16] = 3;
         }
         if self.speed < SUPER_SPEED {
             out[2..4].copy_from_slice(&0x0200u16.to_le_bytes());
@@ -772,6 +779,14 @@ impl Hardware {
                 DEVICE_DESCRIPTOR => Ok(node.device()),
                 CONFIGURATION_DESCRIPTOR => Ok(node.configuration()),
                 15 => Ok(node.bos.clone().unwrap_or_else(|| vec![5, 15, 5, 0, 0])),
+                STRING_DESCRIPTOR if value & 0xff == 0 => Ok(vec![4, STRING_DESCRIPTOR, 9, 4]),
+                STRING_DESCRIPTOR if value & 0xff == 3 && index == 0x0409 => {
+                    let serial = node.serial.ok_or(6u32)?;
+                    let mut out = vec![0, STRING_DESCRIPTOR];
+                    out.extend(serial.encode_utf16().flat_map(u16::to_le_bytes));
+                    out[0] = out.len() as u8;
+                    Ok(out)
+                }
                 _ => Err(6),
             },
             (0xa0, GET_DESCRIPTOR) => {

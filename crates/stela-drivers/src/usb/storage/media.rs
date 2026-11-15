@@ -21,6 +21,10 @@ pub(super) fn changed(sense: &Sense, removable: bool) -> bool {
 const RESET_LIMIT: usize = 3;
 const RESET_WINDOW_US: u64 = 60_000_000;
 
+/// A unit's LUN and what its probe gave: its identity and whether its
+/// medium is removable.
+pub(super) type Probed<L> = (L, Result<(Identity, bool), BlockError>);
+
 pub(super) struct Owner<T: Scsi> {
     pub transport: T,
     prefix: String,
@@ -48,6 +52,9 @@ pub(super) struct Owner<T: Scsi> {
     failure_status: Option<String>,
     /// The last port reset that failed ([`Scsi::take_reset_failure`]).
     reset_failure: Option<(String, BlockError)>,
+    /// Times the device left the bus and came back, and was taken again
+    /// ([`Self::resume`]).
+    returned: u32,
 }
 /// A begun command and what [`Owner::run`]'s retries of it still allow.
 struct Begun<L> {
@@ -104,6 +111,7 @@ impl<T: Scsi> Owner<T> {
             ended: None,
             failure_status: None,
             reset_failure: None,
+            returned: 0,
         }
     }
     pub fn invalidate(&mut self) {
@@ -383,6 +391,65 @@ impl<T: Scsi> Owner<T> {
         }
     }
 
+    /// The published units a device that came back is probed for, each LUN
+    /// with its location, and the serial number the probe names them by.
+    pub(super) fn published(&self) -> (Vec<(T::Lun, String)>, String) {
+        let units = self
+            .units
+            .iter()
+            .map(|unit| (unit.lun, unit.identity.location.clone()))
+            .collect();
+        (units, self.serial.clone())
+    }
+
+    /// Times the device came back and was taken again.
+    pub(super) fn returned(&self) -> u32 {
+        self.returned
+    }
+
+    /// Take `transport`, bound to the device after it left the bus and came
+    /// back, when a published unit probed (`probed`) with the identity it
+    /// was published with: that unit's disks go on, as after a port reset
+    /// ([`Self::revalidate`]), and every other unit ends. A command begun on
+    /// the old transport ends failed. With no unit the same, nothing is
+    /// taken: the device is another one. How many units go on.
+    pub(super) fn resume(&mut self, transport: T, probed: Vec<Probed<T::Lun>>) -> usize {
+        let same = |unit: &Unit<T::Lun>| {
+            probed.iter().any(|(lun, probed)| {
+                *lun == unit.lun
+                    && probed.as_ref().is_ok_and(|(identity, removable)| {
+                        *removable == unit.removable
+                            && Identity {
+                                features: unit.identity.features,
+                                ..identity.clone()
+                            } == unit.identity
+                    })
+            })
+        };
+        let kept: Vec<bool> = self.units.iter().map(same).collect();
+        let count = kept.iter().filter(|kept| **kept).count();
+        if count == 0 {
+            return 0;
+        }
+        if self.begun.take().is_some() && self.ended.is_none() {
+            self.ended = Some(Err(BlockError::Unsupported(
+                "USB storage device left the bus during the command",
+            )));
+        }
+        for (_, valid, _) in &self.pending {
+            valid.set(false);
+        }
+        self.transport = transport;
+        // The device's power-on UNIT ATTENTION may still be pending.
+        self.expecting_reset = true;
+        self.rebinds += 1;
+        self.returned += 1;
+        for (unit, kept) in self.units.iter().zip(kept) {
+            unit.valid.set(kept);
+        }
+        count
+    }
+
     /// After a device reset, keep each published unit whose probe gives the
     /// identity it was published with, and end the others.
     fn revalidate(&mut self) {
@@ -627,6 +694,16 @@ pub(super) enum TransportOwner {
     Uas(Rc<RefCell<Owner<uas::Host>>>),
 }
 impl UsbStorage {
+    /// Whether this interface's transport is on `controller`.
+    pub(in crate::usb) fn on(&self, controller: &Shared) -> bool {
+        match &self.owner {
+            TransportOwner::Bot(owner) => {
+                Rc::ptr_eq(&owner.borrow().transport.io.controller, controller)
+            }
+            TransportOwner::EhciBot(_) => false,
+            TransportOwner::Uas(owner) => owner.borrow().transport.on(controller),
+        }
+    }
     /// Controller/physical-interface location, including an empty reader.
     pub fn location(&self) -> String {
         match &self.owner {

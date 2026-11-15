@@ -7,9 +7,12 @@
 //! pointer that arrives joins the host input, behind a hub that arrives
 //! with it too; another new device is reported unused and is not started:
 //! a disk, network adapter, audio function or Bluetooth controller starts
-//! at the next boot. What a new device leaves is kept until every device it
-//! came with is removed. The USB storage interfaces probe configured stay owned here
-//! for the boot, with the disks the guest reaches through them.
+//! at the next boot. The exception is the device of a disk in use that left
+//! the bus and came back, the same one at the same port: it is started
+//! again in steps and the disk's users go on (`xhci::Host::keep_storage`).
+//! What a new device leaves is kept until every device it came with is
+//! removed. The USB storage interfaces probe configured stay owned here for
+//! the boot, with the disks the guest reaches through them.
 //!
 //! A USB4 host whose firmware runs the connection manager is looked at on the
 //! same timer: each firmware event is reported, as Linux's
@@ -183,6 +186,12 @@ impl HostUsb {
         root: u64,
         tsc_hz: u64,
     ) -> Self {
+        let mut hosts = hosts;
+        // A device of a disk in use that leaves the bus and comes back is
+        // started again for it.
+        for host in &mut hosts {
+            host.keep_storage(&storage);
+        }
         Self {
             hosts,
             usb4: usb4
@@ -289,6 +298,11 @@ impl HostUsb {
             }
             for (location, why) in &added.unused {
                 output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
+            }
+            for (location, units) in &added.resumed {
+                output::arguments(format_args!(
+                    "USB DISK RETURNED {location}: started again, {units} of its units go on\n"
+                ));
             }
             inputs.extend(
                 added
