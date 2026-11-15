@@ -896,7 +896,6 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         (self.host.run)(stack, &mut || {
             done = job.take().map(|job| job.run(&held));
         });
-        drop(held);
         let ran = (self.host.ticks)().wrapping_sub(now);
         self.jobs.with(|jobs| {
             jobs.running = None;
@@ -907,6 +906,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             report.longest = report.longest.max(ran);
             report.longest_queued = report.longest_queued.max(now.wrapping_sub(queued));
         });
+        // Only now may another processor take the next job: it marks that
+        // job running, which this one's completion must not clear.
+        drop(held);
         true
     }
 
@@ -1963,6 +1965,94 @@ mod tests {
         assert!(!shared.signaled());
         assert_eq!(shared.reached.load(Ordering::Acquire), 0);
         drop(held);
+    }
+
+    /// A job's completion is published before another processor can take
+    /// the next job: the next job stays marked running while it runs, so a
+    /// call parked on it is still answered `Pending` and its job is not
+    /// queued a second time.
+    #[test]
+    fn a_finished_job_leaves_the_next_job_marked_running() {
+        extern crate std;
+        use std::{
+            sync::{Mutex, OnceLock},
+            thread::JoinHandle,
+            time::{Duration, Instant},
+        };
+        type Mock = SharedService<MockBackend, crate::metal::device::fixture::MockCompiler>;
+        static SHARED: OnceLock<Arc<Mock>> = OnceLock::new();
+        static FIRST_RAN: AtomicBool = AtomicBool::new(false);
+        static SECOND_RUNS: AtomicBool = AtomicBool::new(false);
+        static SECOND_MAY_END: AtomicBool = AtomicBool::new(false);
+        static SECOND: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+        /// Whether `done` came true within `within`.
+        fn within(within: Duration, done: impl Fn() -> bool) -> bool {
+            let started = Instant::now();
+            while !done() {
+                if started.elapsed() > within {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            true
+        }
+        const LONG: Duration = Duration::from_secs(10);
+        // The first reading after the first job ran: another processor
+        // tries to take the second job, and is given a short while to.
+        fn ticks() -> u64 {
+            if FIRST_RAN.swap(false, Ordering::AcqRel) {
+                let shared = SHARED.get().unwrap().clone();
+                let second = std::thread::spawn(move || {
+                    assert!(
+                        within(LONG, || shared.run_job(0)),
+                        "the second job never ran"
+                    );
+                });
+                *SECOND.lock().unwrap() = Some(second);
+                within(Duration::from_millis(50), || {
+                    SECOND_RUNS.load(Ordering::Acquire)
+                });
+            }
+            7
+        }
+        let service = Service::new(
+            device_on(MockBackend::new()),
+            DeviceEpoch::from_registered(NonZeroU64::MIN),
+        );
+        let shared = Arc::new(SharedService::new(service, ServiceHost { ticks, ..HOST }));
+        assert!(SHARED.set(shared.clone()).is_ok());
+        shared.set_compile_stack(1);
+        shared.jobs.with(|jobs| {
+            jobs.queued.push_back((
+                Job::new([1; 32], Owner::Compiler, || {
+                    FIRST_RAN.store(true, Ordering::Release);
+                    Box::new(())
+                }),
+                0,
+            ));
+            jobs.queued.push_back((
+                Job::new([2; 32], Owner::Compiler, || {
+                    SECOND_RUNS.store(true, Ordering::Release);
+                    assert!(within(LONG, || SECOND_MAY_END.load(Ordering::Acquire)));
+                    Box::new(())
+                }),
+                0,
+            ));
+        });
+        assert!(shared.run_job(0));
+        assert!(
+            within(LONG, || SECOND_RUNS.load(Ordering::Acquire)),
+            "the second job never started"
+        );
+        let running = shared.jobs.with(|jobs| jobs.running);
+        SECOND_MAY_END.store(true, Ordering::Release);
+        let second = SECOND.lock().unwrap().take().unwrap();
+        second.join().unwrap();
+        assert_eq!(running, Some([2; 32]));
+        shared.jobs.with(|jobs| {
+            assert_eq!(jobs.running, None);
+            assert_eq!(jobs.done.len(), 2);
+        });
     }
 
     #[test]
