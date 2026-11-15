@@ -190,6 +190,9 @@ unsafe extern "C" {
     fn stela_acpi_start(services: *const Services, hardware: u8) -> Status;
     fn stela_acpi_stop() -> Status;
     fn stela_acpi_preflight_wait_events() -> Status;
+    fn stela_acpi_locate(out: *mut RawLocation);
+    fn stela_acpi_bound_begin(ticks: u64);
+    fn stela_acpi_bound_end(out: *mut RawLocation) -> u8;
     fn stela_acpi_enable_hardware() -> Status;
     fn stela_acpi_guard_enter(out: *mut *mut c_void, epoch: *mut u64) -> Status;
     fn stela_acpi_guard_leave(guard: *mut c_void);
@@ -694,6 +697,160 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+/// `struct stela_acpi_location` (`bridge.h`).
+#[repr(C)]
+struct RawLocation {
+    path: [u8; 128],
+    offset: u32,
+    opcode: u16,
+    in_loop: u8,
+    found: u8,
+}
+const _: () = assert!(size_of::<RawLocation>() == 136);
+impl RawLocation {
+    const EMPTY: Self = Self {
+        path: [0; 128],
+        offset: 0,
+        opcode: 0,
+        in_loop: 0,
+        found: 0,
+    };
+    fn location(&self) -> Option<Location> {
+        (self.found != 0).then(|| {
+            let end = self.path.iter().position(|&byte| byte == 0);
+            Location {
+                method: String::from_utf8_lossy(&self.path[..end.unwrap_or(self.path.len())])
+                    .into_owned(),
+                opcode: self.opcode,
+                offset: self.offset,
+                in_loop: self.in_loop != 0,
+            }
+        })
+    }
+}
+
+/// Where the interpreter runs: the method (`\` for a table's module-level
+/// code), the opcode it executes, at which offset of the method's AML, and
+/// whether a While loop holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub method: String,
+    pub opcode: u16,
+    pub offset: u32,
+    pub in_loop: bool,
+}
+impl core::fmt::Display for Location {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} at AML offset {:#x}, opcode {:#06x}",
+            self.method, self.offset, self.opcode
+        )?;
+        if let Some(name) = opcode_name(self.opcode) {
+            write!(f, " ({name})")?;
+        }
+        if self.in_loop {
+            f.write_str(" in a While loop")?;
+        }
+        Ok(())
+    }
+}
+
+/// The names of the AML opcodes that wait or loop, and of those a method
+/// is usually at while it reaches a device (`amlcode.h`); ACPICA's own
+/// opcode names are built only with its disassembler.
+pub fn opcode_name(opcode: u16) -> Option<&'static str> {
+    Some(match opcode {
+        0x0014 => "Method",
+        0x002d => "name",
+        0x0035 => "method call",
+        0x0070 => "Store",
+        0x00a0 => "If",
+        0x00a2 => "While",
+        0x00a4 => "Return",
+        0x5b21 => "Stall",
+        0x5b22 => "Sleep",
+        0x5b23 => "Acquire",
+        0x5b25 => "Wait",
+        _ => return None,
+    })
+}
+
+/// Where the interpreter runs now; `None` outside AML.
+///
+/// # Safety
+/// On the interpreter's only processor, with the interpreter stopped where
+/// it runs (an NMI's handler) or between calls; it reads ACPICA's walk
+/// state and namespace nodes without their locks.
+pub unsafe fn running() -> Option<Location> {
+    let mut raw = RawLocation::EMPTY;
+    // SAFETY: the caller's contract; the C writes `raw` only.
+    unsafe { stela_acpi_locate(&mut raw) };
+    raw.location()
+}
+
+/// A bound on the interpreter's time in one native call, which neither ACPI
+/// nor ACPICA has: ACPICA bounds each While loop (30 s), each Sleep (2 s)
+/// and each Stall (255 us), but nested methods, loops and Sleeps add up
+/// without limit. Once the bound runs out, Sleep and Stall return at once,
+/// every hardware access fails with `AE_TIME`, waits end, and each While loop
+/// ends at its next iteration with `AE_AML_LOOP_TIMEOUT`: the methods
+/// running end with that error, as ACPICA aborts a method on any error, and
+/// the call returns. Waits never outlast the bound. One bound at a time, on
+/// the interpreter's processor.
+pub struct Bound {
+    ended: bool,
+    _local: PhantomData<*mut ()>,
+}
+
+/// A bound that ran out, and where AML was then (`None`: outside any
+/// method, as in ACPICA's own work between them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Overrun {
+    pub at: Option<Location>,
+}
+impl core::fmt::Display for Overrun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.at {
+            Some(location) => write!(f, "in {location}"),
+            None => f.write_str("outside any AML method"),
+        }
+    }
+}
+
+impl Bound {
+    /// Bound the calls into the interpreter until [`Self::end`] to
+    /// `milliseconds`, counted from now, or from [`Session::start`]'s first
+    /// time read when the session has not started yet.
+    pub fn begin(milliseconds: u32) -> Self {
+        // SAFETY: plain stores into the bridge's bound; it reads the
+        // provider's timer only once a session is active.
+        unsafe { stela_acpi_bound_begin(u64::from(milliseconds) * 10_000) };
+        Self {
+            ended: false,
+            _local: PhantomData,
+        }
+    }
+    /// End the bound: `Err`, with where AML was, when it ran out.
+    pub fn end(mut self) -> Result<(), Overrun> {
+        self.ended = true;
+        let mut raw = RawLocation::EMPTY;
+        // SAFETY: the C writes `raw` only.
+        match unsafe { stela_acpi_bound_end(&mut raw) } {
+            0 => Ok(()),
+            _ => Err(Overrun { at: raw.location() }),
+        }
+    }
+}
+impl Drop for Bound {
+    fn drop(&mut self) {
+        if !self.ended {
+            // SAFETY: as in `end`; a null output keeps nothing.
+            unsafe { stela_acpi_bound_end(ptr::null_mut()) };
+        }
     }
 }
 

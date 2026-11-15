@@ -1,5 +1,6 @@
 mod battery;
 mod battery_native;
+mod bounds;
 mod ec_binding;
 mod ec_native;
 mod references;

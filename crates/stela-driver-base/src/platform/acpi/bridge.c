@@ -1,8 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "bridge.h"
 #include "accommon.h"
+#include "acdispat.h"
+#include "acnamesp.h"
+#include "amlcode.h"
 static struct stela_acpi_services services;
 static u8 active;
+/* The bound on one native call into the interpreter (stela_acpi_bound_begin),
+ * in the provider's 100 ns timer units: its length (0: none), its end (0:
+ * not started yet), and whether it ran out. ACPICA bounds each While loop
+ * (acpi_gbl_max_loop_iterations seconds), each Sleep (ACPI_MAX_SLEEP) and
+ * each Stall (255 us), but nothing bounds a whole table load or method:
+ * nested methods, loops and Sleeps add up without limit. */
+static u64 bound_ticks;
+static u64 bound_end;
+static u8 bound_spent;
+/* What acpi_os_get_timer adds to the provider's time once a bound ran out:
+ * every read moves it past any While loop's timeout, so each loop ends at
+ * its next iteration with AE_AML_LOOP_TIMEOUT. It never goes back, so the
+ * time AML reads stays monotonic for the whole session. */
+static u64 bound_skew;
+static struct stela_acpi_location bound_location;
 static u8 hardware_enabled;
 static u8 arbitration_ready;
 static u8 core_started;
@@ -152,6 +170,58 @@ acpi_status stela_acpi_bind_node(acpi_handle candidate, u64 epoch) {
     (void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
     return status;
 }
+void stela_acpi_locate(struct stela_acpi_location *out) {
+    memset(out, 0, sizeof(*out));
+    /* Interpretation is single-threaded here: the parser keeps its current
+     * thread's walk list in this global, NULL outside any parse. */
+    struct acpi_walk_state *walk = acpi_ds_get_current_walk_state(acpi_gbl_current_walk_list);
+    if (!walk) return;
+    out->found = 1;
+    struct acpi_namespace_node *node = walk->method_node;
+    u32 length = acpi_ns_build_normalized_path(node, 0, 0, FALSE);
+    if (length && length <= sizeof(out->path)) {
+        (void)acpi_ns_build_normalized_path(node, out->path, sizeof(out->path), FALSE);
+    } else if (node && ACPI_GET_DESCRIPTOR_TYPE(node) == ACPI_DESC_TYPE_NAMED) {
+        memcpy(out->path, "...", 3);
+        ACPI_COPY_NAMESEG(out->path + 3, acpi_ut_get_node_name(node));
+    }
+    if (walk->op) out->opcode = walk->op->common.aml_opcode;
+    if (walk->parser_state.aml_start && walk->parser_state.aml >= walk->parser_state.aml_start)
+        out->offset = (u32)(walk->parser_state.aml - walk->parser_state.aml_start);
+    union acpi_generic_state *control = walk->control_state;
+    out->in_loop = control && control->common.descriptor_type == ACPI_DESC_TYPE_STATE_CONTROL &&
+                   control->control.opcode == AML_WHILE_OP;
+}
+void stela_acpi_bound_begin(u64 ticks) {
+    bound_ticks = ticks;
+    bound_spent = 0;
+    bound_end = ticks && active ? services.timer(services.context) + ticks : 0;
+    memset(&bound_location, 0, sizeof(bound_location));
+}
+u8 stela_acpi_bound_end(struct stela_acpi_location *out) {
+    u8 spent = bound_spent;
+    if (out) memcpy(out, &bound_location, sizeof(*out));
+    bound_ticks = 0;
+    bound_end = 0;
+    bound_spent = 0;
+    return spent;
+}
+/* Whether the current bound ran out; the first time, where AML was. */
+static u8 bound_over(void) {
+    if (!bound_ticks || !bound_end || !active) return 0;
+    if (bound_spent) return 1;
+    if (services.timer(services.context) < bound_end) return 0;
+    bound_spent = 1;
+    stela_acpi_locate(&bound_location);
+    return 1;
+}
+/* What is left of the bound, in whole milliseconds rounded up; ~0 without one. */
+static u64 bound_left_ms(void) {
+    if (!bound_ticks || !bound_end || !active) return ~0ull;
+    u64 now = services.timer(services.context);
+    return now >= bound_end ? 0 : (bound_end - now + ACPI_100NSEC_PER_MSEC - 1) / ACPI_100NSEC_PER_MSEC;
+}
+_Static_assert(sizeof(struct stela_acpi_location) == 136, "location ABI");
 _Static_assert(sizeof(struct allocation) == 32, "allocator alignment");
 _Static_assert(sizeof(struct stela_acpi_services) == 296, "OSL vtable ABI");
 _Static_assert(ACPI_OFFSET(struct stela_acpi_services, destroy) == 272, "OSL callback ABI");
@@ -171,6 +241,7 @@ acpi_status stela_acpi_preflight_wait_events(void) {
 static acpi_status system_memory(u32 function, acpi_physical_address address, u32 width, u64 *value, void *handler_context, void *region_context) {
     (void)handler_context; (void)region_context;
     if (!value) return AE_BAD_PARAMETER;
+    if (bound_over()) return AE_TIME;
     switch (function & ACPI_IO_MASK) {
     case ACPI_READ:
         *value = 0;
@@ -189,9 +260,12 @@ acpi_status stela_acpi_start(const struct stela_acpi_services *input, u8 hardwar
     if (hardware && (input->capabilities & STELA_ACPI_FULL_CAPABILITIES) != STELA_ACPI_FULL_CAPABILITIES) return AE_SUPPORT;
     memcpy(&services, input, sizeof(services));
     active = 1;
+    /* A bound begun before the start counts from here, its first time read. */
+    if (bound_ticks && !bound_end) bound_end = services.timer(CTX) + bound_ticks;
     hardware_enabled = 0;
     __atomic_store_n(&arbitration_ready, 0, __ATOMIC_RELEASE);
     core_started = 0;
+    bound_skew = 0;
     allocations = 0;
     retained_contexts = 0;
     namespace_guards = 0;
@@ -363,7 +437,15 @@ acpi_cpu_flags acpi_os_acquire_lock(acpi_spinlock lock) { return services.acquir
 void acpi_os_release_lock(acpi_spinlock lock, acpi_cpu_flags flags) { services.release_lock(CTX, lock, flags); }
 acpi_status acpi_os_create_semaphore(u32 max, u32 initial, acpi_semaphore *out) { return services.create_semaphore(CTX, max, initial, out); }
 acpi_status acpi_os_delete_semaphore(acpi_semaphore s) { return services.delete_semaphore(CTX, s); }
-acpi_status acpi_os_wait_semaphore(acpi_semaphore s, u32 n, u16 timeout) { return services.wait_semaphore(CTX, s, n, timeout); }
+/* Under a bound, a wait (ACPI_WAIT_FOREVER included) lasts at most what is
+ * left of it; one that ran out makes the bound's overrun. */
+acpi_status acpi_os_wait_semaphore(acpi_semaphore s, u32 n, u16 timeout) {
+    u64 left = bound_over() ? 0 : bound_left_ms();
+    u16 bounded = left < timeout ? (u16)left : timeout;
+    acpi_status status = services.wait_semaphore(CTX, s, n, bounded);
+    if (ACPI_FAILURE(status) && bounded != timeout) (void)bound_over();
+    return status;
+}
 acpi_status acpi_os_signal_semaphore(acpi_semaphore s, u32 n) { return services.signal_semaphore(CTX, s, n); }
 acpi_status acpi_os_install_interrupt_handler(u32 irq, acpi_osd_handler handler, void *context) { return services.install_interrupt(CTX, irq, handler, context); }
 acpi_status acpi_os_remove_interrupt_handler(u32 irq, acpi_osd_handler handler) { return services.remove_interrupt(CTX, irq, handler); }
@@ -381,15 +463,44 @@ void acpi_os_wait_events_complete(void) {
         __builtin_trap(); /* Also stop an invalid returning native provider. */
     }
 }
-void acpi_os_sleep(u64 ms) { services.sleep(CTX, ms); }
-void acpi_os_stall(u32 us) { services.stall(CTX, us); }
-acpi_status acpi_os_read_port(acpi_io_address port, u32 *value, u32 width) { return services.read_port(CTX, port, value, width); }
-acpi_status acpi_os_write_port(acpi_io_address port, u32 value, u32 width) { return services.write_port(CTX, port, value, width); }
-acpi_status acpi_os_read_memory(acpi_physical_address p, u64 *value, u32 width) { return services.read_memory(CTX, p, value, width); }
-acpi_status acpi_os_write_memory(acpi_physical_address p, u64 value, u32 width) { return services.write_memory(CTX, p, value, width); }
-acpi_status acpi_os_read_pci_configuration(struct acpi_pci_id *id, u32 reg, u64 *value, u32 width) { return services.read_pci(CTX, id, reg, value, width); }
-acpi_status acpi_os_write_pci_configuration(struct acpi_pci_id *id, u32 reg, u64 value, u32 width) { return services.write_pci(CTX, id, reg, value, width); }
-u64 acpi_os_get_timer(void) { return services.timer(CTX); }
+/* Once a bound ran out, Sleep and Stall return at once and every hardware
+ * access fails with AE_TIME, so the methods running unwind as ACPICA aborts
+ * a method on any error; a Sleep never outlasts the bound. */
+void acpi_os_sleep(u64 ms) {
+    if (bound_over()) return;
+    u64 left = bound_left_ms();
+    services.sleep(CTX, ms < left ? ms : left);
+}
+void acpi_os_stall(u32 us) { if (!bound_over()) services.stall(CTX, us); }
+acpi_status acpi_os_read_port(acpi_io_address port, u32 *value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.read_port(CTX, port, value, width);
+}
+acpi_status acpi_os_write_port(acpi_io_address port, u32 value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.write_port(CTX, port, value, width);
+}
+acpi_status acpi_os_read_memory(acpi_physical_address p, u64 *value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.read_memory(CTX, p, value, width);
+}
+acpi_status acpi_os_write_memory(acpi_physical_address p, u64 value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.write_memory(CTX, p, value, width);
+}
+acpi_status acpi_os_read_pci_configuration(struct acpi_pci_id *id, u32 reg, u64 *value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.read_pci(CTX, id, reg, value, width);
+}
+acpi_status acpi_os_write_pci_configuration(struct acpi_pci_id *id, u32 reg, u64 value, u32 width) {
+    if (bound_over()) return AE_TIME;
+    return services.write_pci(CTX, id, reg, value, width);
+}
+u64 acpi_os_get_timer(void) {
+    u64 now = services.timer(CTX);
+    if (bound_over()) bound_skew += (u64)acpi_gbl_max_loop_iterations * ACPI_100NSEC_PER_SEC + 1;
+    return now + bound_skew;
+}
 acpi_status acpi_os_signal(u32 kind, void *info) { return services.signal(CTX, kind, info); }
 acpi_status acpi_os_enter_sleep(u8 state, u32 a, u32 b) { (void)state; (void)a; (void)b; return AE_SUPPORT; } /* No public system-sleep API yet. */
 void stela_acpi_flush_cpu_cache(void) { services.flush_cache(CTX); }
