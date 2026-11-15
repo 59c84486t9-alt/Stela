@@ -423,8 +423,7 @@ pub fn steps() -> Vec<Step> {
         step("/sbin/mount -P 1".into(), 120),
         step("/usr/libexec/init_data_protection".into(), 180),
         step("/sbin/mount -P 2".into(), 180),
-        step(format!("/bin/test -d {PLUGINS}"), 30),
-        // Each named last, so `-m` gives each its mode.
+        // Create the complete hierarchy; GPUBundles may not exist yet.
         step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
