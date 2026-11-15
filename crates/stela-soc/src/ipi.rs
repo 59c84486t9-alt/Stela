@@ -75,6 +75,9 @@ struct Word {
     /// [`FastIpi`] holds a deferred IPI for the CPU (written under the
     /// devices' lock).
     armed: AtomicBool,
+    /// The counter value that deferred IPI fires at (at least 1), 0 for
+    /// none: its CPU's PE wakes for it itself ([`Signals::deferred`]).
+    deadline: AtomicU64,
 }
 
 /// What every CPU reaches of the fast IPIs without the devices' lock.
@@ -151,6 +154,16 @@ impl Signals {
         Some(())
     }
 
+    /// The counter value at which `cpu`'s deferred IPI fires, if one is
+    /// armed. The devices fire it at their next advance with time past it,
+    /// which a PE that sleeps does not make: its PE wakes at this count
+    /// and advances them itself, so the IPI fires on time whichever PE
+    /// advances the devices and whatever the home machine does.
+    pub fn deferred(&self, cpu: CpuIndex) -> Option<u64> {
+        let deadline = self.words.get(cpu)?.deadline.load(Acquire);
+        (deadline != 0).then_some(deadline)
+    }
+
     /// `cpu`'s IPI_SR.
     pub fn pending(&self, cpu: CpuIndex) -> u64 {
         self.words
@@ -205,9 +218,10 @@ pub struct FastIpi {
     deferred: Vec<Option<u64>>,
     /// The global IPI_CR value.
     countdown: Option<u64>,
-    /// CPUs whose FIQ a locked access or advance raised since
-    /// [`Self::take_raised`] took theirs: bit `cpu % 64` of word `cpu / 64`,
-    /// for every CPU of the machine.
+    /// CPUs whose FIQ a locked access or advance raised, or for which an
+    /// access armed a deferred IPI, since [`Self::take_raised`] took theirs:
+    /// bit `cpu % 64` of word `cpu / 64`, for every CPU of the machine.
+    /// Their PEs look at their lines and their own wake again.
     raised: Vec<u64>,
     deferred_counts: DeferredCounts,
 }
@@ -264,9 +278,10 @@ impl FastIpi {
     }
     fn arm(&mut self, cpu: CpuIndex, deadline: Option<u64>) {
         self.deferred[cpu] = deadline;
-        self.signals.words[cpu]
-            .armed
-            .store(deadline.is_some(), Release);
+        let word = &self.signals.words[cpu];
+        word.deadline
+            .store(deadline.map_or(0, |deadline| deadline.max(1)), Release);
+        word.armed.store(deadline.is_some(), Release);
     }
     fn raise(&mut self, cpu: CpuIndex) {
         if self.signals.raise(cpu) {
@@ -328,6 +343,8 @@ impl FastIpi {
                             self.deferred[target].unwrap_or(now.saturating_add(countdown));
                         self.deferred_counts.sent += 1;
                         self.arm(target, Some(deadline));
+                        // Its PE, which may sleep, learns when to wake.
+                        self.raised[target / 64] |= 1 << (target % 64);
                     }
                     _ => return unsupported("no-wake IPIs are not modeled"),
                 }
@@ -447,6 +464,32 @@ mod tests {
             }
         );
         assert_eq!(ipi.take_deferred(), DeferredCounts::default());
+    }
+
+    /// A deferred IPI's deadline is published for its CPU's PE, which wakes
+    /// for it itself, and that PE is told at the request; the deadline goes
+    /// once the IPI fires, is retracted or is subsumed.
+    #[test]
+    fn a_deferred_ipis_deadline_is_published_for_its_cpu() {
+        let mut ipi = t8112();
+        let signals = ipi.signals();
+        write(&mut ipi, 0, Register::Countdown, 240, 0);
+        assert_eq!(signals.deferred(1), None);
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 1, 100);
+        assert_eq!(signals.deferred(1), Some(340));
+        assert!(ipi.take_raised(1) && !ipi.fiq(1), "told, not raised");
+        // A second request keeps the first countdown.
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 1, 200);
+        assert_eq!(signals.deferred(1), Some(340));
+        assert_eq!(ipi.advance(340), None);
+        assert_eq!(signals.deferred(1), None);
+        assert!(ipi.fiq(1));
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 2, 400);
+        write(&mut ipi, 0, Register::RequestLocal, 1 << 28 | 2, 401);
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 3, 400);
+        write(&mut ipi, 0, Register::RequestLocal, 3, 401);
+        assert_eq!((signals.deferred(2), signals.deferred(3)), (None, None));
+        assert_eq!(signals.deferred(99), None);
     }
 
     /// Immediate requests and acknowledgements complete on the signals

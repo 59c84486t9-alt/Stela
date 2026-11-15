@@ -2191,6 +2191,93 @@ fn a_kicked_sleep_counts_its_wake_latency() {
     assert_eq!(hub.take_wake_latency(), (0, 0, 0));
 }
 
+/// A signal armed for a PE that comes due by itself (an Apple deferred fast
+/// IPI) bounds how long that PE's machine trusts its lines, and once due
+/// the PE advances the devices itself, while home runs its own loop: it
+/// fires then, not at home's next advance, which can be milliseconds on.
+#[test]
+fn a_pe_fires_its_own_due_signal_without_waiting_for_home() {
+    struct Own(Arc<AtomicU64>);
+    impl LocalRegisters for Own {
+        fn register(&self, _: Encoding, _: Option<u64>) -> Option<u64> {
+            None
+        }
+        fn storage(&self, _: Encoding) -> Option<u64> {
+            None
+        }
+        fn deadline(&self) -> Option<u64> {
+            let due = self.0.load(Ordering::SeqCst);
+            (due != 0).then_some(due)
+        }
+    }
+    /// PE 1's IRQ rises once an advance passes the armed count.
+    struct Deferred {
+        due: Arc<AtomicU64>,
+        raised: bool,
+        advanced_by: Vec<usize>,
+    }
+    impl Devices for Deferred {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn local_registers(&self, _: usize) -> Option<Arc<dyn LocalRegisters>> {
+            Some(Arc::new(Own(Arc::clone(&self.due))))
+        }
+        fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
+            self.advanced_by.push(cpu);
+            let due = self.due.load(Ordering::SeqCst);
+            if due != 0 && now >= due {
+                self.due.store(0, Ordering::SeqCst);
+                self.raised = true;
+            }
+            (self.pins(cpu).unwrap_or_default(), None)
+        }
+        fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+            self.lines_and_deadline(cpu, now).0
+        }
+        fn pins(&mut self, pe: usize) -> Option<Lines> {
+            Some(Lines {
+                irq: pe == 1 && self.raised,
+                ..Lines::default()
+            })
+        }
+    }
+    let (hub, _) = hub(2);
+    let due = Arc::new(AtomicU64::new(0));
+    let home = SharedDevices::new(
+        Deferred {
+            due: Arc::clone(&due),
+            raised: false,
+            advanced_by: Vec::new(),
+        },
+        Arc::clone(&hub),
+    );
+    let mut worker = home.worker();
+    let advanced = |home: &SharedDevices<Deferred>| {
+        home.with(|devices| core::mem::take(&mut devices.advanced_by))
+    };
+    advanced(&home);
+    // Nothing armed: the worker looks again in its usual time.
+    let look = worker.lines_and_deadline(1, 10).1.unwrap() - 10;
+    // Armed for count 50: the worker trusts its lines no later than that
+    // and advances nothing before.
+    due.store(50, Ordering::SeqCst);
+    assert_eq!(worker.own_deadline(1), Some(50));
+    let (lines, until) = worker.lines_and_deadline(1, 20);
+    assert_eq!((lines.irq, until), (false, Some(50.min(20 + look))));
+    assert!(advanced(&home).is_empty());
+    // Due, with home in its run loop: the worker advances them as PE 1 and
+    // reads its IRQ at once.
+    assert!(!hub.home_outside());
+    let (lines, _) = worker.lines_and_deadline(1, 50);
+    assert!(lines.irq);
+    assert_eq!(advanced(&home), [1]);
+    assert_eq!(worker.own_deadline(1), None);
+}
+
 #[test]
 fn a_pe_without_a_machine_waits_for_its_first_start() {
     let (hub, _) = hub(2);

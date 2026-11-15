@@ -2172,6 +2172,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             [
                 self.timer_deadline(),
                 self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
+                self.devices.own_deadline(self.current),
             ]
             .into_iter()
             .flatten()
@@ -2357,6 +2358,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             super::timer::next_event(&self.cpu, now),
             self.timer_deadline(),
             self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
+            self.devices.own_deadline(self.current),
             wait.timeout.map(|timeout| timeout.deadline(now)),
             lines,
         ]

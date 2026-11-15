@@ -29,6 +29,13 @@ pub trait LocalRegisters: Send + Sync {
     fn fiq(&self) -> bool {
         false
     }
+    /// The count at which something this PE's handle holds comes due by
+    /// itself (an Apple deferred fast IPI armed for it), which only an
+    /// advance of the devices with time makes happen
+    /// ([`Devices::own_deadline`]).
+    fn deadline(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Device registers every PE reads without the devices' lock: words whose
@@ -651,6 +658,15 @@ pub trait Devices {
     /// that sets it is seen there.
     fn own_fiq(&mut self, _cpu: usize) -> bool {
         false
+    }
+    /// The count at which a signal to PE `cpu` comes due by itself (an
+    /// Apple deferred fast IPI), on a board where the PE's own machine,
+    /// not only the one that advances the devices with time, must look
+    /// then ([`LocalRegisters::deadline`]): its waits end by it, and a look
+    /// past it advances the devices. `None` where the devices' own
+    /// deadline covers it.
+    fn own_deadline(&mut self, _cpu: usize) -> Option<u64> {
+        None
     }
     /// Every CPU's Apple fast-IPI word, CPU `n` being PE `n`: empty for a
     /// board without fast IPIs.

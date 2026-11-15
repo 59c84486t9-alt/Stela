@@ -966,6 +966,13 @@ impl LocalRegisters for PeRegisters {
             .is_some_and(|(signals, cpu)| signals.pending(*cpu) != 0)
     }
 
+    /// The deferred fast IPI armed for the PE ([`crate::ipi::Signals::deferred`]).
+    fn deadline(&self) -> Option<u64> {
+        self.ipi
+            .as_ref()
+            .and_then(|(signals, cpu)| signals.deferred(*cpu))
+    }
+
     fn storage(&self, encoding: Encoding) -> Option<u64> {
         use stela_engine::machine::fast_ipi::Register;
         self.counters

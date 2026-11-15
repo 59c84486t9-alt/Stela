@@ -813,6 +813,40 @@ fn a_lock_free_device_load_keeps_the_cached_lines() {
     }
 }
 
+/// A signal armed for the running PE that comes due by itself (an Apple
+/// deferred fast IPI, `Devices::own_deadline`) ends its wait: its next
+/// deadline, and its wake while it serves the host, are no later.
+#[test]
+fn a_pes_own_due_signal_ends_its_wait() {
+    #[derive(Default)]
+    struct Armed(Option<u64>);
+    impl Devices for Armed {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+        fn own_deadline(&mut self, _: usize) -> Option<u64> {
+            self.0
+        }
+    }
+    let mut machine = board(&[], Armed::default(), Vec::new());
+    assert_eq!(machine.next_deadline(10), None);
+    machine.devices.0 = Some(77);
+    assert_eq!(machine.next_deadline(10), Some(77));
+    // In WFI, which a FIQ ends whatever its mask.
+    machine.waiting = Some(Wait {
+        kind: WaitKind::Interrupt,
+        timeout: None,
+        down: false,
+    });
+    assert_eq!(machine.own_deadline(10), Some(77));
+}
+
 #[test]
 fn survey_substitutes_registers_but_never_dma_service_effects() {
     let mut machine = machine(&[0]);

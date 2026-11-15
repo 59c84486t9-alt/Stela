@@ -625,6 +625,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             consider(self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()));
             consider(streams(&self.cpu, self.waiting));
             consider(timeout(self.waiting));
+            consider(self.devices.own_deadline(self.current));
         }
         for (pe, peer) in self.peers.iter().enumerate() {
             if let Peer::Parked(parked) = peer

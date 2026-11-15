@@ -698,6 +698,21 @@ impl<D: Devices> SharedDevices<D> {
         devices.notify(usize::MAX, now);
     }
 
+    /// Advance the devices to `now` as PE `cpu`, whatever home does: a
+    /// signal armed for that PE came due ([`Devices::own_deadline`]), and
+    /// only an advance with time fires it. Waits for the lock: the PE has
+    /// nothing else to do until the signal fires.
+    fn advance_as(&self, cpu: usize, now: u64) {
+        let mut devices = self.lock(Call::Deadline);
+        let now = devices.now(now);
+        let (lines, deadline) = devices.lines_and_deadline(cpu, now);
+        if let Some(seen) = devices.state.lines.get_mut(cpu) {
+            *seen = lines;
+        }
+        self.board.publish_time(deadline);
+        devices.notify(cpu, now);
+    }
+
     /// When a PE other than home next looks at the devices' deadline: at
     /// it, at most 10 ms on, or 1 ms on while it is overdue and home is in
     /// its run loop, which advances them.
@@ -1094,6 +1109,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
     fn fast_ipi_table(&self) -> Option<Arc<crate::machine::fast_ipi::Table>> {
         self.board.ipi_table.clone()
     }
+    fn own_deadline(&mut self, cpu: usize) -> Option<u64> {
+        self.local_registers_of(cpu)?.deadline()
+    }
     /// Timed as the engine's own lock-free sends are (`DEVICE WAKES
     /// register=`).
     fn wake_signalled(&mut self, pe: usize) {
@@ -1125,10 +1143,19 @@ impl<D: Devices> Devices for SharedDevices<D> {
     /// The home machine's [`Self::lines`] and [`Self::deadline`] under one
     /// lock, from one advance of the devices. Another PE's machine gets its
     /// pins and when to look again ([`Self::look_again`]).
+    /// A signal armed for that PE ([`Devices::own_deadline`]) that came
+    /// due fires now, by its own advance, and one still ahead bounds when
+    /// it looks again.
     fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
         if !self.home {
-            self.advance_for_home(now);
-            return (self.lines(cpu, now), Some(self.look_again(now)));
+            if self.own_deadline(cpu).is_some_and(|due| due <= now) {
+                self.advance_as(cpu, now);
+            } else {
+                self.advance_for_home(now);
+            }
+            let look = self.look_again(now);
+            let until = self.own_deadline(cpu).map_or(look, |due| due.min(look));
+            return (self.lines(cpu, now), Some(until));
         }
         let mut devices = self.lock(Call::Lines);
         let now = devices.now(now);
