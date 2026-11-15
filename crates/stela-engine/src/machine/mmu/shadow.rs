@@ -833,7 +833,9 @@ mod tests {
                             .ranges(Reach::Containing(page + 8), half)
                             .expect("a TLBI by address keeps the half");
                         assert!(
-                            ranges.iter().any(|&(low, high)| low <= first && last <= high),
+                            ranges
+                                .iter()
+                                .any(|&(low, high)| low <= first && last <= high),
                             "{page:#x} {ranges:x?}"
                         );
                         let mut extents = around_fill.clone();
