@@ -1559,6 +1559,18 @@ impl Heartbeat {
                         ipis.longest_late_ticks * 1_000_000 / hz,
                     ));
                 }
+                // Sleeping PEs a wake kicked (an interrupt or IPI for an idle
+                // PE) and how long their host cores took to come back.
+                let (kicked, ticks, longest) = machine.devices.hub().take_wake_latency();
+                if let Some(average) = ticks.checked_div(kicked) {
+                    let micros =
+                        |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(host::COUNTER_HZ);
+                    output::arguments(format_args!(
+                        "PES WAKE kicked={kicked} average_us={} longest_us={}\n",
+                        micros(average),
+                        micros(longest),
+                    ));
+                }
                 survey_report(machine);
                 occupancy_report(machine, &mut self.occupancy);
                 let next = if self.beats.is_multiple_of(SUSPENSION_BEATS) {

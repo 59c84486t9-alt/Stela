@@ -424,6 +424,10 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
+    /// The host tick of the first [`Hub::wake`] that kicked it in this
+    /// sleep, 0 for none: how long its core takes to come back
+    /// ([`Hub::take_wake_latency`]).
+    kicked_at: AtomicU64,
     /// While it sleeps, it waits for an interrupt (or is powered down), so a
     /// wake for the host's service is one it takes ([`Hub::request_service`]):
     /// one waiting in WFE may hold a ticket another PE hands it, and leaves
@@ -621,6 +625,10 @@ pub(super) struct Cluster {
 pub struct Hub {
     inboxes: Box<[Inbox]>,
     kick: Box<dyn Kick>,
+    /// Sleeping PEs a [`Hub::wake`] kicked, and the host ticks from that
+    /// kick to their sleep's end, summed and the longest
+    /// ([`Hub::take_wake_latency`]).
+    wake_latency: [AtomicU64; 3],
     /// Cluster state by physical cluster (MPIDR_EL1 Aff1).
     clusters: Mutex<BTreeMap<u64, Cluster>>,
     /// The count every PE reads, from the home machine's as the board went
@@ -716,6 +724,7 @@ impl Hub {
                     pending: AtomicBool::new(false),
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
+                    kicked_at: AtomicU64::new(0),
                     serves: AtomicBool::new(false),
                     host_call: AtomicBool::new(false),
                     translating: AtomicU32::new(ANY_CONTEXT),
@@ -742,6 +751,7 @@ impl Hub {
                 })
                 .collect(),
             kick: Box::new(kick),
+            wake_latency: Default::default(),
             clusters: Mutex::new(BTreeMap::new()),
             clock: Arc::new(SharedClock::new(pes)),
             home: Padded(AtomicUsize::new(0)),
@@ -765,6 +775,19 @@ impl Hub {
     /// The host's count for timing lock waits ([`Kick::ticks`]).
     pub(super) fn ticks(&self) -> u64 {
         self.kick.ticks()
+    }
+
+    /// Since the last call: the sleeping PEs a wake kicked, and the host
+    /// ticks ([`Kick::ticks`]) from the kick to the end of their sleep,
+    /// summed and the longest. What a device interrupt or an IPI for an
+    /// idle PE pays before its engine runs again.
+    pub fn take_wake_latency(&self) -> (u64, u64, u64) {
+        let [count, ticks, longest] = &self.wake_latency;
+        (
+            count.swap(0, Ordering::Relaxed),
+            ticks.swap(0, Ordering::Relaxed),
+            longest.swap(0, Ordering::Relaxed),
+        )
     }
 
     /// What the code the board's PEs share came to: `None` while each
@@ -883,6 +906,15 @@ impl Hub {
     fn wake(&self, pe: usize) {
         let inbox = &self.inboxes[pe];
         if inbox.sleeping.load(Ordering::SeqCst) {
+            let ticks = self.kick.ticks();
+            if ticks != 0 {
+                let _ = inbox.kicked_at.compare_exchange(
+                    0,
+                    ticks,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
             self.kick.kick(pe);
             return;
         }
@@ -990,10 +1022,18 @@ impl Hub {
     /// interrupt, so takes the host's service a wake brings ([`Inbox::serves`]).
     fn sleep(&self, pe: usize, epoch: u64, serves: bool, halt: impl FnOnce()) {
         let inbox = &self.inboxes[pe];
+        inbox.kicked_at.store(0, Ordering::Relaxed);
         inbox.serves.store(serves, Ordering::SeqCst);
         inbox.sleeping.store(true, Ordering::SeqCst);
         if !self.woken(pe, epoch) {
             halt();
+        }
+        let kicked = inbox.kicked_at.swap(0, Ordering::Relaxed);
+        if kicked != 0 {
+            let took = self.kick.ticks().saturating_sub(kicked);
+            self.wake_latency[0].fetch_add(1, Ordering::Relaxed);
+            self.wake_latency[1].fetch_add(took, Ordering::Relaxed);
+            self.wake_latency[2].fetch_max(took, Ordering::Relaxed);
         }
         // Ordered before its look at its mail, against a broadcast's look
         // at `sleeping` ([`Self::applied`]).

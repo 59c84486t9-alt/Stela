@@ -2163,6 +2163,34 @@ fn a_pe_advances_the_devices_once_their_deadline_passed_while_home_is_outside() 
     assert!(worker.lines(1, 60).irq);
 }
 
+/// The host ticks from the first wake that kicks a sleeping PE to the end
+/// of its sleep are counted; a sleep nobody kicked, and a later kick in
+/// the same sleep, add nothing.
+#[test]
+fn a_kicked_sleep_counts_its_wake_latency() {
+    struct Ticking(AtomicU64);
+    impl Kick for Ticking {
+        fn kick(&self, _pe: usize) {}
+        fn ticks(&self) -> u64 {
+            self.0.fetch_add(10, Ordering::Relaxed) + 10
+        }
+    }
+    let hub = Hub::new(2, Ticking(AtomicU64::new(0)));
+    let epoch = hub.lines_epoch(1);
+    // Kicked at tick 10 (and again at 20), awake at 30.
+    hub.sleep(1, epoch, true, || {
+        hub.wake(1);
+        hub.wake(1);
+    });
+    hub.sleep(1, epoch, true, || {});
+    assert_eq!(hub.take_wake_latency(), (1, 20, 20));
+    assert_eq!(hub.take_wake_latency(), (0, 0, 0));
+    // A wake of a PE that does not sleep kicks nothing and counts nothing.
+    hub.wake(1);
+    hub.sleep(1, epoch, true, || {});
+    assert_eq!(hub.take_wake_latency(), (0, 0, 0));
+}
+
 #[test]
 fn a_pe_without_a_machine_waits_for_its_first_start() {
     let (hub, _) = hub(2);
