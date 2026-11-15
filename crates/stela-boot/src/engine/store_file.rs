@@ -141,7 +141,12 @@ impl Target for Staged<'_> {
                 .collect())
         })
     }
+    /// A device without a write cache is sent no flush, as the block
+    /// layer's ([`BlockDevice::flush`]) and the [`Direct`] target's.
     fn flush(&mut self) -> Result<bool, String> {
+        if !self.device.identity().features.write_cache {
+            return Ok(true);
+        }
         self.run(u64::MAX, || Ok(vec![Command::Flush]))
     }
 }
