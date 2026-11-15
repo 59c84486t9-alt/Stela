@@ -915,6 +915,9 @@ pub(super) fn run<H: Host>(
         let sliced = waiting || matches!(stop, Stop::Budget) && !budget_reached;
         let now = host::rdtsc();
         if !sliced {
+            // Every guest line, the last ones before the stop first of all.
+            let taken = machine.devices.with(|_| super::take_guest_output());
+            super::write_guest_output(taken, || true);
             service.report(tsc_hz);
             // The interval before the stop, which no beat reports: whether a
             // PE was kept from guest code, and whether the count held for it.
@@ -1022,6 +1025,10 @@ fn calm<H: Host>(machine: &Machine<H, parallel::Board>, quiet: bool) -> super::g
     }
 }
 
+/// The longest the boot PE writes the guest's console lines for between
+/// two slices; the rest wait for the next.
+const GUEST_OUTPUT_MICROS: u64 = 250;
+
 /// Report what the PEs' device accesses left since the last slice: the
 /// guest's console and the installer's step, the boot's progress, and the
 /// unmodeled requests and device logs.
@@ -1032,6 +1039,11 @@ pub(super) fn report_drained<H: Host>(
     now: u64,
     tsc_hz: u64,
 ) {
+    let started = host::rdtsc();
+    let budget = tsc_hz / 1_000_000 * GUEST_OUTPUT_MICROS;
+    super::write_guest_output(drained.guest, || {
+        host::rdtsc().wrapping_sub(started) < budget
+    });
     let lines = drained.lines;
     if let Some(step) = lines.iter().rev().find_map(|line| installer_step(line)) {
         crate::status::progress(&step);

@@ -4,7 +4,7 @@
 //! Every other byte is represented: valid UTF-8 stays readable; controls,
 //! invalid UTF-8 and literal backslashes use unambiguous escapes. A full
 //! fragment is emitted before accepting the next byte, never instead of it.
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::fmt::Write;
 
 /// Large enough for ordinary kernel panic and driver diagnostics. This is
@@ -157,10 +157,119 @@ fn escaped(mut bytes: &[u8]) -> String {
     text
 }
 
+/// Lines for the log, in order, kept where they are made (under a lock a
+/// UART write holds) for another processor to write outside it, a bounded
+/// number at a time: at most `limit` wait, and the rest are counted.
+#[derive(Default)]
+pub struct Queued {
+    lines: VecDeque<Line>,
+    dropped: u64,
+}
+
+impl Queued {
+    pub const fn new() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    /// Keep `line` after the others, unless `limit` lines wait already.
+    pub fn push(&mut self, line: Line, limit: usize) {
+        if self.lines.len() < limit {
+            self.lines.push_back(line);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// Everything kept, leaving this empty.
+    pub fn take(&mut self) -> Self {
+        core::mem::take(self)
+    }
+
+    /// Keep `taken`'s lines after these, and its count of dropped ones.
+    pub fn append(&mut self, mut taken: Self) {
+        self.lines.append(&mut taken.lines);
+        self.dropped += taken.dropped;
+    }
+
+    /// Lines dropped since the last call, then the waiting lines in order
+    /// while `more` allows, each to `write`; the rest wait for the next call.
+    pub fn write(
+        &mut self,
+        mut dropped: impl FnMut(u64),
+        mut more: impl FnMut() -> bool,
+        mut write: impl FnMut(&Line),
+    ) {
+        if self.dropped != 0 {
+            dropped(core::mem::take(&mut self.dropped));
+        }
+        while !self.lines.is_empty() && more() {
+            if let Some(line) = self.lines.pop_front() {
+                write(&line);
+            }
+        }
+    }
+
+    /// Lines waiting.
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
+
+    #[test]
+    fn queued_lines_are_written_in_order_in_bounded_steps() {
+        let line = |text: &str| Line {
+            text: text.into(),
+            bytes: text.len(),
+            complete: true,
+            beginning: true,
+        };
+        let mut made = Queued::default();
+        for text in ["a", "b", "c"] {
+            made.push(line(text), 3);
+        }
+        // Past the limit: counted, not kept.
+        made.push(line("d"), 3);
+        let mut writing = Queued::default();
+        writing.append(made.take());
+        assert!(made.is_empty());
+        let mut written = Vec::new();
+        let mut drops = Vec::new();
+        let mut budget = 2;
+        writing.write(
+            |count| drops.push(count),
+            || {
+                budget -= 1;
+                budget >= 0
+            },
+            |line| written.push(line.text.clone()),
+        );
+        assert_eq!(written, ["a", "b"]);
+        assert_eq!(drops, [1]);
+        assert_eq!(writing.len(), 1);
+        // Lines made since go after the one left.
+        made.push(line("e"), 3);
+        writing.append(made.take());
+        writing.write(
+            |count| drops.push(count),
+            || true,
+            |line| written.push(line.text.clone()),
+        );
+        assert_eq!(written, ["a", "b", "c", "e"]);
+        assert_eq!(drops, [1]);
+        assert!(writing.is_empty());
+    }
 
     fn lines(bytes: &[u8]) -> Vec<String> {
         let mut console = Lines::default();

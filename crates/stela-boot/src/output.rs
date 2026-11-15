@@ -254,8 +254,11 @@ impl Queue {
         skipped
     }
 
-    /// Send what the port takes now, never waiting for it; nothing while
-    /// another processor sends or once processors drain the queue.
+    /// Send what the port takes now, never waiting for it, for
+    /// [`DRAIN_BURSTS`] bursts at most; nothing while another processor
+    /// sends or once processors drain the queue. A port that always takes
+    /// bytes at once (a hypervisor's) would otherwise have the writer send
+    /// the whole queue, each burst an exit to the host's device model.
     fn send_now(&mut self) {
         if self.len == 0
             || SHARED_DRAINING.load(Ordering::Relaxed)
@@ -266,7 +269,9 @@ impl Queue {
             return;
         }
         let mut burst = [0u8; SERIAL_FIFO];
-        while self.len != 0 && crate::serial::ready() {
+        let mut bursts = 0;
+        while self.len != 0 && bursts < DRAIN_BURSTS && crate::serial::ready() {
+            bursts += 1;
             let taken = self.take_burst(&mut burst);
             crate::serial::burst(&burst[..taken]);
         }

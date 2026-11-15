@@ -662,13 +662,11 @@ impl ConsoleSink for GuestConsole {
             if let Ok(mut panic) = GUEST_PANIC.0.try_borrow_mut() {
                 panic.observe(&fragment);
             }
-            let line = fragment.text;
-            output::arguments(format_args!("GUEST| {line}\n"));
-            if !fragment.complete {
-                output::arguments(format_args!(
-                    "GUEST-FRAGMENT bytes={} continues=1\n",
-                    fragment.bytes
-                ));
+            let line = fragment.text.clone();
+            // The log and the serial port take it outside the board's lock
+            // ([`write_guest_output`]), in order.
+            if let Ok(mut queued) = GUEST_OUTPUT.0.try_borrow_mut() {
+                queued.push(fragment, GUEST_OUTPUT_LINES);
             }
             if let Some(driver) = self.repair() {
                 let now = Self::millis();
@@ -925,6 +923,55 @@ fn stop_here(text: &str, code: u32) -> ! {
 /// The guest's console lines since the run loop showed them, the last
 /// `status::STREAM_LINES` at most, reached under the board's lock.
 static GUEST_LINES: output::Global<Vec<String>> = output::Global(RefCell::new(Vec::new()));
+
+/// The guest's console lines and fragments for the log since the home PE
+/// last took them ([`Drained::take`]), in order, reached under the board's
+/// lock.
+static GUEST_OUTPUT: output::Global<console_lines::Queued> =
+    output::Global(RefCell::new(console_lines::Queued::new()));
+
+/// The most guest lines kept for the log between two takes: far more than
+/// a slice's worth, so that only a home PE kept from its reports drops any.
+const GUEST_OUTPUT_LINES: usize = 4096;
+
+/// The guest lines the home PE took and has not written yet, which only it
+/// reaches.
+static GUEST_WRITING: output::Global<console_lines::Queued> =
+    output::Global(RefCell::new(console_lines::Queued::new()));
+
+/// Take the guest's console output for the log, under the board's lock.
+pub(super) fn take_guest_output() -> console_lines::Queued {
+    GUEST_OUTPUT
+        .0
+        .try_borrow_mut()
+        .map(|mut queued| queued.take())
+        .unwrap_or_default()
+}
+
+/// Write the guest console lines taken so far (those left before, then
+/// `taken`) as `GUEST|` lines, in order, while `more` allows, keeping the
+/// rest for the next call: the home PE's reports write them between slices,
+/// not the PE whose UART write ended the line under the board's lock. With
+/// `more` always true, everything left.
+pub(super) fn write_guest_output(taken: console_lines::Queued, more: impl FnMut() -> bool) {
+    let Ok(mut writing) = GUEST_WRITING.0.try_borrow_mut() else {
+        return;
+    };
+    writing.append(taken);
+    writing.write(
+        |dropped| output::arguments(format_args!("GUEST-DROPPED lines={dropped}\n")),
+        more,
+        |fragment| {
+            output::arguments(format_args!("GUEST| {}\n", fragment.text));
+            if !fragment.complete {
+                output::arguments(format_args!(
+                    "GUEST-FRAGMENT bytes={} continues=1\n",
+                    fragment.bytes
+                ));
+            }
+        },
+    );
+}
 
 /// The restore step `line` begins, by name, as the running step's detail.
 fn installer_step(line: &str) -> Option<String> {
@@ -1184,6 +1231,7 @@ fn finish<H: Host>(
     parallel::report_source_observations(machine);
     survey_report(machine);
     let drained = machine.devices.with(Drained::take);
+    write_guest_output(drained.guest, || true);
     unmodeled_report(machine, drained.unmodeled);
     // Machine answers are counted per access; coprocessor requests are
     // counted among the distinct reports only.

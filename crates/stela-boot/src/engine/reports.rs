@@ -603,6 +603,8 @@ pub(super) fn text_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
 /// request and may end at the host timeout) and their logs.
 pub(super) struct Drained {
     pub(super) lines: Vec<String>,
+    /// The guest's console output for the log ([`super::write_guest_output`]).
+    pub(super) guest: stela_boot_core::console_lines::Queued,
     pub(super) unmodeled: Vec<String>,
     pub(super) sep: Vec<String>,
     pub(super) usb: Vec<stela_soc::machine::UsbLog>,
@@ -636,6 +638,7 @@ impl Drained {
                 .try_borrow_mut()
                 .map(|mut lines| core::mem::take(&mut *lines))
                 .unwrap_or_default(),
+            guest: super::take_guest_output(),
             unmodeled: devices.take_unmodeled(),
             sep: devices.sep_observations(),
             usb_transfers: if mux_error {
