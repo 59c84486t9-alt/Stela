@@ -190,6 +190,14 @@ pub trait MmioDevice: Any {
     fn register_name(&self, _offset: u64) -> Option<&'static str> {
         None
     }
+    /// Whether every write to this model changes only the model and the
+    /// interrupt lines it drives: it starts no DMA, queues no call, and
+    /// changes no power, PHY, cable or other state another model's step
+    /// reads. A settle after such a write then has only those lines to
+    /// deliver, and no DMA master to step.
+    fn reaches_only_itself(&self) -> bool {
+        false
+    }
     /// Whether a read at `offset` of `width` is plain: it changes nothing in
     /// the model, and its value follows from the model's state alone, not
     /// from the time, the reading CPU or anything outside the model. The
@@ -553,6 +561,13 @@ impl Bus {
         }
         let epoch = self.epochs.get(device.0)?;
         Some((Arc::clone(epoch), epoch.load(Ordering::SeqCst)))
+    }
+    /// Whether `device`'s writes reach only itself and its interrupt lines
+    /// ([`MmioDevice::reaches_only_itself`]).
+    pub fn reaches_only_itself(&self, device: DeviceId) -> bool {
+        self.devices
+            .get(device.0)
+            .is_some_and(|device| device.reaches_only_itself())
     }
     /// The name the model gives the register at `address`, for reports.
     pub fn register_name_at(&self, address: u64) -> Option<&'static str> {

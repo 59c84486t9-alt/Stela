@@ -96,6 +96,62 @@ fn a_write_elsewhere_runs_the_usb_schedule_only_with_work() {
     );
 }
 
+/// A write to a model whose writes reach only itself and its lines (the
+/// UART) steps no DMA master, even one with work; a write to any other
+/// model steps it.
+#[test]
+fn a_write_that_reaches_only_its_model_leaves_the_masters() {
+    let mut d = AppleDevices::new();
+    let dart = d
+        .add_dart(
+            Range {
+                physical: 0x382f00000,
+                bytes: 0x4000,
+            },
+            16,
+            None,
+            None,
+        )
+        .unwrap();
+    let phy = add_usb_phy(&mut d);
+    let placement = usb_placement();
+    d.add_usb(&placement, dart).unwrap();
+    release_usb_phy(&mut d, &phy);
+    d.add_cpm_power(CPM, false).unwrap();
+    d.add_uart(
+        Console::default(),
+        &[Range {
+            physical: UART,
+            bytes: 0x4000,
+        }],
+        None,
+    )
+    .unwrap();
+    let base = placement.ranges[0].0;
+    let mut ram = Ram::new(0x800000000, 0x10000);
+    // The schedule has work: an event ring to load through the disabled
+    // DART stream, which its step refuses.
+    let table = 0x800008000u64;
+    ram.put_u64(table, 0x800009000);
+    ram.put_u64(table + 8, 16);
+    d.write(0, base + 0x468, 4, 1, 0).unwrap();
+    d.write(0, base + 0x470, 4, table as u32 as u64, 0).unwrap();
+    d.write(0, base + 0x474, 4, table >> 32, 0).unwrap();
+    // A UART transmit settles without the master.
+    d.write(0, UART + 0x20, 4, u64::from(b'a'), 0).unwrap();
+    assert!(d.settle_write(0, 0, &mut Locked(&mut ram)).transfer.is_ok());
+    // A write to the CPM, which has no such promise, steps it.
+    d.write(0, CPM + 0x250, 8, 1, 0).unwrap();
+    let error = d
+        .settle_write(0, 0, &mut Locked(&mut ram))
+        .transfer
+        .unwrap_err();
+    assert!(
+        matches!(error, DeviceError::TransferRefused(ref reason) if reason.to_string().starts_with("USB device advance:")),
+        "{error:?}"
+    );
+}
+
 /// A cable change reaches the USB master through its connector, not a
 /// write to its devices: a write elsewhere still takes it up, a device-mode
 /// attach as the controller's port and a host-mode one as its host cable,

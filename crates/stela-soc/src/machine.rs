@@ -1497,10 +1497,18 @@ impl Devices for AppleDevices {
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         lap.end(&mut self.transfer_times, 0);
+        // A write that reached only its own model and lines leaves every
+        // master as the last transfer did ([`MmioDevice::reaches_only_itself`]):
+        // what a master's deadline brings, the home machine's DMA deadline
+        // runs.
+        let masters = !self
+            .written_device()
+            .flatten()
+            .is_some_and(|device| self.bus.reaches_only_itself(device));
         // A master's refused work stops only that master: the others and the
         // devices' timers go on, and the first refusal is what is reported.
         let mut results = [const { Ok(()) }; 7];
-        for (index, result) in results.iter_mut().enumerate() {
+        for (index, result) in results.iter_mut().enumerate().filter(|_| masters) {
             *result = match index {
                 0 => self.transfer_pmp(cpu, memory, now),
                 1 => self.transfer_aes(cpu, memory, now),

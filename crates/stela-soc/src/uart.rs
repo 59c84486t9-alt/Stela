@@ -446,6 +446,10 @@ impl<C: ConsoleSink + 'static> MmioDevice for S5lUart<C> {
     fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
         Some(self)
     }
+    /// A write moves the FIFOs, the host console and the interrupt lines.
+    fn reaches_only_itself(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         NAME
     }
