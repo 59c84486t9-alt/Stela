@@ -89,6 +89,10 @@ pub fn driver_stopped(stop: &str, failed_start: Option<&str>, firmware: Option<&
 /// `NV_VGPU_MSG_EVENT_GSP_INIT_DONE`: GSP-RM's report that its own start
 /// ended (nouveau `rm/r535/nvrm/msgfn.h` and `rm/r570/nvrm/msgfn.h`).
 const GSP_INIT_DONE: u32 = 0x1001;
+/// `NV_VGPU_MSG_EVENT_RECOVERY_ACTION` (r570 `msgfn.h`): GSP-RM changed the
+/// recovery the GPU needs, which it does when it marks the GPU for a reset.
+/// nouveau handles no such event and prints it.
+const RECOVERY_ACTION: u32 = 0x1022;
 
 /// What GSP-RM, the firmware an NVIDIA GPU runs its driver core on, said
 /// about its start, read from the lines nouveau prints: `gsp: RM version:
@@ -102,6 +106,8 @@ pub struct GspStart {
     version: Option<String>,
     /// The nonzero NV_STATUS GSP-RM ended its start with.
     init_result: Option<u32>,
+    /// Whether GSP-RM raised RECOVERY_ACTION before it ended its start.
+    recovery: bool,
 }
 
 impl GspStart {
@@ -128,27 +134,36 @@ impl GspStart {
             (Some(GSP_INIT_DONE), Some(result)) if result != 0 => {
                 self.init_result.get_or_insert(result);
             }
+            (Some(RECOVERY_ACTION), _) if self.init_result.is_none() => self.recovery = true,
             _ => {}
         }
     }
 
     /// The words for a start GSP-RM itself ended with an error, or None
-    /// when it reported none.
+    /// when it reported none. They name the step: GSP-RM's own
+    /// initialisation, which nouveau waits for as GSP_INIT_DONE once GSP-RM
+    /// booted (`r535_gsp_init`, after the FSP or booter started it) and
+    /// before it asks GSP-RM for anything.
     pub fn failure(&self) -> Option<String> {
         let result = self.init_result?;
         let firmware = match &self.version {
             Some(version) => format!("GSP-RM {version}"),
             None => String::from("GSP-RM"),
         };
-        Some(match nv_status(result) {
-            Some((name, meaning)) => format!(
-                "The GPU's own firmware, {firmware}, ended its start with {name} \
-                 ({result:#x}): {meaning} inside that firmware"
-            ),
-            None => format!(
-                "The GPU's own firmware, {firmware}, ended its start with NV_STATUS {result:#x}"
-            ),
-        })
+        let status = match nv_status(result) {
+            Some((name, meaning)) => {
+                format!("{name} ({result:#x}): {meaning} inside that firmware")
+            }
+            None => format!("NV_STATUS {result:#x}"),
+        };
+        let recovery = match self.recovery {
+            true => ", after it had raised RECOVERY_ACTION, its mark that the GPU needs a reset",
+            false => "",
+        };
+        Some(format!(
+            "The GPU's own firmware, {firmware}, ended its initialisation (GSP_INIT_DONE, right \
+             after it booted) with {status}{recovery}"
+        ))
     }
 }
 
@@ -324,8 +339,9 @@ mod tests {
         let failure = start.failure().unwrap();
         assert_eq!(
             failure,
-            "The GPU's own firmware, GSP-RM 570.144, ended its start with NV_ERR_TIMEOUT (0x65): \
-             a step timed out inside that firmware"
+            "The GPU's own firmware, GSP-RM 570.144, ended its initialisation (GSP_INIT_DONE, \
+             right after it booted) with NV_ERR_TIMEOUT (0x65): a step timed out inside that \
+             firmware, after it had raised RECOVERY_ACTION, its mark that the GPU needs a reset"
         );
         assert_eq!(
             driver_stopped(
@@ -334,9 +350,11 @@ mod tests {
                 Some(&failure)
             ),
             "the NVIDIA GPU did not start (nouveau 0000:01:00.0: gsp: init failed, -22). The \
-             GPU's own firmware, GSP-RM 570.144, ended its start with NV_ERR_TIMEOUT (0x65): a \
-             step timed out inside that firmware. Stela cannot yet finish the GPU driver's \
-             cleanup after that (IRQ action retirement unavailable; request retained)"
+             GPU's own firmware, GSP-RM 570.144, ended its initialisation (GSP_INIT_DONE, right \
+             after it booted) with NV_ERR_TIMEOUT (0x65): a step timed out inside that firmware, \
+             after it had raised RECOVERY_ACTION, its mark that the GPU needs a reset. Stela \
+             cannot yet finish the GPU driver's cleanup after that (IRQ action retirement \
+             unavailable; request retained)"
         );
 
         // An error reply to any other call is not the start's result, and
@@ -345,9 +363,12 @@ mod tests {
         other.observe("nouveau 0000:01:00.0: gsp:msg fn:76 len:0x20/0x0 res:0x56 resp:0x0");
         assert_eq!(other.failure(), None);
         other.observe("nouveau 0000:01:00.0: gsp:msg fn:4097 len:0x20/0x0 res:0x1234 resp:0x0");
+        // A recovery action after the start's end is not part of it.
+        other.observe("nouveau 0000:01:00.0: gsp:msg fn:4130 len:0x28/0x8 res:0x0 resp:0x0");
         assert_eq!(
             other.failure().unwrap(),
-            "The GPU's own firmware, GSP-RM, ended its start with NV_STATUS 0x1234"
+            "The GPU's own firmware, GSP-RM, ended its initialisation (GSP_INIT_DONE, right after \
+             it booted) with NV_STATUS 0x1234"
         );
     }
 
