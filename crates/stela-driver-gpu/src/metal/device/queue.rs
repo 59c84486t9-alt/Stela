@@ -472,6 +472,30 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // Copy the descriptors so the pass can borrow them while views are
         // created.
         let textures = self.pass_textures(request)?;
+        // A pass writes its attachments and resolve textures.
+        let written = request
+            .color_attachments
+            .iter()
+            .flatten()
+            .map(|color| (color.texture, color.resolve))
+            .chain(
+                request
+                    .depth_attachment
+                    .iter()
+                    .map(|depth| (depth.texture, depth.resolve)),
+            )
+            .chain(
+                request
+                    .stencil_attachment
+                    .iter()
+                    .map(|stencil| (stencil.texture, stencil.resolve)),
+            );
+        for (texture, resolve) in written {
+            self.note_texture_write(commands, texture);
+            if let Some((resolve, ..)) = resolve {
+                self.note_texture_write(commands, resolve);
+            }
+        }
         let lookup = |id: TextureId| {
             textures
                 .iter()
@@ -835,6 +859,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let finished = self
             .flush_indirect_writes()
             .and_then(|()| commands.finish(&mut self.resolver(), completion));
+        // Aligned copies are refreshed from their rows first, and those it
+        // wrote copied back into them last.
+        if finished.is_ok() {
+            let written = core::mem::take(&mut commands.aligned_writes);
+            let (lead, tail) = self.aligned_copy_commands(&written);
+            commands.surround(lead, tail);
+        }
         // Applied once the recording reaches the queue.
         let planes = core::mem::take(&mut commands.planes);
         let recording = commands.into_recording();

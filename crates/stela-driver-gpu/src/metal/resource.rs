@@ -1032,14 +1032,22 @@ pub fn linear_texture(
         descriptor.width.max(descriptor.height) <= capabilities.limits.max_texture_dimension_2d,
         "texture dimensions",
     )?;
-    let (row_alignment, offset_alignment) = capabilities.linear_texture_alignments();
+    // Metal asks rows and offsets aligned to the device's
+    // `minimumLinearTextureAlignmentForPixelFormat:`, and macOS's frameworks
+    // lay IOSurface planes out to Apple GPUs' answer, 16 bytes (an M-series
+    // Mac's for RGBA8 and RGBA32Float), as an '&b38' surface's alpha plane
+    // whose row is the screen's width. Any whole number of texels a row is
+    // taken: where the GPU's linear layout needs more
+    // ([`linear_layout_fits`]), the texture is an aligned copy of the rows
+    // ([`aligned_copy`]).
+    let texel = u64::from(description.block.bytes);
     ensure(
-        bytes_per_row.is_multiple_of(row_alignment),
-        "bytesPerRow is not aligned",
+        bytes_per_row.is_multiple_of(texel),
+        "bytesPerRow is not a whole number of pixels",
     )?;
     ensure(
-        offset.is_multiple_of(offset_alignment),
-        "offset is not aligned",
+        offset.is_multiple_of(texel),
+        "offset is not a whole number of pixels",
     )?;
     ensure(
         bytes_per_row >= description.row_bytes(descriptor.width),
@@ -1092,6 +1100,30 @@ pub fn linear_texture(
             CpuAccess::Linear
         },
     })
+}
+
+/// Whether a linear texture whose rows lie `bytes_per_row` apart from
+/// `place` bytes into their memory is one the GPU addresses in place: its
+/// linear layout's row pitch and binding offset alignments
+/// ([`Capabilities::linear_texture_alignments`]).
+pub fn linear_layout_fits(capabilities: &Capabilities, place: u64, bytes_per_row: u64) -> bool {
+    let (row, offset) = capabilities.linear_texture_alignments();
+    bytes_per_row.is_multiple_of(row) && place.is_multiple_of(offset)
+}
+
+/// The image of a linear texture's aligned copy, for rows the GPU cannot
+/// address in place ([`linear_layout_fits`]): the linear image's format,
+/// views and usages in the GPU's own layout, which copies fill from the
+/// rows and return to them.
+pub fn aligned_copy(linear: &ImageInfo) -> ImageInfo {
+    ImageInfo {
+        tiling: ImageTiling::Optimal,
+        linear: None,
+        // The CPU reaches the rows, never the copy.
+        usage: (linear.usage | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST)
+            .difference(ImageUsage::HOST_TRANSFER),
+        ..linear.clone()
+    }
 }
 
 /// One plane of a two-plane texture: where it starts in the buffer and its

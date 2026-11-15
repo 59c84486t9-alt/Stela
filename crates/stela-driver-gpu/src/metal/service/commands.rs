@@ -341,6 +341,21 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             .texture_resource_id(self.object::<TextureId>(connection, handle)?)?)
     }
 
+    /// Notes the texture `handle` names, nil for none, bound for shaders
+    /// ([`Device::note_texture_binding`](crate::metal::device::Device::note_texture_binding)).
+    fn note_bound(
+        &self,
+        connection: NonZeroU64,
+        commands: &mut CommandBuffer,
+        handle: u64,
+    ) -> Result<(), Fault> {
+        if handle != 0 {
+            let id = self.object::<TextureId>(connection, handle)?;
+            self.device.note_texture_binding(commands, id);
+        }
+        Ok(())
+    }
+
     /// The `gpuResourceID` of the sampler `handle` names, null for nil.
     fn sampler_id(&self, connection: NonZeroU64, handle: u64) -> Result<ResourceId, Fault> {
         if handle == 0 {

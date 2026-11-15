@@ -125,6 +125,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     texture,
                     index,
                 } = payload.record()?;
+                self.note_bound(connection, commands, texture)?;
                 let texture = self.texture_id(connection, texture)?;
                 if stage == TILE_STAGE {
                     commands.set_tile_texture(texture, binding(index)?)?;

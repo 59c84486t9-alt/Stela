@@ -2220,6 +2220,7 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
         decodes_whole: false,
         mirror: 0,
         stamp: 0,
+        refreshes: [None; 2],
     };
     let record = |draws: &[(ScissorRect, Option<Viewport>, PrimitiveType)]| {
         let mut resolver = MockResolver::default();
@@ -2357,6 +2358,7 @@ fn marked_passes_encode_their_dirty_tiles() {
         decodes_whole: true,
         mirror: crate::metal::binding::TexelArguments::MIRROR_COMPARE,
         stamp: 7,
+        refreshes: [None; 2],
     };
     let record = |scissor: ScissorRect, attached: ResourceId| {
         let mut resolver = MockResolver::default();

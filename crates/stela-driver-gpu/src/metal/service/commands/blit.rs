@@ -53,6 +53,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             BlitCode::CopyBufferToTexture => {
                 let request: CopyBufferToTexture = payload.record()?;
+                self.note_written(connection, commands, request.texture)?;
                 let source = self.buffer_layout(connection, request.source)?;
                 let region = region(&request.region);
                 let (image, descriptor, storage, blocks) =
@@ -95,6 +96,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             BlitCode::CopyTexture => {
                 let request: CopyTexture = payload.record()?;
+                self.note_written(connection, commands, request.destination)?;
                 commands.copy_texture(
                     self.blit_texture(connection, request.source)?,
                     region(&request.region),
@@ -106,6 +108,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             BlitCode::CopyTextureSlices => {
                 let request: CopyTextureSlices = payload.record()?;
+                self.note_written(connection, commands, request.destination)?;
                 commands.copy_texture_slices(
                     self.blit_texture(connection, request.source)?,
                     request.source_slice,
@@ -127,6 +130,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             BlitCode::GenerateMipmaps => {
                 let Resource { resource } = payload.record()?;
+                self.note_written(connection, commands, resource)?;
                 let texture = self.blit_texture(connection, resource)?;
                 let format = self
                     .device
@@ -187,6 +191,19 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// descriptor and, when its image stores another encoding than its
     /// format's bytes, the raw storage view of the region's level and slice
     /// that the texel kernels convert through, and a decoded format's blocks.
+    /// Notes that `commands` writes the texture `handle` names
+    /// ([`Device::note_texture_write`](crate::metal::device::Device::note_texture_write)).
+    fn note_written(
+        &self,
+        connection: NonZeroU64,
+        commands: &mut CommandBuffer,
+        handle: u64,
+    ) -> Result<(), Fault> {
+        let id = self.object::<TextureId>(connection, handle)?;
+        self.device.note_texture_write(commands, id);
+        Ok(())
+    }
+
     fn copied_texture(
         &mut self,
         connection: NonZeroU64,

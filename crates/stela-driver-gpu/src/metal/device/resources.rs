@@ -44,8 +44,10 @@ use alloc::{
 use core::{num::NonZeroU64, ops::Range};
 use stela_contracts::gate::MemoryRange;
 
+mod aligned_copies;
 mod extended_planes;
 mod read_back;
+pub use aligned_copies::RowCopy;
 pub(super) use extended_planes::PlaneActions;
 pub use extended_planes::PlaneChanges;
 pub use read_back::ReadBack;
@@ -250,6 +252,9 @@ pub(super) struct Resources {
     /// The times textures encoded into each IOSurface's planes, by surface
     /// ID ([`extended_planes`]).
     extended_generations: BTreeMap<u32, u64>,
+    /// Linear textures' planes whose rows the GPU cannot address in place,
+    /// by texture: their aligned copies ([`aligned_copies`]).
+    aligned_copies: BTreeMap<u32, Vec<aligned_copies::AlignedCopy>>,
     /// Destroyed private textures kept for reuse, oldest first, and their
     /// bytes.
     recycled: VecDeque<Recycled>,
@@ -880,6 +885,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             buffer.memory_offset,
             buffer.length,
         );
+        let mut copies = Vec::new();
         let texture = if descriptor.texture_type == TextureType::TextureBuffer {
             let info = resource::texture_buffer(
                 &self.capabilities,
@@ -928,23 +934,26 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 offset,
                 bytes_per_row,
             )?;
-            let (_, linear) = self.capabilities.linear_texture_alignments();
-            let place = memory_offset
-                .checked_add(offset)
-                .filter(|place| place.is_multiple_of(linear))
-                .ok_or(Error::Invalid(
-                    "the buffer's memory is not aligned for a texture",
-                ))?;
-            let image = self
-                .backend
-                .create_placed_image(&plan.image, memory, place)?;
+            let rows = aligned_copies::Rows {
+                buffer: vk_buffer,
+                memory,
+                memory_offset,
+                layout: resource::PlaneLayout {
+                    offset,
+                    bytes_per_row,
+                },
+                texel_bytes: u64::from(descriptor.pixel_format.describe().block.bytes),
+            };
+            let (image, copy) = self.plane_image(&plan, rows)?;
             let (id, views) = match self.shader_views(image, &plan.views) {
                 Ok(created) => created,
                 Err(error) => {
                     self.backend.destroy(Object::Image(image));
+                    self.release_aligned_copies(copy);
                     return Err(error);
                 }
             };
+            copies.extend(copy);
             TextureObject {
                 image: Some(image),
                 descriptor: *descriptor,
@@ -965,7 +974,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
         self.book_texture_over(buffer_id, descriptor);
-        Ok(TextureId(self.resources.textures.insert(texture)))
+        let id = TextureId(self.resources.textures.insert(texture));
+        self.keep_aligned_copies(id, copies);
+        Ok(id)
     }
 
     /// Names the texture `descriptor` made over buffer `id` as what owns
@@ -1067,24 +1078,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             });
         }
         let buffer = self.resources.buffers.get(buffer_id.0)?;
-        let (memory, memory_offset, length) = (buffer.memory, buffer.memory_offset, buffer.length);
+        let (vk_buffer, memory, memory_offset, length) = (
+            buffer.buffer,
+            buffer.memory,
+            buffer.memory_offset,
+            buffer.length,
+        );
         let plans = resource::two_plane_texture(&self.capabilities, descriptor, length, planes)?;
-        let (_, linear) = self.capabilities.linear_texture_alignments();
+        let formats = descriptor
+            .pixel_format
+            .plane_formats()
+            .ok_or(Error::Invalid("the format has one plane"))?;
         let mut images = Vec::with_capacity(2);
         let mut views = Vec::with_capacity(2);
+        let mut copies = Vec::new();
         let created = (|| -> Result<ResourceId> {
-            for (plan, layout) in plans.iter().zip(planes) {
-                let place = memory_offset
-                    .checked_add(layout.offset)
-                    .filter(|place| place.is_multiple_of(linear))
-                    .ok_or(Error::Invalid(
-                        "the surface's plane is not aligned for a texture",
-                    ))?;
-                images.push(
-                    self.backend
-                        .create_placed_image(&plan.image, memory, place)?,
-                );
-                let image = images[images.len() - 1];
+            for ((plan, layout), format) in plans.iter().zip(planes).zip(formats) {
+                let rows = aligned_copies::Rows {
+                    buffer: vk_buffer,
+                    memory,
+                    memory_offset,
+                    layout,
+                    texel_bytes: u64::from(format.describe().block.bytes),
+                };
+                let (image, copy) = self.plane_image(plan, rows)?;
+                images.push(image);
+                copies.extend(copy);
                 let info = plan
                     .views
                     .sampled
@@ -1117,6 +1136,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 for image in images {
                     self.backend.destroy(Object::Image(image));
                 }
+                self.release_aligned_copies(copies);
                 return Err(error);
             }
         };
@@ -1139,7 +1159,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
         self.book_texture_over(buffer_id, descriptor);
-        Ok(TextureId(self.resources.textures.insert(texture)))
+        let id = TextureId(self.resources.textures.insert(texture));
+        self.keep_aligned_copies(id, copies);
+        Ok(id)
     }
 
     /// The view a render pass attaches, created on first use and kept with
@@ -1708,6 +1730,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture.image.ok_or(Error::Invalid(
             "texture buffers are written through their buffer",
         ))?;
+        if self.write_aligned_rows(id, region, bytes)? {
+            return Ok(());
+        }
+        let texture = self.resources.textures.get(id.0)?;
         let Some(copy) = &texture.cpu_copy else {
             let description = texture.descriptor.pixel_format.describe();
             return match description.encoding() {
@@ -1766,6 +1792,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "texture buffers are read through their buffer",
         ))?;
         let start = self.timing.now();
+        if self.read_aligned_rows(id, region, bytes)? {
+            self.timing.since(Phase::BytesCopy, start);
+            return Ok(());
+        }
+        let texture = self.resources.textures.get(id.0)?;
         let Some(copy) = &texture.cpu_copy else {
             let description = texture.descriptor.pixel_format.describe();
             return match description.encoding() {
@@ -1966,6 +1997,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         )?;
         let texture = self.resources.textures.remove(id.0)?;
         self.forget_extended_planes(id);
+        // Every commit refreshes an aligned copy, whatever its connection.
+        let copies = self.take_aligned_copies(id);
         // Its decodes would write a view destroyed with it, and its uploads
         // would go to whatever texture takes its slot next.
         self.resources
@@ -1975,16 +2008,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .cpu_copy_uploads
             .retain(|(uploaded, _)| *uploaded != id);
         // Command buffers of any connection that carry its uploads read it.
-        let scope = self
+        let mut scope = self
             .queue
             .carriers(id)
             .fold(self.scope.clone(), |scope, key| super::pins::Scope {
                 reach: scope.reach.with(key),
                 ..scope
             });
-        self.release_for(scope, |device| match recyclable(&texture) {
-            Some(bytes) if !device.lost => device.recycle_texture(texture, bytes),
-            _ => device.free_texture(texture),
+        if copies.is_some() {
+            scope.reach = super::pins::Reach::All;
+        }
+        self.release_for(scope, |device| {
+            let freed = match recyclable(&texture) {
+                Some(bytes) if !device.lost => device.recycle_texture(texture, bytes),
+                _ => device.free_texture(texture),
+            };
+            device.release_aligned_copies(copies.into_iter().flatten());
+            freed
         })
     }
 

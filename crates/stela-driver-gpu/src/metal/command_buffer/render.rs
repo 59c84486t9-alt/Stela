@@ -688,6 +688,14 @@ impl CommandBuffer {
                     }
                 });
             }
+            // The encode wrote the planes' rows: a plane the GPU samples
+            // through an aligned copy has it refreshed for later reads.
+            if !begins && ordered && planes.refreshes.iter().any(Option::is_some) {
+                self.recorder.access(super::blit::TRANSFER);
+                for refresh in planes.refreshes.iter().flatten() {
+                    self.recorder.push(refresh.refresh());
+                }
+            }
         }
         Ok(decodes)
     }

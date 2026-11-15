@@ -200,7 +200,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ));
         }
         let buffer = self.resources.buffers.get(buffer_id.0)?;
-        let (memory, memory_offset, length) = (buffer.memory, buffer.memory_offset, buffer.length);
+        let (vk_buffer, memory, memory_offset, length) = (
+            buffer.buffer,
+            buffer.memory,
+            buffer.memory_offset,
+            buffer.length,
+        );
         let plane = |pixel_format, layout: PlaneLayout| {
             let plane = TextureDescriptor {
                 pixel_format,
@@ -216,22 +221,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             )
         };
         let plans = [plane(formats[0], planes[0])?, plane(formats[1], planes[1])?];
-        let (_, linear) = self.capabilities.linear_texture_alignments();
         let mut images = Vec::with_capacity(2);
         let mut views = Vec::with_capacity(2);
+        let mut copies = Vec::new();
         let created = (|| -> Result<ResourceId> {
-            for (plan, layout) in plans.iter().zip(planes) {
-                let place = memory_offset
-                    .checked_add(layout.offset)
-                    .filter(|place| place.is_multiple_of(linear))
-                    .ok_or(Error::Invalid(
-                        "the surface's plane is not aligned for a texture",
-                    ))?;
-                images.push(
-                    self.backend
-                        .create_placed_image(&plan.image, memory, place)?,
-                );
-                let image = images[images.len() - 1];
+            for ((plan, layout), format) in plans.iter().zip(planes).zip(formats) {
+                let rows = super::aligned_copies::Rows {
+                    buffer: vk_buffer,
+                    memory,
+                    memory_offset,
+                    layout,
+                    texel_bytes: u64::from(format.describe().block.bytes),
+                };
+                let (image, copy) = self.plane_image(plan, rows)?;
+                images.push(image);
+                copies.extend(copy);
                 let info = plan
                     .views
                     .sampled
@@ -261,6 +265,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 for image in images {
                     self.backend.destroy(Object::Image(image));
                 }
+                self.release_aligned_copies(copies);
                 return Err(error);
             }
         };
@@ -283,6 +288,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
         let id = TextureId(self.resources.textures.insert(texture));
+        self.keep_aligned_copies(id, copies);
         self.resources.extended_planes.insert(
             id.0,
             PlaneState {
@@ -631,6 +637,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             } else {
                 0
             },
+            refreshes: self.plane_refreshes(id),
         }))
     }
 }

@@ -555,7 +555,7 @@ fn stencil_views_read_the_stencil_aspect() {
 }
 
 #[test]
-fn linear_textures_alias_buffer_rows_with_nvk_alignment() {
+fn linear_textures_alias_buffer_rows_of_whole_pixels() {
     let capabilities = capabilities();
     let mut linear = descriptor(TextureType::D2, PixelFormat::Bgra8Unorm);
     linear.width = 100;
@@ -565,13 +565,26 @@ fn linear_textures_alias_buffer_rows_with_nvk_alignment() {
     assert_eq!(plan.image.tiling, ImageTiling::DrmFormatModifier);
     assert_eq!(plan.image.linear, Some(LinearLayout { row_pitch: 416 }));
     assert_eq!(plan.cpu_access, CpuAccess::Linear);
+    let copy = aligned_copy(&plan.image);
+    assert_eq!((copy.tiling, copy.linear), (ImageTiling::Optimal, None));
+    assert!(
+        copy.usage
+            .contains(ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST)
+    );
 
     let refused = |offset, bytes_per_row, length| {
         linear_texture(&capabilities, &linear, length, offset, bytes_per_row).is_err()
     };
-    assert!(refused(8192, 400, 1 << 20), "rows need 32-byte alignment");
+    // Rows and offsets of whole pixels are taken; those the GPU cannot
+    // address in place become an aligned copy.
+    assert!(!refused(8192, 400, 1 << 20));
+    assert!(!refused(4100, 416, 1 << 20));
+    assert!(linear_layout_fits(&capabilities, 8192, 416));
+    assert!(!linear_layout_fits(&capabilities, 8192, 400));
+    assert!(!linear_layout_fits(&capabilities, 4100, 416));
+    assert!(refused(8192, 402, 1 << 20), "rows are whole pixels");
+    assert!(refused(4098, 416, 1 << 20), "offsets are whole pixels");
     assert!(refused(8192, 384, 1 << 20), "a row is 400 bytes");
-    assert!(refused(4100, 416, 1 << 20), "offsets need page alignment");
     assert!(refused(0, 416, 9 * 416 + 399), "the last row must fit");
     assert!(!refused(0, 416, 9 * 416 + 400));
     let mut d1 = linear;

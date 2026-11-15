@@ -195,6 +195,10 @@ pub struct ExtendedPlanes {
     /// image's dirty tiles ([`PassDirty`](crate::metal::binding::PassDirty)),
     /// which its encode then converts alone.
     pub stamp: u32,
+    /// The copies that refresh an IOSurface plane's aligned copy from its
+    /// rows once the encode wrote them, the first plane's and the
+    /// second's ([`RowCopy`](super::device::resources::RowCopy)).
+    pub refreshes: [Option<super::device::resources::RowCopy>; 2],
 }
 
 /// Storage copies of a pass's depth and stencil samples and of its stencil

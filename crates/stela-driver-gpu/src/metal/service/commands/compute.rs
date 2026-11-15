@@ -93,6 +93,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             ComputeCode::SetTexture => {
                 let SetTexture { texture, index } = payload.record()?;
+                self.note_bound(connection, commands, texture)?;
                 let texture = self.texture_id(connection, texture)?;
                 commands.set_compute_texture(texture, binding(index)?)?;
             }
