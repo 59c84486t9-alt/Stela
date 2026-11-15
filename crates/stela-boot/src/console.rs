@@ -16,6 +16,7 @@ mod mode;
 use crate::ui;
 use alloc::{string::String, vec, vec::Vec};
 use core::{
+    arch::x86_64::_rdtsc,
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -561,6 +562,8 @@ struct Text {
     shown: Vec<Cell>,
     column: usize,
     row: usize,
+    /// A bounded present left cells undrawn ([`present_some`]).
+    pending: bool,
 }
 
 impl Text {
@@ -586,6 +589,7 @@ impl Text {
             shown: vec![BLANK; columns * rows],
             column: 0,
             row: 0,
+            pending: false,
         })
     }
 
@@ -626,27 +630,82 @@ impl Text {
     }
 
     /// Draw every cell that differs from what the screen shows.
+    /// Draw the cells that changed: all of them, or with a `bound` of TSC
+    /// ticks, what that allows and at least one, leaving the rest pending
+    /// ([`present_some`]).
     fn present(&mut self) {
+        self.present_within(0);
+    }
+
+    /// Replace the cursor's line with `segments`, cut at the edge.
+    fn rewrite(&mut self, segments: &[(&str, Color)]) {
+        let start = self.row * self.columns;
+        self.cells[start..start + self.columns].fill(BLANK);
+        self.column = 0;
+        for (part, color) in segments {
+            for character in part.bytes().filter(|&c| c != b'\n') {
+                if self.column == self.columns {
+                    break;
+                }
+                self.put(character, *color);
+            }
+        }
+    }
+
+    /// Put `lines` on the rows under the cursor's ([`below`]).
+    fn below(&mut self, lines: &[String], indent: usize, color: Color) {
+        let width = self.columns.saturating_sub(indent).max(1);
+        let rows_of = |line: &String| line.len().div_ceil(width).max(1);
+        let first = self.row + 1;
+        let total: usize = lines.iter().map(rows_of).sum();
+        let skip = total.saturating_sub(self.rows - first);
+        let mut pieces = lines.iter().flat_map(|line| {
+            let bytes = line.as_bytes();
+            let end = |k: usize| (k * width).min(bytes.len());
+            (0..rows_of(line)).map(move |k| &bytes[end(k)..end(k + 1)])
+        });
+        for _ in 0..skip {
+            pieces.next();
+        }
+        for row in first..self.rows {
+            let cells = &mut self.cells[row * self.columns..(row + 1) * self.columns];
+            cells.fill(BLANK);
+            if let Some(piece) = pieces.next() {
+                for (cell, &character) in cells.iter_mut().skip(indent).zip(piece) {
+                    *cell = Cell {
+                        character: printable(character),
+                        color,
+                    };
+                }
+            }
+        }
+    }
+
+    fn present_within(&mut self, bound: u64) {
         let Some(_access) = self.screen.use_screen() else {
             return;
+        };
+        // SAFETY: RDTSC has no memory effects.
+        let started = unsafe { _rdtsc() };
+        let mut first = true;
+        let more = || {
+            // SAFETY: as above.
+            let within = bound == 0 || unsafe { _rdtsc() }.wrapping_sub(started) < bound;
+            core::mem::take(&mut first) || within
         };
         let s = self.scale;
         let (on_width, on_height) = (self.font.width * s, self.font.height * s);
         let off = self.screen.encoding.encode(ui::BACKGROUND);
-        for index in 0..self.cells.len() {
-            let cell = self.cells[index];
-            if cell == self.shown[index] {
-                continue;
-            }
-            self.shown[index] = cell;
-            let x = self.left + index % self.columns * on_width;
-            let y = self.top + index / self.columns * on_height;
-            let on = self.screen.pixel(cell.color);
+        let (screen, font, columns) = (&self.screen, &self.font, self.columns);
+        let (left, top) = (self.left, self.top);
+        let draw = |index: usize, cell: Cell| {
+            let x = left + index % columns * on_width;
+            let y = top + index / columns * on_height;
+            let on = screen.pixel(cell.color);
             for row in 0..on_height {
-                let line = (self.screen.base + (y + row) * self.screen.stride * BYTES_PER_PIXEL)
-                    as *mut u32;
+                let line = (screen.base + (y + row) * screen.stride * BYTES_PER_PIXEL) as *mut u32;
                 for column in 0..on_width {
-                    let value = if self.font.pixel(cell.character, column / s, row / s) {
+                    let value = if font.pixel(cell.character, column / s, row / s) {
                         on
                     } else {
                         off
@@ -656,8 +715,22 @@ impl Text {
                     unsafe { line.add(x + column).write_volatile(value) };
                 }
             }
-        }
+        };
+        self.pending =
+            !stela_boot_core::screen::present_changed(&self.cells, &mut self.shown, draw, more);
     }
+}
+
+/// Draw for `ticks` at most what earlier bounded presents left undrawn
+/// ([`running`]); whether some is still left.
+pub fn present_some(ticks: u64) -> bool {
+    with(|text| {
+        if text.pending {
+            text.present_within(ticks);
+        }
+        text.pending
+    })
+    .unwrap_or(false)
 }
 
 fn printable(character: u8) -> u8 {
@@ -777,22 +850,19 @@ pub fn write(segments: &[(&str, Color)]) {
     });
 }
 
-/// Replace the cursor's line with `segments`, cut to the line, and leave
-/// the cursor on it, so that a line can change in place.
-pub fn rewrite(segments: &[(&str, Color)]) {
+/// Replace the cursor's line with `segments`, cut to the line, leaving the
+/// cursor on it, and show `lines` [`below`] it, drawing for `ticks` of the
+/// TSC at most (0 for no bound): a change of
+/// many cells, such as lines that scrolled, reaches the screen over the
+/// next [`present_some`] calls instead of holding the boot CPU for one long
+/// draw.
+pub fn running(segments: &[(&str, Color)], lines: Option<(&[String], usize, Color)>, ticks: u64) {
     with(|text| {
-        let start = text.row * text.columns;
-        text.cells[start..start + text.columns].fill(BLANK);
-        text.column = 0;
-        for (part, color) in segments {
-            for character in part.bytes().filter(|&c| c != b'\n') {
-                if text.column == text.columns {
-                    break;
-                }
-                text.put(character, *color);
-            }
+        text.rewrite(segments);
+        if let Some((lines, indent, color)) = lines {
+            text.below(lines, indent, color);
         }
-        text.present();
+        text.present_within(ticks);
     });
 }
 
@@ -838,31 +908,7 @@ pub fn rewrite_wrapped(segments: &[(&str, Color)], indent: usize) {
 /// earlier call showed.
 pub fn below(lines: &[String], indent: usize, color: Color) {
     with(|text| {
-        let width = text.columns.saturating_sub(indent).max(1);
-        let rows_of = |line: &String| line.len().div_ceil(width).max(1);
-        let first = text.row + 1;
-        let total: usize = lines.iter().map(rows_of).sum();
-        let skip = total.saturating_sub(text.rows - first);
-        let mut pieces = lines.iter().flat_map(|line| {
-            let bytes = line.as_bytes();
-            let end = |k: usize| (k * width).min(bytes.len());
-            (0..rows_of(line)).map(move |k| &bytes[end(k)..end(k + 1)])
-        });
-        for _ in 0..skip {
-            pieces.next();
-        }
-        for row in first..text.rows {
-            let cells = &mut text.cells[row * text.columns..(row + 1) * text.columns];
-            cells.fill(BLANK);
-            if let Some(piece) = pieces.next() {
-                for (cell, &character) in cells.iter_mut().skip(indent).zip(piece) {
-                    *cell = Cell {
-                        character: printable(character),
-                        color,
-                    };
-                }
-            }
-        }
+        text.below(lines, indent, color);
         text.present();
     });
 }

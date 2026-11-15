@@ -160,6 +160,30 @@ pub fn disk_size(bytes: u64) -> String {
     }
 }
 
+/// Draw the cells of a text grid that differ from what the screen shows,
+/// in order, while `more` allows: `draw` paints cell `index` as `cells`
+/// holds it, and `shown` then records it. Whether every cell is shown now;
+/// when not, the next call goes on where this one stopped, so a caller with
+/// a time budget spreads a whole-screen change over several calls.
+pub fn present_changed<C: Copy + PartialEq>(
+    cells: &[C],
+    shown: &mut [C],
+    mut draw: impl FnMut(usize, C),
+    mut more: impl FnMut() -> bool,
+) -> bool {
+    for (index, (&cell, seen)) in cells.iter().zip(shown.iter_mut()).enumerate() {
+        if cell == *seen {
+            continue;
+        }
+        if !more() {
+            return false;
+        }
+        draw(index, cell);
+        *seen = cell;
+    }
+    true
+}
+
 /// The logo at (`u`, `v`) of its unit square: a rounded square split by an
 /// S curve into a blue half and an orange half, each lighter at the top.
 /// `None` outside it and in the gap between the halves.
@@ -206,6 +230,39 @@ fn mix(from: u32, to: u32, amount: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bounded_present_draws_changed_cells_in_steps_and_resumes() {
+        let cells = [1, 2, 3, 4, 5, 6];
+        let mut shown = [1, 0, 3, 0, 0, 0];
+        let mut drawn = alloc::vec::Vec::new();
+        // Two cells' budget: the first two changed cells, then a stop.
+        let mut budget = 2;
+        let done = present_changed(
+            &cells,
+            &mut shown,
+            |index, _| drawn.push(index),
+            || {
+                budget -= 1;
+                budget >= 0
+            },
+        );
+        assert!(!done);
+        assert_eq!(drawn, [1, 3]);
+        assert_eq!(shown, [1, 2, 3, 4, 0, 0]);
+        // The next call goes on with the rest and draws nothing twice.
+        let done = present_changed(&cells, &mut shown, |index, _| drawn.push(index), || true);
+        assert!(done);
+        assert_eq!(drawn, [1, 3, 4, 5]);
+        assert_eq!(shown, cells);
+        // Nothing changed: nothing drawn, done at once.
+        assert!(present_changed(
+            &cells,
+            &mut shown,
+            |_, _| panic!("drawn"),
+            || false
+        ));
+    }
 
     #[test]
     fn retirement_requires_the_writer_to_return_and_permanently_closes_admission() {

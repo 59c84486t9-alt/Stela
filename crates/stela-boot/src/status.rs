@@ -43,6 +43,10 @@ const TEXT_INDENT: &str = "           ";
 /// A running step's detail held this long is logged with its time
 /// ([`State::detail_ends`]).
 const DETAIL_LOG_MILLIS: u64 = 250;
+/// The longest one draw of the running step holds the boot CPU: a scroll
+/// of the lines under it takes tens of milliseconds on a large or slow
+/// framebuffer, which the guest's PE 0 would otherwise wait out at once.
+const PRESENT_MICROS: u64 = 250;
 
 /// Text formatted on the stack: drawing a timer tick allocates nothing.
 #[derive(Default)]
@@ -228,20 +232,31 @@ impl State {
             let _ = write!(elapsed, " ({seconds} s)");
         }
         let gap = if running.detail.is_empty() { "" } else { "  " };
-        console::rewrite(&[
-            (" [", Color::Dim),
-            (marker, Color::Busy),
-            ("]  ", Color::Dim),
-            (&running.title, Color::Text),
-            (elapsed.as_str(), Color::Dim),
-            (gap, Color::Text),
-            (&running.detail, Color::Text),
-            (percentage.as_str(), Color::Busy),
-        ]);
-        if !self.streamed {
-            console::below(&self.stream, TEXT_INDENT.len(), Color::Dim);
-            self.streamed = true;
-        }
+        // The lines under the step scroll as each new one comes: what that
+        // changes reaches the screen over the next ticks.
+        let below =
+            (!self.streamed).then_some((self.stream.as_slice(), TEXT_INDENT.len(), Color::Dim));
+        console::running(
+            &[
+                (" [", Color::Dim),
+                (marker, Color::Busy),
+                ("]  ", Color::Dim),
+                (&running.title, Color::Text),
+                (elapsed.as_str(), Color::Dim),
+                (gap, Color::Text),
+                (&running.detail, Color::Text),
+                (percentage.as_str(), Color::Busy),
+            ],
+            below,
+            self.present_ticks(),
+        );
+        self.streamed = true;
+    }
+
+    /// TSC ticks one present of the running step may draw for
+    /// ([`PRESENT_MICROS`]); 0, no bound, before the rate is known.
+    fn present_ticks(&self) -> u64 {
+        self.tsc_hz / 1_000_000 * PRESENT_MICROS
     }
 
     fn finish(&mut self, mark: Mark, result: &str) {
@@ -382,6 +397,11 @@ pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
 pub fn tick() {
     output::pump_serial();
     STATE.try_with(|state| {
+        // What the last bounded presents left, such as lines that scrolled.
+        let bound = state.present_ticks();
+        if bound != 0 && console::present_some(bound) {
+            return;
+        }
         let frame = state.tsc_hz / 8;
         let Some(running) = state.running.as_mut().filter(|_| frame > 0) else {
             return;
