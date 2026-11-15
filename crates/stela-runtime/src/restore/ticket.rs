@@ -385,6 +385,30 @@ pub(crate) mod tests {
         out.extend_from_slice(&tlv(0, &body)[1..]);
         out
     }
+    /// A synthetic global ticket covering each digest under its tag.
+    pub(crate) fn covering(covered: &[([u8; 4], [u8; 48])]) -> Vec<u8> {
+        let manp = [
+            entry(b"CHIP", &tlv(2, &[0, 0x81, 0x12])),
+            entry(b"BORD", &tlv(2, &[0x24])),
+            entry(b"SDOM", &tlv(2, &[1])),
+        ]
+        .concat();
+        let mut entries = entry(b"MANP", &tlv(0x31, &manp));
+        for (tag, digest) in covered {
+            entries.extend(entry(tag, &tlv(0x31, &entry(b"DGST", &tlv(4, digest)))));
+        }
+        tlv(
+            0x30,
+            &[
+                tlv(0x16, b"IM4M"),
+                tlv(2, &[0]),
+                tlv(0x31, &entry(b"MANB", &tlv(0x31, &entries))),
+                tlv(4, b"synthetic-signature"),
+                tlv(0x30, b""),
+            ]
+            .concat(),
+        )
+    }
     pub(crate) fn manifest(payload: &[u8]) -> Vec<u8> {
         ticket_for(b"krnl", payload, None)
     }

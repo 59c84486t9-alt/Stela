@@ -21,7 +21,7 @@ use stela_contracts::refuse;
 use {stela_formats::payload::ReadAt, stela_formats::payload::safe_path};
 const MAX_STAGED_ANSWERS: usize = 128;
 const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 /// The writer returns success only after durable storage and readback.
 pub type FdrCommit = Box<dyn FnMut(&[u8]) -> Result<()>>;
 /// A transfer is a bounded recipe. A scheduler opens DataPort and polls a Job;
@@ -486,8 +486,14 @@ impl<R: ReadAt> Answers<R> {
         global.retype_covered(&mut bytes, digest)?;
         global.wrap(&bytes, digest)
     }
+    /// The plan for `request`. A pending read leaves it to be asked again
+    /// with the same request, which goes on from what this call read
+    /// ([`Store::answering`]).
     pub fn plan(&mut self, request: &Value) -> Result<Plan> {
-        self.plan_inner(request).map_err(|e| match e {
+        self.store.answering(request);
+        let plan = self.plan_inner(request);
+        self.store.answered(matches!(plan, Err(Error::Pending)));
+        plan.map_err(|e| match e {
             Error::Pending => e,
             e => super::refuse(refuse!("restore plan: {e}", ?e), request),
         })
@@ -782,7 +788,10 @@ impl<R: ReadAt> Answers<R> {
     /// authenticator, as SEPROM is a Mac's. The
     /// firmware set and LLB are absent, so a reader of them fails.
     pub fn sep_firmware(&mut self, request: &Value) -> Result<Plan> {
-        self.sep_firmware_inner(request).map_err(|e| match e {
+        self.store.answering(request);
+        let plan = self.sep_firmware_inner(request);
+        self.store.answered(matches!(plan, Err(Error::Pending)));
+        plan.map_err(|e| match e {
             Error::Pending => e,
             e => super::refuse(refuse!("SEP firmware plan: {e}", ?e), request),
         })
@@ -1211,4 +1220,4 @@ fn cpio_header(name: &str, mode: u64, size: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

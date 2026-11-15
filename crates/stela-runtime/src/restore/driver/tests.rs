@@ -485,3 +485,74 @@ fn a_read_ahead_over_its_time_reads_for_each_job_in_turn() {
     }
     assert_eq!(sent, payload);
 }
+
+/// NORData asked on the control stream and answered from a slow stick in
+/// service turns as the boot runs them (poll, then the answer and the read
+/// ahead each with 20 ms for their reads) reaches the guest whole: the
+/// bytes on the stream are those an unbounded stick gives, and the turns
+/// about those the stick's reads take. The firmware set is too large to
+/// hold, so the answer digests the SEP image retyped and streams every
+/// image, as a Mac's does.
+#[test]
+fn nor_data_from_a_slow_stick_reaches_the_guest_whole_in_bounded_turns() {
+    use super::super::answers::tests::{STICKS, device_us};
+    use super::super::store::tests::{Stick, TURN_US, firmware};
+    // The bytes NORData's answer puts on the control stream, the turns it
+    // took, and the stick's commands meanwhile.
+    let deliver = |command_us: u64, slow: Option<(u64, u64)>, bounded: bool, cap: u64| {
+        let store = firmware(3_300_000, 1_800_000, false, |memory| {
+            Stick::new(memory, command_us, slow)
+        });
+        let mut d = Driver::new(Answers::new(store), Route::Stock).unwrap();
+        let mut h = harness();
+        restoring(&mut d, &mut h);
+        let s = h.streams.get_mut(&PORT).unwrap();
+        s.chunk = 1 << 20;
+        let start = s.output.len();
+        let ledger = d.session.ledger().len();
+        d.answers.store.reader_mut().commands = 0;
+        append(&mut h, request("NORData", false));
+        let mut turns = 0;
+        loop {
+            turns += 1;
+            assert!(turns <= cap, "no answer after {turns} turns");
+            // The guest takes what was read ahead: the harness's stream
+            // takes a write every other poll.
+            let mut idle = 0;
+            while idle < 4 {
+                let before = h.streams[&PORT].output.len();
+                assert!(d.poll_prefetched(&mut h).is_pending());
+                idle = if h.streams[&PORT].output.len() == before {
+                    idle + 1
+                } else {
+                    0
+                };
+            }
+            assert!(d.failed().is_none(), "{:?}", d.failed());
+            if d.session.ledger().len() > ledger && d.session.outstanding() == 0 {
+                break;
+            }
+            if bounded {
+                d.answers.store.reader_mut().turn();
+            }
+            d.work();
+            if bounded {
+                d.answers.store.reader_mut().turn();
+            }
+            d.prefetch(8, || true);
+        }
+        let commands = d.answers.store.reader_mut().commands;
+        (h.streams[&PORT].output[start..].to_vec(), turns, commands)
+    };
+    let (expected, _, commands) = deliver(1_300, None, false, 100_000);
+    assert!(expected.len() > 8 << 20, "{}", expected.len());
+    for (stick, command_us, slow) in STICKS {
+        let ideal = device_us(commands, command_us, slow).div_ceil(TURN_US);
+        let (sent, turns, _) = deliver(command_us, slow, true, 20 * ideal + 100);
+        assert!(sent == expected, "{stick}: the stream differs");
+        assert!(
+            turns <= 2 * ideal + 8,
+            "{stick}: {turns} turns, its reads take {ideal}"
+        );
+    }
+}

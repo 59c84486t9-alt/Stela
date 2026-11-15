@@ -205,9 +205,72 @@ pub struct Store<R> {
     check: Option<(String, u64, Sha384)>,
     /// The whole-member reads pending reads stopped, oldest first.
     passes: Vec<Pass>,
+    /// What the answer to the request being answered read, while that
+    /// request is asked again ([`Store::answering`]).
+    resume: Option<Resume>,
+    /// Requests whose answers began, for [`AnswerProgress::serial`].
+    answers_begun: u64,
 }
 /// Scans and whole-member reads kept at most while their reads are pending.
 const KEPT: usize = 4;
+/// The bytes one request's answer keeps at most across its turns: the
+/// largest answer held in memory reads one image past the reply's bound
+/// before it streams instead, besides its heads and global manifests.
+const RESUME_BYTES: usize = 2 * super::answers::MAX_REPLY_BYTES + 2 * MAX_READ_BYTES;
+/// The results the answer to one request read, kept while a pending read
+/// has it asked again: each turn then goes on from what earlier turns
+/// read, whatever the source's speed, instead of reading every head and
+/// digesting every member again. The store's members do not change, and
+/// each result was checked as it was read, so a result serves any later
+/// ask of the same read; the request only bounds how long they are kept.
+struct Resume {
+    request: Value,
+    serial: u64,
+    entries: Vec<(String, Kept, Vec<u8>)>,
+    /// The bytes `entries` hold, at most [`RESUME_BYTES`].
+    bytes: usize,
+    /// A result was not kept because `bytes` would pass the bound.
+    full: bool,
+    /// Member bytes the answer's reads returned, over all its turns.
+    read: u64,
+    /// The times the answer began.
+    turns: u64,
+    /// Whether the answer runs now: reads outside it, such as a transfer's,
+    /// are not kept.
+    active: bool,
+}
+/// One kept read of a member.
+#[derive(PartialEq)]
+enum Kept {
+    /// `read_at(offset, len)`.
+    At(u64, usize),
+    /// The member whole.
+    Whole,
+    /// SHA-384 of these bytes and then the member after as many.
+    Digest(Vec<u8>),
+}
+impl Kept {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Digest(head) => head.len(),
+            _ => 0,
+        }
+    }
+}
+/// The answer of a request asked again after pending reads, for a report.
+pub struct AnswerProgress<'a> {
+    /// The request's `DataType`.
+    pub data_type: &'a str,
+    /// Which request's answer this is: a new request has a new one.
+    pub serial: u64,
+    pub turns: u64,
+    /// Member bytes its reads returned so far.
+    pub read: u64,
+    /// Bytes it keeps for its next turn.
+    pub kept: usize,
+    /// A result was too large to keep.
+    pub full: bool,
+}
 /// A read of a member to its end that a pending read stopped: where it is,
 /// and what it gathered or hashed, so asking again reads no byte twice.
 struct Pass {
@@ -346,7 +409,89 @@ impl<R: ReadAt> Store<R> {
             scans: Vec::new(),
             check: None,
             passes: Vec::new(),
+            resume: None,
+            answers_begun: 0,
         })
+    }
+    /// Begin answering `request`. What an earlier answer to the same
+    /// request read before a pending read stopped it serves this one; an
+    /// answer to any other request drops it.
+    pub(super) fn answering(&mut self, request: &Value) {
+        match &mut self.resume {
+            Some(resume) if resume.request == *request => {
+                resume.active = true;
+                resume.turns += 1;
+            }
+            _ => {
+                self.answers_begun += 1;
+                self.resume = Some(Resume {
+                    request: request.clone(),
+                    serial: self.answers_begun,
+                    entries: Vec::new(),
+                    bytes: 0,
+                    full: false,
+                    read: 0,
+                    turns: 1,
+                    active: true,
+                });
+            }
+        }
+    }
+    /// End the answer [`Self::answering`] began: a `pending` one keeps what
+    /// it read for the request asked again; any other end drops it.
+    pub(super) fn answered(&mut self, pending: bool) {
+        match (&mut self.resume, pending) {
+            (Some(resume), true) => resume.active = false,
+            _ => self.resume = None,
+        }
+    }
+    /// The answer that a pending read stopped and that waits for its
+    /// request to be asked again.
+    pub fn answer_progress(&self) -> Option<AnswerProgress<'_>> {
+        let resume = self.resume.as_ref()?;
+        Some(AnswerProgress {
+            data_type: resume
+                .request
+                .get("DataType")
+                .and_then(|kind| kind.string().ok())
+                .unwrap_or("unnamed"),
+            serial: resume.serial,
+            turns: resume.turns,
+            read: resume.read,
+            kept: resume.bytes,
+            full: resume.full,
+        })
+    }
+    /// `read`'s result for `path` and `kept`, which the running answer
+    /// keeps for its later turns; one it kept already is not read again.
+    fn remembered(
+        &mut self,
+        path: &str,
+        kept: Kept,
+        read: impl FnOnce(&mut Self) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        match self.resume.as_ref().filter(|resume| resume.active) {
+            None => return read(self),
+            Some(resume) => {
+                if let Some((.., bytes)) = resume
+                    .entries
+                    .iter()
+                    .find(|(at, what, _)| at == path && *what == kept)
+                {
+                    return Ok(bytes.clone());
+                }
+            }
+        }
+        let bytes = read(self)?;
+        let resume = self.resume.as_mut().expect("active above");
+        let cost = path.len() + kept.bytes() + bytes.len();
+        if resume.bytes + cost <= RESUME_BYTES {
+            resume.bytes += cost;
+            resume.entries.push((path.into(), kept, bytes.clone()));
+        } else {
+            resume.full = true;
+        }
+        Ok(bytes)
     }
     pub fn manifest(&self) -> &PayloadManifest {
         &self.manifest
@@ -692,10 +837,26 @@ impl<R: ReadAt> Store<R> {
         Ok(())
     }
     pub fn read_at(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
-        self.read_at_reusing(path, offset, len, Vec::new())
+        self.remembered(path, Kept::At(offset, len), |store| {
+            store.read_at_reusing(path, offset, len, Vec::new())
+        })
     }
 
     pub(super) fn read_at_reusing(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+        result: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let result = self.read_checked(path, offset, len, result)?;
+        if let Some(resume) = self.resume.as_mut().filter(|resume| resume.active) {
+            resume.read += result.len() as u64;
+        }
+        Ok(result)
+    }
+
+    fn read_checked(
         &mut self,
         path: &str,
         offset: u64,
@@ -785,7 +946,8 @@ impl<R: ReadAt> Store<R> {
         };
         while pass.offset < size {
             let n = (size - pass.offset).min(MAX_READ_BYTES as u64) as usize;
-            match self.read_at(path, pass.offset, n) {
+            // Not kept one by one: the pass keeps where it is itself.
+            match self.read_at_reusing(path, pass.offset, n, Vec::new()) {
                 Ok(read) => {
                     match &mut pass.bytes {
                         Some(bytes) => bytes.extend(read),
@@ -807,12 +969,19 @@ impl<R: ReadAt> Store<R> {
     }
     /// A member's bytes, whole, read across pending reads.
     pub fn read_whole(&mut self, path: &str) -> Result<Vec<u8>> {
-        Ok(self.pass(path, &[], true)?.bytes.unwrap_or_default())
+        self.remembered(path, Kept::Whole, |store| {
+            Ok(store.pass(path, &[], true)?.bytes.unwrap_or_default())
+        })
     }
     /// SHA-384 of `head` and then the member's bytes after its first
     /// `head.len()`, read across pending reads.
     pub fn digest_after(&mut self, path: &str, head: &[u8]) -> Result<[u8; 48]> {
-        Ok(self.pass(path, head, false)?.hash.finalize().into())
+        let digest = self.remembered(path, Kept::Digest(head.to_vec()), |store| {
+            Ok(store.pass(path, head, false)?.hash.finalize().to_vec())
+        })?;
+        digest
+            .try_into()
+            .map_err(|_| Error::Invalid("kept digest length"))
     }
     pub fn read_component(&mut self, name: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         let path = self.identity().path(name)?.to_string();

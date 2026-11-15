@@ -12,7 +12,7 @@ pub(crate) fn set_aea_keys(store: &mut Store<Memory>, keys: Vec<stela_formats::p
     store.manifest.aea_keys = keys;
 }
 /// Set one Info field on the selected fixture identity.
-pub(crate) fn set_info(store: &mut Store<Memory>, key: &str, value: Value) {
+pub(crate) fn set_info<R>(store: &mut Store<R>, key: &str, value: Value) {
     let Value::Dict(identity) = &mut store.identities[store.current].value else {
         panic!("fixture identity is not a dictionary")
     };
@@ -21,8 +21,8 @@ pub(crate) fn set_info(store: &mut Store<Memory>, key: &str, value: Value) {
     };
     info.insert(key.into(), value);
 }
-pub(crate) fn set_component_info(
-    store: &mut Store<Memory>,
+pub(crate) fn set_component_info<R>(
+    store: &mut Store<R>,
     component: &str,
     key: &str,
     value: Value,
@@ -812,12 +812,29 @@ use crate::platform::net::{
 /// A remote image's network for [`Ranges`]: an open range's body arrives
 /// only while the reader waits, `per_wait` bytes each wait, and every wait
 /// takes a whole turn's budget. Counts the times each image byte arrives.
-struct Network {
+pub(crate) struct Network {
     image: Vec<u8>,
     per_wait: u64,
     now: u64,
     bodies: Vec<Option<Body>>,
     arrivals: Vec<u8>,
+}
+impl Network {
+    /// `image` over a network that brings `per_wait` bytes to each open
+    /// range at each wait.
+    pub(crate) fn new(image: Vec<u8>, per_wait: u64) -> Self {
+        Self {
+            arrivals: vec![0; image.len()],
+            image,
+            per_wait,
+            now: 0,
+            bodies: Vec::new(),
+        }
+    }
+    /// The bytes that arrived, counting each time one arrived.
+    pub(crate) fn arrived(&self) -> u64 {
+        self.arrivals.iter().map(|&count| u64::from(count)).sum()
+    }
 }
 /// An open range: handed over up to `next`, arrived up to `arrived`.
 struct Body {
@@ -873,7 +890,7 @@ impl RangeSource for Network {
 }
 
 /// Bytes like an Image4 payload's that deflate barely shrinks.
-fn noise(len: usize, mut state: u32) -> Vec<u8> {
+pub(crate) fn noise(len: usize, mut state: u32) -> Vec<u8> {
     (0..len)
         .map(|_| {
             state ^= state << 13;
@@ -1013,4 +1030,338 @@ fn a_remote_component_longer_than_a_turn_is_read_across_turns_once() {
             "{case}: {twice} bytes arrived again in {turns} turns, allowed {allowed}"
         );
     }
+}
+
+/// The time a service turn's reads may wait in all, as the install medium's
+/// bound (`READ_WAIT_MICROS`) and a remote image's (`BUDGET_MS`).
+pub(crate) const TURN_US: u64 = 20_000;
+/// The most one of the stick's commands moves.
+const COMMAND_BYTES: usize = 64 << 10;
+/// Reads started or done that the stick keeps for their callers, as the
+/// install medium's bounded reads keep them.
+const STICK_KEPT: usize = 8;
+
+/// A USB stick read in service turns, as the install medium's bounded
+/// reads are: its one queue works on the oldest started read, a command of
+/// up to 64 KiB at a time, only while a read waits; past the turn's
+/// [`TURN_US`] a read starts its command and fails as blocked, and the same
+/// read asked in a later turn takes its result. Every `slow.0`th command
+/// takes `slow.1` microseconds, as one behind the stick's own slow write.
+/// Before [`Stick::turn`] bounds them, reads are served whole at once; the
+/// device time they would take is counted all the same.
+pub(crate) struct Stick {
+    source: Memory,
+    command_us: u64,
+    slow: Option<(u64, u64)>,
+    bounded: bool,
+    blocked: bool,
+    /// Device time the turn's reads waited.
+    spent: u64,
+    /// Reads started: offset, length and device time left.
+    running: VecDeque<(u64, usize, u64)>,
+    /// Reads done that no read took yet.
+    done: VecDeque<(u64, usize)>,
+    /// Commands started, bytes the reads returned, and the device time
+    /// they took, in all.
+    pub commands: u64,
+    pub served: u64,
+    pub busy_us: u64,
+}
+impl Stick {
+    pub(crate) fn new(source: Memory, command_us: u64, slow: Option<(u64, u64)>) -> Self {
+        Self {
+            source,
+            command_us,
+            slow,
+            bounded: false,
+            blocked: false,
+            spent: 0,
+            running: VecDeque::new(),
+            done: VecDeque::new(),
+            commands: 0,
+            served: 0,
+            busy_us: 0,
+        }
+    }
+    /// Begin a service turn: the reads from here wait [`TURN_US`] in all.
+    pub(crate) fn turn(&mut self) {
+        self.bounded = true;
+        self.spent = 0;
+    }
+    /// Serve every later read at once, as before the guest runs.
+    pub(crate) fn unbound(&mut self) {
+        self.bounded = false;
+    }
+    /// The device time a read of `bytes` takes.
+    fn cost(&mut self, bytes: usize) -> u64 {
+        let mut cost = 0;
+        for _ in 0..bytes.div_ceil(COMMAND_BYTES).max(1) {
+            self.commands += 1;
+            cost += match self.slow {
+                Some((every, us)) if self.commands.is_multiple_of(every) => us,
+                _ => self.command_us,
+            };
+        }
+        cost
+    }
+    fn serve(&mut self, offset: u64, buffer: &mut [u8]) -> core::result::Result<(), &'static str> {
+        self.served += buffer.len() as u64;
+        self.source.read_at(offset, buffer)
+    }
+}
+impl ReadAt for Stick {
+    type Error = &'static str;
+
+    fn len(&self) -> u64 {
+        self.source.len()
+    }
+
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> core::result::Result<(), Self::Error> {
+        let read = (offset, buffer.len());
+        if !self.bounded {
+            self.busy_us += self.cost(buffer.len());
+            return self.serve(offset, buffer);
+        }
+        loop {
+            if let Some(at) = self.done.iter().position(|done| *done == read) {
+                self.done.remove(at);
+                return self.serve(offset, buffer);
+            }
+            let started = self
+                .running
+                .iter()
+                .any(|&(at, bytes, _)| (at, bytes) == read);
+            if !started && self.running.len() < STICK_KEPT {
+                let cost = self.cost(buffer.len());
+                self.running.push_back((offset, buffer.len(), cost));
+            }
+            if self.spent >= TURN_US {
+                self.blocked = true;
+                return Err("the turn's time ran out");
+            }
+            let (_, _, left) = self.running.front_mut().expect("a read runs");
+            let step = (*left).min(TURN_US - self.spent);
+            *left -= step;
+            self.spent += step;
+            self.busy_us += step;
+            if *left == 0 {
+                let (at, bytes, _) = self.running.pop_front().expect("a read runs");
+                if self.done.len() == STICK_KEPT {
+                    self.done.pop_front();
+                }
+                self.done.push_back((at, bytes));
+            }
+        }
+    }
+
+    fn blocked(&mut self) -> bool {
+        core::mem::take(&mut self.blocked)
+    }
+}
+
+/// The global manifest the firmware fixture's identity names.
+pub(crate) const GLOBAL: &str = "Firmware/Manifests/restore/macOS Customer/apticket.testap.im4m";
+
+/// A bare IM4P typed `tag` with a `body`-byte payload of noise.
+pub(crate) fn im4p(tag: &[u8; 4], body: usize, seed: u32) -> Vec<u8> {
+    fn der(tag: u8, bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        if bytes.len() < 128 {
+            out.push(bytes.len() as u8);
+        } else {
+            let n = (bytes.len() as u32).to_be_bytes();
+            let skip = n.iter().take_while(|&&b| b == 0).count();
+            out.push(0x80 | (4 - skip) as u8);
+            out.extend_from_slice(&n[skip..]);
+        }
+        out.extend_from_slice(bytes);
+        out
+    }
+    der(
+        0x30,
+        &[
+            der(0x16, b"IM4P"),
+            der(0x16, tag),
+            der(0x16, b""),
+            der(4, &noise(body, seed)),
+        ]
+        .concat(),
+    )
+}
+
+/// A Mac-like firmware set read through `reader`: LLB, iBoot and ten
+/// firmware images flashed with it, a large one (`big` payload bytes,
+/// also an FUD image with two of the ten), the SEP image (`sep` bytes)
+/// that `SEP` names and `RestoreSEP` names retyped `rsep`, `SepStage1`,
+/// and a global ticket that covers each. The hashes are recorded and
+/// checked on read, as the install medium's are.
+pub(crate) fn firmware<R: ReadAt>(
+    sep: usize,
+    big: usize,
+    deflate: bool,
+    reader: impl FnOnce(Memory) -> R,
+) -> Store<R> {
+    use sha2::{Digest, Sha384};
+    // Component, path, flags, and the file.
+    let mut images: Vec<(String, String, &[&str], Vec<u8>)> = vec![
+        (
+            "LLB".into(),
+            "llb.im4p".into(),
+            &[],
+            im4p(b"illb", 40_000, 1),
+        ),
+        (
+            "iBoot".into(),
+            "iboot.im4p".into(),
+            &["IsFirmwarePayload"],
+            im4p(b"ibot", 300_000, 2),
+        ),
+    ];
+    for index in 0..10u8 {
+        let flags: &[&str] = match index {
+            1 | 3 => &["IsFirmwarePayload", "IsFUDFirmware"],
+            _ if index % 2 == 0 => &["IsSecondaryFirmwarePayload", "IsLoadedByiBoot"],
+            _ => &["IsFirmwarePayload"],
+        };
+        images.push((
+            format!("Ap,Fw{index}"),
+            format!("fw{index}.im4p"),
+            flags,
+            im4p(
+                &[b'f', b'w', b'0', b'0' + index],
+                9_000 + 7_000 * index as usize,
+                10 + index as u32,
+            ),
+        ));
+    }
+    images.push((
+        "Ap,Big".into(),
+        "big.im4p".into(),
+        &["IsFirmwarePayload", "IsFUDFirmware"],
+        im4p(b"bigf", big, 3),
+    ));
+    let sepi = im4p(b"sepi", sep, 4);
+    images.push(("SEP".into(), "sep.im4p".into(), &[], sepi.clone()));
+    images.push(("RestoreSEP".into(), "sep.im4p".into(), &[], sepi.clone()));
+    images.push((
+        "SepStage1".into(),
+        "sep1.im4p".into(),
+        &[],
+        im4p(b"sep1", 30_000, 5),
+    ));
+    let mut rsep = sepi.clone();
+    stela_formats::img4::set_payload_type(&mut rsep, *b"rsep").unwrap();
+    let restore_sep: [u8; 48] = Sha384::digest(&rsep).into();
+    let mut covered: Vec<([u8; 4], [u8; 48])> = images
+        .iter()
+        .filter(|(name, ..)| name != "RestoreSEP")
+        .map(|(.., file)| {
+            let tag = stela_formats::img4::payload_type(file).unwrap();
+            (tag, Sha384::digest(file).into())
+        })
+        .collect();
+    covered.push((*b"rsep", restore_sep));
+    let ticket = super::super::ticket::tests::covering(&covered);
+    images.push(("ApTicket".into(), GLOBAL.into(), &[], ticket));
+    let extra: Vec<(&str, &str, &[u8])> = images
+        .iter()
+        .map(|(name, path, _, file)| (name.as_str(), path.as_str(), file.as_slice()))
+        .collect();
+    let (memory, mut manifest) =
+        parts(b"x", deflate, &extra, &[("RestoreSEP", restore_sep)], ERASE);
+    manifest.global_manifests.push(GLOBAL.into());
+    // The recorded hashes, in member order.
+    let mut blocks = Vec::new();
+    for member in &mut manifest.members {
+        let file = match member.name.as_str() {
+            "os.dmg" => b"x".as_slice(),
+            name => extra.iter().find(|(_, path, _)| *path == name).unwrap().2,
+        };
+        for block in file.chunks(BLOCK_BYTES) {
+            blocks.extend(Sha256::digest(block).to_vec());
+        }
+        member.sha384 = Some(hex::encode(Sha384::digest(file)));
+    }
+    manifest.block_hashes = Some(stela_formats::payload::BlockHashes {
+        file: stela_formats::payload::BLOCK_HASHES_FILE.into(),
+        block_bytes: stela_formats::payload::HASH_BLOCK_BYTES,
+        sha256: stela_formats::sha256(&blocks),
+    });
+    manifest.validate().unwrap();
+    let mut store = Store::open(reader(memory), manifest, 0).unwrap();
+    store.set_verify(Verify::OnRead);
+    store.adopt_block_hashes(&blocks).unwrap();
+    for (name, _, flags, _) in &images {
+        for flag in *flags {
+            set_component_info(&mut store, name, flag, Value::Boolean(true));
+        }
+    }
+    store
+}
+
+/// A request's answer asked again after a pending read reads nothing it
+/// read before: its heads and its finished digest are kept, and the turn
+/// goes on with the read that ran out of time. The answer to another
+/// request, and a finished one, keep nothing.
+#[test]
+fn an_answer_asked_again_goes_on_from_what_it_read() {
+    use sha2::{Digest, Sha384};
+    let mut store = firmware(300_000, 1_000, false, |memory| {
+        Stick::new(memory, 1_300, None)
+    });
+    let request = Value::dict([("DataType", Value::from("NORData"))]);
+    let other = Value::dict([("DataType", Value::from("FUDData"))]);
+    let head_of = |store: &mut Store<Stick>, path: &str| store.read_at(path, 0, 64).unwrap();
+    // An unbounded answer: a head, a digest, and the next head.
+    store.answering(&request);
+    let head = head_of(&mut store, "sep.im4p");
+    let digest = store.digest_after("sep.im4p", &head).unwrap();
+    let mut whole = store.read_whole("sep.im4p").unwrap();
+    assert_eq!(Sha384::digest(&whole).as_slice(), digest);
+    whole.truncate(64);
+    assert_eq!(whole, head);
+    // Its next read runs out of time.
+    store.reader.turn();
+    store.reader.spent = TURN_US;
+    assert!(matches!(
+        store.read_at("sep1.im4p", 0, 64),
+        Err(Error::Pending)
+    ));
+    store.answered(true);
+    let progress = store.answer_progress().unwrap();
+    assert_eq!((progress.data_type, progress.turns), ("NORData", 1));
+    assert!(progress.read >= 2 * 300_000, "{}", progress.read);
+    assert!(progress.kept > 300_000 && !progress.full);
+    // Asked again, it reads only the read that ran out of time.
+    let served = store.reader.served;
+    store.reader.turn();
+    store.answering(&request);
+    assert_eq!(head_of(&mut store, "sep.im4p"), head);
+    assert_eq!(store.digest_after("sep.im4p", &head).unwrap(), digest);
+    let size = store.member_len("sep.im4p").unwrap() as usize;
+    assert_eq!(store.read_whole("sep.im4p").unwrap().len(), size);
+    assert_eq!(store.reader.served, served);
+    head_of(&mut store, "sep1.im4p");
+    assert!(store.reader.served > served);
+    store.answered(true);
+    assert_eq!(store.answer_progress().unwrap().turns, 2);
+    // Reads outside the answer, such as a transfer's, are not kept.
+    let kept = store.answer_progress().unwrap().kept;
+    head_of(&mut store, "llb.im4p");
+    assert_eq!(store.answer_progress().unwrap().kept, kept);
+    // Another request's answer starts afresh.
+    store.answering(&other);
+    let served = store.reader.served;
+    head_of(&mut store, "sep.im4p");
+    assert!(store.reader.served > served);
+    let serial = store.answer_progress().unwrap().serial;
+    store.answered(false);
+    assert!(store.answer_progress().is_none());
+    // So does the same request once its answer ended.
+    store.answering(&other);
+    assert_ne!(store.answer_progress().unwrap().serial, serial);
+    let served = store.reader.served;
+    head_of(&mut store, "sep.im4p");
+    assert!(store.reader.served > served);
+    store.answered(false);
 }

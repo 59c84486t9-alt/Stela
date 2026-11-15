@@ -441,3 +441,227 @@ fn cpio_header_has_the_public_wire_layout() {
     assert_eq!(&h[65..76], b"00000000173");
     assert_eq!(&h[76..], b"a/b\0");
 }
+
+/// Every how many commands one takes how long instead.
+pub(crate) type Slow = Option<(u64, u64)>;
+/// The modelled sticks: a name, the device time of one 64 KiB command, and
+/// their slow commands.
+pub(crate) const STICKS: [(&str, u64, Slow); 3] = [
+    ("1.3 ms a command", 1_300, None),
+    ("20 ms a command", 20_000, None),
+    (
+        "a command in seven slower than a turn",
+        1_300,
+        Some((7, 30_000)),
+    ),
+];
+
+/// The device time a stick takes for `commands` commands.
+pub(crate) fn device_us(commands: u64, command_us: u64, slow: Option<(u64, u64)>) -> u64 {
+    commands * command_us + slow.map_or(0, |(every, us)| commands / every * (us - command_us))
+}
+
+/// The bytes a plan sends: a reply's plist, or a transfer's segments with
+/// each member's bytes.
+fn sent<R: ReadAt>(plan: &Plan, store: &mut Store<R>) -> Vec<u8> {
+    let segments = match plan {
+        Plan::Reply(value) => return plist::encode_binary(value, Limits::default()).unwrap(),
+        Plan::File(segments) | Plan::Raw(segments) | Plan::Message(segments) => segments,
+        Plan::Asr(_) => panic!("no image is sent here"),
+    };
+    let mut out = Vec::new();
+    for segment in segments {
+        match segment {
+            Segment::Bytes(bytes) => out.extend_from_slice(bytes),
+            Segment::Member {
+                path,
+                offset,
+                bytes,
+            } => {
+                let mut at = 0;
+                while at < *bytes {
+                    let n = (*bytes - at).min(super::super::store::MAX_READ_BYTES as u64);
+                    out.extend(store.read_at(path, offset + at, n as usize).unwrap());
+                    at += n;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Each answer that reads the install medium, asked again in service turns
+/// whose reads wait 20 ms in all, ends in about the turns its reads take
+/// on the stick, reads about what one unbounded answer reads, and sends
+/// the same bytes: on a stick whose commands take 1.3 ms (the GH #128
+/// stick), one whose commands each take a whole turn, and one with a
+/// command slower than a turn now and then. A turn goes on from what the
+/// earlier ones read: the heads, the global manifest, finished digests
+/// and whole images.
+#[test]
+fn each_answer_from_a_slow_stick_ends_in_bounded_turns_with_the_unbounded_bytes() {
+    use super::super::store::tests::{Stick, TURN_US, firmware};
+    let nor = Value::dict([("DataType", Value::from("NORData"))]);
+    let fud = Value::dict([
+        ("DataType", Value::from("FUDData")),
+        ("Arguments", Value::dict([])),
+    ]);
+    let boot = Value::dict([
+        ("DataType", Value::from("PersonalizedBootObjectV3")),
+        (
+            "Arguments",
+            Value::dict([("ImageName", Value::from("RestoreSEP"))]),
+        ),
+    ]);
+    let answer = |answers: &mut Answers<Stick>, request: &Value, flash: bool| match flash {
+        true => answers.plan(request),
+        false => answers.sep_firmware(request),
+    };
+    // What, the request, whether NOR is flashed, the SEP and large image's
+    // bytes, and whether the IPSW deflates its members.
+    let cases = [
+        ("streamed NORData", &nor, true, 3_300_000, 1_800_000, false),
+        ("held NORData", &nor, true, 1_000_000, 500_000, false),
+        (
+            "held NORData, deflated",
+            &nor,
+            true,
+            1_000_000,
+            500_000,
+            true,
+        ),
+        ("SEP firmware", &nor, false, 1_000_000, 500_000, false),
+        ("FUD images", &fud, true, 1_000_000, 500_000, true),
+        (
+            "a personalized boot object",
+            &boot,
+            true,
+            3_300_000,
+            1_000,
+            false,
+        ),
+    ];
+    for (what, request, flash, sep, big, deflate) in cases {
+        let mut plain = Answers::new(firmware(sep, big, deflate, |memory| {
+            Stick::new(memory, 1_300, None)
+        }));
+        plain.store.reader_mut().commands = 0;
+        plain.store.reader_mut().served = 0;
+        let plan = answer(&mut plain, request, flash).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let commands = plain.store.reader_mut().commands;
+        let read = plain.store.reader_mut().served;
+        if what.starts_with("streamed") {
+            assert!(matches!(plan, Plan::Message(_)), "{what}");
+        } else if what.starts_with("held") {
+            assert!(matches!(plan, Plan::Reply(_)), "{what}");
+        }
+        let expected = sent(&plan, &mut plain.store);
+        for (stick, command_us, slow) in STICKS {
+            let case = format!("{what} on a stick with {stick}");
+            let mut answers = Answers::new(firmware(sep, big, deflate, |memory| {
+                Stick::new(memory, command_us, slow)
+            }));
+            answers.store.reader_mut().served = 0;
+            let ideal = device_us(commands, command_us, slow).div_ceil(TURN_US);
+            let mut turns = 0;
+            let plan = loop {
+                turns += 1;
+                assert!(
+                    turns <= 20 * ideal + 100,
+                    "{case}: no answer after {turns} turns (its reads take {ideal})"
+                );
+                answers.store.reader_mut().turn();
+                match answer(&mut answers, request, flash) {
+                    Ok(plan) => break plan,
+                    Err(Error::Pending) => {}
+                    Err(e) => panic!("{case}: {e}"),
+                }
+            };
+            assert!(answers.store.answer_progress().is_none(), "{case}");
+            let again = answers.store.reader_mut().served;
+            assert!(
+                turns <= 2 * ideal + 4,
+                "{case}: {turns} turns, its reads take {ideal}"
+            );
+            assert!(
+                again <= read + read / 4 + (256 << 10),
+                "{case}: read {again} bytes, one answer reads {read}"
+            );
+            answers.store.reader_mut().unbound();
+            assert!(sent(&plan, &mut answers.store) == expected, "{case}");
+        }
+    }
+}
+
+/// The same answers from a remote image, as the online install reads it:
+/// each turn's waits for the network take 20 ms in all, and each wait
+/// brings 256 KiB to each open range. Each answer ends in about the turns
+/// its bytes and its far-apart reads take, and its plan sends the bytes of
+/// an unbounded one.
+#[test]
+fn each_answer_from_a_remote_image_ends_in_bounded_turns_with_the_unbounded_bytes() {
+    use super::super::store::tests::{Network, Stick, firmware};
+    use crate::platform::net::ranges::Ranges;
+    const PER_WAIT: u64 = 256 << 10;
+    let nor = Value::dict([("DataType", Value::from("NORData"))]);
+    let boot = Value::dict([
+        ("DataType", Value::from("PersonalizedBootObjectV3")),
+        (
+            "Arguments",
+            Value::dict([("ImageName", Value::from("RestoreSEP"))]),
+        ),
+    ]);
+    for (what, request, flash) in [
+        ("streamed NORData", &nor, true),
+        ("SEP firmware", &nor, false),
+        ("a personalized boot object", &boot, true),
+    ] {
+        let mut plain = Answers::new(firmware(3_300_000, 1_800_000, false, |memory| {
+            Stick::new(memory, 1_300, None)
+        }));
+        plain.store.reader_mut().served = 0;
+        let plan = match flash {
+            true => plain.plan(request),
+            false => plain.sep_firmware(request),
+        }
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        let read = plain.store.reader_mut().served;
+        let expected = sent(&plan, &mut plain.store);
+        let mut answers = Answers::new(firmware(3_300_000, 1_800_000, false, |memory| {
+            let len = memory.0.len() as u64;
+            Ranges::new(Network::new(memory.0, PER_WAIT), len)
+        }));
+        let before = answers.store.reader_mut().source().arrived();
+        // The images' heads are far apart: each takes a range and a wait.
+        let ideal = read.div_ceil(PER_WAIT) + 20;
+        let mut turns = 0;
+        let plan = loop {
+            turns += 1;
+            assert!(turns <= 20 * ideal, "{what}: no answer after {turns} turns");
+            answers.store.reader_mut().bound();
+            let answer = match flash {
+                true => answers.plan(request),
+                false => answers.sep_firmware(request),
+            };
+            match answer {
+                Ok(plan) => break plan,
+                Err(Error::Pending) => {}
+                Err(e) => panic!("{what}: {e}"),
+            }
+            answers.store.reader_mut().pump();
+        };
+        let arrived = answers.store.reader_mut().source().arrived() - before;
+        // The read ahead brings the small image whole, once.
+        let image = ReadAt::len(answers.store.reader_mut());
+        assert!(
+            arrived <= image,
+            "{what}: {arrived} bytes arrived of {image}"
+        );
+        assert!(
+            turns <= 2 * ideal,
+            "{what}: {turns} turns, its reads take {ideal}"
+        );
+        // The plan names the same bytes, read here from the unbounded store.
+        assert!(sent(&plan, &mut plain.store) == expected, "{what}");
+    }
+}
