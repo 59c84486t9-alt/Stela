@@ -755,6 +755,12 @@ impl AppleDevices {
             .map_or_else(Vec::new, Spi::take_dirty)
     }
 
+    /// The deferred fast IPIs' counts since the last call
+    /// ([`crate::ipi::DeferredCounts`]); `None` without fast IPIs.
+    pub fn take_deferred_ipis(&mut self) -> Option<crate::ipi::DeferredCounts> {
+        self.ipi.as_mut().map(FastIpi::take_deferred)
+    }
+
     /// The SPI NOR controller's activity since the last call
     /// ([`crate::spi::Activity`]); `None` without a NOR.
     pub fn take_nor_activity(&mut self) -> Option<crate::spi::Activity> {

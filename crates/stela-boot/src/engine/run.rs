@@ -1542,6 +1542,23 @@ impl Heartbeat {
                         nor.unclaimed_ticks * 1000 / hz,
                     ));
                 }
+                // Deferred fast IPIs (XNU's wake of an idle core) fire when
+                // the devices are next advanced with time: how late they did.
+                if let Some(ipis) = machine
+                    .devices
+                    .with(|devices| devices.take_deferred_ipis())
+                    .filter(|ipis| ipis.sent != 0 || ipis.fired != 0)
+                {
+                    let hz = stela_soc::counter::FREQUENCY_HZ;
+                    output::arguments(format_args!(
+                        "FAST IPI deferred={} cancelled={} fired={} late_ms={} longest_late_us={}\n",
+                        ipis.sent,
+                        ipis.cancelled,
+                        ipis.fired,
+                        ipis.late_ticks * 1000 / hz,
+                        ipis.longest_late_ticks * 1_000_000 / hz,
+                    ));
+                }
                 survey_report(machine);
                 occupancy_report(machine, &mut self.occupancy);
                 let next = if self.beats.is_multiple_of(SUSPENSION_BEATS) {

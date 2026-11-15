@@ -184,6 +184,20 @@ impl Signals {
     }
 }
 
+/// What the deferred IPIs did since [`FastIpi::take_deferred`]: the requests,
+/// those a retract or an immediate request cancelled, those that fired, and
+/// how far past its countdown each fired (counter ticks), summed and the
+/// longest. A deferred IPI fires when the devices are next advanced with
+/// time, so the lateness is how long none was.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeferredCounts {
+    pub sent: u64,
+    pub cancelled: u64,
+    pub fired: u64,
+    pub late_ticks: u64,
+    pub longest_late_ticks: u64,
+}
+
 /// Fast-IPI state of every CPU. `cpus[i]` is the affinity of logical CPU `i`.
 pub struct FastIpi {
     signals: Arc<Signals>,
@@ -195,6 +209,7 @@ pub struct FastIpi {
     /// [`Self::take_raised`] took theirs: bit `cpu % 64` of word `cpu / 64`,
     /// for every CPU of the machine.
     raised: Vec<u64>,
+    deferred_counts: DeferredCounts,
 }
 impl FastIpi {
     pub fn new(cpus: Vec<Affinity>) -> Self {
@@ -206,6 +221,7 @@ impl FastIpi {
             deferred,
             countdown: None,
             raised,
+            deferred_counts: DeferredCounts::default(),
         }
     }
     /// What every CPU reaches without the lock.
@@ -234,6 +250,17 @@ impl FastIpi {
             *word &= !bit;
             raised
         })
+    }
+    /// The deferred IPIs' counts since the last call ([`DeferredCounts`]).
+    pub fn take_deferred(&mut self) -> DeferredCounts {
+        core::mem::take(&mut self.deferred_counts)
+    }
+    /// Cancel `cpu`'s deferred IPI, counting one that was armed.
+    fn disarm(&mut self, cpu: CpuIndex) {
+        if self.deferred[cpu].is_some() {
+            self.deferred_counts.cancelled += 1;
+        }
+        self.arm(cpu, None);
     }
     fn arm(&mut self, cpu: CpuIndex, deadline: Option<u64>) {
         self.deferred[cpu] = deadline;
@@ -289,16 +316,17 @@ impl FastIpi {
                 };
                 match value >> RR_TYPE_SHIFT & 0b11 {
                     0 => {
-                        self.arm(target, None);
+                        self.disarm(target);
                         self.raise(target);
                     }
-                    1 => self.arm(target, None),
+                    1 => self.disarm(target),
                     2 => {
                         let Some(countdown) = self.countdown else {
                             return unsupported("deferred IPI sent before IPI_CR was written");
                         };
                         let deadline =
                             self.deferred[target].unwrap_or(now.saturating_add(countdown));
+                        self.deferred_counts.sent += 1;
                         self.arm(target, Some(deadline));
                     }
                     _ => return unsupported("no-wake IPIs are not modeled"),
@@ -334,6 +362,11 @@ impl FastIpi {
         for cpu in 0..self.deferred.len() {
             match self.deferred[cpu] {
                 Some(deadline) if deadline <= now => {
+                    let late = now - deadline;
+                    let counts = &mut self.deferred_counts;
+                    counts.fired += 1;
+                    counts.late_ticks += late;
+                    counts.longest_late_ticks = counts.longest_late_ticks.max(late);
                     self.arm(cpu, None);
                     self.raise(cpu);
                 }
@@ -397,6 +430,23 @@ mod tests {
         write(&mut ipi, 0, Register::RequestLocal, 1 << 28 | 1, 401);
         assert_eq!(ipi.advance(1000), None);
         assert!(!ipi.fiq(1));
+        // One fired on time and one retracted; a third fires 60 ticks late,
+        // and an immediate request subsumes a fourth.
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 2, 1000);
+        assert_eq!(ipi.advance(1300), None);
+        write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 3, 1300);
+        write(&mut ipi, 0, Register::RequestLocal, 3, 1301);
+        assert_eq!(
+            ipi.take_deferred(),
+            DeferredCounts {
+                sent: 4,
+                cancelled: 2,
+                fired: 2,
+                late_ticks: 60,
+                longest_late_ticks: 60,
+            }
+        );
+        assert_eq!(ipi.take_deferred(), DeferredCounts::default());
     }
 
     /// Immediate requests and acknowledgements complete on the signals
