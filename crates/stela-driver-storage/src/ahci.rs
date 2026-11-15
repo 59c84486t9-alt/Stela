@@ -12,7 +12,7 @@ use crate::{
     Clock, Deadline, Handoff,
     block::{
         BlockDevice, BlockError, Command, DiscardLimits, Expired, Extent, Features, Finished,
-        Identity, Rotation, Sense, SenseCompletion, Transport, ascii,
+        Identity, Rotation, Sense, SenseCompletion, Transport, ata_string,
     },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -976,11 +976,9 @@ fn sense_reporting(word: impl Fn(usize) -> u16) -> (bool, bool) {
 
 fn identify(data: &[u8]) -> Result<Identified, BlockError> {
     let word = |index: usize| u16::from_le_bytes([data[2 * index], data[2 * index + 1]]);
-    // ATA strings hold two characters per word, high byte first.
-    let string = |words: core::ops::Range<usize>| {
-        let bytes: Vec<u8> = words.flat_map(|index| word(index).to_be_bytes()).collect();
-        ascii(&bytes)
-    };
+    // As the firmware's disk picker reads them, which names the disk by its
+    // serial number for this driver to find.
+    let string = |words: core::ops::Range<usize>| ata_string(data, words);
     if word(IDENTIFY_COMMANDS_2) & COMMANDS_2_LBA48 == 0 {
         return Err(BlockError::Unsupported(
             "SATA disk without 48-bit addressing",

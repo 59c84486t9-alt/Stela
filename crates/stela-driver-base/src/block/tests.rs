@@ -1091,6 +1091,38 @@ fn identify_strings_lose_padding_and_terminators() {
 }
 
 #[test]
+fn ata_strings_swap_each_word_and_lose_padding() {
+    // Words 10-19 of an IDENTIFY page: "WD-WCC4E1234567" padded with spaces,
+    // each word's first character in its high byte.
+    let mut data = [0u8; 512];
+    let serial = b"     WD-WCC4E1234567";
+    for (word, &[first, second]) in serial.as_chunks::<2>().0.iter().enumerate() {
+        data[2 * (10 + word)] = second;
+        data[2 * (10 + word) + 1] = first;
+    }
+    assert_eq!(ata_string(&data, 10..20), "WD-WCC4E1234567");
+    // Past the end of a short page: no text, not a panic.
+    assert_eq!(ata_string(&data[..30], 10..20), "");
+    assert_eq!(ata_string(&data, 0..0), "");
+}
+
+#[test]
+fn only_identify_data_with_its_integrity_word_counts_as_signed() {
+    let mut data = [0u8; 512];
+    data[20] = b'W';
+    assert!(!ata_identify_signed(&data));
+    data[510] = 0xa5;
+    let sum = data.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    data[511] = 0u8.wrapping_sub(sum);
+    assert!(ata_identify_signed(&data));
+    // A wrong checksum, or a short page, is not.
+    data[511] ^= 1;
+    assert!(!ata_identify_signed(&data));
+    data[511] ^= 1;
+    assert!(!ata_identify_signed(&data[..511]));
+}
+
+#[test]
 fn only_a_write_zeroes_that_stores_zeros_counts_as_written() {
     let zeroes = |unmap| Command::WriteZeroes {
         lba: 0,

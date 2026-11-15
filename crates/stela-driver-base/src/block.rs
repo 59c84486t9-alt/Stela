@@ -1310,6 +1310,34 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
     }
 }
 
+/// The text of the ATA IDENTIFY words `words` in `data`, two characters
+/// per word with the first in the high byte, as [`ascii`] reads it; empty
+/// where `data` ends first. Stela's AHCI driver and the firmware's disk
+/// picker both read a disk's serial number with it: the picker records it,
+/// and the driver must find the disk by it, byte for byte.
+pub fn ata_string(data: &[u8], words: core::ops::Range<usize>) -> String {
+    let Some(field) = data.get(2 * words.start..2 * words.end) else {
+        return String::new();
+    };
+    let bytes: alloc::vec::Vec<u8> = field
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .flat_map(|&[first, second]| [second, first])
+        .collect();
+    ascii(&bytes)
+}
+
+/// Whether `data` begins with 512 bytes of IDENTIFY data that carry ATA's
+/// integrity word: word 255's low byte is the signature 0xa5 and its high
+/// byte a checksum that brings the sum of all 512 bytes to zero (ACS-3
+/// 7.12.7.97), which other identify data, such as SCSI's, does not.
+pub fn ata_identify_signed(data: &[u8]) -> bool {
+    data.get(..512).is_some_and(|page| {
+        page[510] == 0xa5 && page.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) == 0
+    })
+}
+
 /// ASCII from a fixed-width identify field, trimmed of padding.
 pub fn ascii(bytes: &[u8]) -> String {
     let text: String = bytes

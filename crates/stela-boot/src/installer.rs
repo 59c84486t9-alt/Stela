@@ -26,7 +26,7 @@ use crate::{
     choice::{self, Press, Wait},
     console::{Framebuffer, font},
     output,
-    payload::{Aligned, device_path, disk_model, disk_rotation, disk_serial},
+    payload::{Aligned, device_path, disk_model, disk_rotation, disk_serial, serial_sources},
     ui::{self, Canvas},
 };
 use alloc::string::ToString;
@@ -551,6 +551,14 @@ fn disks() -> Vec<Disk> {
             blocks: media.last_block() + 1,
         };
         let serial = disk_serial(handle, &path);
+        // What a disk without a serial number offers, which says why.
+        if serial.is_none() {
+            output::arguments(format_args!(
+                "INSTALLER disk {} without a serial number: {}\n",
+                bus(&path),
+                serial_sources(handle, &path)
+            ));
+        }
         let rotation = disk_rotation(handle);
         let mut disk = Disk {
             media: media.media_id(),
