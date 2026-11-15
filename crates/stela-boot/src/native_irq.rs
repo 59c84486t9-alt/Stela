@@ -216,6 +216,14 @@ pub(crate) fn interrupt_window() {
     }
 }
 
+/// Whether RFLAGS.IF is set on this processor.
+fn interrupts_enabled() -> bool {
+    let flags: u64;
+    // SAFETY: reads RFLAGS through the stack, which the push and pop balance.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+    flags & (1 << 9) != 0
+}
+
 pub fn dispatch(vector: u8) -> bool {
     // SAFETY: Existing CPU entry calls this with local IRQs off. It does not supply
     // an interrupted-SP witness, so no such frame proof may be claimed.
@@ -305,6 +313,14 @@ unsafe impl Platform for NativePlatform {
     }
     fn eoi(&self, vector: u8) -> Result<Trigger, IrqError> {
         self.check_cpu()?;
+        // The device's handlers ran with interrupts off up to here: the
+        // timer, above every device class, would else take this vector as
+        // one left in service and end it (`host::timer_interrupt`), and its
+        // entry would nest in this one's, which the entry stub refuses.
+        debug_assert!(
+            !interrupts_enabled(),
+            "a device dispatch enabled interrupts before its EOI"
+        );
         let apic = controller();
         // EOI removes the highest-priority ISR bit, not a caller-selected
         // vector. A process/debug dispatch or nested lower-vector call must

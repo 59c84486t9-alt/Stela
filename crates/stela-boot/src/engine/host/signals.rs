@@ -10,7 +10,16 @@ pub fn timer_interrupt() {
     apic.eoi();
     // No handler runs under this one (entries never nest), so a vector
     // still in service after the timer's own EOI has none: end it. One
-    // register read when there is none.
+    // register read when there is none. Entries never nest because every
+    // ordinary vector shares one entry slot, which the stub refuses to
+    // enter twice (`interrupts::ORDINARY_ENTRIES`), and because no device
+    // dispatch enables interrupts before its EOI (`native_irq`'s `eoi`):
+    // a timer that arrived inside one would halt at its entry, never end
+    // that device's vector here.
+    debug_assert!(
+        !matches!(crate::native_irq::current_context(), Ok(Some(_))),
+        "the timer ran inside a device dispatch"
+    );
     if apic::stale::holds_stale(apic.read(apic::stale::PPR), task_priority()) {
         end_stale_in_service(apic);
     }

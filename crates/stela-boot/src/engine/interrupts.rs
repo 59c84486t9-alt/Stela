@@ -464,6 +464,27 @@ const _: () = assert!(
         && TIMER_VECTOR < SPURIOUS_VECTOR
 );
 
+/// The timer and every device and completion vector are ordinary: they run
+/// on the ordinary interrupt stack and share its one entry slot, which the
+/// entry stub refuses to enter while it is in use. So no handler of theirs
+/// runs under another's, which the timer's ending of vectors left in
+/// service relies on (`host::timer_interrupt`).
+pub(crate) const ORDINARY_ENTRIES: () = {
+    let mut vector = 0x50;
+    while vector <= 0x5f {
+        assert!(interrupt_image::ist(vector) == interrupt_image::ORDINARY_IST);
+        vector += 1;
+    }
+    assert!(
+        interrupt_image::ist(TIMER_VECTOR) == interrupt_image::ORDINARY_IST
+            && interrupt_image::ist(SIGNAL_VECTOR) == interrupt_image::ORDINARY_IST
+            && interrupt_image::ist(NETWORK_VECTOR) == interrupt_image::ORDINARY_IST
+            && interrupt_image::ist(SHOOTDOWN_VECTOR) == interrupt_image::ORDINARY_IST
+            && interrupt_image::ist(NATIVE_WAKE_VECTOR) == interrupt_image::ORDINARY_IST
+    );
+};
+const _: () = ORDINARY_ENTRIES;
+
 unsafe extern "C" {
     static stela_vector_table: [usize; VECTOR_NUMBERS.len()];
     fn stela_nmi_gate();
