@@ -1158,6 +1158,50 @@ fn a_target_erased_by_0_4_1_is_taken_for_blank() {
 }
 
 #[test]
+fn a_target_with_its_first_mib_zero_and_a_format_past_it_needs_erase_target() {
+    // VMFS keeps its first MiB zero and its LVM header at 1 MiB; an NTFS
+    // volume whose first MiB was zeroed keeps its backup boot sector in the
+    // last sector. Named with --target alone, neither is erased.
+    for (offset, magic, name) in [
+        (1 << 20, &[0x0d, 0xd0, 0x01, 0xc0][..], "VMFS"),
+        (u64::MAX, b"NTFS    ", "NTFS"),
+    ] {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let bytes = f.host.partitions[REGION].0.bytes;
+        let path = f.host.partitions[REGION].1.clone();
+        sparse_image(&path, bytes);
+        let offset = offset.min(bytes - 512 + 3);
+        f.host.write(REGION, offset, magic).unwrap();
+        f.host.write(REGION, 3 << 20, &[0xa5; 4096]).unwrap();
+        let mut dry = installed_command(&f);
+        dry.dry_run = true;
+        let error = setup(&environment(&f.host), dry).unwrap_err().to_string();
+        assert!(error.contains(&format!("holds {name}")), "{error}");
+        assert!(error.contains("--erase-target"), "{error}");
+        // --erase-target clears it, and what it leaves is blank.
+        let mut erase = installed_command(&f);
+        erase.erase_target = true;
+        setup(&environment(&f.host), erase).unwrap();
+        assert!(
+            f.host
+                .read(REGION, offset, magic.len())
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+        assert!(!status.contains("erase-target"), "{status}");
+        // The same bytes once more are named again.
+        f.host.write(REGION, offset, magic).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status)
+            .unwrap_err()
+            .to_string();
+        assert!(status.contains("repair --erase-target"), "{status}");
+    }
+}
+
+#[test]
 fn setup_erases_usb_and_refuses_internal_disk() {
     let f = fixture(64 * GIB, true);
     let whole = |usb: &str| f.host.whole_disk(Path::new(usb)).unwrap();

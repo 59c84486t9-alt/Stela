@@ -1,26 +1,38 @@
 //! What a partition holds, read from the signatures that file systems,
 //! encryption, volume managers, RAID and partition tables write at their
-//! documented offsets, near the start of the partition or its end. A
-//! partition is blank only when no signature is found and its first
-//! [`HEAD_BYTES`], where every format probed starts, are zero. Bytes past
-//! them, and in its last [`TAIL_BYTES`], that no signature names are what an
-//! erase that cleared the start left: Stela 0.4.1's `--erase-target`
-//! cleared only the first MiB. A backup GPT whose primary table at the
-//! start is gone is the same. A signature that marks data on its own at
-//! the end, Linux RAID or ZFS's back labels, is never taken for blank. A
+//! documented offsets: near the start of the partition, at copies of their
+//! superblocks past it, and near its end.
+//!
+//! A partition is blank only when no signature is found and its first
+//! [`HEAD_BYTES`] are zero. That MiB is what Stela's own erases clear:
+//! 0.4.1's `--erase-target` zeroed it and nothing else, and Install macOS's
+//! disk step in `stela.efi` zeroes it and the machine state after the
+//! guest's bytes. Both leave the old data between, the guest's last bytes
+//! included, so bytes that no signature names are not data of their own: a
+//! backup GPT whose primary table at the start is gone is the same. A copy
+//! a format keeps past that MiB or at its end (VMFS's headers, NTFS's
+//! backup boot sector, ext's and btrfs's backup superblocks, LUKS2's second
+//! header, HFS+'s alternate header, Linux RAID and ZFS's back labels) is
+//! that format's data and never blank. Every byte probed is in [`probed`],
+//! which an erase zeroes, so a partition erased now is blank later. A
 //! partition that cannot be read is never blank; the caller refuses it.
 use anyhow::{Context, Result};
+use std::ops::Range;
 
-/// The bytes read from the start, which must be zero for blank: past
-/// btrfs's and ReiserFS's superblocks at 64 KiB, ZFS's two front labels
-/// (512 KiB) and a primary GPT's entries, the bytes an erase clears.
-pub(super) const HEAD_BYTES: u64 = 1 << 20;
+/// The bytes from the start that must be zero for blank: the MiB Stela's
+/// erases clear, past btrfs's and ReiserFS's superblocks at 64 KiB, ZFS's
+/// two front labels (512 KiB) and a primary GPT's entries.
+const HEAD_BYTES: u64 = 1 << 20;
 /// The bytes read from the end: ZFS's two back labels (512 KiB), MD RAID
-/// 0.90 and 1.0 superblocks (within 128 KiB) and the backup GPT header.
-pub(super) const TAIL_BYTES: u64 = 1 << 20;
+/// 0.90 and 1.0 superblocks (within 128 KiB), the backup GPT header, NTFS's
+/// backup boot sector and HFS+'s alternate volume header.
+const TAIL_BYTES: u64 = 1 << 20;
 /// A ZFS label's size: the labels sit at the device's size aligned down to
 /// it, two at the start and two at the end.
 const ZFS_LABEL: u64 = 256 << 10;
+/// The unit [`probed`] reads and an erase writes in: whole 4 KiB blocks,
+/// which every disk's block size divides.
+const BLOCK: u64 = 4096;
 
 /// Where a signature sits in a partition of a given size.
 #[derive(Clone, Copy, Debug)]
@@ -72,9 +84,24 @@ pub(super) struct Signature {
     pub(super) name: &'static str,
     at: At,
     magic: &'static [u8],
+    /// Bytes that must match as well, each at its distance past the
+    /// magic's offset.
+    also: &'static [(u64, &'static [u8])],
     /// Whether it marks data only beside the start it belongs to: a backup
     /// GPT whose primary table at the start is gone is what an erase left.
     with_start: bool,
+}
+
+impl Signature {
+    /// Every run of bytes it needs, with the magic at `offset`.
+    fn fields(&self, offset: u64) -> impl Iterator<Item = (u64, &'static [u8])> {
+        let magic = self.magic;
+        std::iter::once((offset, magic)).chain(
+            self.also
+                .iter()
+                .map(move |&(past, bytes)| (offset.saturating_add(past), bytes)),
+        )
+    }
 }
 
 const fn sig(name: &'static str, at: At, magic: &'static [u8]) -> Signature {
@@ -82,6 +109,7 @@ const fn sig(name: &'static str, at: At, magic: &'static [u8]) -> Signature {
         name,
         at,
         magic,
+        also: &[],
         with_start: false,
     }
 }
@@ -91,6 +119,20 @@ const fn backup_gpt(back: u64) -> Signature {
     Signature {
         with_start: true,
         ..sig("a backup GPT", At::End(back), GPT_HEADER)
+    }
+}
+
+/// The backup superblock of ext2, ext3 or ext4 at block group 1, which
+/// starts at byte `superblock`: its magic at 0x38, and the group's number
+/// (1) at 0x5a, which only a backup holds (e2fsprogs' `write_backup_super`).
+const fn ext_backup(superblock: u64) -> Signature {
+    Signature {
+        also: &[(0x5a - 0x38, &[1, 0])],
+        ..sig(
+            "ext2, ext3 or ext4",
+            At::Start(superblock + 0x38),
+            &[0x53, 0xef],
+        )
     }
 }
 
@@ -104,8 +146,14 @@ pub(super) const SIGNATURES: &[Signature] = &[
     sig("APFS", At::Start(32), b"NXSB"),
     sig("HFS+", At::Start(1024), b"H+\x00\x04"),
     sig("HFS+", At::Start(1024), b"HX\x00\x05"),
+    // The alternate volume header, 1 KiB before the end (TN1150).
+    sig("HFS+", At::End(1024), b"H+\x00\x04"),
+    sig("HFS+", At::End(1024), b"HX\x00\x05"),
     sig("XFS", At::Start(0), b"XFSB"),
     sig("btrfs", At::Start(0x1_0040), b"_BHRfS_M"),
+    // Its mirror superblocks at 64 MiB and 256 GiB.
+    sig("btrfs", At::Start((64 << 20) + 0x40), b"_BHRfS_M"),
+    sig("btrfs", At::Start((256 << 30) + 0x40), b"_BHRfS_M"),
     sig("F2FS", At::Start(1024), &[0x10, 0x20, 0xf5, 0xf2]),
     sig(
         "bcachefs",
@@ -119,10 +167,17 @@ pub(super) const SIGNATURES: &[Signature] = &[
     sig("ZFS", At::ZfsRing, &[0, 0, 0, 0, 0, 0xba, 0xb1, 0x0c]),
     sig("ZFS", At::ZfsBackRing, &[0x0c, 0xb1, 0xba, 0, 0, 0, 0, 0]),
     sig("ZFS", At::ZfsBackRing, &[0, 0, 0, 0, 0, 0xba, 0xb1, 0x0c]),
+    // VMFS keeps its first MiB zero: its LVM header (0xc001d00d) at 1 MiB,
+    // its file system's (0x2fabf15e) at 2 MiB.
+    sig("VMFS", At::Start(1 << 20), &[0x0d, 0xd0, 0x01, 0xc0]),
+    sig("VMFS", At::Start(2 << 20), &[0x5e, 0xf1, 0xab, 0x2f]),
     sig("ReiserFS", At::Start(0x1_0034), b"ReIsEr"),
     sig("ReiserFS", At::Start(0x2034), b"ReIsEr"),
     sig("JFS", At::Start(0x8000), b"JFS1"),
     sig("NTFS", At::Start(3), b"NTFS    "),
+    // Its backup boot sector, in the last sector of 512 or 4096 bytes.
+    sig("NTFS", At::End(512 - 3), b"NTFS    "),
+    sig("NTFS", At::End(4096 - 3), b"NTFS    "),
     sig("exFAT", At::Start(3), b"EXFAT   "),
     sig("BitLocker", At::Start(3), b"-FVE-FS-"),
     sig("ReFS", At::Start(3), b"ReFS\x00\x00\x00\x00"),
@@ -130,6 +185,10 @@ pub(super) const SIGNATURES: &[Signature] = &[
     sig("FAT", At::Start(82), b"FAT32   "),
     sig("LUKS encryption", At::Start(0), b"LUKS\xba\xbe"),
     sig("LUKS encryption", At::Start(16384), b"SKUL\xba\xbe"),
+    // LUKS2's second header after a larger first one, past the first MiB.
+    sig("LUKS encryption", At::Start(1 << 20), b"SKUL\xba\xbe"),
+    sig("LUKS encryption", At::Start(2 << 20), b"SKUL\xba\xbe"),
+    sig("LUKS encryption", At::Start(4 << 20), b"SKUL\xba\xbe"),
     sig("an LVM volume", At::Start(0), b"LABELONE"),
     sig("an LVM volume", At::Start(512), b"LABELONE"),
     sig("an LVM volume", At::Start(1024), b"LABELONE"),
@@ -143,6 +202,10 @@ pub(super) const SIGNATURES: &[Signature] = &[
     sig("ISO 9660", At::Start(32769), b"CD001"),
     sig("UDF", At::Start(32769), b"BEA01"),
     sig("ext2, ext3 or ext4", At::Start(1080), &[0x53, 0xef]),
+    // Group 1's backup superblock for 1, 2 and 4 KiB blocks.
+    ext_backup((8192 + 1) * 1024),
+    ext_backup(16384 * 2048),
+    ext_backup(32768 * 4096),
     backup_gpt(512),
     backup_gpt(4096),
     sig("a boot sector", At::Start(510), &[0x55, 0xaa]),
@@ -151,7 +214,7 @@ pub(super) const SIGNATURES: &[Signature] = &[
 /// What a partition holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Found {
-    /// No signature, and zeros where every format probed starts.
+    /// No signature, and zeros in its first [`HEAD_BYTES`].
     Blank,
     /// A GUID partition table at its start: a disk of its own.
     Gpt,
@@ -161,25 +224,60 @@ pub(super) enum Found {
     Unknown,
 }
 
+/// The bytes of a partition of `bytes` that [`probe`] reads, in whole
+/// [`BLOCK`]s, sorted and apart: its first [`HEAD_BYTES`], its last
+/// [`TAIL_BYTES`] and every signature's bytes between. Zeroing them all
+/// leaves it blank.
+pub(super) fn probed(bytes: u64) -> Vec<Range<u64>> {
+    let signatures = SIGNATURES.iter().flat_map(|signature| {
+        signature
+            .at
+            .offsets(bytes)
+            .into_iter()
+            .flat_map(|offset| signature.fields(offset))
+            .filter_map(|(offset, run)| Some(offset..offset.checked_add(run.len() as u64)?))
+    });
+    let mut ranges: Vec<Range<u64>> = [
+        0..bytes.min(HEAD_BYTES),
+        bytes.saturating_sub(TAIL_BYTES)..bytes,
+    ]
+    .into_iter()
+    .chain(signatures)
+    .filter(|range| range.end <= bytes)
+    .map(|range| {
+        range.start / BLOCK * BLOCK..range.end.div_ceil(BLOCK).saturating_mul(BLOCK).min(bytes)
+    })
+    .filter(|range| range.start < range.end)
+    .collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut apart: Vec<Range<u64>> = Vec::new();
+    for range in ranges {
+        match apart.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => apart.push(range),
+        }
+    }
+    apart
+}
+
 /// What the partition of `bytes` holds; `read(offset, length)` reads it.
 pub(super) fn probe(
     bytes: u64,
     read: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>>,
 ) -> Result<Found> {
-    let head_end = bytes.min(HEAD_BYTES);
-    let head = read(0, usize::try_from(head_end)?).context("reading its start")?;
-    let tail_start = bytes.saturating_sub(TAIL_BYTES).max(head_end);
-    let tail = read(tail_start, usize::try_from(bytes - tail_start)?).context("reading its end")?;
+    let mut held = Vec::new();
+    for range in probed(bytes) {
+        let data = read(range.start, usize::try_from(range.end - range.start)?)
+            .with_context(|| format!("reading its bytes from {:#x}", range.start))?;
+        held.push((range.start, data));
+    }
     // The bytes at `offset`, when read.
     let at = |offset: u64, length: usize| -> Option<&[u8]> {
         let end = offset.checked_add(length as u64)?;
-        if end <= head_end {
-            head.get(offset as usize..end as usize)
-        } else if offset >= tail_start && end <= bytes {
-            tail.get((offset - tail_start) as usize..(end - tail_start) as usize)
-        } else {
-            None
-        }
+        let (start, data) = held
+            .iter()
+            .find(|(start, data)| *start <= offset && end <= start + data.len() as u64)?;
+        data.get((offset - start) as usize..(end - start) as usize)
     };
     if GPT_HEADER_OFFSETS
         .iter()
@@ -187,18 +285,17 @@ pub(super) fn probe(
     {
         return Ok(Found::Gpt);
     }
-    let cleared = head.iter().all(|&byte| byte == 0);
+    let cleared = at(0, usize::try_from(bytes.min(HEAD_BYTES))?)
+        .is_some_and(|head| head.iter().all(|&byte| byte == 0));
     for signature in SIGNATURES {
         if signature.with_start && cleared {
             continue;
         }
-        let length = signature.magic.len();
-        if signature
-            .at
-            .offsets(bytes)
-            .into_iter()
-            .any(|offset| at(offset, length) == Some(signature.magic))
-        {
+        if signature.at.offsets(bytes).into_iter().any(|offset| {
+            signature
+                .fields(offset)
+                .all(|(offset, run)| at(offset, run.len()) == Some(run))
+        }) {
             return Ok(Found::Known(signature.name));
         }
     }
@@ -213,25 +310,73 @@ mod tests {
     use super::*;
 
     const BYTES: u64 = 16 << 20;
+    /// A partition past every offset a signature names from the start.
+    const LARGE: u64 = 300 << 30;
+    const NTFS_BOOT: &[u8] = b"NTFS    ";
+    const VMFS_LVM: &[u8] = &[0x0d, 0xd0, 0x01, 0xc0];
 
-    /// A partition of `bytes` that holds `writes`, read as a host reads
-    /// one, with every read recorded.
-    fn found(bytes: u64, writes: &[(u64, &[u8])]) -> Result<Found> {
-        let mut image = vec![0u8; bytes as usize];
-        for &(offset, data) in writes {
-            image[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+    /// A partition of `bytes`, zeros but for `writes` laid over them in
+    /// order, read as a host reads one.
+    struct Image {
+        bytes: u64,
+        writes: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl Image {
+        fn new(bytes: u64, writes: &[(u64, &[u8])]) -> Self {
+            let writes = writes.iter().map(|&(at, data)| (at, data.to_vec()));
+            Self {
+                bytes,
+                writes: writes.collect(),
+            }
         }
-        probe(bytes, &mut |offset, length| {
-            let end = offset as usize + length;
-            anyhow::ensure!(end <= image.len(), "read past the partition");
-            Ok(image[offset as usize..end].to_vec())
-        })
+
+        /// What the first `span` bytes hold, the bytes a guest disk spans.
+        fn probe(&self, span: u64) -> Result<Found> {
+            assert!(span <= self.bytes);
+            probe(span, &mut |offset, length| {
+                let end = offset + length as u64;
+                anyhow::ensure!(end <= span, "read past the partition");
+                let mut bytes = vec![0u8; length];
+                for (at, data) in &self.writes {
+                    let (from, to) = (offset.max(*at), end.min(at + data.len() as u64));
+                    if from < to {
+                        bytes[(from - offset) as usize..(to - offset) as usize]
+                            .copy_from_slice(&data[(from - at) as usize..(to - at) as usize]);
+                    }
+                }
+                Ok(bytes)
+            })
+        }
+
+        /// Zeros over `range`.
+        fn zero(&mut self, range: Range<u64>) {
+            self.writes
+                .push((range.start, vec![0; (range.end - range.start) as usize]));
+        }
+
+        /// Erased as `installed::erase_foreign` erases a guest disk's first
+        /// `span` bytes.
+        fn erase(&mut self, span: u64) {
+            for range in probed(span) {
+                self.zero(range);
+            }
+        }
+    }
+
+    fn found(bytes: u64, writes: &[(u64, &[u8])]) -> Result<Found> {
+        Image::new(bytes, writes).probe(bytes)
+    }
+
+    /// `signature`'s bytes with its magic at `offset`.
+    fn writes(signature: &Signature, offset: u64) -> Vec<(u64, &'static [u8])> {
+        signature.fields(offset).collect()
     }
 
     #[test]
     fn every_signature_is_found_at_its_offset_and_named() {
         for signature in SIGNATURES {
-            for offset in signature.at.offsets(BYTES) {
+            for offset in signature.at.offsets(LARGE) {
                 // One that marks data only beside its start is found with
                 // bytes there.
                 let start: &[(u64, &[u8])] = match signature.with_start {
@@ -239,11 +384,39 @@ mod tests {
                     false => &[],
                 };
                 assert_eq!(
-                    found(BYTES, &[start, &[(offset, signature.magic)]].concat()).unwrap(),
+                    found(LARGE, &[start, &writes(signature, offset)].concat()).unwrap(),
                     Found::Known(signature.name),
                     "{signature:?} at {offset:#x}"
                 );
             }
+        }
+    }
+
+    /// What `installed::erase_foreign` zeroes, every byte probed, leaves
+    /// blank, whatever signature was there: a partition erased now is
+    /// taken for blank later.
+    #[test]
+    fn an_erased_partition_is_blank() {
+        for signature in SIGNATURES {
+            for offset in signature.at.offsets(LARGE) {
+                let mut image = Image::new(LARGE, &writes(signature, offset));
+                image.writes.push((100, b"x".to_vec()));
+                image.writes.push((LARGE / 3, vec![0xa5; 4096]));
+                image.erase(LARGE);
+                assert_eq!(
+                    image.probe(LARGE).unwrap(),
+                    Found::Blank,
+                    "{signature:?} at {offset:#x}"
+                );
+            }
+        }
+        // The ranges are whole blocks, apart, within the partition.
+        for bytes in [BYTES, LARGE, (1 << 20) + 512, 3 * 512] {
+            let ranges = probed(bytes);
+            assert_eq!(ranges[0].start, 0);
+            assert!(ranges.windows(2).all(|pair| pair[0].end < pair[1].start));
+            assert!(ranges.iter().all(|range| range.start % BLOCK == 0));
+            assert_eq!(ranges.last().unwrap().end, bytes);
         }
     }
 
@@ -305,37 +478,40 @@ mod tests {
         );
     }
 
-    /// A partition that held NTFS, files past its first MiB and the backup
-    /// boot sector in its last sector, as Stela 0.4.1's `--erase-target`
-    /// left it, its first MiB zeroed: blank, as 0.4.1 took it.
+    /// A partition that held NTFS, as Stela 0.4.1's `--erase-target` left
+    /// it: its first MiB zeroed, files past it to the guest's last bytes,
+    /// and the backup boot sector in the partition's last sector.
     #[test]
     fn a_partition_erased_by_0_4_1_is_blank() {
         let mut boot = [0u8; 512];
-        boot[3..11].copy_from_slice(b"NTFS    ");
+        boot[3..11].copy_from_slice(NTFS_BOOT);
         boot[510..].copy_from_slice(&[0x55, 0xaa]);
         let files = [0xa5; 4096];
+        // The guest disk spans `BYTES`; the machine state follows, to the
+        // partition's end.
+        let partition = BYTES + (17 << 20);
         let writes: &[(u64, &[u8])] = &[
             (0, &boot),
             (HEAD_BYTES - 4096, &files),
             (HEAD_BYTES, &files),
             (BYTES / 2, &files),
             (BYTES - (64 << 10), &files),
-            (BYTES - 512, &boot),
+            (BYTES - 512, &files),
+            (partition - 512, &boot),
         ];
-        assert_eq!(found(BYTES, writes).unwrap(), Found::Known("NTFS"));
-        let erased = |writes: &[(u64, &[u8])]| {
-            let mut image = vec![0u8; BYTES as usize];
-            for &(offset, data) in writes {
-                image[offset as usize..offset as usize + data.len()].copy_from_slice(data);
-            }
-            // 0.4.1's FOREIGN_HEAD_BYTES.
-            image[..1 << 20].fill(0);
-            probe(BYTES, &mut |offset, length| {
-                Ok(image[offset as usize..offset as usize + length].to_vec())
-            })
-            .unwrap()
-        };
-        assert_eq!(erased(writes), Found::Blank);
+        let mut image = Image::new(partition, writes);
+        assert_eq!(image.probe(partition).unwrap(), Found::Known("NTFS"));
+        // 0.4.1's FOREIGN_HEAD_BYTES.
+        image.zero(0..1 << 20);
+        // The machine state in the partition's tail: the guest's bytes hold
+        // no signature of their own.
+        assert_eq!(image.probe(BYTES).unwrap(), Found::Blank);
+        // The machine state on a partition of its own: the guest spans the
+        // whole partition and the backup boot sector is NTFS's, until
+        // --erase-target erases it.
+        assert_eq!(image.probe(partition).unwrap(), Found::Known("NTFS"));
+        image.erase(partition);
+        assert_eq!(image.probe(partition).unwrap(), Found::Blank);
         // A guest disk an install wrote, so erased: the backup GPT at its
         // end is left, its primary table gone.
         let mut primary = [0u8; 92];
@@ -347,15 +523,33 @@ mod tests {
             (BYTES - 33 * 512, &files),
             (BYTES - 512, &primary),
         ];
-        assert_eq!(found(BYTES, guest).unwrap(), Found::Gpt);
-        assert_eq!(erased(guest), Found::Blank);
+        let mut image = Image::new(BYTES, guest);
+        assert_eq!(image.probe(BYTES).unwrap(), Found::Gpt);
+        image.zero(0..1 << 20);
+        assert_eq!(image.probe(BYTES).unwrap(), Found::Blank);
     }
 
-    /// Zeros at the start alone do not make a partition blank where a
-    /// signature at its end marks data of its own: a Linux RAID member's
-    /// superblock, or ZFS's back labels.
+    /// Zeros at the start do not make a partition blank where its end holds
+    /// a format's own data: NTFS's backup boot sector, HFS+'s alternate
+    /// header, a Linux RAID member's superblock or ZFS's back labels. Bytes
+    /// there that no signature names are what Stela's erases leave.
     #[test]
-    fn a_foreign_end_behind_a_zeroed_start_is_not_blank() {
+    fn a_format_at_the_end_behind_a_zeroed_start_is_not_blank() {
+        let mut boot = [0u8; 512];
+        boot[3..11].copy_from_slice(NTFS_BOOT);
+        boot[510..].copy_from_slice(&[0x55, 0xaa]);
+        assert_eq!(
+            found(BYTES, &[(BYTES - 512, &boot)]).unwrap(),
+            Found::Known("NTFS")
+        );
+        assert_eq!(
+            found(BYTES, &[(BYTES - 4096, &boot)]).unwrap(),
+            Found::Known("NTFS")
+        );
+        assert_eq!(
+            found(BYTES, &[(BYTES - 1024, b"H+\x00\x04")]).unwrap(),
+            Found::Known("HFS+")
+        );
         let md10 = (((BYTES >> 9) - 16) & !7) << 9;
         assert_eq!(
             found(BYTES, &[(md10, &[0xfc, 0x4e, 0x2b, 0xa9])]).unwrap(),
@@ -374,6 +568,62 @@ mod tests {
             )
             .unwrap(),
             Found::Known("Linux RAID")
+        );
+        assert_eq!(found(BYTES, &[(BYTES - 100, b"x")]).unwrap(), Found::Blank);
+    }
+
+    /// VMFS keeps its first MiB zero and its LVM header at 1 MiB.
+    #[test]
+    fn vmfs_is_not_blank() {
+        assert_eq!(
+            found(BYTES, &[(1 << 20, VMFS_LVM)]).unwrap(),
+            Found::Known("VMFS")
+        );
+        assert_eq!(
+            found(BYTES, &[(2 << 20, &[0x5e, 0xf1, 0xab, 0x2f])]).unwrap(),
+            Found::Known("VMFS")
+        );
+        // Bytes just past the first MiB that no format names are not.
+        assert_eq!(
+            found(BYTES, &[((1 << 20) + 8, VMFS_LVM)]).unwrap(),
+            Found::Blank
+        );
+    }
+
+    /// ext4 with its first MiB zeroed keeps group 1's backup superblock,
+    /// at 128 MiB for 4 KiB blocks; the magic alone, without the group's
+    /// number a backup holds, is not one.
+    #[test]
+    fn ext4_behind_a_zeroed_start_is_not_blank() {
+        let superblock = 128 << 20;
+        let bytes = 1 << 30;
+        assert_eq!(
+            found(
+                bytes,
+                &[
+                    (superblock + 0x38, &[0x53, 0xef]),
+                    (superblock + 0x5a, &[1, 0])
+                ]
+            )
+            .unwrap(),
+            Found::Known("ext2, ext3 or ext4")
+        );
+        assert_eq!(
+            found(bytes, &[(superblock + 0x38, &[0x53, 0xef])]).unwrap(),
+            Found::Blank
+        );
+        // A 1 KiB-block ext2 keeps it at block 8193.
+        let superblock = 8193 * 1024;
+        assert_eq!(
+            found(
+                bytes,
+                &[
+                    (superblock + 0x38, &[0x53, 0xef]),
+                    (superblock + 0x5a, &[1, 0])
+                ]
+            )
+            .unwrap(),
+            Found::Known("ext2, ext3 or ext4")
         );
     }
 

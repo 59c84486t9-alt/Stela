@@ -392,9 +392,9 @@ pub(super) struct Checked {
 
 /// What the first `bytes` of `partition` hold, the bytes a guest disk may
 /// span: a known signature at its documented offset, near the start or
-/// the end, is that kind of data (`signatures::probe`); zeros where every
-/// format starts, with no signature of its own at the end, are blank, as
-/// an earlier erase of the start left them. A partition that cannot be
+/// the end, or at a copy past the start, is that kind of data
+/// (`signatures::probe`); a zeroed first MiB with no signature anywhere
+/// probed is blank, as Stela's erases leave it. A partition that cannot be
 /// read is refused, never taken for blank.
 fn contents(host: &dyn Host, partition: &str, bytes: u64) -> Result<Contents> {
     let found = signatures::probe(bytes, &mut |offset, length| {
@@ -737,10 +737,10 @@ pub(super) fn foreign(host: &dyn Host, disk: &InstalledDisk) -> Result<Option<Pa
 }
 
 /// Clear the other file system of `region`, unmounting it first, which
-/// `--erase-target` gave up: zeros over every byte a signature can sit in
-/// (`signatures::HEAD_BYTES` and `signatures::TAIL_BYTES`) of the bytes the
-/// guest disk spans, up to the machine state at `state_offset` when it
-/// lives in the region's tail.
+/// `--erase-target` gave up: zeros over every byte `signatures::probe`
+/// reads (`signatures::probed`) of the bytes the guest disk spans, up to
+/// the machine state at `state_offset` when it lives in the region's tail,
+/// so the region is blank to the next check.
 pub(super) fn erase_foreign(
     host: &dyn Host,
     region: &PartitionInfo,
@@ -750,13 +750,11 @@ pub(super) fn erase_foreign(
         host.unmount(region)?;
     }
     let guest = state_offset.unwrap_or(region.bytes);
-    let head = guest.min(signatures::HEAD_BYTES);
-    let tail = guest.saturating_sub(signatures::TAIL_BYTES).max(head);
-    for (offset, end) in [(0, head), (tail, guest)] {
+    for range in signatures::probed(guest) {
         host.write(
             &region.identifier,
-            offset,
-            &vec![0; usize::try_from(end - offset)?],
+            range.start,
+            &vec![0; usize::try_from(range.end - range.start)?],
         )
         .with_context(|| format!("erasing the file system on {}", region.identifier))?;
     }
