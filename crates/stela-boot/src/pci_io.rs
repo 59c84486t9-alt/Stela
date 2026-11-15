@@ -224,7 +224,7 @@ fn observe_display(
             Err(error) => return Err(error),
         }
     }
-    Ok(FramebufferBar::observe(
+    let bar = FramebufferBar::observe(
         &header,
         bars.iter().filter_map(|(index, regions)| {
             let [region] = regions.as_slice() else {
@@ -233,8 +233,50 @@ fn observe_display(
             Some((*index, region))
         }),
         screen.clone(),
-    )
-    .map(|bar| FramebufferSource { address, bar }))
+    );
+    if bar.is_none() {
+        report_unmatched(address, &header, &bars, screen);
+    }
+    Ok(bar.map(|bar| FramebufferSource { address, bar }))
+}
+
+/// One line naming what the firmware said of each BAR of the display
+/// function at `address` that none was matched to the screen: when no
+/// function is, the screen's owner stays unknown, and these words tell why.
+fn report_unmatched(
+    address: Address,
+    header: &[u8; 64],
+    bars: &[(u8, Vec<BarRegion>)],
+    screen: &Range<u64>,
+) {
+    use alloc::string::String;
+    use core::fmt::Write;
+    let mut line = String::new();
+    for (index, regions) in bars {
+        let word = 0x10 + usize::from(*index) * 4;
+        let low = u32::from_le_bytes([
+            header[word],
+            header[word + 1],
+            header[word + 2],
+            header[word + 3],
+        ]);
+        let _ = write!(line, " BAR{index} word={low:#x}");
+        for region in regions {
+            let _ = write!(
+                line,
+                " [type={} granularity={} host={:#x}..{:#x} translation={:#x}]",
+                region.resource_type,
+                region.granularity,
+                region.host.start,
+                region.host.end,
+                region.translation
+            );
+        }
+    }
+    crate::output::arguments(format_args!(
+        "GOP PCI source {address}: no BAR holds the screen at {:#x}..{:#x};{line}\n",
+        screen.start, screen.end
+    ));
 }
 /// The Bochs-compatible virtual display device (PCI 1234:1111, QEMU's
 /// standard VGA, `hw/display/vga-pci.c`), vendor and device. No PC graphics
