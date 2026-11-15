@@ -203,7 +203,7 @@ impl Image {
             (InstallImage::Full, Some(bytes), _) | (InstallImage::Network, _, Some(bytes)) => {
                 (bytes, host::size_text(bytes))
             }
-            _ => (0, "the size is unknown until Apple's server answers".into()),
+            _ => (0, "size not known yet".into()),
         }
     }
 }
@@ -311,10 +311,7 @@ fn ask(environment: &Environment<'_>, command: &mut Request, stick: &Stick) -> R
             &format!(
                 "Stick      {}\nInstaller  {}\nmacOS      {} ({})\nMac        {model_name}\n\
                  {network}Download   {download_text}\n{}",
-                usb.serial.as_ref().map_or_else(
-                    || usb.description(),
-                    |serial| format!("{} · serial {serial}", usb.description())
-                ),
+                usb.description(),
                 match online {
                     false => InstallImage::Full.name(),
                     true => InstallImage::Network.name(),
@@ -332,7 +329,6 @@ fn ask(environment: &Environment<'_>, command: &mut Request, stick: &Stick) -> R
         for note in firmware::host_notes(host)? {
             ui.info(&note)?;
         }
-        ui.info(super::create::SIGNING_SUMMARY)?;
         if let Some(record) = &stick.record {
             // The command its state calls for, if any: a stick that needs
             // nothing is kept by not erasing it.

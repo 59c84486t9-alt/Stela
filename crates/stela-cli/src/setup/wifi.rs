@@ -149,17 +149,12 @@ pub(super) fn write_key(esp: &Path, passphrase: &str) -> Result<()> {
 }
 
 /// The plan's line for the network, after its two spaces.
-pub(super) fn describe(network: &Network, esp: &Path) -> String {
+pub(super) fn describe(network: &Network) -> String {
     format!(
-        "{:<14} joins \"{}\"{}; its passphrase is in {} in plaintext",
+        "{:<14} \"{}\"{}; the passphrase is stored on the stick in plaintext",
         "Wi-Fi",
         network.ssid,
-        network
-            .country
-            .as_ref()
-            .map(|country| format!(" under {country}'s rules"))
-            .unwrap_or_default(),
-        esp.join(KEY_PATH).display()
+        rules(network.country.as_deref()),
     )
 }
 

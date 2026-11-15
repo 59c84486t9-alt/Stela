@@ -597,7 +597,7 @@ fn row(choice: Choice, stick: &Stick, offers: &Offers, first: bool) -> super::wi
         ),
         Choice::Check => (
             "Check every file".into(),
-            "Reads every macOS piece and changes nothing; takes a few minutes",
+            "Reads all of macOS on the stick and changes nothing; takes a few minutes",
         ),
         Choice::Status => ("Show status".into(), "Changes nothing"),
         Choice::Logs => ("Save the boot logs for a bug report".into(), ""),
@@ -802,11 +802,11 @@ fn update_text(environment: &Environment<'_>, record: Option<&Record>) -> String
             sources::locate(environment, &lookup).ok()
         });
     match download {
-        None => "Replaces stela.efi; its boot files stay.".into(),
+        None => "Updates Stela on the stick; its boot files stay.".into(),
         Some(source) => match sources::download_bytes(&source) {
-            0 => "Replaces stela.efi and prepares the boot files again.".into(),
+            0 => "Updates Stela on the stick and prepares the boot files again.".into(),
             bytes => format!(
-                "Replaces stela.efi and prepares the boot files again (downloads {}).",
+                "Updates Stela on the stick and prepares the boot files again (downloads {}).",
                 host::size_text(bytes)
             ),
         },

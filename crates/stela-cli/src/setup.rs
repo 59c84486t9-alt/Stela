@@ -251,11 +251,10 @@ fn quoted(word: &str) -> String {
 }
 
 /// What to do about an interrupted first setup on `usb`.
-fn interrupted_text(record: &Record, usb: &Path) -> String {
+fn interrupted_text(usb: &Path) -> String {
     format!(
-        "the first setup on {} was interrupted: {} finishes it (add --ipsw FILE to use a local \
-         image). To start over, make a new installer on the stick with `stela create`",
-        record.esp.display(),
+        "the create on this stick stopped part way: {} finishes it. To start over, make a new \
+         installer on the stick with `stela create`",
         fix(usb, "repair")
     )
 }
@@ -468,8 +467,8 @@ fn image_is_remote(ipsw: &Path, choice: InstallImage) -> Result<bool> {
         InstallImage::Full => {
             ensure!(
                 restore::payload::holds_system_image(ipsw)?,
-                "{} holds only boot files, without the macOS system image this stick's \
-                 install reads from it; pass the whole IPSW with --ipsw",
+                "{} holds only part of macOS; an Offline installer needs the whole IPSW file \
+                 (--ipsw)",
                 ipsw.display()
             );
             Ok(false)
@@ -757,13 +756,10 @@ fn needs_update(environment: &Environment<'_>, record: &Record) -> bool {
 fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result<()> {
     let tool = record.esp.join(LOADER_PATH);
     let image = fs::read(&tool).with_context(|| format!("cannot read {}", tool.display()))?;
-    if let Some(reason) =
-        mount_interface::mismatch(environment.interface, mount_interface::find(&image))
-    {
+    if mount_interface::mismatch(environment.interface, mount_interface::find(&image)).is_some() {
         bail!(
-            "the stela.efi on {} does not read what this stela writes ({reason}); install this \
-             stela's stela.efi first with {}, or use the stela that installed it",
-            record.esp.display(),
+            "Stela on this stick does not match this stela: update it first with {}, or use the \
+             stela that made it",
             fix(&record.esp, "update")
         );
     }
@@ -789,15 +785,11 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
     }
     Some(if theirs < ours {
         format!(
-            "this setup's boot bundles are revision {theirs}, and this stela prepares revision \
-             {ours}: prepare them again with {}",
+            "this stick's boot files were prepared by an older stela: prepare them again with {}",
             fix(&record.esp, "update")
         )
     } else {
-        format!(
-            "this setup's boot bundles are revision {theirs}, newer than the revision {ours} \
-             this stela prepares: use the stela that prepared them"
-        )
+        "this stick's boot files were prepared by a newer stela: use that stela".into()
     })
 }
 
@@ -1296,8 +1288,9 @@ impl Request {
                         text = self.update_stela(environment, record, (true, false))?;
                         if self.dry_run {
                             text.push_str(&format!(
-                                "  then          the switch to macOS {build} goes on once this \
-                                 stela.efi is in place\n"
+                                "  then          the switch to macOS {} goes on once Stela is \
+                                 updated\n",
+                                home::macos_name(&build)
                             ));
                             return Ok(text);
                         }
@@ -1316,7 +1309,7 @@ impl Request {
                 let mut text = self.update_stela(environment, record, (false, self.dry_run))?;
                 match self.dry_run {
                     true => text.push_str(
-                        "  then          the repair checks the rest once this stela.efi is in place\n",
+                        "  then          the repair checks the rest once Stela is updated\n",
                     ),
                     false => text.push_str(&doctor::repair(environment, &self)?),
                 }
@@ -1397,7 +1390,7 @@ impl Request {
             self.wifi_passphrase = Some(wifi::read_passphrase(&key)?);
         }
         if !self.dry_run {
-            let what = format!("the rest of macOS {}", record.build);
+            let what = format!("the rest of macOS {}", home::macos_name(&record.build));
             match resume_bytes(
                 environment,
                 record,

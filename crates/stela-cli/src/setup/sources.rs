@@ -173,13 +173,6 @@ impl Lookup<'_> {
             .or_else(|| environment.image_caches.first().cloned())
             .unwrap_or_else(super::download_dir)
     }
-
-    fn what(&self) -> &'static str {
-        match self.need {
-            Need::BootFiles => "its boot files",
-            Need::WholeImage | Need::Pieces => "the whole image",
-        }
-    }
 }
 
 /// Decide where `lookup`'s image comes from, downloading nothing but the
@@ -210,15 +203,10 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
     {
         return Ok(Source::Medium(medium.clone()));
     }
-    let searched = directories
-        .iter()
-        .map(|d| d.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
     let medium = match lookup.medium {
-        Some(m) if m.remote => "this stick streams it from Apple's servers",
-        Some(_) => "this stick's copy of it is damaged",
-        None => "this stick holds no copy of it",
+        Some(m) if m.remote => "the stick downloads it during the install",
+        Some(_) => "the stick's copy of it is damaged",
+        None => "the stick has no copy of it",
     };
     match (environment.image_size)(lookup.build, lookup.model) {
         Ok((boot, whole)) => Ok(Source::Remote {
@@ -243,47 +231,30 @@ pub(super) fn locate(environment: &Environment<'_>, lookup: &Lookup<'_>) -> Resu
             whole,
         }),
         Err(error) => anyhow::bail!(
-            "the macOS {build} restore image is not on this computer (looked in {searched}) and \
-             {medium}, and Apple's servers could not be asked for {what} ({error:#}). Pass the \
-             image with --ipsw FILE, or connect to the network and run this again{only}",
-            build = lookup.build,
-            what = lookup.what(),
-            only = match lookup.need {
-                Need::BootFiles => ", which downloads only its boot files, not the whole image",
-                Need::WholeImage | Need::Pieces => "",
-            },
+            "macOS {} is not on this computer, {medium}, and it could not be downloaded \
+             ({error:#}). Connect to the internet and run this again, or pass the image with \
+             --ipsw FILE",
+            super::home::macos_name(lookup.build),
         ),
     }
 }
 
 /// The plan line that names `source`.
 pub(super) fn describe(source: &Source, lookup: &Lookup<'_>) -> String {
-    let build = lookup.build;
+    let macos = super::home::macos_name(lookup.build);
     match source {
         Source::Given(path) => format!("from {}", path.display()),
         Source::Cached(path) => format!("from {}, downloaded earlier", path.display()),
-        Source::Kept(path) => format!(
-            "from the boot files kept on this stick in {}; nothing is downloaded",
-            path.display()
-        ),
-        Source::Medium(medium) => format!(
-            "from this stick's copy of macOS {build} in {}; nothing is downloaded",
-            medium.directory().display()
-        ),
-        Source::Remote { .. } => format!(
-            "download {}: no copy of it is on this {}computer (pass --ipsw FILE to use one you \
-             have)",
-            remote_text(source, build),
-            match lookup.need {
-                Need::BootFiles => "stick or this ",
-                Need::WholeImage | Need::Pieces => "",
-            }
-        ),
+        Source::Kept(_) => "from the boot files kept on this stick; nothing is downloaded".into(),
+        Source::Medium(_) => {
+            format!("from this stick's copy of macOS {macos}; nothing is downloaded")
+        }
+        Source::Remote { .. } => format!("download {}", remote_text(source, &macos)),
     }
 }
 
-/// What a [`Source::Remote`] downloads of `build`'s image, with the sizes.
-fn remote_text(source: &Source, build: &str) -> String {
+/// What a [`Source::Remote`] downloads of macOS `macos`, with its size.
+fn remote_text(source: &Source, macos: &str) -> String {
     let Source::Remote {
         boot,
         pieces,
@@ -294,29 +265,9 @@ fn remote_text(source: &Source, build: &str) -> String {
     };
     let total = bytes_text(boot + pieces);
     match (boot, pieces) {
-        // No boot bundle is prepared: the image's pieces alone.
-        (0, _) if pieces == whole => {
-            format!("{total} from Apple: the whole macOS {build} image straight onto the stick")
-        }
-        (0, _) => format!(
-            "{total} from Apple: the pieces of the macOS {build} image this stick's copy lacks, \
-             straight onto the stick; the pieces it holds are checked and kept"
-        ),
-        (_, 0) => format!(
-            "{total} of the macOS {build} image's {} from Apple: its boot files, read by range",
-            bytes_text(whole)
-        ),
-        _ if pieces == whole => format!(
-            "{total} from Apple: the macOS {build} image's boot files, read by range, then the \
-             whole image, {}, straight onto the stick",
-            bytes_text(whole)
-        ),
-        _ => format!(
-            "{total} from Apple: the macOS {build} image's boot files, read by range, then the \
-             {} of it this stick's copy lacks, straight onto the stick; the pieces it holds are \
-             checked and kept",
-            bytes_text(pieces)
-        ),
+        (_, 0) => format!("the boot files of macOS {macos} ({total})"),
+        _ if pieces == whole => format!("macOS {macos} ({total}) onto the stick"),
+        _ => format!("the rest of macOS {macos} ({total}) onto the stick"),
     }
 }
 
@@ -363,7 +314,7 @@ pub(super) fn obtain(
             let path = temporary.path().join("boot.ipsw");
             eprintln!(
                 "Reading the boot files of macOS {} from this stick",
-                lookup.build
+                super::home::macos_name(lookup.build)
             );
             // The members a download reads, and no more.
             (|| -> Result<u64> {
@@ -388,9 +339,8 @@ pub(super) fn obtain(
         }
         Source::Remote { .. } => {
             eprintln!(
-                "Downloading {}. No copy of it is on this computer; pass --ipsw FILE to use one \
-                 you have",
-                remote_text(source, lookup.build)
+                "Downloading {}",
+                remote_text(source, &super::home::macos_name(lookup.build))
             );
             let directory = lookup.download_dir(environment);
             let (directory, temporary) = match lookup.need {

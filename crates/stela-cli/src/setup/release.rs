@@ -84,11 +84,11 @@ fn capitalized(text: &str) -> String {
 pub(super) fn describe(record: &Record) -> String {
     match &record.release {
         Some(version) => match compare(version, CURRENT) {
-            Ordering::Equal => format!("Stela {version}"),
-            Ordering::Less => format!("Stela {version}; this stela is {CURRENT}"),
-            Ordering::Greater => format!("Stela {version}, newer than this stela ({CURRENT})"),
+            Ordering::Equal => version.clone(),
+            Ordering::Less => format!("{version}; this stela is {CURRENT}"),
+            Ordering::Greater => format!("{version}, newer than this stela ({CURRENT})"),
         },
-        None => format!("Stela 0.3 or older; this stela is {CURRENT}"),
+        None => format!("0.3 or older; this stela is {CURRENT}"),
     }
 }
 

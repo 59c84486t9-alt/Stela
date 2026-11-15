@@ -349,9 +349,6 @@ pub(super) fn backup(
         install.name,
         path.display()
     );
-    if let Some(ecid) = install.ecid {
-        writeln!(text, "  ECID           {ecid}")?;
-    }
     writeln!(
         text,
         "  holds          the NOR image (NVRAM) and the SEP's area, with the machine's keys: \

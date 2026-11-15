@@ -196,8 +196,7 @@ impl Medium {
             return Ok(Vec::new());
         };
         let total = pieces.iter().map(|piece| piece.bytes).sum();
-        let progress =
-            crate::progress::Phase::bytes("Checking every piece of the install medium", total);
+        let progress = crate::progress::Phase::bytes("Checking macOS on the stick", total);
         let mut damaged = Vec::new();
         for (index, piece) in pieces.iter().enumerate() {
             let path = directory.join(piece_name(index));
@@ -283,10 +282,10 @@ pub(super) fn locate(
         );
     }
     bail!(
-        "The boot bundles and the install medium go on a FAT32 data partition of the stick beside \
-         its EFI partition, and {usb} has none stela can use:\n{reasons}Setup does not repartition \
-         the stick: add a FAT32 partition of at least 30 GB with a disk utility, mount it, and run \
-         setup again."
+        "macOS and its boot files go on a FAT32 partition of the stick, and {usb} has none \
+         stela can use:\n{reasons}stela does not repartition the stick: add a FAT32 partition of \
+         at least 30 GB with a disk utility, mount it, and run stela again. Or erase the stick \
+         with `stela create` on its whole disk."
     )
 }
 
@@ -297,13 +296,14 @@ pub(super) fn reach(host: &dyn Host, esp: &Path) -> Result<PathBuf> {
     match search(host, esp, None)? {
         Search::Found(volume, _) => Ok(volume),
         Search::Missing { usb, reasons } if reasons.is_empty() => bail!(
-            "the stick's FAT32 data partition, which holds its boot bundles and install medium, \
-             is missing: {usb} has no partition beside its EFI partition"
+            "the stick's {} volume, which holds macOS and its boot files, is missing from {usb}",
+            super::create::USB_VOLUME
         ),
         Search::Missing { reasons, .. } => bail!(
-            "the stick's FAT32 data partition, which holds its boot bundles and install medium, \
-             is not mounted, and stela could not mount it:\n{reasons}Mount it, or plug the stick \
-             in again, and run stela again"
+            "the stick's {} volume, which holds macOS and its boot files, is not mounted, and \
+             stela could not mount it:\n{reasons}Mount it, or plug the stick in again, and run \
+             stela again",
+            super::create::USB_VOLUME
         ),
     }
 }
@@ -460,11 +460,12 @@ pub(super) fn check_space(host: &dyn Host, options: SpaceOptions<'_>) -> Result<
     let free = host.volume(volume)?.free_bytes;
     ensure!(
         free >= need,
-        "{} has {:.1} GB free; the install medium needs {:.1} GB more (the macOS {build} IPSW is \
-         {:.1} GB). Free space on it, or use a larger stick.",
+        "{} has {:.1} GB free; macOS needs {:.1} GB more (macOS {} is {:.1} GB). Free space on \
+         it, or use a larger stick.",
         volume.display(),
         free as f64 / 1e9,
         need as f64 / 1e9,
+        super::home::macos_name(build),
         ipsw_bytes as f64 / 1e9
     );
     Ok(need)
@@ -646,8 +647,7 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
     let mut piece_blocks = Vec::new();
     let mut written = Written::default();
     let mut offset = 0;
-    let progress =
-        crate::progress::Phase::bytes("Writing and verifying the stick image", total * 2);
+    let progress = crate::progress::Phase::bytes("Copying macOS to the stick", total * 2);
     for (index, &size) in sizes.iter().enumerate() {
         let name = piece_name(index);
         let path = directory.join(&name);

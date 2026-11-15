@@ -503,25 +503,19 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
     ensure!(
         path.is_file(),
         "{} holds no Stela setup: make an installer on the stick with `stela create`",
-        esp.display()
+        usb.display()
     );
     let header: serde_json::Value = stela_engine::read_json(&path)
         .with_context(|| format!("cannot read setup record {}", path.display()))?;
     let schema = header["schema_version"].as_u64().unwrap_or(0);
     ensure!(
         header["kind"] == RECORD_KIND && schema <= u64::from(RECORD_SCHEMA),
-        "{} is not a setup record this version understands; it may come from a newer stela",
-        path.display()
+        "this stick's setup cannot be read by this stela; a newer stela may have made it"
     );
     ensure!(
         schema == u64::from(RECORD_SCHEMA),
-        "{} is a schema {schema} setup, which this stela no longer reads: {}. Start over with \
-         `stela create` on the stick's whole disk, which erases it",
-        path.display(),
-        match schema {
-            8 => "it keeps its files under EFI/ on the data partition",
-            _ => "it booted a recoveryOS bundle from the stick",
-        }
+        "this stick was made by a stela too old for this one to read. Start over with \
+         `stela create` on the stick's whole disk, which erases it"
     );
     let mut value = header;
     // A data partition out of reach is reported as that: the record's old
@@ -530,10 +524,7 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
     let volume = match reached_volume(environment.host, &esp, usb) {
         Ok(volume) => volume,
         Err(error) if volume_gone(&value) => {
-            return Err(error.context(format!(
-                "the Stela setup on {} cannot be read whole",
-                esp.display()
-            )));
+            return Err(error.context("the Stela setup on this stick cannot be read whole"));
         }
         Err(_) => esp.clone(),
     };
@@ -542,9 +533,8 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         .with_context(|| format!("cannot read setup record {}", path.display()))?;
     ensure!(
         !record.installs.is_empty(),
-        "{} names no install. Start over with `stela create` on the stick's whole disk, which \
-         erases it",
-        path.display()
+        "this stick's setup names no install. Start over with `stela create` on the stick's \
+         whole disk, which erases it"
     );
     Ok(record)
 }

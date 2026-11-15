@@ -31,10 +31,10 @@
 //! becomes a request again (`installed::bundle_repair_again`), so it runs
 //! at the install's next start.
 use super::{
-    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Reported, Request, apply_install,
-    bundle, check_bundle_revision, describe_install, ecid::Ecid, fix, host::Host, host::bytes_text,
-    installed, interrupted_text, machines, plan_install, publish, read_record, revision_mismatch,
-    sources, state, update, write_record,
+    CHOICES_PATH, Environment, LOADER_PATH, Record, Reported, Request, apply_install, bundle,
+    check_bundle_revision, describe_install, ecid::Ecid, fix, host::Host, installed,
+    interrupted_text, machines, plan_install, publish, read_record, revision_mismatch, sources,
+    state, update, write_record,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -156,32 +156,23 @@ impl Report {
     }
 }
 
-/// The translation store's packs, and what `repair` would fix.
+/// What `repair` would fix of the translation cache: one problem, without
+/// its files. The first boot of each new `stela.efi` takes the spare for its
+/// pack by design, which is no problem.
 fn translations_status(record: &Record, report: &mut Report) {
     let Some(store) = &record.translations else {
-        report.line("translations", "none");
         return;
     };
-    report.line("translations", store.describe());
-    for pack in store.packs() {
-        report.line(
-            "  pack",
-            format!("{} ({})", pack.path.display(), bytes_text(pack.bytes)),
-        );
-    }
-    // The first boot renames the spare into its pack by design: a note, with
-    // the repair that prepares the next one.
     let taken = store.spare_taken().then(|| store.spare_repair());
-    for repair in store.repairs() {
+    if store
+        .repairs()
+        .iter()
+        .any(|repair| taken.as_ref() != Some(repair))
+    {
         let fix = report.fix("repair");
-        let text = format!("translation store: {repair}: {fix}");
-        match taken.as_ref() == Some(&repair) {
-            true => report.line(
-                "note",
-                format!("{text} (the first boot took the spare for its pack, as it should)"),
-            ),
-            false => report.problem(text),
-        }
+        report.problem(format!(
+            "the translation cache on the stick needs repair: {fix}"
+        ));
     }
 }
 
@@ -191,50 +182,40 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
         Ok(image) => {
             let id = update::version_id(&image);
             let interface = mount_interface::find(&image);
-            report.line(
-                "stela.efi",
-                format!(
-                    "version {id}{}",
-                    interface
-                        .map(|i| format!(", reads boot-bundle schema {}", i.bundle_schema))
-                        .unwrap_or_default()
-                ),
-            );
             let fix = report.fix("update");
             if record.stela_version.as_deref() != Some(id.as_str()) {
                 report.problem(format!(
-                    "{} is not the version setup installed ({}): {fix}",
-                    tool.display(),
-                    record.stela_version.as_deref().unwrap_or("unknown")
+                    "Stela's boot loader on the stick is not the one it was made with: {fix} \
+                     puts it back"
                 ));
-            }
-            if let Some(reason) = mount_interface::mismatch(environment.interface, interface) {
+            } else if mount_interface::mismatch(environment.interface, interface).is_some() {
                 report.problem(format!(
-                    "the installed stela.efi does not read what this stela writes ({reason}): \
-                     {fix}"
+                    "Stela on the stick does not match this stela: {fix}"
                 ));
             }
         }
         Err(_) => {
             let fix = report.fix("update");
-            report.problem(format!("{} is missing: {fix}", tool.display()))
+            report.problem(format!(
+                "Stela's boot loader is missing from the stick: {fix} puts it back"
+            ))
         }
     }
     let repair = report.fix("repair");
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
     match record.options_text() {
-        Ok(expected) if options != expected => {
-            report.problem(format!("stela.cfg differs from the setup record: {repair}"))
-        }
+        Ok(expected) if options != expected => report.problem(format!(
+            "the stick's boot settings differ from its setup: {repair}"
+        )),
         Ok(_) => {}
         Err(error) => report.problem(format!(
-            "stela.cfg cannot be written from the setup record: {error:#}"
+            "the stick's boot settings cannot be written: {error:#}"
         )),
     }
     let choices = fs::read_to_string(record.esp.join(CHOICES_PATH)).ok();
     match record.choices_text() {
         Ok(expected) if choices != expected => report.problem(format!(
-            "the startup choices (choices.cfg) differ from the setup record: {repair}"
+            "the startup choices differ from the stick's setup: {repair}"
         )),
         Ok(_) => {}
         Err(error) => report.problem(format!("the startup choices: {error:#}")),
@@ -249,7 +230,7 @@ fn firmware_status(record: &Record, report: &mut Report) {
     };
     if stela_loader::host_firmware::reads_bundle(&tool) {
         match super::firmware::bundle_status(&record.volume) {
-            Ok(complete) => report.line("firmware", format!("bundle {complete}")),
+            Ok(complete) => report.line("firmware", complete),
             Err(missing) => {
                 report.problem(format!("{missing}: {} adds the rest", report.fix("repair")))
             }
@@ -302,141 +283,137 @@ fn image_fix(environment: &Environment<'_>, record: &Record, report: &Report) ->
 fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Report, full: bool) {
     let repair = report.fix("repair");
     let image = image_fix(environment, record, report);
+    let macos = super::home::macos_name(&record.build);
+    let mut left = false;
     for kept in &record.bundles {
         let directory = kept.directory(&record.volume);
-        let role = if kept.build == record.build && kept.generation() == record.generation() {
-            "active"
-        } else {
-            "left by an interrupted update"
-        };
-        let problems = bundle::verify(&directory, &kept.manifest_sha256);
-        report.line(
-            kept.kind.label(),
-            format!(
-                "{} ({role}, {}{}): {}",
-                directory.display(),
-                kept.generation(),
-                kept.ecid
-                    .map(|ecid| format!(", ECID {ecid}"))
-                    .unwrap_or_default(),
-                if problems.is_empty() {
-                    "intact"
-                } else {
-                    "DAMAGED"
-                }
-            ),
-        );
-        if role != "active" {
-            report.problem(format!(
-                "{} is left by an interrupted update: run that update again, or {repair} \
-                 removes it",
-                directory.display()
-            ));
+        if kept.build != record.build || kept.generation() != record.generation() {
+            left = true;
             continue;
         }
-        for problem in problems {
+        let damaged = !bundle::verify(&directory, &kept.manifest_sha256).is_empty();
+        let label = match kept.kind {
+            bundle::Kind::Restore => "boot files",
+            bundle::Kind::Update => "update files",
+        };
+        report.line(label, if damaged { "DAMAGED" } else { "intact" });
+        if damaged {
             report.problem(format!(
-                "{problem}: {image} puts it right (--ipsw FILE names a macOS {} image to use)",
-                kept.build
+                "the {label} on the stick are damaged: {image} puts them right (--ipsw FILE names \
+                 a macOS {macos} image to use)"
             ));
         }
     }
-    for directory in record.build_directories() {
-        for (_, what) in bundle::leftovers(&directory) {
-            report.problem(format!("{what}: {repair} puts it right"));
-        }
+    if left {
+        report.problem(format!(
+            "older boot files are left by an update that stopped: run that update again, or \
+             {repair} removes them"
+        ));
+    }
+    if record
+        .build_directories()
+        .iter()
+        .any(|directory| !bundle::leftovers(directory).is_empty())
+    {
+        report.problem(format!(
+            "a copy of the boot files stopped part way: {repair} puts it right"
+        ));
     }
     if let Some(reason) = revision_mismatch(environment, record) {
         report.problem(reason);
     }
-    for (kind, ecid) in record.missing_restore_bundles() {
+    for (_, ecid) in record.missing_restore_bundles() {
+        let install = record
+            .installs
+            .iter()
+            .find(|install| install.ecid == ecid && record.installs.len() > 1)
+            .map(|install| format!(" for install \"{}\"", install.name))
+            .unwrap_or_default();
         report.problem(format!(
-            "the active build {} has no {} bundle for {}, so its {} choice is missing: {image}",
-            record.build,
-            kind.label(),
-            ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")),
-            super::restore_choice_name(kind)
+            "the boot files{install} are missing, so the stick cannot install macOS: {image}"
         ));
     }
     if let Some(next) = &record.replacing {
         report.problem(format!(
-            "the switch to macOS {next} stopped before its copy was complete, so this stick cannot \
+            "the switch to macOS {} stopped before its copy was complete, so this stick cannot \
              install macOS until it is: {} finishes it",
+            super::home::macos_name(next),
             report.fix("repair")
         ));
     } else if record.installs_media() && record.active_medium().is_none() {
         report.problem(format!(
-            "the active build {} has no install medium, so its Install macOS choice is \
-             missing: {image}",
-            record.build
+            "macOS {macos} is missing from the stick, so it cannot install macOS: {image}"
         ));
     }
     for medium in &record.media {
-        let mut problems = medium.problems();
-        // A piece an install found damaged since the medium was last
-        // written or checked whole: installs read the active build's
-        // medium alone, so the log's piece is one of its own.
-        if medium.build == record.build && !medium.remote && problems.is_empty() {
-            for piece in
-                super::medium::reported_damage(&record.esp, record.medium_checked.unwrap_or(0))
-            {
-                problems.push(format!(
-                    "{} failed its block check when an install read it (the stick's boot log \
-                     says so)",
-                    medium.directory().join(&piece).display()
-                ));
-            }
-            // `--full`: every piece read back and checked now.
-            if full && problems.is_empty() {
-                match medium.damaged_pieces() {
-                    Ok(damaged) => problems.extend(damaged.into_iter().map(|piece| {
-                        format!(
-                            "{} differs from what was written (read back now)",
-                            medium.directory().join(piece).display()
-                        )
-                    })),
-                    Err(error) => problems.push(format!("its pieces cannot be read: {error:#}")),
-                }
-            }
-        }
         if medium.build != record.build {
-            report.line(
-                "leftover",
-                format!("{} (macOS {})", medium.directory().display(), medium.build),
-            );
             report.problem(format!(
-                "{} is left by an interrupted update: run that update again, or {repair} \
-                 removes it",
-                medium.directory().display()
+                "macOS {}'s files are left by an update that stopped: run that update again, or \
+                 {repair} removes them",
+                super::home::macos_name(&medium.build)
             ));
             continue;
         }
-        report.line(
-            "install medium",
-            format!(
-                "{} (macOS {}, {}): {}",
-                medium.directory().display(),
-                medium.build,
-                // A streamed image is on Apple's servers, not a partition.
-                match medium.remote {
-                    true => "Online, downloads during installation".into(),
-                    false => format!("Offline, on partition {}", medium.partition_guid),
-                },
-                match (problems.is_empty(), medium.remote) {
-                    (false, _) => "DAMAGED",
-                    (true, true) => "intact",
-                    // Its bytes are read only by an install, or by
-                    // `repair --full`.
-                    (true, false) => "complete; every block is checked as the install reads it",
-                }
-            ),
-        );
-        for problem in problems {
+        let mut problems = medium.problems().len();
+        if problems > 0 {
             report.problem(format!(
-                "{problem}: {image} puts it right (--ipsw FILE names a macOS {} image to use)",
-                medium.build
+                "macOS on the stick is damaged or incomplete: {image} puts it right (--ipsw FILE \
+                 names a macOS {macos} image to use)"
             ));
         }
+        // A piece an install found damaged since the medium was last
+        // written or checked whole: installs read the active build's
+        // medium alone, so the log's piece is one of its own.
+        if !medium.remote && problems == 0 {
+            let reported =
+                super::medium::reported_damage(&record.esp, record.medium_checked.unwrap_or(0));
+            if !reported.is_empty() {
+                problems += reported.len();
+                report.problem(format!(
+                    "{} of macOS on the stick failed {} check during an install (the boot log \
+                     says so): {image} puts {} right",
+                    parts(reported.len()),
+                    if reported.len() == 1 { "its" } else { "their" },
+                    if reported.len() == 1 { "it" } else { "them" },
+                ));
+            }
+            // `--full`: every piece read back and checked now.
+            if full && problems == 0 {
+                match medium.damaged_pieces() {
+                    Ok(damaged) if damaged.is_empty() => {}
+                    Ok(damaged) => {
+                        problems += damaged.len();
+                        report.problem(format!(
+                            "{} of macOS on the stick read back wrong: {image} puts {} right",
+                            parts(damaged.len()),
+                            if damaged.len() == 1 { "it" } else { "them" },
+                        ));
+                    }
+                    Err(error) => {
+                        problems += 1;
+                        report.problem(format!("macOS on the stick cannot be read: {error:#}"));
+                    }
+                }
+            }
+        }
+        report.line(
+            "macOS copy",
+            match (problems == 0, medium.remote) {
+                (false, _) => "DAMAGED",
+                (true, true) => "none: the install downloads macOS",
+                // Its bytes are read only by an install, or by
+                // `repair --full`.
+                (true, false) => "complete",
+            },
+        );
+    }
+}
+
+/// `count` parts, in words: "1 part", "3 parts".
+fn parts(count: usize) -> String {
+    match count {
+        1 => "1 part".into(),
+        _ => format!("{count} parts"),
     }
 }
 
@@ -539,7 +516,7 @@ fn chosen_status(host: &dyn Host, record: &Record, report: &mut Report) {
     };
     match chosen_search(host, &chosen) {
         Some(Ok(partition)) => {
-            report.line("", "the chosen disk is in this computer");
+            report.line("", "that disk is in this computer");
             // Its NVRAM, for the Metal plugin repair this computer can
             // let run again; the rest of its state is the PC's.
             let nvram = installed::chosen_state_area(host, &partition)
@@ -589,22 +566,18 @@ fn install_status(
         install.name,
         if default { " (default)" } else { "" }
     );
-    match install.ecid {
-        Some(ecid) => report.line("ECID", ecid),
-        None => {
-            let fix = report.fix("repair");
-            report.problem(format!(
-                "install \"{}\" has no ECID (an older setup made it): {fix}, with --ecid or \
-                 --new-ecid when its SEP state is provisioned",
-                install.name
-            ))
-        }
+    if install.ecid.is_none() {
+        let fix = report.fix("repair");
+        report.problem(format!(
+            "install \"{}\" was made by an older stela and needs new boot files: {fix}",
+            install.name
+        ))
     }
     let disk = &install.disk;
     // A portable installer's disk is chosen in stela.efi, out of this
     // computer's reach.
     if disk.is_chosen() {
-        report.line("Mac's SSD", "a PC disk chosen at Install macOS");
+        report.line("installs to", "the PC disk you pick at Install macOS");
         chosen_status(host, record, report);
         return;
     }
@@ -615,11 +588,9 @@ fn install_status(
             let bytes = disk.machine_state_offset.unwrap_or(bytes).min(bytes);
             let systems = systems(host, &region, bytes);
             report.line(
-                "Mac's SSD",
+                "installs to",
                 format!(
-                    "{region} (serial {}, partition {}): {}",
-                    disk.apple_region_serial,
-                    disk.apple_region_guid,
+                    "{region}: {}",
                     if systems.is_empty() {
                         "no installed macOS yet; choose Install macOS"
                     } else {
@@ -632,9 +603,6 @@ fn install_status(
                     "",
                     format!("was {}; `repair` records the new name", disk.apple_region),
                 );
-            }
-            for system in systems {
-                report.line("", system);
             }
         }
         Err(error) => report.problem(format!(
@@ -659,10 +627,7 @@ fn install_status(
             return;
         }
     };
-    report.line(
-        "machine state",
-        format!("{} ({})", disk.state_description(), bytes_text(area.bytes)),
-    );
+    report.line("machine state", disk.state_description());
     let bytes = match area.read(
         host,
         0,
@@ -714,8 +679,8 @@ fn install_status(
         }
     }
     match state::sep(sep_area) {
-        Ok(true) => report.line("SEP state", "provisioned"),
-        Ok(false) => report.line("SEP state", "blank"),
+        Ok(true) => report.line("machine keys", "set up"),
+        Ok(false) => report.line("machine keys", "none yet"),
         Err(error) if never_booted => {
             let fix = report.fix("repair --initialize-nor");
             report.problem(format!(
@@ -746,18 +711,13 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path, full: bool) -> R
         problems: Vec::new(),
         usb: usb.to_path_buf(),
     };
-    let _ = writeln!(
-        report.text,
-        "Stela setup on {} ({}):",
-        record.esp.display(),
-        record.esp.join(RECORD).display()
-    );
+    let _ = writeln!(report.text, "Stela stick {}:", usb.display());
     if !record.complete {
-        report.problem(interrupted_text(&record, usb));
+        report.problem(interrupted_text(usb));
     }
     report.line("model", &record.model);
     report.line("Stela", super::release::describe(&record));
-    report.line("macOS build", &record.build);
+    report.line("macOS", super::home::macos_name(&record.build));
     report.line(
         "Wi-Fi",
         match &record.wifi {
@@ -795,8 +755,8 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path, full: bool) -> R
         let rest = report.problems.len() - 1;
         report.problems.truncate(1);
         report.problems[0].push_str(&format!(
-            ". Running the setup again also writes the {rest} other part{} this report finds missing \
-             or different",
+            ". Finishing it also writes the {rest} other part{} this report finds missing or \
+             different",
             if rest == 1 { "" } else { "s" }
         ));
     }
@@ -832,11 +792,11 @@ pub(super) fn device_skips(esp: &Path, dry_run: bool) -> Result<String> {
     Ok(match (named.is_empty(), dry_run) {
         (true, _) => String::new(),
         (false, true) => format!(
-            "  device skips   {} would be started again\n",
+            "  skipped        {} would be tried again at the next boot\n",
             named.join(", ")
         ),
         (false, false) => format!(
-            "  device skips   {} will be started again at the next boot\n",
+            "  skipped        {} will be tried again at the next boot\n",
             named.join(", ")
         ),
     })
@@ -876,16 +836,17 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
     // finishes it as an update (`Request::dispatch`).
     debug_assert!(record.replacing.is_none());
     let esp = record.esp.clone();
-    let mut text = format!("Stela repair on {}:\n", esp.display());
+    let mut text = String::from("Stela repair:\n");
     text.push_str(&device_skips(&esp, command.dry_run)?);
     let Ok(tool) = fs::read(esp.join(LOADER_PATH)) else {
-        bail!("{} has no stela.efi: {}", esp.display(), fix(usb, "update"));
-    };
-    if let Some(reason) =
-        mount_interface::mismatch(environment.interface, mount_interface::find(&tool))
-    {
         bail!(
-            "the setup's stela.efi does not read what this stela writes ({reason}): run {} first",
+            "Stela's boot loader is missing from the stick: {} puts it back",
+            fix(usb, "update")
+        );
+    };
+    if mount_interface::mismatch(environment.interface, mount_interface::find(&tool)).is_some() {
+        bail!(
+            "Stela on the stick does not match this stela: run {} first",
             fix(usb, "update")
         );
     }
@@ -918,22 +879,19 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
             match damaged.is_empty() {
                 true => writeln!(
                     text,
-                    "  install medium every piece read and checked: intact{}",
+                    "  macOS copy     every part read and checked: intact{}",
                     match reported.is_empty() {
-                        true => String::new(),
-                        false => format!(
-                            " (the boot log named {}, which reads back correctly now)",
-                            reported.join(", ")
-                        ),
+                        true => "",
+                        false => " (the parts the boot log named read back correctly now)",
                     }
                 )?,
                 false => writeln!(
                     text,
-                    "  install medium {} damaged: {}",
-                    damaged.join(", "),
+                    "  macOS copy     {} damaged: {}",
+                    parts(damaged.len()),
                     match command.dry_run {
-                        true => "would be removed and written again",
-                        false => "removed and written again",
+                        true => "would be written again",
+                        false => "written again",
                     }
                 )?,
             }
@@ -945,10 +903,10 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
     } else if command.full {
         writeln!(
             text,
-            "  install medium {}",
+            "  macOS copy     {}",
             match record.active_medium() {
-                Some(m) if m.remote => "streams from Apple: no piece is on the stick to check",
-                Some(_) => "incomplete: the missing or short pieces are written again",
+                Some(m) if m.remote => "none to check: the install downloads macOS",
+                Some(_) => "incomplete: the missing parts are written again",
                 None => "none",
             }
         )?;
@@ -981,7 +939,10 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
                 check_bundle_revision(environment, &record)?;
             }
             let source = sources::locate(environment, &lookup).map_err(|error| {
-                anyhow::anyhow!("repair needs the macOS {build} restore image; but {error:#}")
+                anyhow::anyhow!(
+                    "repair needs macOS {}; but {error:#}",
+                    super::home::macos_name(&build)
+                )
             })?;
             if need.whole() {
                 sources::check_room(environment, &record, &build, &source)?;
@@ -992,7 +953,10 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
                     command.yes,
                     false,
                     sources::download_bytes(&source),
-                    &format!("what this stick lacks of macOS {build}"),
+                    &format!(
+                        "what this stick lacks of macOS {}",
+                        super::home::macos_name(&build)
+                    ),
                 )?;
             }
             Some(source)
@@ -1056,8 +1020,8 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
                 })
                 .with_context(|| {
                     format!(
-                        "install \"{}\" needs an ECID, which depends on its machine state; \
-                         connect its disk",
+                        "install \"{}\" needs new boot files, which depend on its disk; connect \
+                         its disk",
                         install.name
                     )
                 })?;
@@ -1075,29 +1039,34 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
             assigned.push((install.name.clone(), ecid));
         }
     }
-    for (name, ecid) in &assigned {
-        writeln!(text, "  ECID           install \"{name}\" is now {ecid}")?;
+    for (name, _) in &assigned {
+        writeln!(
+            text,
+            "  machine        install \"{name}\" gets its own identity"
+        )?;
     }
     // What interrupted copies left, before any bundle is judged; a dry run
     // judges a set-aside bundle where it would be put back.
     for directory in record.build_directories() {
-        for (destination, what) in bundle::leftovers(&directory) {
+        for (destination, _) in bundle::leftovers(&directory) {
             if command.dry_run {
-                writeln!(text, "  bundle         would put right: {what}")?;
+                writeln!(
+                    text,
+                    "  boot files     would put right a copy that stopped part way"
+                )?;
                 continue;
             }
-            for done in bundle::recover(&destination)? {
-                writeln!(text, "  bundle         {done}")?;
+            if !bundle::recover(&destination)?.is_empty() {
+                writeln!(
+                    text,
+                    "  boot files     put right a copy that stopped part way"
+                )?;
             }
         }
     }
     let stale = record.drop_stale_bundles();
-    for old in &stale {
-        writeln!(
-            text,
-            "  remove         {}",
-            old.directory(&record.volume).display()
-        )?;
+    if !stale.is_empty() {
+        writeln!(text, "  remove         older boot files")?;
     }
     // What an interrupted update left beside the active build and
     // generation.
@@ -1105,8 +1074,8 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
     if leftovers {
         writeln!(
             text,
-            "  remove         the files an interrupted update left beside macOS {}'s",
-            record.build
+            "  remove         the files a stopped update left beside macOS {}",
+            super::home::macos_name(&record.build)
         )?;
     }
     // The install's restore bundles and medium: all again with an image.
@@ -1126,19 +1095,18 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
         (Some(source), false) => {
             writeln!(
                 text,
-                "  restore image  {}",
+                "  macOS          {}",
                 sources::describe(source, &lookup)
             )?;
             if command.dry_run && !source.is_local() {
                 // Nothing is read or downloaded to prepare the plan.
                 writeln!(
                     text,
-                    "  install        {} restore bundles of macOS {build}{}",
-                    restore.len(),
-                    if damaged_medium {
-                        " and its install medium"
-                    } else {
-                        ""
+                    "  installer      {} again",
+                    match (restore.is_empty(), damaged_medium) {
+                        (false, true) => "macOS and its boot files",
+                        (false, false) => "the boot files",
+                        (true, _) => "macOS",
                     }
                 )?;
                 None
@@ -1158,15 +1126,15 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
                         additional_bytes: 0,
                     },
                 )?;
-                describe_install(&record, &plan, &mut text)?;
+                describe_install(&plan, 0, &mut text)?;
                 Some((plan, obtained))
             }
         }
-        (None, false) => bail!("repair found nothing to prepare its restore files from"),
+        (None, false) => bail!("repair found no macOS image to prepare the boot files from"),
     };
     writeln!(
         text,
-        "  boot loader    stela.efi, stela.cfg and the startup choices as recorded"
+        "  settings       the boot settings and startup choices as set up"
     )?;
     for line in requested.lines() {
         writeln!(text, "  firmware       {line}")?;
@@ -1282,8 +1250,8 @@ fn repair_steps(environment: &Environment<'_>, command: &Request) -> Result<Stri
         .as_ref()
         .map(super::translations::Store::repairs)
         .unwrap_or_default();
-    for repair in &store_repairs {
-        writeln!(text, "  translations   {repair}")?;
+    if !store_repairs.is_empty() {
+        writeln!(text, "  translations   repair the translation cache")?;
     }
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");

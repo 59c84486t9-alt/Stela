@@ -33,7 +33,7 @@ pub(crate) enum Command {
     /// Fix what is damaged or missing; finish a stopped create or update
     #[command(
         long_about = "Check the stick and put back what is damaged or missing: settings,\n\
-                      boot files, macOS pieces, firmware the last boot asked for.\n\
+                      boot files, macOS, firmware the last boot asked for.\n\
                       Finishes an interrupted create or update."
     )]
     Repair(Repair),
@@ -422,7 +422,8 @@ pub(crate) struct Create {
     #[arg(long, hide = true)]
     install: Option<String>,
     /// The ECID of the machine being set up, in hexadecimal: reuse a known
-    /// machine's (from `status` of its old stick or a `state backup` file).
+    /// machine's (from its old stick's EFI/stela/setup.json or a `state
+    /// backup` file).
     #[arg(long, value_parser = ecid, hide = true)]
     ecid: Option<Ecid>,
     /// Give the machine a new ECID although its machine state belongs to
@@ -523,9 +524,13 @@ impl Update {
 pub(crate) struct Repair {
     #[command(flatten)]
     stick: Stick,
-    /// Read every macOS piece (slow). Done by itself when the last
-    /// install reported a damaged piece.
-    #[arg(long, help = "Read every macOS piece (slow)", verbatim_doc_comment)]
+    /// Read all of macOS on the stick (slow). Done by itself when the
+    /// last install reported a damaged part.
+    #[arg(
+        long,
+        help = "Read all of macOS on the stick (slow)",
+        verbatim_doc_comment
+    )]
     full: bool,
     /// Use this IPSW instead of downloading
     #[arg(long, value_name = "FILE")]
@@ -580,7 +585,7 @@ impl Repair {
 pub(crate) struct Status {
     #[command(flatten)]
     stick: Stick,
-    /// Also read every macOS piece (slow)
+    /// Also read all of macOS on the stick (slow)
     #[arg(long)]
     full: bool,
 }

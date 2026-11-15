@@ -26,9 +26,9 @@ use stela_runtime::restore::{
 fn signing_service(error: restore::Error) -> anyhow::Error {
     match error {
         restore::Error::Transport(why) | restore::Error::Payload(why) => {
-            anyhow!("Apple's signing service: {why}")
+            anyhow!("signing the files: {why}")
         }
-        other => anyhow!("Apple's signing service: {}", other.summary()),
+        other => anyhow!("signing the files: {}", other.summary()),
     }
 }
 
@@ -50,7 +50,7 @@ impl tss::Transport for Apple {
         let failed = |error: String| restore::Error::Transport(refuse!("{error}", %error));
         // The same body asks for the same ticket, so a lost request is
         // asked again.
-        let response = crate::net::send(&format!("Apple's signing server ({host})"), || {
+        let response = crate::net::send("signing the files", || {
             let mut request = self
                 .0
                 .post(format!("http://{host}{path}"))
@@ -65,28 +65,28 @@ impl tss::Transport for Apple {
         let status = response.status();
         if !status.is_success() {
             return Err(failed(format!(
-                "{host} answered HTTP status {}",
+                "Apple's server answered HTTP status {}",
                 status.as_u16()
             )));
         }
         let bytes = response
             .bytes()
             .map_err(|error| failed(crate::net::explain(&error)))?;
-        signing_answer(host, &bytes).map_err(failed)?;
+        signing_answer(&bytes).map_err(failed)?;
         Ok(Some(bytes.to_vec()))
     }
 }
 
 /// Refuse an answer that is not the signing server's: a network that shows
 /// its sign-in page answers every plain-HTTP request with that page.
-fn signing_answer(host: &str, bytes: &[u8]) -> Result<(), String> {
+fn signing_answer(bytes: &[u8]) -> Result<(), String> {
     if bytes.starts_with(b"STATUS=") {
         return Ok(());
     }
     Err(format!(
-        "the network answered for {host} with something other than Apple's signing server \
-         ({} bytes{}). A network that wants a sign-in first does this: open a web page on this \
-         computer, sign in to the network, and run setup again",
+        "the network did not let stela reach Apple ({} bytes came back{}). A network that wants \
+         a sign-in first does this: open a web page on this computer, sign in to the network, \
+         and run stela again",
         bytes.len(),
         if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"<html")) {
             ", a web page"

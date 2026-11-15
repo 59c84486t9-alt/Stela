@@ -73,20 +73,19 @@ pub(super) fn machine_ecid(options: EcidOptions, notes: &mut Vec<String>) -> Res
     } = options;
     match (given, recorded) {
         (Some(given), Some(recorded)) if given != recorded && !new_ecid => bail!(
-            "this machine's ECID is {recorded}, not {given}; changing it orphans its LocalPolicy \
-             and SEP state. Pass --new-ecid to change it anyway."
+            "this machine already has another ECID (the stick's EFI/stela/setup.json names it); \
+             changing it orphans its machine state. Pass --new-ecid to change it anyway."
         ),
         (Some(given), _) => Ok(given),
         (None, Some(recorded)) => Ok(recorded),
         (None, None) if sep_provisioned && !new_ecid => bail!(
-            "this disk's machine state holds an earlier Stela machine's SEP state, which is \
-             bound to that machine's ECID. Pass that ECID with --ecid (`stela status` of \
-             its old stick, or its `state backup` file, shows it), or --new-ecid to start a new \
-             machine, which orphans its LocalPolicy and SEP state."
+            "this disk's machine state belongs to an earlier Stela machine. Pass that machine's \
+             ECID with --ecid (its old stick's EFI/stela/setup.json, or its `state backup` file, \
+             names it), or --new-ecid to start a new machine, which orphans the old state."
         ),
         (None, None) => {
             if sep_provisioned {
-                notes.push("--new-ecid: the old SEP state and LocalPolicy are orphaned".into());
+                notes.push("--new-ecid: the old machine state is orphaned".into());
             }
             Ecid::generate()
         }
@@ -184,7 +183,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     }
     let mut notes = checked.notes.clone();
     let mut next = record.clone();
-    let (name, ecid) = match unfinished {
+    let name = match unfinished {
         Some(install) => {
             let ecid = machine_ecid(
                 EcidOptions {
@@ -203,7 +202,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
                 kept.ecid = Some(ecid);
                 kept.disk = checked.disk.clone();
             }
-            (install.name, ecid)
+            install.name
         }
         None => {
             let name = match &command.install {
@@ -230,14 +229,14 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
             )?;
             ensure!(
                 record.installs.iter().all(|i| i.ecid != Some(ecid)),
-                "ECID {ecid} already belongs to another install of this setup"
+                "that ECID already belongs to another install of this setup"
             );
             next.installs.push(Install {
                 name: name.clone(),
                 ecid: Some(ecid),
                 disk: checked.disk.clone(),
             });
-            (name, ecid)
+            name
         }
     };
     next.verify_on_read = command.verify_on_read;
@@ -256,9 +255,9 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     };
     let source = sources::locate(environment, &lookup).map_err(|error| {
         anyhow::anyhow!(
-            "install \"{name}\" (ECID {ecid}) needs a restore bundle of its own, prepared from \
-             the macOS {} restore image; but {error:#}",
-            record.build
+            "install \"{name}\" needs boot files of its own, prepared from macOS {}; but \
+             {error:#}",
+            super::home::macos_name(&record.build)
         )
     })?;
     if need.whole() {
@@ -292,26 +291,18 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
         }
     };
     let mut text = String::new();
-    writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
-    writeln!(text, "  ECID           {ecid}")?;
+    writeln!(text, "Add install \"{name}\":")?;
     let disk = &checked.disk;
-    writeln!(
-        text,
-        "  Mac's SSD      {} (serial {}, partition {})",
-        disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
-    )?;
+    writeln!(text, "  installs to    {}", disk.apple_region)?;
     writeln!(text, "  {}", super::state_line(disk))?;
     writeln!(
         text,
-        "  restore image  {}",
+        "  macOS          {}",
         sources::describe(&source, &lookup)
     )?;
     match &install_plan {
-        Some((plan, _)) => describe_install(&next, plan, &mut text)?,
-        None => writeln!(
-            text,
-            "  install        its restore bundle, prepared from that image"
-        )?,
+        Some((plan, _)) => describe_install(plan, 0, &mut text)?,
+        None => writeln!(text, "  boot files     prepared from that image")?,
     }
     writeln!(
         text,
@@ -324,12 +315,8 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
             disk.state_description()
         )?;
     }
-    for kept in &stale {
-        writeln!(
-            text,
-            "  remove         {}",
-            kept.directory(&record.volume).display()
-        )?;
+    if !stale.is_empty() {
+        writeln!(text, "  remove         older boot files")?;
     }
     for note in &notes {
         writeln!(text, "  note           {note}")?;
@@ -364,10 +351,10 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
     let mut record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
     super::update::ready(&record, &command.usb)?;
-    let mut text = format!("Stela setup on {}:\n", record.esp.display());
+    let mut text = String::from("Settings:\n");
     let mut removed_bundles = Vec::new();
     if let Some(name) = &command.remove_install {
-        let install = record.install(Some(name))?.clone();
+        record.install(Some(name))?;
         ensure!(
             record.installs.len() > 1,
             "install \"{name}\" is this setup's only one; to remove it, {}",
@@ -379,20 +366,9 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         }
         writeln!(
             text,
-            "  remove         install \"{name}\" (disk kept{})",
-            install
-                .ecid
-                .map(|ecid| format!(", ECID {ecid}"))
-                .unwrap_or_default()
+            "  remove         install \"{name}\" (its disk is kept)"
         )?;
         removed_bundles = record.drop_stale_bundles();
-        for kept in &removed_bundles {
-            writeln!(
-                text,
-                "  remove         {}",
-                kept.directory(&record.volume).display()
-            )?;
-        }
     }
     if let Some(name) = &command.default_install {
         record.install(Some(name))?;
@@ -434,7 +410,7 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
                 .clone()
                 .or_else(environment.wifi_country),
         };
-        writeln!(text, "  {}", super::wifi::describe(&network, &record.esp))?;
+        writeln!(text, "  {}", super::wifi::describe(&network))?;
         record.wifi = Some(network);
     }
     if let Some(ipv4) = command.ipv4 {
@@ -457,20 +433,19 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
     if command.no_wifi && record.wifi.take().is_some() {
         writeln!(
             text,
-            "  Wi-Fi          off; remove {}",
-            record.esp.join(super::wifi::KEY_PATH).display()
+            "  Wi-Fi          off; its passphrase is removed from the stick"
         )?;
     }
     if !command.usb4_approve.is_empty() {
         record.usb4_approved = command.usb4_approve.clone();
         writeln!(
             text,
-            "  USB4 PCIe      also without an IOMMU for {}",
+            "  USB4           allowed on PCs without an IOMMU: {}",
             record.usb4_approved.join(", ")
         )?;
     }
     if command.no_usb4_approve && !std::mem::take(&mut record.usb4_approved).is_empty() {
-        writeln!(text, "  USB4 PCIe      only with an IOMMU")?;
+        writeln!(text, "  USB4           allowed only on PCs with an IOMMU")?;
     }
     record.choices_text()?;
     if command.dry_run {

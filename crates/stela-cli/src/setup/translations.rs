@@ -205,15 +205,6 @@ impl Store {
         self.packs().iter().map(|p| p.bytes).sum()
     }
 
-    /// The store, for plans and `status`.
-    pub(super) fn describe(&self) -> String {
-        format!(
-            "{}: one pack of up to {:.1} GB, the newest",
-            self.directory().display(),
-            self.pack_bytes as f64 / 1e9
-        )
-    }
-
     /// What [`Self::repair`] would change: a missing or changed
     /// `store.cfg`, and each pack to remove, damaged or past the kept
     /// ones.
@@ -415,11 +406,10 @@ pub(super) fn choose(
             return Ok((
                 None,
                 Some(format!(
-                    "no translation store: {} ({:.1} GB free) has no room for {} packs of 64 \
-                     MiB; every boot translates anew",
+                    "no translation cache: {} has too little room ({:.1} GB free), so every \
+                     start is slower",
                     volume.display(),
                     room as f64 / 1e9,
-                    PACKS_KEPT
                 )),
             ));
         }
@@ -434,8 +424,8 @@ pub(super) fn choose(
     Ok((
         None,
         Some(
-            "no translation store: the stick has no FAT32 volume the firmware writes; every boot \
-             translates anew"
+            "no translation cache: the stick has no volume the PC can write at boot, so every \
+             start is slower"
                 .into(),
         ),
     ))

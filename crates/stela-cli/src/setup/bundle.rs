@@ -93,14 +93,6 @@ impl Kind {
             Self::Update => "update",
         }
     }
-
-    /// What it is called in reports.
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Restore => "restore",
-            Self::Update => "update restore",
-        }
-    }
 }
 
 /// One boot bundle setup wrote.

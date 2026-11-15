@@ -131,8 +131,7 @@ impl Remote {
             if attempt > 0 {
                 let wait = Duration::from_secs(1 << attempt).min(MAX_WAIT);
                 eprintln!(
-                    "note: bytes {start}-{end} of {}: {}; trying again in {} s",
-                    self.url,
+                    "Note: downloading macOS: {}; trying again in {} s",
                     last.as_ref()
                         .map_or(String::new(), |e: &anyhow::Error| format!("{e:#}")),
                     wait.as_secs()

@@ -507,7 +507,7 @@ pub(crate) fn disk_logs(host: &dyn Host, disk: &Disk) -> Result<Logs> {
 }
 
 /// What [`scan_noted`] says when the logs it found lack the stick's own.
-pub(crate) const NO_STICK_LOG: &str = "no Stela stick's own log (EFI/stela/boot.log) was found. \
+pub(crate) const NO_STICK_LOG: &str = "no log from a Stela stick was found. \
     These logs come only from the disk macOS is on, which an install writes and later boots do \
     not: they do not show a boot that failed after the install. Plug in the stick Stela booted \
     from and run this again.";
@@ -602,17 +602,9 @@ fn read(file: &mut File, state: u64) -> Result<Log> {
 
 /// What a log holds, one line.
 pub(crate) fn summary(log: &Log) -> String {
-    let mut text = format!(
-        "Stela boot log: {} boots, {} bytes",
-        log.boots,
-        log.stream.len()
-    );
+    let mut text = format!("Stela boot log: {} boots", log.boots);
     if log.overwritten() != 0 {
-        let _ = write!(
-            text,
-            "; the {} bytes before them were overwritten",
-            log.overwritten()
-        );
+        text.push_str("; older boots were overwritten");
     }
     text.push('\n');
     text
@@ -926,10 +918,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(log.boots, 2);
         assert_eq!(String::from_utf8(log.stream.clone()).unwrap(), expected);
-        assert_eq!(
-            summary(&log),
-            format!("Stela boot log: 2 boots, {} bytes\n", expected.len())
-        );
+        assert_eq!(summary(&log), "Stela boot log: 2 boots\n");
         let raw = command(&path, None, Some(2048 * 512)).load(&path).unwrap();
         assert_eq!(raw, log);
 

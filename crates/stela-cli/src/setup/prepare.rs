@@ -72,8 +72,7 @@ pub(super) fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str)
         .map_err(|error| anyhow::anyhow!("{}: {error}", ipsw.display()))?;
     if entry.build != build {
         eprintln!(
-            "note: macOS build {build} is not tested yet; Stela uses build {}'s device \
-             interfaces for it",
+            "Note: macOS {build} is not tested with Stela yet; it is treated as {}",
             entry.build
         );
     }
@@ -122,15 +121,19 @@ pub(super) fn prepare_kind(
         // A restore bundle for a known machine boots under its personalized
         // ticket from Apple's signing service (TSS).
         let personalized = ecid.is_some();
-        let progress =
-            crate::progress::Phase::spinner(format!("Preparing {} boot files", kind.label()));
+        let progress = crate::progress::Phase::spinner(match (kind, personalized) {
+            (Kind::Restore, true) => "Preparing and signing the boot files",
+            (Kind::Restore, false) => "Preparing the boot files",
+            (Kind::Update, true) => "Preparing and signing the update boot files",
+            (Kind::Update, false) => "Preparing the update boot files",
+        });
         prepare(RamdiskOptions {
             ipsw,
             model,
             ecid,
             output: &output,
         })
-        .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
+        .context("could not prepare the boot files")?;
         progress.finish();
         let generation = bundle::generation(&output)?;
         ensure!(
@@ -178,8 +181,7 @@ pub(super) fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result
         let problems = bundle::verify(&destination, &digest);
         ensure!(
             problems.is_empty(),
-            "the copied bundle does not read back as written: {}",
-            problems.join("; ")
+            "the boot files on the stick did not read back as written; the stick may be failing"
         );
         record.bundles.retain(|b| {
             !b.same_kind(bundle::Identity {
@@ -209,7 +211,7 @@ pub(super) fn check_space(host: &dyn Host, volume: &Path, prepared: &[Prepared])
     let free = host.volume(volume)?.free_bytes;
     ensure!(
         free >= need,
-        "{} has {:.1} GB free; the boot bundles need {:.1} GB",
+        "{} has {:.1} GB free; the boot files need {:.1} GB",
         volume.display(),
         free as f64 / 1e9,
         need as f64 / 1e9

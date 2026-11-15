@@ -51,7 +51,7 @@ pub(super) fn load() -> Result<Releases> {
             return parse(&bytes);
         }
         eprintln!(
-            "note: api.ipsw.me answered without its list of macOS releases; asking again in {} s",
+            "Note: the list of macOS releases did not come back; asking again in {} s",
             wait.as_secs()
         );
         std::thread::sleep(wait);

@@ -100,18 +100,11 @@ impl InstalledDisk {
     /// Where the machine state is, for messages.
     pub(super) fn state_description(&self) -> String {
         if self.is_chosen() {
-            return format!("the tail of {CHOSEN_REGION}");
+            return "the end of the PC disk chosen at Install macOS".into();
         }
         match self.machine_state_offset {
-            Some(offset) => format!(
-                "the tail of {} from byte {offset:#x}, outside the Mac's SSD (serial {}, \
-                 partition {})",
-                self.apple_region, self.apple_region_serial, self.apple_region_guid
-            ),
-            None => format!(
-                "{} (serial {}, partition {})",
-                self.nor, self.nor_serial, self.nor_guid
-            ),
+            Some(_) => format!("the end of {}", self.apple_region),
+            None => self.nor.clone(),
         }
     }
 

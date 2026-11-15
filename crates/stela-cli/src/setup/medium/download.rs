@@ -264,8 +264,8 @@ fn write_from(
     }
     if !record.done.is_empty() {
         eprintln!(
-            "note: checking the {} of {} pieces already on the stick; only missing or damaged \
-             pieces are downloaded again",
+            "Note: checking the {} of {} parts of macOS already on the stick; only missing or \
+             damaged parts are downloaded again",
             record.done.len().min(sizes.len()),
             sizes.len()
         );

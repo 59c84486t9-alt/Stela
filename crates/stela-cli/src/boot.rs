@@ -964,25 +964,35 @@ impl Prepare {
         let boot_manifest = match (self.restore, self.ecid) {
             (true, Some(ecid)) => {
                 let manifest = ipsw.read(members::BUILD_MANIFEST, BUILD_MANIFEST_LIMIT)?;
-                eprintln!(
-                    "Sending ECID {ecid:#x}, fresh nonces and the component hashes to Apple's \
-                     signing service (gs.apple.com) for the restore's AP root ticket"
-                );
+                // `stela`'s own runs (`quiet`) show one step, "Preparing and
+                // signing the boot files", and never the machine's ECID.
+                if !self.quiet {
+                    eprintln!(
+                        "Sending ECID {ecid:#x}, fresh nonces and the component hashes to \
+                         Apple's signing service (gs.apple.com) for the restore's AP root ticket"
+                    );
+                }
                 let bytes = ticket::personalized(&manifest, identity.index, ecid)?;
                 // An erase install's other signing requests bind only values
                 // known now: their answers go on the stick, so the install
                 // needs no network.
                 if !self.update {
-                    eprintln!(
-                        "Sending the same ECID and the install's recoveryOS, Cryptex1 and \
-                         LocalPolicy requests to Apple's signing service now, so the install \
-                         does not ask for them"
-                    );
+                    if !self.quiet {
+                        eprintln!(
+                            "Sending the same ECID and the install's recoveryOS, Cryptex1 and \
+                             LocalPolicy requests to Apple's signing service now, so the \
+                             install does not ask for them"
+                        );
+                    }
                     staged = ticket::staged(&manifest, identity.index, ecid, &bytes)
-                        .inspect_err(|error| {
-                            eprintln!(
+                        .inspect_err(|error| match self.quiet {
+                            true => eprintln!(
+                                "Note: not every file could be signed now, so the install \
+                                 needs internet to sign the rest"
+                            ),
+                            false => eprintln!(
                                 "note: {error:#}; installing macOS will ask Apple's signing service"
-                            )
+                            ),
                         })
                         .ok();
                 }

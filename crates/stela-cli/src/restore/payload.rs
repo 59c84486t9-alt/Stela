@@ -480,10 +480,8 @@ pub fn inventory(image: &Path, model: &str, keys: KeyOptions<'_>) -> Result<Inve
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
     // Hashing a whole IPSW takes minutes from a slow disk: its progress is
     // the whole file's, which the members are read beside.
-    let progress = crate::progress::Phase::bytes(
-        "Checking the restore image",
-        std::fs::metadata(image)?.len(),
-    );
+    let progress =
+        crate::progress::Phase::bytes("Checking the macOS image", std::fs::metadata(image)?.len());
     let (ipsw, members) = std::thread::scope(|scope| {
         let whole = scope.spawn(|| file_sha256_with(image, |bytes| progress.advance(bytes)));
         let members = hash_members(image, &selection.names, BlockDigests::Record);

@@ -308,6 +308,6 @@ fn a_lost_signing_service_is_named_in_words() {
         .to_string();
     assert_eq!(
         error,
-        "Apple's signing service: this computer cannot reach the server"
+        "signing the files: this computer cannot reach the server"
     );
 }

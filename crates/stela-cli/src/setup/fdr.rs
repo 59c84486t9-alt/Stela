@@ -13,9 +13,7 @@ pub(super) fn prepare(record: &Record, dry_run: bool) -> Result<String> {
     let mut report = String::new();
     for medium in &record.media {
         if prepare_directory(&medium.directory(), dry_run)? {
-            report.push_str(
-                "  FDR storage    initialize a 4 MiB journal from the staged diagnostic\n",
-            );
+            report.push_str("  diagnostics    prepare the storage for a staged diagnostic\n");
         }
     }
     Ok(report)

@@ -311,8 +311,8 @@ pub(super) fn host_notes(host: &dyn super::host::Host) -> Result<Vec<String>> {
     for device in host.nvidia_gpus()? {
         if recipes::nvidia_chip(device).is_none() {
             notes.push(format!(
-                "this computer's NVIDIA GPU (device {device:04x}) is not one Stela supports \
-                 ({}); the stick still works on a PC that has one",
+                "This computer's NVIDIA GPU is not supported. The stick still works on a PC with \
+                 {}.",
                 stela_boot_core::gpu_status::SUPPORTED
             ));
         }
@@ -322,9 +322,9 @@ pub(super) fn host_notes(host: &dyn super::host::Host) -> Result<Vec<String>> {
 
 /// The firmware line of a setup plan.
 pub(super) fn bundle_summary() -> String {
-    let (count, bytes) = bundle::size();
+    let (_, bytes) = bundle::size();
     format!(
-        "every supported device: {count} files, {:.1} MiB (each PC loads only its own)",
+        "for every supported device ({:.1} MiB)",
         bytes as f64 / MIB as f64
     )
 }
@@ -383,22 +383,13 @@ fn prefetch(
         return Ok(0);
     }
     let bytes: usize = wanted.iter().map(|(artifact, _)| artifact.length).sum();
-    eprintln!(
-        "Downloading the firmware bundle: {} files, {:.1} MiB",
-        wanted.len(),
-        bytes as f64 / MIB as f64
-    );
-    for (index, (artifact, _)) in wanted.iter().enumerate() {
-        eprintln!(
-            "  {} ({:.1} MiB), file {} of {}",
-            artifact.member,
-            artifact.length as f64 / MIB as f64,
-            index + 1,
-            wanted.len()
-        );
+    let progress = crate::progress::Phase::bytes("Downloading firmware", bytes as u64);
+    for (artifact, _) in &wanted {
         let bytes = download(artifact)?;
         store(cache, artifact, &bytes)?;
+        progress.advance(artifact.length as u64);
     }
+    progress.finish();
     Ok(wanted.len())
 }
 
@@ -524,12 +515,7 @@ pub(super) fn provision_bundle(
     let free = host.volume(volume)?.free_bytes;
     let (files, left) = bundle_plan(Some(free), present_bytes(&directory));
     let bytes: usize = files.iter().map(|(object, _)| object.length).sum();
-    eprintln!(
-        "Firmware for every supported device: {} files, {:.1} MiB, to {}",
-        files.len(),
-        bytes as f64 / MIB as f64,
-        directory.display()
-    );
+    eprintln!("Writing firmware ({:.1} MiB)", bytes as f64 / MIB as f64);
     // Every download before the first write to the stick.
     prefetch_bundle(mount_image, Some(volume))?;
     let cache = super::cache_dir().join("firmware");
@@ -540,8 +526,7 @@ pub(super) fn provision_bundle(
     let mut notes = Vec::new();
     if !left.is_empty() {
         notes.push(format!(
-            "{} has no room for {} of the firmware bundle's files, so PCs that need them \
-             lack them: {}",
+            "{} has no room for {} firmware files, so PCs that need them lack them: {}",
             volume.display(),
             left.len(),
             left.iter()
@@ -590,10 +575,10 @@ pub(super) fn bundle_status(volume: &Path) -> std::result::Result<String, String
             })
             .count();
         return Err(if present == 0 {
-            "the stick has no firmware bundle".into()
+            "the stick has no firmware".into()
         } else {
             format!(
-                "the firmware bundle is incomplete: {present} of {} files are on the stick",
+                "the firmware on the stick is incomplete: {present} of {} files are there",
                 bundle::size().0
             )
         });
@@ -611,26 +596,11 @@ pub(super) fn bundle_status(volume: &Path) -> std::result::Result<String, String
     let missing = parsed.missing();
     let (count, bytes) = bundle::size();
     if missing.is_empty() && damaged == 0 {
-        return Ok(format!(
-            "complete: {count} files, {:.1} MiB",
-            bytes as f64 / MIB as f64
-        ));
+        return Ok(format!("complete ({:.1} MiB)", bytes as f64 / MIB as f64));
     }
     Err(format!(
-        "the bundle lacks {} of {count} files{}{}",
+        "the firmware on the stick lacks {} of {count} files{}",
         missing.len(),
-        if missing.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " ({})",
-                missing
-                    .iter()
-                    .map(|artifact| artifact.member)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        },
         if damaged == 0 {
             String::new()
         } else {
@@ -911,7 +881,7 @@ mod tests {
         let parsed = bundle::Bundle::parse(&manifest).unwrap();
         assert!(parsed.missing().is_empty());
         assert_eq!(parsed.objects.len(), 87);
-        assert!(bundle_summary().starts_with("every supported device: 87 files, 115.8 MiB"));
+        assert_eq!(bundle_summary(), "for every supported device (115.8 MiB)");
         // A volume short of room keeps the small files and leaves the large
         // GPU images out, by name.
         let (files, left) = bundle_plan(Some(MARGIN + 40 * MIB), 0);
@@ -1142,7 +1112,7 @@ mod tests {
         let status = bundle_status(dir.path()).unwrap_err();
         assert_eq!(
             status,
-            "the firmware bundle is incomplete: 3 of 87 files are on the stick"
+            "the firmware on the stick is incomplete: 3 of 87 files are there"
         );
     }
 
@@ -1152,7 +1122,7 @@ mod tests {
         assert!(
             bundle_status(dir.path())
                 .unwrap_err()
-                .contains("no firmware bundle")
+                .contains("has no firmware")
         );
         // A partial bundle: one real recipe's entry, its file not written.
         let first = bundle::complete()[0];
@@ -1165,10 +1135,7 @@ mod tests {
         .unwrap();
         let status = bundle_status(dir.path()).unwrap_err();
         assert!(status.contains("lacks 86 of 87 files"), "{status}");
-        assert!(
-            status.contains("nvidia/ga102/gsp/gsp-570.144.bin"),
-            "{status}"
-        );
+        assert!(!status.contains("nvidia/"), "{status}");
         assert!(status.contains("1 of its files are damaged"), "{status}");
     }
 

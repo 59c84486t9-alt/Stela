@@ -559,15 +559,18 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     host.nvidia_gpus.take();
     // No firmware follows this computer's GPUs; an unsupported one is a note.
     assert!(!plan.contains("gb203"), "{plan}");
-    assert!(plan.contains("NVIDIA GPU (device 9999)"), "{plan}");
+    assert!(plan.contains("NVIDIA GPU is not supported"), "{plan}");
+    assert!(!plan.contains("9999"), "{plan}");
     assert!(plan.contains("Dry run: nothing was changed."), "{plan}");
-    assert!(plan.contains("ECID           0x"), "{plan}");
-    assert!(plan.contains("gs.apple.com"), "{plan}");
+    // The plan names no machine identity, signing service or internal path.
+    for hidden in ["ECID", "gs.apple.com", "EFI/stela", "stela/boot"] {
+        assert!(!plan.contains(hidden), "{hidden}: {plan}");
+    }
     // macOS is on the stick, and the plan still says the install needs the
-    // network, for the signing server alone.
+    // network, to sign its files alone.
     let local = create::OFFLINE_SIGNING_NOTE;
     assert!(plan.contains(local), "{plan}");
-    assert!(plan.contains("restore        "), "{plan}");
+    assert!(plan.contains("boot files     "), "{plan}");
     assert!(!plan.contains("recoveryOS     "), "{plan}");
     assert_eq!(
         (snapshot(&f.esp), snapshot(&f.data), snapshot(&volume)),
@@ -679,10 +682,7 @@ fn setup_places_bundles_on_fat32_data_volume() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("not FAT32"), "{error}");
-    assert!(
-        error.contains("boot bundles and the install medium"),
-        "{error}"
-    );
+    assert!(error.contains("macOS and its boot files"), "{error}");
     // A FAT data partition holds the bundle and the network install's
     // inventory under `stela/`; the EFI partition keeps only the boot
     // loader and its configuration.
@@ -731,7 +731,7 @@ fn usbs_setup_cannot_boot_from_are_explained_and_left_unchanged() {
     let mut dry = command(&f, &f.data);
     dry.dry_run = true;
     let plan = setup(&environment(&host), dry).unwrap();
-    assert!(plan.contains(&f.esp.display().to_string()), "{plan}");
+    assert!(plan.contains("writes         this stick only"), "{plan}");
     let loader = f.esp.join(efi::LOADER);
     fs::create_dir_all(loader.parent().unwrap()).unwrap();
     fs::write(&loader, b"MZopencore").unwrap();
@@ -839,13 +839,12 @@ fn older_setups_are_still_read_and_undone() {
     let error = read_record(&environment(&f.host), &f.esp)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("schema 7 setup"), "{error}");
-    assert!(error.contains("recoveryOS bundle"), "{error}");
+    assert!(error.contains("too old for this one to read"), "{error}");
     assert!(error.contains("Start over with `stela create`"), "{error}");
     let error = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("no longer reads"), "{error}");
+    assert!(error.contains("too old for this one to read"), "{error}");
     let dry = uninstall(&environment(&f.host), &f.esp, true).unwrap();
     assert!(dry.contains("keep     install \"macOS\""), "{dry}");
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
@@ -901,7 +900,7 @@ fn older_setups_are_still_read_and_undone() {
     let error = read_record(&environment(&f.host), &f.esp)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("under EFI/"), "{error}");
+    assert!(error.contains("too old for this one to read"), "{error}");
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert_eq!((snapshot(&f.esp), snapshot(&volume)), before);
     assert!(!old.join("boot").exists());
@@ -1221,7 +1220,7 @@ fn setup_erases_usb_and_refuses_internal_disk() {
     let mut dry = command(&f, Path::new("disk5"));
     dry.dry_run = true;
     let report = setup(&environment(&f.host), dry).unwrap();
-    assert!(report.contains("would erase disk5"), "{report}");
+    assert!(report.contains("Would erase disk5"), "{report}");
     let mut internal = command(&f, Path::new("disk0"));
     internal.dry_run = true;
     let error = setup(&environment(&f.host), internal)
@@ -1259,7 +1258,7 @@ fn setup_erases_usb_and_refuses_internal_disk() {
         card.dry_run = true;
         card.confirm_disk = Some(typed.into());
         let report = setup(&environment(&host), card).unwrap();
-        assert!(report.contains("would erase disk6"), "{report}");
+        assert!(report.contains("Would erase disk6"), "{report}");
     }
     // Without an image, the stick is left as it was: no erase is tried.
     let mut no_image = command(&f, Path::new("disk5"));
@@ -1531,8 +1530,7 @@ fn install_reads_full_or_streamed_image() {
     // Status names where a streamed image comes from, not an empty partition.
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains("(macOS ")
-            && status.contains(", Online, downloads during installation): intact"),
+        status.contains("macOS copy     none: the install downloads macOS"),
         "{status}"
     );
     assert!(status.contains(create::ONLINE_NOTE), "{status}");
@@ -1616,13 +1614,11 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
     assert!(plan.contains("installer      Offline: "), "{plan}");
-    assert!(plan.contains(STELA_GUID), "{plan}");
-    assert!(plan.contains("restore        "), "{plan}");
+    assert!(!plan.contains(STELA_GUID), "{plan}");
+    assert!(plan.contains("boot files     "), "{plan}");
     assert_eq!(snapshot(&stela_volume(&f)), stela_before);
-    assert!(
-        plan.contains("Mac's SSD      disk1s2 (serial STELAPC01"),
-        "{plan}"
-    );
+    assert!(plan.contains("installs to    disk1s2\n"), "{plan}");
+    assert!(!plan.contains("STELAPC01"), "{plan}");
     assert!(plan.contains("disk1s2 is blank"), "{plan}");
     assert!(plan.contains("Dry run"), "{plan}");
     assert_eq!(snapshot(&f.esp), before);
@@ -1713,7 +1709,11 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
         "{:#}",
         rerun(&f, |c| c.action = Action::Status).unwrap_err()
     );
-    assert!(status.contains("ipsw.000 holds"), "{status}");
+    assert!(
+        status.contains("macOS on the stick is damaged or incomplete"),
+        "{status}"
+    );
+    assert!(!status.contains("ipsw.000"), "{status}");
     fs::write(&first, &piece).unwrap();
     // --verify-on-read is the engine's, on the Install choice alone.
     let mut verify = record.clone();
@@ -2038,7 +2038,11 @@ fn additional_disk_gets_separate_machine_identity() {
         c.remove_install = Some("macOS 2".into());
     })
     .unwrap();
-    assert!(f2.contains(&format!("ECID {second}")), "{f2}");
+    assert!(
+        f2.contains("install \"macOS 2\" (its disk is kept)"),
+        "{f2}"
+    );
+    assert!(!f2.contains("ECID"), "{f2}");
     assert!(!bundle_of(&f, Some(second)).exists());
     assert!(!restore2.exists());
     assert_eq!(partition_bytes(&f, NOR2), nor2);
@@ -2090,7 +2094,11 @@ fn same_revision_update_preserves_options() {
     assert!(update(true).unwrap().contains("Dry run"));
     assert!(!spare.exists());
     assert_eq!(fs::read(&options).unwrap(), custom);
-    assert!(update(false).unwrap().contains("prepare the cache"));
+    assert!(
+        update(false)
+            .unwrap()
+            .contains("prepare the translation cache")
+    );
     assert_eq!(fs::metadata(&spare).unwrap().len(), store.pack_bytes);
     assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
     assert_eq!(fs::read(&options).unwrap(), custom);
@@ -2104,7 +2112,7 @@ fn same_revision_update_preserves_options() {
     assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
     assert_eq!(fs::read(&options).unwrap(), custom);
     assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_record);
-    assert!(update(false).unwrap().contains("already installed"));
+    assert!(update(false).unwrap().contains("already on the stick"));
 }
 
 #[test]
@@ -2117,14 +2125,11 @@ fn status_notes_the_spare_the_first_boot_took_and_succeeds() {
     // The first boot renames the spare into its translator's pack.
     let pack = store.directory().join(translations::pack_name(&[7; 32]));
     fs::rename(&spare, &pack).unwrap();
+    // That is no problem, and status names none of the cache's files.
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(status.contains("No problems found."), "{status}");
-    let note = status
-        .lines()
-        .find(|line| line.contains(&store.spare_repair()))
-        .unwrap();
-    assert!(note.trim_start().starts_with("note"), "{status}");
-    assert!(note.contains("`stela repair`"), "{status}");
+    assert!(!status.contains(&store.spare_repair()), "{status}");
+    assert!(!status.contains("translation"), "{status}");
     // Repair prepares the next spare and keeps the pack.
     rerun(&f, |c| c.action = Action::Repair).unwrap();
     assert!(store.spare_ready() && pack.is_file());
@@ -2192,10 +2197,7 @@ fn status_notes_a_stale_chosen_disk_without_a_problem() {
     )
     .unwrap();
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
-    assert!(
-        status.contains("the chosen disk is in this computer"),
-        "{status}"
-    );
+    assert!(status.contains("that disk is in this computer"), "{status}");
     assert!(!status.contains("will ask for a disk again"), "{status}");
 }
 
@@ -2302,13 +2304,11 @@ fn stela_update_replaces_the_loader_and_keeps_the_newest_pack() {
         })
         .collect();
     fs::write(packs.join(translations::pack_name(&[0xab; 32])), b"STLT").unwrap();
+    // The report names no translation pack: they are the cache's own.
     let report = update(false).unwrap();
+    assert!(report.contains("Stela          "), "{report}");
     assert!(
-        report.contains("new pack for the new stela.efi"),
-        "{report}"
-    );
-    assert!(
-        report.contains(&written[0].display().to_string()),
+        !report.contains(&written[0].display().to_string()),
         "{report}"
     );
     assert!(written[..3].iter().all(|path| !path.exists()) && written[3].exists());
@@ -2322,7 +2322,7 @@ fn stela_update_replaces_the_loader_and_keeps_the_newest_pack() {
     assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela-2"));
     // Only the loader changed: stela.cfg stays.
     assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
-    assert!(update(false).unwrap().contains("already installed"));
+    assert!(update(false).unwrap().contains("already on the stick"));
     // A stela.efi of another interface is refused.
     fs::write(&new, b"MZ old build").unwrap();
     assert!(
@@ -2443,9 +2443,10 @@ fn revision_update_rebuilds_bundles() {
     };
     let status = run(&|c| c.action = Action::Status).unwrap_err().to_string();
     assert!(
-        status.contains("boot bundles are revision 0, and this stela prepares revision 1"),
+        status.contains("boot files were prepared by an older stela"),
         "{status}"
     );
+    assert!(!status.contains("revision"), "{status}");
     assert!(!status.contains("--fetch"), "{status}");
     assert!(status.contains("`stela update`"), "{status}");
     // A repair prepares them again first, as the update does; a dry run
@@ -2457,7 +2458,11 @@ fn revision_update_rebuilds_bundles() {
         c.dry_run = true;
     })
     .unwrap();
-    assert!(repair.contains("replaces schema 4 revision 0"), "{repair}");
+    assert!(
+        repair.contains("prepared again for this version"),
+        "{repair}"
+    );
+    assert!(!repair.contains("schema"), "{repair}");
     assert!(repair.contains("the repair checks the rest"), "{repair}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     let update = |ipsw: bool, dry_run: bool| {
@@ -2474,15 +2479,14 @@ fn revision_update_rebuilds_bundles() {
     let plan = update(true, true).unwrap();
     assert!(!plan.contains("is already installed"), "{plan}");
     assert!(plan.contains(&f.ipsw.display().to_string()), "{plan}");
+    assert!(plan.contains("boot files     prepared again"), "{plan}");
     for directory in directories(1) {
-        assert!(plan.contains(&directory.display().to_string()), "{plan}");
+        assert!(!plan.contains(&directory.display().to_string()), "{plan}");
     }
     let plan = update(false, true).unwrap();
     assert!(plan.contains("from this stick's copy of macOS"), "{plan}");
     assert!(plan.contains("nothing is downloaded"), "{plan}");
-    for directory in directories(1) {
-        assert!(plan.contains(&directory.display().to_string()), "{plan}");
-    }
+    assert!(plan.contains("boot files     prepared again"), "{plan}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     // A copy that does not read back as written is refused before the stick
     // changes.
@@ -2519,7 +2523,11 @@ fn revision_update_rebuilds_bundles() {
     );
     // Bundles of the current revision are left alone: a new stela.efi
     // needs no restore image, and the same one is no update.
-    assert!(update(false, false).unwrap().contains("already installed"));
+    assert!(
+        update(false, false)
+            .unwrap()
+            .contains("already on the stick")
+    );
     let new_efi = f._dir.path().join("new.efi");
     fs::write(&new_efi, efi_image(b"stela-2")).unwrap();
     run(&|c| {
@@ -2595,13 +2603,10 @@ fn revision_update_without_any_image_fails_before_changing_anything() {
         .dispatch(&environment_at(&f.host, &newer, 1))
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains(&format!("schema {} revision 1", current().schema)),
-        "{error}"
-    );
+    assert!(error.contains("prepares the boot files again"), "{error}");
     assert!(error.contains("--ipsw FILE"), "{error}");
-    assert!(error.contains("streams it from Apple"), "{error}");
-    assert!(error.contains(&cache.display().to_string()), "{error}");
+    assert!(error.contains("downloads it during the install"), "{error}");
+    assert!(!error.contains(&cache.display().to_string()), "{error}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
 }
 
@@ -2682,9 +2687,11 @@ fn revision_update_downloads_only_the_boot_files_saying_their_size() {
     let mut dry = update_request(&f, &cache);
     dry.dry_run = true;
     let plan = dry.dispatch(&environment).unwrap();
-    assert!(plan.contains("download 2.2 GB of the macOS"), "{plan}");
-    assert!(plan.contains("27.0 GB"), "{plan}");
-    assert!(plan.contains("--ipsw FILE"), "{plan}");
+    assert!(
+        plan.contains("download the boot files of macOS STELA1 (2.2 GB)"),
+        "{plan}"
+    );
+    assert!(!plan.contains("27.0 GB"), "{plan}");
     assert_eq!(fetched.get(), 0, "a dry run downloads nothing");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     update_request(&f, &cache).dispatch(&environment).unwrap();
@@ -2779,7 +2786,7 @@ fn status_advises_update_stela_while_bundles_are_of_another_revision() {
     let mut repair = update_request(&f, &f._dir.path().join("cache"));
     repair.action = Action::Repair;
     let error = repair.dispatch(&environment).unwrap_err().to_string();
-    assert!(error.contains("restore image"), "{error}");
+    assert!(error.contains("repair needs macOS"), "{error}");
     assert_eq!(record(&f).bundle_revision, 1);
 }
 
@@ -2797,14 +2804,14 @@ fn os_update_checks_everything_before_any_download() {
     };
     // The setup's own build: nothing to do, and no download (they panic).
     let done = os(restore::payload::SYNTHETIC_BUILD, &environment(&f.host)).unwrap();
-    assert!(done.contains("already the build"), "{done}");
+    assert!(done.contains("already installs macOS"), "{done}");
     assert!(done.contains("nothing to update"), "{done}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     // Another build, offline and nowhere on this computer: refused with
     // what to do.
     let error = os("STELA2", &environment(&f.host)).unwrap_err().to_string();
     assert!(error.contains("--ipsw FILE"), "{error}");
-    assert!(error.contains("the whole image"), "{error}");
+    assert!(error.contains("could not be downloaded"), "{error}");
     // A whole image larger than the stick's free space: refused before the
     // download, with the sizes.
     let huge = |_: &str, _: &str| -> Result<(u64, u64)> { Ok((GIB, 1000 * GIB)) };
@@ -2837,7 +2844,7 @@ fn a_new_setup_takes_an_image_this_computer_holds_instead_of_downloading() {
         request.install_image = Some(installer);
         let text = setup(&environment(&f.host), request).unwrap();
         assert!(
-            text.contains(&format!("restore image  {}", cached.display())),
+            text.contains(&format!("macOS image    {}", cached.display())),
             "{text}"
         );
         assert_eq!(record(&f).install_kind(), installer);
@@ -2861,10 +2868,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     fs::write(&first, &bad).unwrap();
     let status = || rerun(&f, |c| c.action = Action::Status);
     let clean = status().unwrap();
-    assert!(
-        clean.contains("every block is checked as the install reads it"),
-        "{clean}"
-    );
+    assert!(clean.contains("macOS copy     complete"), "{clean}");
     // Without the image or the network, repair refuses before it changes
     // anything: the damaged piece stays rather than going missing.
     let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
@@ -2878,7 +2882,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
         "{:#}",
         offline().dispatch(&environment(&f.host)).unwrap_err()
     );
-    assert!(error.contains("needs the macOS"), "{error}");
+    assert!(error.contains("repair needs macOS"), "{error}");
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     // With Apple's servers reachable, the dry run names the download of
     // that piece alone.
@@ -2894,10 +2898,11 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
         .unwrap();
     let piece = host::bytes_text(good.len() as u64);
     assert!(
-        plan.contains(&format!("download {piece} from Apple")),
+        plan.contains(&format!(
+            "download the rest of macOS STELA1 ({piece}) onto the stick"
+        )),
         "{plan}"
     );
-    assert!(plan.contains("this stick's copy lacks"), "{plan}");
     // The image, downloaded earlier.
     let cache = f._dir.path().join("cache");
     fs::create_dir_all(&cache).unwrap();
@@ -2919,9 +2924,10 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     // Asked to, repair reads every piece, and names what it finds.
     let plan = repair(true, true);
     assert!(
-        plan.contains("ipsw.000 damaged: would be removed"),
+        plan.contains("macOS copy     1 part damaged: would be written again"),
         "{plan}"
     );
+    assert!(!plan.contains("ipsw.000"), "{plan}");
     assert!(plan.contains(&format!("({piece} to write)")), "{plan}");
     assert_eq!(fs::read(&first).unwrap(), bad);
     // An install that found the block: status names the piece and repair.
@@ -2933,19 +2939,19 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     .unwrap();
     let problems = format!("{:#}", status().unwrap_err());
     assert!(
-        problems.contains("ipsw.000 failed its block check"),
+        problems.contains("1 part of macOS on the stick failed its check during an install"),
         "{problems}"
     );
     assert!(problems.contains("`stela repair`"), "{problems}");
     // Repair finds it by itself, and writes it again from the image.
     let done = repair(false, false);
-    assert!(done.contains("ipsw.000 damaged: removed"), "{done}");
+    assert!(done.contains("1 part damaged: written again"), "{done}");
     assert_eq!(fs::read(&first).unwrap(), good);
     // The log still names it; it is put right since.
     assert!(status().unwrap().contains("No problems found."));
     let again = repair(true, false);
     assert!(
-        again.contains("every piece read and checked: intact"),
+        again.contains("every part read and checked: intact"),
         "{again}"
     );
     // A later install that finds a damaged block is named again.
@@ -2956,7 +2962,7 @@ fn a_piece_an_install_found_damaged_is_named_by_status_and_put_right_by_repair()
     .unwrap();
     let problems = format!("{:#}", status().unwrap_err());
     assert!(
-        problems.contains("ipsw.000 failed its block check"),
+        problems.contains("of macOS on the stick failed"),
         "{problems}"
     );
 }
@@ -2995,11 +3001,11 @@ fn repair_of_a_short_piece_downloads_that_piece_alone_saying_so() {
     let plan = repair(None, true).unwrap();
     let total = host::bytes_text(piece.len() as u64);
     assert!(
-        plan.contains(&format!("download {total} from Apple")),
+        plan.contains(&format!(
+            "download the rest of macOS STELA1 ({total}) onto the stick"
+        )),
         "{plan}"
     );
-    assert!(plan.contains("this stick's copy lacks"), "{plan}");
-    assert!(plan.contains("checked and kept"), "{plan}");
     assert!(!plan.contains("boot files"), "{plan}");
     let error = repair(None, false).unwrap_err().to_string();
     assert!(error.contains("asked for Pieces"), "{error}");
@@ -3054,8 +3060,11 @@ fn os_update_with_room_for_one_copy_replaces_it_only_after_asking() {
         })
         .unwrap();
     assert!(never.shown.borrow().is_empty());
-    assert!(plan.contains("remove first"), "{plan}");
-    assert!(plan.contains(&old.display().to_string()), "{plan}");
+    assert!(
+        plan.contains("remove first   macOS STELA1's copy"),
+        "{plan}"
+    );
+    assert!(!plan.contains(&old.display().to_string()), "{plan}");
     // A no keeps everything.
     let no = ui::tests::Scripted::new(&["no"]);
     let error = os_update(&f, &newer)
@@ -3230,10 +3239,10 @@ fn device_skips_end_only_once_an_update_or_repair_has_done_everything_else() {
     fs::remove_file(f.esp.join(LOADER_PATH)).unwrap();
     let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
     assert!(
-        report.contains("PCI 0000:07:00.0 10ec:8125 will be started again"),
+        report.contains("PCI 0000:07:00.0 10ec:8125 will be tried again"),
         "{report}"
     );
-    assert_eq!(report.matches("device skips").count(), 1, "{report}");
+    assert_eq!(report.matches("skipped  ").count(), 1, "{report}");
     assert!(cleared(&f));
     // So does an update; a dry run names them and changes nothing.
     let f = made_by(None);
@@ -3243,7 +3252,7 @@ fn device_skips_end_only_once_an_update_or_repair_has_done_everything_else() {
         c.dry_run = true;
     })
     .unwrap();
-    assert!(report.contains("would be started again"), "{report}");
+    assert!(report.contains("would be tried again"), "{report}");
     assert!(!cleared(&f));
     rerun(&f, |c| c.action = Action::UpdateStela).unwrap();
     assert!(cleared(&f));
@@ -3401,24 +3410,28 @@ fn stela_update_stopped_after_its_loader_finishes_when_run_again() {
     fs::write(f.esp.join(CHOICES_PATH), &old_choices).unwrap();
     copy_tree(&saved, &old_bundle);
     let status = run(&|c| c.action = Action::Status).unwrap_err().to_string();
+    assert!(status.contains("not the one it was made with"), "{status}");
     assert!(
-        status.contains("not the version setup installed"),
+        status.contains("left by an update that stopped"),
         "{status}"
     );
-    assert!(status.contains("left by an interrupted update"), "{status}");
     // A dry run changes nothing; running the update again finishes it
     // without the restore image.
     let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
     assert!(update(false, true).unwrap().contains("Dry run"));
     assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
     let report = update(false, false).unwrap();
-    assert!(report.contains("its update is finished"), "{report}");
+    assert!(report.contains("this finishes its update"), "{report}");
     assert!(!old_bundle.exists());
     assert_eq!(record(&f), done);
     assert_eq!(fs::read_to_string(&options).unwrap(), done.options);
     let status = run(&|c| c.action = Action::Status).unwrap();
     assert!(status.contains("No problems found."), "{status}");
-    assert!(update(false, false).unwrap().contains("already installed"));
+    assert!(
+        update(false, false)
+            .unwrap()
+            .contains("already on the stick")
+    );
 }
 
 #[test]
@@ -3460,11 +3473,11 @@ fn os_update_leftovers_are_removed_by_running_it_again_or_repair() {
     stop();
     let problems = status().unwrap_err().to_string();
     assert!(
-        problems.contains("left by an interrupted update"),
+        problems.contains("left by an update that stopped"),
         "{problems}"
     );
     let report = update(false).unwrap();
-    assert!(report.contains("earlier builds"), "{report}");
+    assert!(report.contains("earlier macOS versions"), "{report}");
     assert!(!old_bundle.exists() && !old_medium.exists());
     assert_eq!(record(&f), done);
     assert!(status().unwrap().contains("No problems found."));
@@ -3477,7 +3490,7 @@ fn os_update_leftovers_are_removed_by_running_it_again_or_repair() {
         c.dry_run = true;
     })
     .unwrap();
-    assert!(plan.contains("interrupted update"), "{plan}");
+    assert!(plan.contains("a stopped update left"), "{plan}");
     assert!(old_bundle.exists() && old_medium.exists());
     rerun(&f, |c| c.action = Action::Repair).unwrap();
     assert!(!old_bundle.exists() && !old_medium.exists());
@@ -3547,7 +3560,7 @@ fn interrupted_first_setup_resumes_keeping_intact_files() {
     let status = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(status.contains("was interrupted: "), "{status}");
+    assert!(status.contains("stopped part way: "), "{status}");
     // The parts it had not written are named as its, not as other fixes.
     assert!(status.contains("1 problem:"), "{status}");
     assert_eq!(status.matches("repair").count(), 1, "{status}");
@@ -3555,8 +3568,11 @@ fn interrupted_first_setup_resumes_keeping_intact_files() {
     let mut dry = installed_command(&f);
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
-    assert!(plan.contains("resumes the setup interrupted"), "{plan}");
-    assert!(plan.contains("boot files are intact and kept"), "{plan}");
+    assert!(plan.contains("finishes the create that stopped"), "{plan}");
+    assert!(
+        plan.contains("keeps the boot files already on the stick"),
+        "{plan}"
+    );
     assert!(!f.esp.join(efi::LOADER).exists());
     setup(&environment(&f.host), installed_command(&f)).unwrap();
     // The intact piece and bundle were kept, the short piece written again.
@@ -3573,7 +3589,7 @@ fn interrupted_first_setup_resumes_keeping_intact_files() {
     let again = setup(&environment(&f.host), installed_command(&f))
         .unwrap_err()
         .to_string();
-    assert!(again.contains("is already set up"), "{again}");
+    assert!(again.contains("already holds Stela"), "{again}");
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert_eq!(snapshot(&f.esp), before);
     assert!(!stela_volume(&f).join("stela").exists());
@@ -3595,7 +3611,7 @@ fn interrupted_first_setup_of_another_build_or_target_is_refused() {
     other.nor = Some(NOR2.into());
     let error = setup(&environment(&f.host), other).unwrap_err().to_string();
     assert!(
-        error.contains("holds an interrupted setup that differs from this one"),
+        error.contains("holds a create that stopped and differs from this one"),
         "{error}"
     );
     assert!(error.contains("this one STELA2"), "{error}");
@@ -3612,7 +3628,8 @@ fn interrupted_first_setup_of_another_build_or_target_is_refused() {
     let mut ecid = installed_command(&f);
     ecid.ecid = Some(Ecid::parse("0x1234").unwrap());
     let error = setup(&environment(&f.host), ecid).unwrap_err().to_string();
-    assert!(error.contains("this machine's ECID is"), "{error}");
+    assert!(error.contains("already has another ECID"), "{error}");
+    assert!(!error.contains("0x"), "{error}");
 }
 
 #[test]
@@ -3685,7 +3702,7 @@ fn an_interrupted_setup_follows_the_usb_to_where_it_is_mounted_now() {
     let mut dry = installed_command(&f);
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
-    assert!(plan.contains("resumes the setup interrupted"), "{plan}");
+    assert!(plan.contains("finishes the create that stopped"), "{plan}");
     assert!(!plan.contains(old.to_str().unwrap()), "{plan}");
     setup(&environment(&f.host), installed_command(&f)).unwrap();
     let resumed = record(&f);
@@ -3784,7 +3801,10 @@ fn an_older_stelas_interrupted_setup_is_resumed_with_new_bundles_and_its_pieces(
     again.install_image = None;
     let report = setup(&new, again).unwrap();
     assert!(report.contains("Done."), "{report}");
-    assert!(report.contains("an older stela's"), "{report}");
+    assert!(
+        report.contains("an older stela wrote the boot files"),
+        "{report}"
+    );
     let resumed = record(&f);
     assert!(resumed.complete);
     assert_eq!(resumed.bundle_revision, 1);
@@ -4223,10 +4243,7 @@ fn repair_lets_a_chosen_disks_metal_plugin_repair_run_again_on_the_pc() {
         Variables::parse(nor.bank(nor.current_bank().unwrap()).unwrap()).unwrap()
     };
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
-    assert!(
-        status.contains("the chosen disk is in this computer"),
-        "{status}"
-    );
+    assert!(status.contains("that disk is in this computer"), "{status}");
     assert!(
         status.contains("the automatic repair ran and did not install it"),
         "{status}"
@@ -4271,10 +4288,10 @@ fn repair_restores_recorded_state() {
     let report = status().unwrap();
     assert!(report.contains("No problems found."), "{report}");
     assert!(report.contains("Install \"macOS\" (default)"), "{report}");
-    assert!(report.contains("ECID           0x"), "{report}");
+    assert!(!report.contains("ECID"), "{report}");
     assert!(report.contains("no installed macOS yet"), "{report}");
     assert!(report.contains("NVRAM          blank"), "{report}");
-    assert!(report.contains("SEP state      blank"), "{report}");
+    assert!(report.contains("machine keys   none yet"), "{report}");
     assert!(report.contains("intact"), "{report}");
     // Status changes nothing.
     let before = snapshot(&f.esp);
@@ -4289,9 +4306,13 @@ fn repair_restores_recorded_state() {
     fs::write(f.esp.join("EFI/stela/stela.cfg"), b"--system\n").unwrap();
     let error = status().unwrap_err().to_string();
     assert!(error.contains("problems:"), "{error}");
-    assert!(error.contains("ramdisk.img"), "{error}");
-    assert!(error.contains("not the version setup installed"), "{error}");
-    assert!(error.contains("stela.cfg differs"), "{error}");
+    assert!(
+        error.contains("boot files on the stick are damaged"),
+        "{error}"
+    );
+    assert!(!error.contains("ramdisk.img"), "{error}");
+    assert!(error.contains("not the one it was made with"), "{error}");
+    assert!(error.contains("boot settings differ"), "{error}");
     // ... an update puts the loader back ...
     rerun(&f, |c| {
         c.action = Action::UpdateStela;
@@ -4335,7 +4356,8 @@ fn repair_restores_recorded_state() {
     old.installs[0].ecid = None;
     write_record(&f.esp, &old).unwrap();
     let error = status().unwrap_err().to_string();
-    assert!(error.contains("has no ECID"), "{error}");
+    assert!(error.contains("needs new boot files"), "{error}");
+    assert!(!error.contains("ECID"), "{error}");
     assert!(error.contains("`stela repair`"), "{error}");
     assert!(!error.contains("--fetch"), "{error}");
     rerun(&f, |c| {
@@ -4457,8 +4479,10 @@ fn repair_recovers_interrupted_bundle_rename() {
     let error = rerun(&f, |c| c.action = Action::Status)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("set aside"), "{error}");
-    assert!(error.contains("stopped part way"), "{error}");
+    assert!(
+        error.contains("a copy of the boot files stopped part way"),
+        "{error}"
+    );
     // A dry run says so and changes nothing, and needs no restore image.
     let interrupted = snapshot(&f.esp);
     let dry = rerun(&f, |c| {
@@ -4469,7 +4493,7 @@ fn repair_recovers_interrupted_bundle_rename() {
     assert!(dry.contains("would put right"), "{dry}");
     assert_eq!(snapshot(&f.esp), interrupted);
     let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
-    assert!(report.contains("put back"), "{report}");
+    assert!(report.contains("put right a copy"), "{report}");
     assert!(!partial.exists() && !previous.exists());
     assert_eq!(snapshot(&f.esp), before);
     rerun(&f, |c| c.action = Action::Status).unwrap();
@@ -4543,7 +4567,7 @@ fn machine_state_roundtrip_requires_identity() {
     );
     assert_eq!(sep(&f), sep_before);
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
-    assert!(status.contains("SEP state      provisioned"), "{status}");
+    assert!(status.contains("machine keys   set up"), "{status}");
     assert!(status.contains("next boot      macOS"), "{status}");
 
     // The backup restores only to its own machine.
@@ -4611,7 +4635,7 @@ fn boot_log_prints_the_install_s_log_and_names_a_missing_one() {
     let state = partition_bytes(&f, NOR);
     let text = rerun(&f, |c| c.action = Action::BootLog).unwrap();
     assert!(
-        text.contains("(disk1s3): Stela boot log: 1 boots, 47 bytes\n"),
+        text.contains("(disk1s3): Stela boot log: 1 boots\n"),
         "{text}"
     );
     assert!(
@@ -4741,10 +4765,7 @@ fn machine_state_tail_stays_outside_guest_region() {
     dry.dry_run = true;
     let plan = setup(&environment(&f.host), dry).unwrap();
     assert!(
-        plan.contains(&format!(
-            "machine state  the tail of disk1s2 from byte {:#x}",
-            tail()
-        )),
+        plan.contains("machine state  the end of disk1s2\n"),
         "{plan}"
     );
     assert!(
@@ -4822,17 +4843,14 @@ fn machine_state_tail_stays_outside_guest_region() {
     );
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains(&format!(
-            "machine state  the tail of disk1s2 from byte {:#x}",
-            tail()
-        )),
+        status.contains("machine state  the end of disk1s2\n"),
         "{status}"
     );
     assert!(
         status.contains("next boot      System Recovery"),
         "{status}"
     );
-    assert!(status.contains("SEP state      blank"), "{status}");
+    assert!(status.contains("machine keys   none yet"), "{status}");
     assert!(status.contains("No problems found."), "{status}");
 
     // A provisioned SEP area in the tail backs up, survives a reset and
@@ -4870,7 +4888,7 @@ fn machine_state_tail_stays_outside_guest_region() {
     );
     assert_eq!(state_of(&f, REGION)[CAPACITY..], state[CAPACITY..]);
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
-    assert!(status.contains("SEP state      provisioned"), "{status}");
+    assert!(status.contains("machine keys   set up"), "{status}");
     rerun(&f, |c| {
         c.action = Action::RestoreState(file.clone());
         c.nor = Some(REGION.into());
@@ -5040,7 +5058,7 @@ fn separate_state_partition_is_not_converted() {
     })
     .unwrap();
     assert!(
-        added.contains("machine state  the tail of disk2s2"),
+        added.contains("machine state  the end of disk2s2"),
         "{added}"
     );
     let record = self::record(&f);
@@ -5131,7 +5149,10 @@ fn usb4_approvals_apply_to_all_boot_choices_until_withdrawn() {
         c.no_usb4_approve = true;
     })
     .unwrap();
-    assert!(report.contains("only with an IOMMU"), "{report}");
+    assert!(
+        report.contains("allowed only on PCs with an IOMMU"),
+        "{report}"
+    );
     assert!(!options().contains("--usb4-approve"), "{}", options());
 }
 
@@ -5145,7 +5166,7 @@ fn wifi_configuration_applies_to_all_boot_choices() {
     joined.wifi_passphrase = Some("correct horse".into());
     let report = setup(&environment(&f.host), joined).unwrap();
     assert!(
-        report.contains("joins \"Home Net\" under DE's rules"),
+        report.contains("Wi-Fi          \"Home Net\", DE rules; the passphrase is stored"),
         "{report}"
     );
     let key = f.esp.join(wifi::KEY_PATH);
@@ -5438,9 +5459,9 @@ fn interrupted_first_setup_status_names_the_command_that_finishes_it() {
     assert!(!reported.report.contains("then set up again"));
     assert_hints_name_the_usb(&reported.report);
     let (report, result) = split_report(Err(error));
-    assert!(report.contains("was interrupted"), "{report}");
+    assert!(report.contains("stopped part way"), "{report}");
     let summary = result.unwrap_err().to_string();
-    assert!(!summary.contains("was interrupted"), "{summary}");
+    assert!(!summary.contains("stopped part way"), "{summary}");
     // Update names the same fix, and repair finishes the setup as it
     // began: its build, model, target and machine state partition.
     let refusal = rerun(&f, |c| c.action = Action::UpdateStela)
@@ -5661,7 +5682,7 @@ fn a_usb_made_without_an_nvidia_gpu_needs_no_firmware_step() {
         lines.push(line);
     }
     assert_eq!(lines[0], lines[1]);
-    assert!(lines[0].contains("87 files, 115.8 MiB"), "{}", lines[0]);
+    assert!(lines[0].contains("115.8 MiB"), "{}", lines[0]);
     f.host.nvidia_gpus.borrow_mut().clear();
     let report = setup(&environment(&f.host), installed_command(&f)).unwrap();
     assert!(!report.contains("NVIDIA"), "{report}");
@@ -5955,10 +5976,9 @@ fn a_usb_named_by_its_mounted_volume_gets_the_installer_its_size_allows() {
 }
 
 #[test]
-fn the_offline_promise_says_the_install_checks_the_answers_first() {
-    // Setup cannot run the install's dry run (it needs the install's own
-    // nonce and machine), so the plan and status say the check.
-    assert!(create::OFFLINE_NOTE.contains("only if they do not fit"));
+fn the_installer_notes_say_what_the_install_needs_without_the_signing() {
+    // The plan and status say whether the install needs the internet, in a
+    // few words, and never how it signs its files.
     for message in [
         create::OFFLINE_NOTE,
         create::OFFLINE_SIGNING_NOTE,
@@ -5968,6 +5988,9 @@ fn the_offline_promise_says_the_install_checks_the_answers_first() {
             message.starts_with("Offline: ") || message.starts_with("Online: "),
             "{message}"
         );
+        for hidden in ["ECID", "signing server", "answers", "gs.apple.com"] {
+            assert!(!message.contains(hidden), "{message}");
+        }
     }
 }
 
@@ -6314,14 +6337,14 @@ fn a_stick_records_its_stela_version_and_an_update_brings_an_older_one_to_this_o
     let f = made_by(None);
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains("Stela 0.3 or older; this stela is"),
+        status.contains("Stela          0.3 or older; this stela is"),
         "{status}"
     );
     rerun(&f, |c| c.action = Action::UpdateStela).unwrap();
     assert_eq!(record(&f).release.as_deref(), Some(release::CURRENT));
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains(&format!("Stela {}\n", release::CURRENT)),
+        status.contains(&format!("Stela          {}\n", release::CURRENT)),
         "{status}"
     );
 }
@@ -6331,7 +6354,7 @@ fn an_older_stela_asks_before_it_changes_a_newer_stick_and_a_no_changes_nothing(
     let f = made_by(Some("99.0.0"));
     let status = rerun(&f, |c| c.action = Action::Status).unwrap();
     assert!(
-        status.contains("Stela 99.0.0, newer than this stela"),
+        status.contains("Stela          99.0.0, newer than this stela"),
         "{status}"
     );
     let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
@@ -6945,7 +6968,7 @@ fn journey_c_an_older_stick_offers_the_update_and_quit_changes_nothing() {
     assert!(done, "{shown}");
     assert!(shown.contains(&question), "{shown}");
     assert!(shown.contains("● Stela 0.3 or older · Offline"), "{shown}");
-    assert!(shown.contains("● Replaces stela.efi"), "{shown}");
+    assert!(shown.contains("● Updates Stela on the stick"), "{shown}");
     assert!(shown.ends_with("■ Nothing was changed."), "{shown}");
     assert_eq!(stick_files(&f), before);
     // Update brings it to this Stela.
@@ -7098,7 +7121,7 @@ fn repair_puts_back_a_missing_or_replaced_stela_efi_and_the_menu_offer_succeeds(
         .unwrap_err()
         .to_string();
     assert!(
-        status.contains("is not the version setup installed"),
+        status.contains("is not the one it was made with"),
         "{status}"
     );
     // A dry run changes nothing and says what it would do.
@@ -7654,7 +7677,7 @@ fn a_data_partition_out_of_reach_is_named_and_never_offered_a_repair() {
         "{shown}"
     );
     assert!(
-        shown.contains("FAT32 data partition") && shown.contains("is not mounted"),
+        shown.contains("STELA volume") && shown.contains("is not mounted"),
         "{shown}"
     );
     // `stela status` and `stela repair` say the same and write nothing,
@@ -7729,8 +7752,12 @@ fn a_stick_whose_record_cannot_be_read_is_never_taken_for_one_without_stela() {
     let schema_8 = format!("{{\"kind\": \"{RECORD_KIND}\", \"schema_version\": 8}}");
     for (what, record, reason) in [
         ("damaged", "{\"kind\": ".to_owned(), "read setup record"),
-        ("newer schema", newer_schema, "may come from a newer stela"),
-        ("schema 8", schema_8, "no longer reads"),
+        (
+            "newer schema",
+            newer_schema,
+            "a newer stela may have made it",
+        ),
+        ("schema 8", schema_8, "too old for this one to read"),
     ] {
         let f = made_by(Some(release::CURRENT));
         fs::write(f.esp.join(RECORD), record).unwrap();
@@ -7841,13 +7868,13 @@ fn enter_at_every_question_never_erases_and_a_drive_is_typed_back() {
         let (shown, result, done) = plain_stela(&f, &[ENTER, ENTER], &[]);
         result.unwrap();
         assert!(done, "{what}:\n{shown}");
-        // The one candidate is named with its size, and its serial before
+        // The one candidate is named with its size, not its serial, before
         // the erase question, with what is on it.
         assert!(
             shown.contains(&format!("● Disk disk5 · {size}")),
             "{what}:\n{shown}"
         );
-        assert!(shown.contains("· serial TESTSERIAL"), "{what}:\n{shown}");
+        assert!(!shown.contains("TESTSERIAL"), "{what}:\n{shown}");
         assert!(
             shown.contains(&format!(
                 "▲ Everything on Disk disk5 ({size}) will be erased: 2 partitions, mounted at"
