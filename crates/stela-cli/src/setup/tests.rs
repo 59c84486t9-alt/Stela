@@ -7523,6 +7523,91 @@ fn plain_stela_unmounts_the_efi_partitions_it_mounted() {
     assert!(f.host.unmounted.borrow().is_empty());
 }
 
+/// `f`'s stick with neither of its partitions mounted, as a host leaves a
+/// stick it did not mount: the data partition's old mount holds nothing, and
+/// `mount` puts it at `STELA1` when `mountable`.
+fn unmounted_stick(mountable: bool) -> Fixture {
+    let mut f = made_by(Some(release::CURRENT));
+    let moved = f._dir.path().join("STELA1");
+    fs::rename(stela_volume(&f), &moved).unwrap();
+    f.host
+        .volumes
+        .insert(moved.clone(), (FileSystem::Fat, 100 * GIB, Some("disk5")));
+    let usb = f
+        .host
+        .disks
+        .iter_mut()
+        .find(|d| d.identifier == "disk5")
+        .unwrap();
+    for partition in &mut usb.partitions {
+        if partition.identifier == "disk5s1" || partition.identifier == STELA_PARTITION {
+            partition.mount = None;
+        }
+    }
+    f.host.mountable.insert("disk5s1".into(), f.esp.clone());
+    if mountable {
+        f.host.mountable.insert(STELA_PARTITION.into(), moved);
+    }
+    f
+}
+
+#[test]
+fn an_unmounted_data_partition_is_mounted_for_the_run_and_never_reads_as_damage() {
+    let f = unmounted_stick(true);
+    let before = (snapshot(&f.esp), snapshot(&f._dir.path().join("STELA1")));
+    let (shown, result, done) = plain_stela(&f, &["Show status"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(!shown.contains("needs repair"), "{shown}");
+    assert!(shown.ends_with("└ No problems found."), "{shown}");
+    // Both partitions it mounted are unmounted again when the run ends.
+    let unmounted = f.host.unmounted.borrow().clone();
+    assert!(unmounted.iter().any(|p| p == "disk5s1"), "{unmounted:?}");
+    assert!(
+        unmounted.iter().any(|p| p == STELA_PARTITION),
+        "{unmounted:?}"
+    );
+    assert_eq!(
+        (snapshot(&f.esp), snapshot(&f._dir.path().join("STELA1"))),
+        before
+    );
+    assert!(!stela_volume(&f).exists());
+}
+
+#[test]
+fn a_data_partition_out_of_reach_is_named_and_never_offered_a_repair() {
+    let f = unmounted_stick(false);
+    let before = snapshot(&f.esp);
+    let (shown, result, done) = plain_stela(&f, &["Quit"], &[]);
+    result.unwrap();
+    assert!(done, "{shown}");
+    assert!(!shown.contains("needs repair"), "{shown}");
+    assert!(
+        shown.contains("▲ This stick may hold Stela, but stela cannot read it"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("FAT32 data partition") && shown.contains("is not mounted"),
+        "{shown}"
+    );
+    // `stela status` and `stela repair` say the same and write nothing,
+    // above all not into the old mount's empty place.
+    for repair in [false, true] {
+        let action = || match repair {
+            false => Action::Status,
+            true => Action::Repair,
+        };
+        let error = format!("{:#}", rerun(&f, |c| c.action = action()).unwrap_err());
+        assert!(
+            error.contains("is not mounted, and stela could not mount it"),
+            "{error}"
+        );
+        assert!(error.contains(STELA_PARTITION), "{error}");
+    }
+    assert_eq!(snapshot(&f.esp), before);
+    assert!(!stela_volume(&f).exists());
+}
+
 #[test]
 fn status_needs_rights_only_for_an_efi_partition_without_a_mount() {
     // Windows gives a stick's EFI partition no drive letter unless the PC

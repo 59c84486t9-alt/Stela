@@ -186,11 +186,10 @@ fn classify(environment: &Environment<'_>, disk: host::Disk) -> Stick {
         // Hosts often leave a stick's EFI partition unmounted: it holds the
         // record.
         let esp = disk.partitions.iter().find(|p| p.content == "EFI")?;
-        let mount = match esp
-            .mount
-            .clone()
-            .map_or_else(|| super::mount_esp(environment.host, &esp.identifier), Ok)
-        {
+        let mount = match esp.mount.clone().map_or_else(
+            || super::mount_for_run(environment.host, &esp.identifier),
+            Ok,
+        ) {
             Ok(mount) => mount,
             Err(error) => {
                 unmountable = Some(format!(

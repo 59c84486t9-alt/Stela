@@ -263,14 +263,66 @@ pub(super) fn directory(volume: &Path, build: &str) -> PathBuf {
 }
 
 /// The USB's FAT32 data partition, which holds the boot bundles, the install
-/// medium and the translation store: `explicit`, or the first mounted FAT
-/// partition of the ESP's disk that is not the ESP. Returns its mount and
+/// medium and the translation store: `explicit`, or the first FAT partition
+/// of the ESP's disk that is not the ESP ([`search`]). Returns its mount and
 /// GPT unique GUID.
 pub(super) fn locate(
     host: &dyn Host,
     esp: &Path,
     explicit: Option<&Path>,
 ) -> Result<(PathBuf, String)> {
+    let (usb, reasons) = match search(host, esp, explicit)? {
+        Search::Found(volume, guid) => return Ok((volume, guid)),
+        Search::Missing { usb, reasons } => (usb, reasons),
+    };
+    if let Some(explicit) = explicit {
+        bail!(
+            "{} is not a FAT32 data partition of the stick that holds {}:\n{reasons}",
+            explicit.display(),
+            esp.display()
+        );
+    }
+    bail!(
+        "The boot bundles and the install medium go on a FAT32 data partition of the stick beside \
+         its EFI partition, and {usb} has none stela can use:\n{reasons}Setup does not repartition \
+         the stick: add a FAT32 partition of at least 30 GB with a disk utility, mount it, and run \
+         setup again."
+    )
+}
+
+/// The mount of the data partition of a setup the stick holds, whose EFI
+/// partition is at `esp`: as [`locate`] finds it, or an error that says the
+/// partition is out of reach, never that it needs writing again.
+pub(super) fn reach(host: &dyn Host, esp: &Path) -> Result<PathBuf> {
+    match search(host, esp, None)? {
+        Search::Found(volume, _) => Ok(volume),
+        Search::Missing { usb, reasons } if reasons.is_empty() => bail!(
+            "the stick's FAT32 data partition, which holds its boot bundles and install medium, \
+             is missing: {usb} has no partition beside its EFI partition"
+        ),
+        Search::Missing { reasons, .. } => bail!(
+            "the stick's FAT32 data partition, which holds its boot bundles and install medium, \
+             is not mounted, and stela could not mount it:\n{reasons}Mount it, or plug the stick \
+             in again, and run stela again"
+        ),
+    }
+}
+
+/// What [`search`] found.
+enum Search {
+    /// The data partition's mount and GPT unique GUID.
+    Found(PathBuf, String),
+    /// No data partition on the disk `usb`: why each partition is not it,
+    /// one line each.
+    Missing { usb: String, reasons: String },
+}
+
+/// The data partition of the ESP's disk: `explicit`, or the first mounted
+/// FAT partition that is not the ESP. Hosts leave a stick's partitions
+/// unmounted as often as they mount them, so without `explicit` and a
+/// mounted one, each unmounted partition beside the ESP is mounted for
+/// this run, as the ESP is ([`super::mount_for_run`]), until one is FAT.
+fn search(host: &dyn Host, esp: &Path, explicit: Option<&Path>) -> Result<Search> {
     let usb = host.volume(esp)?.disk.with_context(|| {
         format!(
             "this computer does not say which disk {} is on",
@@ -297,34 +349,55 @@ pub(super) fn locate(
             ));
             continue;
         }
-        let filesystem = host.volume(mount)?.filesystem;
-        if filesystem != FileSystem::Fat {
-            reasons.push_str(&format!(
-                "  {} is {filesystem}, not FAT32\n",
-                mount.display()
-            ));
-            continue;
+        if let Some(guid) = data_partition(host, &partition.identifier, mount, &mut reasons)? {
+            return Ok(Search::Found(mount.clone(), guid));
         }
-        let guid = host.partition(&partition.identifier)?.guid;
-        ensure!(
-            !guid.is_empty(),
-            "{} has no GPT partition GUID, by which stela.efi would find it",
-            partition.identifier
-        );
-        return Ok((mount.clone(), guid));
     }
-    if let Some(explicit) = explicit {
-        bail!(
-            "{} is not a FAT32 data partition of the stick that holds {}:\n{reasons}",
-            explicit.display(),
-            esp.display()
-        );
+    if explicit.is_none() {
+        for partition in &disk.partitions {
+            if partition.mount.is_some() || partition.content == "EFI" {
+                continue;
+            }
+            let found = super::mount_for_run(host, &partition.identifier).and_then(|mount| {
+                let guid = data_partition(host, &partition.identifier, &mount, &mut reasons)?;
+                Ok(guid.map(|guid| (mount, guid)))
+            });
+            match found {
+                Ok(Some((mount, guid))) => return Ok(Search::Found(mount, guid)),
+                Ok(None) => {}
+                Err(error) => reasons.push_str(&format!(
+                    "  {} could not be mounted: {error:#}\n",
+                    partition.identifier
+                )),
+            }
+        }
     }
-    bail!(
-        "The boot bundles and the install medium go on a FAT32 data partition of the stick beside \
-         its EFI partition, and {usb} has none mounted:\n{reasons}Setup does not repartition the stick: add a FAT32 \
-         partition of at least 30 GB with a disk utility, mount it, and run setup again."
-    )
+    Ok(Search::Missing { usb, reasons })
+}
+
+/// The GPT unique GUID of the partition `identifier` mounted at `mount`
+/// when it is FAT, the data partition's file system; else why not, added to
+/// `reasons`.
+fn data_partition(
+    host: &dyn Host,
+    identifier: &str,
+    mount: &Path,
+    reasons: &mut String,
+) -> Result<Option<String>> {
+    let filesystem = host.volume(mount)?.filesystem;
+    if filesystem != FileSystem::Fat {
+        reasons.push_str(&format!(
+            "  {} is {filesystem}, not FAT32\n",
+            mount.display()
+        ));
+        return Ok(None);
+    }
+    let guid = host.partition(identifier)?.guid;
+    ensure!(
+        !guid.is_empty(),
+        "{identifier} has no GPT partition GUID, by which stela.efi would find it"
+    );
+    Ok(Some(guid))
 }
 
 /// What writing the medium needs: the IPSW's pieces not already on

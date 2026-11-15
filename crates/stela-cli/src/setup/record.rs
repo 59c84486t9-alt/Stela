@@ -524,11 +524,20 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         }
     );
     let mut value = header;
-    rebase(
-        &mut value,
-        &esp,
-        &current_volume(environment.host, &esp, usb),
-    );
+    // A data partition out of reach is reported as that: the record's old
+    // paths, where nothing is mounted now, would read as files to write
+    // again, and a repair would write them into the host's own directories.
+    let volume = match reached_volume(environment.host, &esp, usb) {
+        Ok(volume) => volume,
+        Err(error) if volume_gone(&value) => {
+            return Err(error.context(format!(
+                "the Stela setup on {} cannot be read whole",
+                esp.display()
+            )));
+        }
+        Err(_) => esp.clone(),
+    };
+    rebase(&mut value, &esp, &volume);
     let record: Record = serde_json::from_value(value)
         .with_context(|| format!("cannot read setup record {}", path.display()))?;
     ensure!(
@@ -584,10 +593,29 @@ pub(super) fn probe(environment: &Environment<'_>, usb: &Path) -> Probe {
 /// the EFI partition, else the EFI partition itself, as for a setup with one
 /// partition.
 pub(super) fn current_volume(host: &dyn Host, esp: &Path, usb: &Path) -> PathBuf {
+    reached_volume(host, esp, usb).unwrap_or_else(|_| esp.to_path_buf())
+}
+
+/// [`current_volume`] without the fallback to the EFI partition: why the
+/// data partition is out of reach ([`medium::reach`]).
+fn reached_volume(host: &dyn Host, esp: &Path, usb: &Path) -> Result<PathBuf> {
     if usb != esp {
-        return usb.to_path_buf();
+        return Ok(usb.to_path_buf());
     }
-    medium::locate(host, esp, None).map_or_else(|_| esp.to_path_buf(), |(volume, _)| volume)
+    medium::reach(host, esp)
+}
+
+/// Whether the record `value` keeps its files on a data partition of its
+/// own, apart from its EFI partition, and its recorded mount holds none of
+/// them now: the paths it names lead nowhere.
+fn volume_gone(value: &serde_json::Value) -> bool {
+    let volume = value["volume"]
+        .as_str()
+        .or_else(|| value["payload_volume"].as_str());
+    match (value["esp"].as_str(), volume) {
+        (Some(esp), Some(volume)) => esp != volume && !Path::new(volume).join("stela").is_dir(),
+        _ => false,
+    }
 }
 
 /// Move every path of the record `value` to where the stick is mounted now:

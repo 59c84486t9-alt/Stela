@@ -164,15 +164,16 @@ thread_local! {
     /// repeat: never the volume path it was resolved to, which may hold
     /// the user's name.
     static NAMED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-    /// The EFI partitions this run mounted, with where: [`Mounted`]
+    /// The stick partitions this run mounted, with where: [`Mounted`]
     /// unmounts them when the run ends.
     static MOUNTED: std::cell::RefCell<Vec<(String, PathBuf)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Mount the EFI partition `identifier`, which hosts leave unmounted on a
-/// stick, for this run: [`Mounted`] unmounts it when the run ends.
-fn mount_esp(host: &dyn Host, identifier: &str) -> Result<PathBuf> {
+/// Mount the stick's partition `identifier`, its EFI or data partition,
+/// which hosts often leave unmounted, for this run: [`Mounted`] unmounts it
+/// when the run ends.
+fn mount_for_run(host: &dyn Host, identifier: &str) -> Result<PathBuf> {
     let mount = host.mount(identifier)?;
     MOUNTED.with_borrow_mut(|mounted| {
         if !mounted.iter().any(|(done, _)| done == identifier) {
@@ -183,7 +184,7 @@ fn mount_esp(host: &dyn Host, identifier: &str) -> Result<PathBuf> {
 }
 
 /// Held for a run: when it ends, on every path, it unmounts what the run
-/// mounted ([`mount_esp`]), so a run leaves no EFI partition mounted (a
+/// mounted ([`mount_for_run`]), so a run leaves no stick partition mounted (a
 /// lasting drive letter on Windows, a read-write mount on Linux) that was
 /// not mounted before it.
 struct Mounted<'a> {
@@ -1586,7 +1587,7 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
         Some(partition) => match &partition.mount {
             Some(mount) => mount.clone(),
             // Hosts leave a USB's EFI partition unmounted.
-            None => mount_esp(host, &partition.identifier).with_context(|| {
+            None => mount_for_run(host, &partition.identifier).with_context(|| {
                 format!(
                     "{} is on the same disk as EFI partition {}, which could not be mounted \
                      (setup needs {})",
