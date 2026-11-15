@@ -188,6 +188,26 @@ fn nv_status(code: u32) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// The memory BARs a reset kept, as the claim's reset line names them:
+/// `BAR0 16 MiB, BAR1 16 GiB`, each `(index, bytes)`. A BAR the size of the
+/// GPU's memory means firmware enabled Resizable BAR, which a reset puts
+/// back to its default size unless it is restored.
+pub fn bar_sizes(bars: &[(usize, u64)]) -> String {
+    let named: Vec<String> = bars
+        .iter()
+        .map(|&(index, bytes)| match bytes {
+            bytes if bytes >= 1 << 30 && bytes.is_multiple_of(1 << 30) => {
+                format!("BAR{index} {} GiB", bytes >> 30)
+            }
+            bytes if bytes >= 1 << 20 && bytes.is_multiple_of(1 << 20) => {
+                format!("BAR{index} {} MiB", bytes >> 20)
+            }
+            bytes => format!("BAR{index} {bytes:#x} bytes"),
+        })
+        .collect();
+    named.join(", ")
+}
+
 /// How the screen names a display adapter: its maker, PCI address and
 /// device ID.
 pub fn adapter(adapter: &Adapter) -> String {
@@ -370,6 +390,15 @@ mod tests {
             "The GPU's own firmware, GSP-RM, ended its initialisation (GSP_INIT_DONE, right after \
              it booted) with NV_STATUS 0x1234"
         );
+    }
+
+    #[test]
+    fn the_bars_a_reset_kept_are_named_with_their_sizes() {
+        assert_eq!(
+            bar_sizes(&[(0, 64 << 20), (1, 16 << 30), (3, 32 << 20), (5, 0x80)]),
+            "BAR0 64 MiB, BAR1 16 GiB, BAR3 32 MiB, BAR5 0x80 bytes"
+        );
+        assert_eq!(bar_sizes(&[]), "");
     }
 
     #[test]

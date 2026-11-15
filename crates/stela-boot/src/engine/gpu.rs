@@ -1148,12 +1148,22 @@ fn claim(
     let ready = cold
         .quiesce_and_bind()
         .map_err(|failure| cold_refusal(address, failure.error))?;
+    // The BARs as firmware sized them, which the reset kept: a BAR as large
+    // as the GPU's memory is a Resizable BAR firmware enabled.
+    let sizes: Vec<(usize, u64)> = placement
+        .regions
+        .iter()
+        .enumerate()
+        .filter(|(_, region)| region.size != 0)
+        .map(|(index, region)| (index, region.size))
+        .collect();
+    let sizes = stela_boot_core::gpu_status::bar_sizes(&sizes);
     match ready.reset() {
         None => output::arguments(format_args!(
-            "GPU {address}: no function-local reset; started as firmware left it, DMA translated\n"
+            "GPU {address}: no function-local reset; started as firmware left it, DMA translated; {sizes}\n"
         )),
         Some(gpu::cold::Reset::SecondaryBus) => output::arguments(format_args!(
-            "GPU {address}: no function-local reset; reset through its bridge's secondary bus\n"
+            "GPU {address}: no function-local reset; reset through its bridge's secondary bus; kept {sizes}\n"
         )),
         Some(gpu::cold::Reset::Function(method)) => {
             let name = match method {
@@ -1162,7 +1172,9 @@ fn claim(
                     "a D3hot to D0 power state reset"
                 }
             };
-            output::arguments(format_args!("GPU {address}: reset by {name}\n"));
+            output::arguments(format_args!(
+                "GPU {address}: reset by {name}; kept {sizes}\n"
+            ));
         }
     }
     // SAFETY: both original owners transfer into this retained function
