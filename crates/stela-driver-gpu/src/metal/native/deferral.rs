@@ -10,10 +10,14 @@
 //! holds it, runs in the job too. A creation through a binary archive's
 //! cache that adds what it lacks (`PipelineSource::Cached`, as an archived
 //! pipeline's variants are) runs in a job through that same cache, which the
-//! archive's destruction then leaves to the job ([`SharedCache`]); a lookup
-//! that fails on a miss (`Archived`) stays in the turn, whose next source
-//! depends on it. The job keeps the pipeline, and the call's next run takes
-//! it with no driver work.
+//! archive's destruction then leaves to the job ([`SharedCache`]). A lookup
+//! that fails on a miss (`Archived`) costs the same key hashing, 6-25 ms in
+//! a turn: it runs in a job too, which keeps its answer, the pipeline or
+//! that the archive lacks it, and the call's next run takes the pipeline,
+//! or goes on to its next source, with no driver work. The device looks in
+//! a creation's every archive in the same turn (`Device::create_from`).
+//! The job keeps the pipeline, and the call's next run takes it with no
+//! driver work.
 //!
 //! The job shares the compiler's NIR rather than copying it in the turn
 //! (copies took 15-35 ms): it pins each stage ([`pin_nir`]), which the
@@ -136,11 +140,29 @@ impl Default for Kept<MadePipeline> {
     }
 }
 
-/// A pipeline a job made, and the pins that keep its key's NIR handles
-/// naming its stages until a call takes it.
+/// What a job made for a creation, and the pins that keep its key's NIR
+/// handles naming its stages until a call takes it.
 struct MadePipeline {
-    pipeline: vk::Pipeline,
+    made: Answer,
     _pins: Vec<PinnedNir>,
+}
+
+/// A job's answer to a creation: the pipeline, or, for a lookup that fails
+/// on a miss, that the archive lacks it.
+#[derive(Clone, Copy)]
+enum Answer {
+    Pipeline(vk::Pipeline),
+    NotArchived,
+}
+
+impl MadePipeline {
+    /// The pipeline it holds, for its owner to destroy.
+    fn pipeline(&self) -> Option<vk::Pipeline> {
+        match self.made {
+            Answer::Pipeline(pipeline) => Some(pipeline),
+            Answer::NotArchived => None,
+        }
+    }
 }
 
 /// Kept pipelines are made under one generation: their pins, not a count
@@ -152,6 +174,8 @@ const GENERATION: u64 = 0;
 /// unadopted, it destroys the pipeline unless the device is gone.
 struct Ran {
     pipeline: Option<vk::Pipeline>,
+    /// A lookup that failed on a miss: the archive lacks the pipeline.
+    not_archived: bool,
     into_store: bool,
     hit: bool,
     pins: Vec<PinnedNir>,
@@ -297,9 +321,9 @@ impl Deferral {
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
         // Their archives' caches stay their owners'.
         self.shared.clear();
-        for made in self.made.drain() {
+        for pipeline in self.made.drain().filter_map(|made| made.pipeline()) {
             // SAFETY: the caller's; no call took the pipeline.
-            unsafe { device.destroy_pipeline(made.pipeline, None) };
+            unsafe { device.destroy_pipeline(pipeline, None) };
         }
         if self.own != vk::PipelineCache::null() {
             // SAFETY: the caller's.
@@ -317,18 +341,18 @@ impl Deferral {
 }
 
 impl NativeBackend {
-    /// A compiled creation, or one an archive's cache adds: the pipeline a
-    /// job made for it, else, while the call may defer, `DEFERRED` with the
-    /// job that makes it left. `None` creates in the call as without
-    /// deferral.
+    /// A creation: the answer a job made for it (the pipeline, or for a
+    /// lookup that fails on a miss, `NotArchived`), else, while the call may
+    /// defer, `DEFERRED` with the job that makes it left. `None` creates in
+    /// the call as without deferral.
     pub(super) fn deferred_creation(&mut self, wanted: Wanted<'_>) -> Option<Result<vk::Pipeline>> {
-        if let PipelineSource::Archived(_) = wanted.source() {
-            return None;
-        }
         let key = wanted.key();
         // The pins drop here: the key is spent.
         if let Taken::Fresh(made) | Taken::Stale(made) = self.deferral.made.take(&key, GENERATION) {
-            return Some(Ok(made.pipeline));
+            return Some(match made.made {
+                Answer::Pipeline(pipeline) => Ok(pipeline),
+                Answer::NotArchived => Err(Error::NotArchived),
+            });
         }
         let lock = self.deferral.deferring.clone()?;
         if self.deferral.failed.contains(&key) {
@@ -359,20 +383,29 @@ impl NativeBackend {
         if !Arc::ptr_eq(&ran.gone, &self.deferral.gone) {
             return;
         }
-        let Some(pipeline) = ran.pipeline.take() else {
-            Deferral::remember(&mut self.deferral.failed, done.key);
-            return;
+        let made = match ran.pipeline.take() {
+            Some(pipeline) => Answer::Pipeline(pipeline),
+            None if ran.not_archived => Answer::NotArchived,
+            None => {
+                Deferral::remember(&mut self.deferral.failed, done.key);
+                return;
+            }
         };
         if ran.into_store {
             self.store.created(&self.device, ran.hit);
         }
         let made = MadePipeline {
-            pipeline,
+            made,
             _pins: core::mem::take(&mut ran.pins),
         };
-        if let Some(oldest) = self.deferral.made.keep(done.key, GENERATION, made) {
+        if let Some(pipeline) = self
+            .deferral
+            .made
+            .keep(done.key, GENERATION, made)
+            .and_then(|oldest| oldest.pipeline())
+        {
             // SAFETY: the job's pipeline, which no call took.
-            unsafe { self.device.destroy_pipeline(oldest.pipeline, None) };
+            unsafe { self.device.destroy_pipeline(pipeline, None) };
         }
     }
 
@@ -423,10 +456,13 @@ impl NativeBackend {
     fn pipeline_job(&mut self, wanted: Wanted<'_>, key: [u8; 32]) -> Option<Job> {
         // A growing store's cache takes what the job compiles; a full one is
         // looked in, and the backend's own takes what it lacks. An archive's
-        // creation goes through the archive's cache alone, as in its turn.
+        // creation or lookup goes through the archive's cache alone, as in
+        // its turn: a lookup's miss is its answer.
         let archive = match wanted.source() {
-            PipelineSource::Cached(cache) => Some(self.share_cache(super::handle(cache.0))),
-            _ => None,
+            PipelineSource::Cached(cache) | PipelineSource::Archived(cache) => {
+                Some(self.share_cache(super::handle(cache.0)))
+            }
+            PipelineSource::Compiled => None,
         };
         let (first, into_store, then) = match self.store.cache() {
             _ if archive.is_some() => (wanted.source(), false, None),
@@ -468,6 +504,7 @@ impl NativeBackend {
             let wanted = owned.wanted();
             let mut feedback = vk::PipelineCreationFeedback::default();
             let mut hit = false;
+            let mut not_archived = false;
             let pipeline = (!gone.load(Ordering::Acquire))
                 .then(|| {
                     let created = create(&device, layout, wanted, source, &mut feedback);
@@ -486,12 +523,14 @@ impl NativeBackend {
                     if !from_archive {
                         super::pipeline_store::note_lookup(hit, feedback.duration);
                     }
+                    not_archived = from_archive && matches!(created, Err(Error::NotArchived));
                     created.ok()
                 })
                 .flatten();
             drop(owned);
             Box::new(Ran {
                 pipeline,
+                not_archived,
                 into_store,
                 hit,
                 pins,

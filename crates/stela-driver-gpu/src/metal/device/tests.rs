@@ -1649,6 +1649,46 @@ fn binary_archives_hold_what_was_added_and_outlive_their_files() {
     );
 }
 
+/// A lookup left to a job does not end the search: every archive is
+/// looked in by a job in the same turn, and nothing compiles or reaches an
+/// archive until the call runs again with their answers.
+#[test]
+fn a_deferred_archive_lookup_leaves_a_job_for_every_archive_and_compiles_nothing() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
+    let first = device.new_archive(&[]).unwrap();
+    let second = device.new_archive(&[]).unwrap();
+    // Required from them, it answers for its archives at creation.
+    let request = archived_compute(
+        kernel,
+        PipelineArchives {
+            searched: alloc::vec![first, second],
+            required: true,
+            added_to: None,
+        },
+    );
+    let lock = crate::metal::deferred::JobLock {
+        lock: Arc::new(crate::metal::compiler::CompileLock::new()),
+        relax: || {},
+    };
+    device.backend().deferred_lookups = 2;
+    device.backend().defer_pipelines(Some(&lock));
+    assert_eq!(
+        device.new_compute_pipeline(&request),
+        Err(crate::metal::compiler::DEFERRED)
+    );
+    let jobs = core::iter::from_fn(|| device.backend().take_job()).count();
+    assert_eq!(jobs, 2, "both archives are looked in by jobs");
+    assert!(device.backend().compute.is_empty(), "nothing compiled");
+    assert_eq!(device.archive_data(first), Ok(alloc::vec![0]));
+    device.backend().stop_deferring();
+    // Made again with the answers: both lack it, so the request fails.
+    assert_eq!(
+        device.new_compute_pipeline(&request),
+        Err(Error::NotArchived)
+    );
+}
+
 #[test]
 fn binary_archives_learn_the_shapes_dispatches_compile() {
     let mut device = device();

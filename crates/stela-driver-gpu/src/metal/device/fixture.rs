@@ -186,6 +186,9 @@ pub(crate) struct MockBackend {
     /// While a call may defer, this many more compute pipeline creations
     /// each defer to a job of its own that runs at once.
     pub(crate) deferred_pipelines: u8,
+    /// While a call may defer, this many more archive lookups each leave a
+    /// job of its own, which answers nothing back.
+    pub(crate) deferred_lookups: u8,
     deferring: Option<JobLock>,
     jobs: Vec<Job>,
     /// Pipeline jobs adopted.
@@ -431,6 +434,17 @@ impl Backend for MockBackend {
         {
             lock.lock.set_deferred(true);
             self.jobs.push(gated_job(2, Owner::Backend, gate));
+            return Err(crate::metal::compiler::DEFERRED);
+        }
+        if let Some(lock) = &self.deferring
+            && matches!(info.source, PipelineSource::Archived(_))
+            && self.deferred_lookups > 0
+        {
+            lock.lock.set_deferred(true);
+            let key = 0x60 + self.deferred_lookups;
+            self.deferred_lookups -= 1;
+            let open = Arc::new(AtomicBool::new(true));
+            self.jobs.push(gated_job(key, Owner::Backend, open));
             return Err(crate::metal::compiler::DEFERRED);
         }
         if let Some(lock) = &self.deferring
