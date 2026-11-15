@@ -803,7 +803,8 @@ pub trait Compiler {
     /// rather than run it ([`super::deferred`]).
     fn defer_compiles(&mut self, _deferring: bool) {}
 
-    /// The compilation the call deferred.
+    /// The next of the jobs the call left, oldest first: a call that goes on
+    /// past a deferral may leave several.
     fn take_job(&mut self) -> Option<super::deferred::Job> {
         None
     }

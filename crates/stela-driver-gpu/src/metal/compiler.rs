@@ -308,9 +308,10 @@ pub struct AirCompiler {
     reflections: Option<ReflectionCache>,
     nir: Option<NirCache>,
     /// A compilation the cache misses defers rather than runs
-    /// ([`AirCompiler::set_deferring`]), and the one deferred.
+    /// ([`AirCompiler::set_deferring`]), and those deferred, at most
+    /// [`LEFT_PER_CALL`].
     deferring: bool,
-    deferred: Option<CompileJob>,
+    deferred: Vec<CompileJob>,
     /// A reflection the cache missed, deferred as a compilation is.
     reflecting: Option<ReflectJob>,
     /// A stitched library deferred as a compilation is, what such jobs
@@ -354,6 +355,10 @@ pub type Recall = fn(&[u8; 32]) -> Option<Vec<u8>>;
 /// Stitched libraries jobs made that wait for their calls' next runs; past
 /// this the oldest is dropped, and its call stitches again.
 const STITCHED: usize = 16;
+
+/// Compilations one call leaves at most: a commit that misses more runs
+/// again for the rest. Each holds its library until it ran.
+const LEFT_PER_CALL: usize = 8;
 
 /// The NIR budget of a device's compiled shaders.
 pub const NIR_BUDGET: usize = 96 << 20;
@@ -426,7 +431,7 @@ impl AirCompiler {
             reflections: None,
             nir: None,
             deferring: false,
-            deferred: None,
+            deferred: Vec::new(),
             reflecting: None,
             stitching: None,
             stitched: Kept::new(STITCHED),
@@ -528,27 +533,18 @@ impl AirCompiler {
         self.lock.clone()
     }
 
-    /// Whether a compilation the NIR cache misses defers: the first is kept
-    /// for [`Self::take_deferred`] and the call fails, to run again once it
-    /// is compiled outside the service's lock ([`Self::adopt`]).
+    /// Whether a compilation the NIR cache misses defers: each is kept for
+    /// [`Self::take_deferred`] and the call fails, to run again once they
+    /// are compiled outside the service's lock ([`Self::adopt`]).
     pub fn set_deferring(&mut self, deferring: bool) {
         self.deferring = deferring && self.nir.is_some();
         self.lock.set_deferred(false);
     }
 
-    /// Whether the call may still leave a job: it defers, and has left
-    /// none yet.
-    fn may_wait(&self) -> bool {
-        self.deferring
-            && self.deferred.is_none()
-            && self.reflecting.is_none()
-            && self.stitching.is_none()
-    }
-
-    /// The compilation the call deferred.
+    /// The oldest compilation the call deferred.
     pub fn take_deferred(&mut self) -> Option<CompileJob> {
         self.lock.set_deferred(false);
-        self.deferred.take()
+        (!self.deferred.is_empty()).then(|| self.deferred.remove(0))
     }
 
     /// Keeps what a deferred compilation made, for the call's next run.
@@ -589,26 +585,39 @@ impl AirCompiler {
 
     /// Holds the compile lock for a use of LLVM in a call's turn: LLVM is
     /// built without threads, and a job may be using it. A call that may
-    /// defer does not wait for the job: it fails with `DEFERRED` and leaves
-    /// a job that does nothing, which runs once the lock is free.
+    /// defer does not wait for the job: it fails with `DEFERRED` and, unless
+    /// it left a job already, leaves one that does nothing, which runs once
+    /// the lock is free.
     fn llvm<'a>(
         lock: &'a CompileLock,
         waiting: &mut Waiting,
-        may_defer: bool,
+        defer: Defer,
         relax: fn(),
     ) -> Result<CompileGuard<'a>> {
         if let Some(held) = lock.try_hold() {
             return Ok(held);
         }
-        if may_defer && waiting.job.is_none() {
-            waiting.count += 1;
-            let mut key = [0xff; 32];
-            key[..8].copy_from_slice(&waiting.count.to_le_bytes());
-            waiting.job = Some(Job::new(key, Owner::Compiler, || Box::new(()) as Made));
-            lock.set_deferred(true);
-            return Err(DEFERRED);
+        match defer {
+            Defer::No => Ok(lock.hold(relax)),
+            Defer::Left => Err(DEFERRED),
+            Defer::May => {
+                waiting.count += 1;
+                let mut key = [0xff; 32];
+                key[..8].copy_from_slice(&waiting.count.to_le_bytes());
+                waiting.job = Some(Job::new(key, Owner::Compiler, || Box::new(()) as Made));
+                lock.set_deferred(true);
+                Err(DEFERRED)
+            }
         }
-        Ok(lock.hold(relax))
+    }
+
+    /// Whether the call served now may defer, and whether it left a job.
+    fn defer(&self) -> Defer {
+        match (self.deferring, self.deferred()) {
+            (false, _) => Defer::No,
+            (true, false) => Defer::May,
+            (true, true) => Defer::Left,
+        }
     }
 
     /// Keeps what a deferred reflection made, for the call's next run.
@@ -707,10 +716,10 @@ impl AirCompiler {
         // A large module's reflection, which parses and specializes its
         // AIR, can take seconds: it runs outside the turn like a compile.
         if let Some(key) = &key
-            && self.may_wait()
+            && self.deferring
         {
             let digest = reflection_digest(key);
-            if !self.failed.remove(&digest) {
+            if self.reflecting.is_none() && !self.failed.contains(&digest) {
                 let library = self
                     .libraries
                     .get(&library)
@@ -726,14 +735,20 @@ impl AirCompiler {
                 self.lock.set_deferred(true);
                 return Err(DEFERRED);
             }
+            // The call runs again for the job it left: nothing it makes
+            // now stays.
+            if self.deferred() {
+                return Err(DEFERRED);
+            }
+            self.failed.remove(&digest);
         }
         let raw = values.map(constant_values);
         // LLVM, built without threads, runs on one processor at a time: a
         // job holds this lock while it runs.
         let reflection = {
             let lock = self.lock.clone();
-            let may_wait = self.may_wait();
-            let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+            let defer = self.defer();
+            let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
             let selected = select(&self.libraries, library, entry)?;
             selected.reflect_raw(&self.service, raw.as_deref(), &mut self.refusal)?
         };
@@ -771,7 +786,7 @@ impl Compiler for AirCompiler {
     }
 
     fn deferred(&self) -> bool {
-        self.deferred.is_some()
+        !self.deferred.is_empty()
             || self.reflecting.is_some()
             || self.stitching.is_some()
             || self.waiting.job.is_some()
@@ -848,8 +863,8 @@ impl Compiler for AirCompiler {
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let may_wait = self.may_wait();
-        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        let defer = self.defer();
+        let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
         list_functions(&self.service, air, &mut error)?
             .ok_or_else(|| refuse(&mut self.refusal, "the library", &error))
     }
@@ -880,8 +895,8 @@ impl Compiler for AirCompiler {
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let may_wait = self.may_wait();
-        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        let defer = self.defer();
+        let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
         // SAFETY: the bitcode and the list outlive the call, which writes
         // the list through `visit` and the error.
         let listed = unsafe {
@@ -919,8 +934,12 @@ impl Compiler for AirCompiler {
             Taken::Stale(_) | Taken::Missing => false,
         };
         // Stitching and listing its functions run LLVM for milliseconds:
-        // outside the turn, like a compile.
-        if !refused && self.may_wait() {
+        // outside the turn, like a compile. A call that left one already
+        // runs again: a second stitch waits for that run.
+        if !refused && self.deferring && self.stitching.is_some() {
+            return Err(DEFERRED);
+        }
+        if !refused && self.deferring {
             let sources = sources
                 .iter()
                 .map(|function| {
@@ -952,8 +971,8 @@ impl Compiler for AirCompiler {
         let mut error = ffi::AirError::NONE;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let may_wait = self.may_wait();
-        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        let defer = self.defer();
+        let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
         let selected = sources
             .iter()
             .map(|function| select(&self.libraries, function.library, &function.entry))
@@ -1029,8 +1048,8 @@ impl Compiler for AirCompiler {
         let count = u32::try_from(values.as_ref().map_or(0, Vec::len)).map_err(|_| MALFORMED)?;
         // LLVM, built without threads, runs on one processor at a time.
         let lock = self.lock.clone();
-        let may_wait = self.may_wait();
-        let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+        let defer = self.defer();
+        let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
         // only the bindings and the error.
         let reflected = unsafe {
@@ -1079,8 +1098,8 @@ impl Compiler for AirCompiler {
             let mut error = ffi::AirError::NONE;
             // LLVM, built without threads, runs on one processor at a time.
             let lock = self.lock.clone();
-            let may_wait = self.may_wait();
-            let _held = Self::llvm(&lock, &mut self.waiting, may_wait, self.relax)?;
+            let defer = self.defer();
+            let _held = Self::llvm(&lock, &mut self.waiting, defer, self.relax)?;
             // SAFETY: the bitcode outlives the call, which writes at most
             // SAMPLER_STATES states, the count and the error.
             let valid = unsafe {
@@ -1259,19 +1278,27 @@ impl AirCompiler {
         }
         // Deserializing stored NIR took a large shader's turn 50-60 ms: a
         // call that defers leaves it to the job, which compiles only when
-        // no stored NIR deserializes.
-        if let Some(key) = job.key
-            && self.deferring
-            && self.deferred.is_none()
-            && !self.failed.contains(&key)
-        {
-            self.deferrals += 1;
-            self.deferred = Some(CompileJob {
-                restore: self.restorable(&key),
-                ..job
-            });
-            self.lock.set_deferred(true);
-            return Err(DEFERRED);
+        // no stored NIR deserializes. A call that goes on past a deferral,
+        // as a commit does to find every compilation it misses, leaves a
+        // job for each, up to a bound; past it, and for a key whose job
+        // failed, it does nothing in a turn whose work does not stay.
+        if self.deferring {
+            if let Some(key) = job.key
+                && !self.failed.contains(&key)
+                && self.deferred.len() < LEFT_PER_CALL
+                && !self.deferred.iter().any(|left| left.key == Some(key))
+            {
+                self.deferrals += 1;
+                self.deferred.push(CompileJob {
+                    restore: self.restorable(&key),
+                    ..job
+                });
+                self.lock.set_deferred(true);
+                return Err(DEFERRED);
+            }
+            if self.deferred() {
+                return Err(DEFERRED);
+            }
         }
         if let Some((shader, bytes)) = self.restore(&job) {
             let key = job.key.expect("restored by its key");
@@ -1563,6 +1590,17 @@ unsafe impl Send for CompileJob {}
 struct Restore {
     stored: Option<&'static [u8]>,
     recall: Option<Recall>,
+}
+
+/// What a call's use of LLVM does while a job holds the lock.
+#[derive(Clone, Copy)]
+enum Defer {
+    /// Waits: the call cannot run again.
+    No,
+    /// Leaves a job that waits, and runs again after it.
+    May,
+    /// Runs again for a job it left already, waiting for nothing.
+    Left,
 }
 
 /// A job that waits for the compile lock, for a call whose turn would.

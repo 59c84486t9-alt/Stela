@@ -183,8 +183,11 @@ pub(crate) struct MockBackend {
     /// it in time: the allocation tells the platform's hook, as the
     /// platform's withdrawal does, and fails as the driver then does.
     pub(crate) withdrawn_allocation: Option<fn() -> bool>,
+    /// While a call may defer, this many more compute pipeline creations
+    /// each defer to a job of its own that runs at once.
+    pub(crate) deferred_pipelines: u8,
     deferring: Option<JobLock>,
-    job: Option<Job>,
+    jobs: Vec<Job>,
     /// Pipeline jobs adopted.
     pub(crate) adopted: usize,
     pub(crate) submissions: Vec<Vec<Segment>>,
@@ -353,7 +356,7 @@ impl Backend for MockBackend {
             && let Some(gate) = self.image_gate.take()
         {
             lock.lock.set_deferred(true);
-            self.job = Some(gated_job(3, Owner::Backend, gate));
+            self.jobs.push(gated_job(3, Owner::Backend, gate));
             return Err(crate::metal::compiler::DEFERRED);
         }
         let requirements = self.image_requirements(info)?;
@@ -400,10 +403,10 @@ impl Backend for MockBackend {
         self.deferring = None;
     }
     fn deferred(&self) -> bool {
-        self.job.is_some()
+        !self.jobs.is_empty()
     }
     fn take_job(&mut self) -> Option<Job> {
-        self.job.take()
+        (!self.jobs.is_empty()).then(|| self.jobs.remove(0))
     }
     fn adopt_job(&mut self, _: Done) {
         self.adopted += 1;
@@ -427,7 +430,18 @@ impl Backend for MockBackend {
             && let Some(gate) = self.pipeline_gate.take()
         {
             lock.lock.set_deferred(true);
-            self.job = Some(gated_job(2, Owner::Backend, gate));
+            self.jobs.push(gated_job(2, Owner::Backend, gate));
+            return Err(crate::metal::compiler::DEFERRED);
+        }
+        if let Some(lock) = &self.deferring
+            && info.source == PipelineSource::Compiled
+            && self.deferred_pipelines > 0
+        {
+            lock.lock.set_deferred(true);
+            let key = 0x40 + self.deferred_pipelines;
+            self.deferred_pipelines -= 1;
+            let open = Arc::new(AtomicBool::new(true));
+            self.jobs.push(gated_job(key, Owner::Backend, open));
             return Err(crate::metal::compiler::DEFERRED);
         }
         self.source(info.source)?;

@@ -20,6 +20,7 @@ use crate::metal::{
         blit::{BlitTexture, BufferLayout},
         render::PatchSource,
     },
+    compiler::DEFERRED,
     device::{BufferId, SamplerId, TextureId},
     pipeline::{DepthStencilDescriptor, DepthStencilState, StencilDescriptor, depth_stencil},
     shader::Compiler,
@@ -125,11 +126,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 uploads: 0,
             },
         );
-        let mut stream = Stream::new(&stream_bytes, CommandCode::from_raw);
-        let replayed = stream.try_for_each(|entry| {
-            let (code, payload) = entry?;
-            self.replay(connection, &mut commands, code, payload)
-        });
+        let replayed = self.replay_stream(connection, &mut commands, &stream_bytes);
         self.device.timing().since(Phase::CommitReplay, start);
         if let Err(fault) = replayed {
             self.device.discard(commands);
@@ -143,6 +140,44 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
         let value = self.device.commit_on(connection.get(), queue, commands)?;
         call.reply(&Value { value })
+    }
+
+    /// Replays the stream into `commands`. A command that defers does not
+    /// end the replay: the commit runs again once its jobs ran, so the rest
+    /// replays to leave a job for every other compilation and pipeline it
+    /// misses, and the commit runs again once rather than once for each.
+    /// Its commands record into a buffer that is discarded; one that would
+    /// change what a second run changes again defers instead
+    /// ([`Device::stop_deferring`](crate::metal::device::Device::stop_deferring)).
+    /// The first other failure ends the search, and is the deferral's: it
+    /// may follow from a command that did not run.
+    fn replay_stream(
+        &mut self,
+        connection: NonZeroU64,
+        commands: &mut CommandBuffer,
+        stream_bytes: &[u8],
+    ) -> Result<(), Fault> {
+        let deferral = Fault::from(DEFERRED);
+        let mut deferred = false;
+        let mut stream = Stream::new(stream_bytes, CommandCode::from_raw);
+        let replayed = stream.try_for_each(|entry| {
+            let (code, payload) = entry?;
+            match self.replay(connection, commands, code, payload) {
+                Err(fault) if fault == deferral && self.device.deferred() => {
+                    deferred = true;
+                    Ok(())
+                }
+                Err(_) if deferred => Err(deferral),
+                replayed => replayed,
+            }
+        });
+        if deferred {
+            // Nothing that failed past the deferral is the commit's.
+            self.noted = None;
+            drop(self.device.take_refusal());
+            return Err(deferral);
+        }
+        replayed
     }
 
     /// A command buffer that fails to replay does none of its work, but

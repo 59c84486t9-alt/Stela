@@ -1300,15 +1300,16 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     }
 
     /// Queues each of `jobs` unless one of its key is queued, running or
-    /// done, and parks the call at `record` on the first.
+    /// done, and parks the call at `record` on the one that runs last: jobs
+    /// run one at a time, oldest first.
     fn park(&self, connection: NonZeroU64, record: u64, call: GateCall, jobs: Vec<Job>) {
-        let key = jobs[0].key;
-        let parked = Parked {
+        let keys: Vec<[u8; 32]> = jobs.iter().map(|job| job.key).collect();
+        let mut parked = Parked {
             connection: connection.get(),
             record,
             operation: call.operation,
             request: call.request.address,
-            key,
+            key: keys[0],
         };
         let now = (self.host.ticks)();
         let new = jobs;
@@ -1320,7 +1321,6 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             if jobs.parked.len() == PARKED {
                 jobs.parked.pop_front();
             }
-            jobs.parked.push_back(parked);
             let mut unwanted = Vec::new();
             for job in new {
                 let known = jobs.running == Some(job.key)
@@ -1332,6 +1332,17 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                     jobs.queued.push_back((job, now));
                 }
             }
+            if let Some((last, _)) = jobs
+                .queued
+                .iter()
+                .rev()
+                .find(|(queued, _)| keys.contains(&queued.key))
+            {
+                parked.key = last.key;
+            } else if let Some(running) = jobs.running.filter(|running| keys.contains(running)) {
+                parked.key = running;
+            }
+            jobs.parked.push_back(parked);
             unwanted
         });
         // Dropped outside the lock: a job frees what it holds.
@@ -1784,14 +1795,10 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 self.keep_library(connection, record, span);
             }
             let device = turn.device();
-            // A call that went on past a deferral may have left both.
-            let jobs: Vec<Job> = [
-                device.compiler_mut().take_job(),
-                device.backend().take_job(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            // A call that went on past a deferral may have left several.
+            let mut jobs: Vec<Job> =
+                core::iter::from_fn(|| device.compiler_mut().take_job()).collect();
+            jobs.extend(core::iter::from_fn(|| device.backend().take_job()));
             device.compiler_mut().defer_compiles(false);
             device.backend().defer_pipelines(None);
             answer = Some((

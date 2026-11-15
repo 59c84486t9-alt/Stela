@@ -88,13 +88,18 @@ const REMEMBERED: usize = 1 << 14;
 /// is destroyed, and its call, run again, defers once more.
 const KEPT: usize = 32;
 
+/// Jobs one call leaves at most, well under [`KEPT`]: a commit that misses
+/// more pipelines runs again for the rest.
+const LEFT_PER_CALL: usize = 8;
+
 #[derive(Default)]
 pub(super) struct Deferral {
     /// Set while the call served now may defer.
     deferring: Option<JobLock>,
     /// The lock of the jobs this backend made.
     jobs: Option<JobLock>,
-    job: Option<Job>,
+    /// The jobs the call served now left, at most [`LEFT_PER_CALL`].
+    left: Vec<Job>,
     /// Set once the device is destroyed.
     gone: Arc<AtomicBool>,
     /// The cache jobs fill while the store's does not grow.
@@ -178,7 +183,7 @@ impl Deferral {
             self.jobs = Some(lock.clone());
         }
         self.deferring = deferring.cloned();
-        self.job = None;
+        self.left.clear();
     }
 
     pub(super) fn stop(&mut self) {
@@ -191,15 +196,16 @@ impl Deferral {
     /// call of it was withdrawn while it could
     /// ([`CompileLock::defer_for_wait`](crate::metal::compiler::CompileLock::defer_for_wait)).
     pub(super) fn deferred(&self) -> bool {
-        self.job.is_some()
+        !self.left.is_empty()
             || self
                 .deferring
                 .as_ref()
                 .is_some_and(|lock| lock.lock.waited())
     }
 
+    /// The oldest job the call left.
     pub(super) fn take(&mut self) -> Option<Job> {
-        self.job.take()
+        (!self.left.is_empty()).then(|| self.left.remove(0))
     }
 
     /// Whether the call served now may defer.
@@ -209,16 +215,16 @@ impl Deferral {
 
     /// Leaves `job` for the call served now, which then fails with
     /// `DEFERRED`; false, leaving nothing, unless the call may defer and has
-    /// left no job yet.
+    /// room for another job.
     pub(super) fn defer(&mut self, job: Job) -> bool {
         let Some(lock) = &self.deferring else {
             return false;
         };
-        if self.job.is_some() {
+        if self.left.len() >= LEFT_PER_CALL {
             return false;
         }
         lock.lock.set_deferred(true);
-        self.job = Some(job);
+        self.left.push(job);
         true
     }
 
@@ -275,14 +281,18 @@ impl NativeBackend {
         if self.deferral.failed.contains(&key) {
             return None;
         }
-        // Deferred already, the call runs again: nothing it makes stays.
-        if self.deferral.job.is_some() {
+        // A call that goes on past a deferral, as a commit does to find
+        // every pipeline it misses, leaves a job for each up to a bound; it
+        // runs again, so past the bound nothing it makes would stay.
+        if self.deferral.left.len() >= LEFT_PER_CALL
+            || self.deferral.left.iter().any(|left| left.key == key)
+        {
             return Some(Err(DEFERRED));
         }
         let started = (self.ticks)();
         let job = self.pipeline_job(wanted, key);
         LEFT.note((self.ticks)().wrapping_sub(started));
-        self.deferral.job = Some(job?);
+        self.deferral.left.push(job?);
         lock.lock.set_deferred(true);
         Some(Err(DEFERRED))
     }

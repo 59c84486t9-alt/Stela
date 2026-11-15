@@ -275,6 +275,77 @@ fn a_commit_whose_pipeline_creation_compiles_waits_outside_the_turn() {
     assert!(submitted(&mut turn).contains(&Command::Dispatch([4, 1, 1])));
 }
 
+/// A commit that misses two pipelines leaves a job for each in one turn and
+/// runs again once, rather than replaying its stream once for each.
+#[test]
+fn a_commit_that_misses_two_pipelines_leaves_both_jobs_in_one_turn() {
+    let mut service = service_on(MockBackend::new());
+    let a = connect(&mut service);
+    let (first, buffer) = pipeline(&mut service, a);
+    let (second, _) = pipeline(&mut service, a);
+    service.device().backend().deferred_pipelines = 2;
+    let shared = SharedService::new(service, host(|_| {}));
+    shared.set_compile_stack(1);
+    let mut memory = Memory::default();
+    let mut stream = Stream::default();
+    stream.push(
+        ComputeCode::Begin.raw(),
+        &BeginCompute {
+            dispatch_type: DispatchType::Serial.raw(),
+        },
+        &[],
+    );
+    for (pipeline, width) in [(first, 4), (second, 8)] {
+        stream
+            .push(
+                ComputeCode::SetPipeline.raw(),
+                &SetPipeline { pipeline },
+                &[],
+            )
+            .push(
+                ComputeCode::SetBuffer.raw(),
+                &SetBuffer {
+                    buffer,
+                    offset: 0,
+                    index: 0,
+                },
+                &[],
+            )
+            .push(
+                ComputeCode::DispatchThreadgroups.raw(),
+                &Dispatch {
+                    size: [width, 1, 1],
+                    threads: [32, 1, 1],
+                },
+                &[],
+            );
+    }
+    stream.end();
+    let request = CommitRequest {
+        commands: memory.put(&stream.0),
+        queue: 1,
+    };
+    let commit = gate_call(&mut memory, Operation::Commit, &request, size_of::<Value>());
+    shared.serve(a, commit, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, commit), Status::Pending);
+    // Parked on the job that runs last: asked again after the first, the
+    // call is still answered without a turn.
+    assert!(shared.run_job(0, 0).is_some());
+    shared.serve(a, commit, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, commit), Status::Pending);
+    assert!(shared.run_job(0, 0).is_some());
+    assert!(shared.run_job(0, 0).is_none());
+    shared.serve(a, commit, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, commit), Status::Ok);
+    let report = shared.take_job_report();
+    assert_eq!((report.ran, report.deferred, report.repeated), (2, 1, 1));
+    let mut turn = shared.try_turn().unwrap();
+    assert_eq!(turn.device().backend().adopted, 2);
+    let submitted = submitted(&mut turn);
+    assert!(submitted.contains(&Command::Dispatch([4, 1, 1])));
+    assert!(submitted.contains(&Command::Dispatch([8, 1, 1])));
+}
+
 /// A new texture whose kernel memory Linux makes slowly holds no turn while
 /// it is made: the call is answered `Pending` at once, another connection's
 /// texture is created while the job blocks, and the call's next run takes

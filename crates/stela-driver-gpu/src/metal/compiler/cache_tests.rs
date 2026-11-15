@@ -300,6 +300,52 @@ fn a_deferred_compilation_runs_outside_and_the_call_finds_it() {
     assert!(compiler.report().contains("nir_hits=1"));
 }
 
+/// A call that goes on past a deferral, as a commit does, leaves a job for
+/// each compilation it misses, up to the bound, and compiles none in its
+/// turn; its next run finds them and leaves a job for the rest.
+#[test]
+fn a_call_that_goes_on_past_a_deferral_leaves_a_job_for_each_compilation() {
+    let (mut compiler, library) = caching();
+    let lock = compiler.compile_lock(core::hint::spin_loop);
+    let shapes: Vec<_> = (1..=LEFT_PER_CALL as u32 + 1)
+        .map(|width| Specialization {
+            workgroup_size: Some([width, 1, 1]),
+            ..Specialization::default()
+        })
+        .collect();
+    compiler.set_deferring(true);
+    for shape in &shapes {
+        assert_eq!(compiler.compile(library, "kernel", shape), Err(DEFERRED));
+    }
+    // Its key again leaves nothing more.
+    assert_eq!(
+        compiler.compile(library, "kernel", &shapes[0]),
+        Err(DEFERRED)
+    );
+    let jobs: Vec<_> = core::iter::from_fn(|| compiler.take_job()).collect();
+    assert_eq!(jobs.len(), LEFT_PER_CALL);
+    compiler.end_call();
+    assert_eq!(calls().1, 0, "nothing compiled in the turn");
+    for job in jobs {
+        let done = job.run(&lock.hold(core::hint::spin_loop));
+        compiler.adopt_job(done);
+    }
+    assert_eq!(calls().1, LEFT_PER_CALL as u32);
+
+    compiler.set_deferring(true);
+    for shape in &shapes[..LEFT_PER_CALL] {
+        let shader = compiler.compile(library, "kernel", shape).unwrap();
+        compiler.release(shader.code);
+    }
+    assert_eq!(
+        compiler.compile(library, "kernel", &shapes[LEFT_PER_CALL]),
+        Err(DEFERRED)
+    );
+    assert!(compiler.take_job().is_some() && compiler.take_job().is_none());
+    compiler.end_call();
+    assert_eq!(calls().1, LEFT_PER_CALL as u32);
+}
+
 #[test]
 fn a_deferred_reflection_runs_outside_and_the_call_finds_it() {
     let (mut compiler, library) = caching();

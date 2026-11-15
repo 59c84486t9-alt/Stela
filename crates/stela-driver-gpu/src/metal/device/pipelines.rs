@@ -1197,10 +1197,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     /// Compiles and creates pipelines in the call from here on: the call
-    /// changed what a second run would change again.
-    pub fn stop_deferring(&mut self) {
+    /// changes what a second run would change again. A call that left a job
+    /// already runs again: it fails with `DEFERRED` and changes nothing.
+    pub fn stop_deferring(&mut self) -> Result<()> {
+        if self.deferred() {
+            return Err(crate::metal::compiler::DEFERRED);
+        }
         self.compiler.stop_deferring();
         self.backend.stop_deferring();
+        Ok(())
     }
 
     /// `newRenderPipelineStateWithDescriptor:`. A post-tessellation vertex
