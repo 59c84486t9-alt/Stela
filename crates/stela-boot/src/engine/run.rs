@@ -963,7 +963,8 @@ const DRAIN_MILLIS: u64 = 50;
 /// none of the PE's translations, which the PE's mail updates before its
 /// next block. A call of `part` that held the PE [`LONG_STEP_MILLIS`] gets
 /// a `HOST STEP LONG` line
-/// ([`stela_boot_core::service_watch::LongSteps`]).
+/// ([`stela_boot_core::service_watch::LongSteps`]); one that held it
+/// [`NAMED_STEP_MILLIS`] counts in the beat's `HOST STEPS` line.
 pub(super) fn host_work<H: Host, R>(
     machine: &mut Machine<H, parallel::Board>,
     part: &'static str,
@@ -975,6 +976,7 @@ pub(super) fn host_work<H: Host, R>(
     // for it a stall limit past that or its own timer's deadline.
     let result = machine.serve_host(work);
     let took = host::fresh_counter().wrapping_sub(started);
+    named_step(part, machine.processor(), took);
     if LONG_STEPS.worth(took, host::COUNTER_HZ / 1000 * LONG_STEP_MILLIS) {
         let pstate = &machine.cpu.pstate;
         output::arguments(format_args!(
@@ -988,10 +990,30 @@ pub(super) fn host_work<H: Host, R>(
     result
 }
 
+/// Host work between two slices that is no [`host_work`] call of its own,
+/// `part`, timed for the beat's `HOST STEPS` line: what else a gap in
+/// `PES STALLS` with phase `host` may hold.
+pub(super) fn host_part<R>(part: &'static str, pe: usize, work: impl FnOnce() -> R) -> R {
+    let started = host::fresh_counter();
+    let result = work();
+    named_step(part, pe, host::fresh_counter().wrapping_sub(started));
+    result
+}
+
+/// Count a step of `part` on PE `pe` that took `ticks` in the beat's
+/// `HOST STEPS` line once it reached [`NAMED_STEP_MILLIS`].
+fn named_step(part: &'static str, pe: usize, ticks: u64) {
+    if ticks >= host::COUNTER_HZ / 1000 * NAMED_STEP_MILLIS {
+        HOST_STEPS.record(part, pe, ticks);
+    }
+}
+
 /// Per PE: its longest gap between two progress marks with guest work since
 /// the last report, and the engine phase that took most of it (`host`
 /// outside the step loop, `?` without `--profile`); a PE that shows no
-/// progress for 50 ms holds the count (`stalled_ms`).
+/// progress for 50 ms holds the count (`stalled_ms`). Then the host steps
+/// over [`NAMED_STEP_MILLIS`] since the last report, by part, which a `host`
+/// gap is made of, if any.
 fn report_stalls<H: Host>(machine: &Machine<H, parallel::Board>) {
     let mut stalls = String::from("PES STALLS longest_ms/phase");
     for (pe, (ticks, phase)) in machine.devices.hub().clock_stalls().iter().enumerate() {
@@ -999,7 +1021,33 @@ fn report_stalls<H: Host>(machine: &Machine<H, parallel::Board>) {
         stalls.push_str(&format!(" {pe}:{millis}/{phase}"));
     }
     output::arguments(format_args!("{stalls}\n"));
+    if let Some(steps) = HOST_STEPS.line(NAMED_STEP_MILLIS, host::COUNTER_HZ) {
+        output::arguments(format_args!("{steps}\n"));
+    }
 }
+
+/// A host step that kept its PE from guest code this long counts in the
+/// beat's `HOST STEPS` line: a frame at 60 Hz has 16 ms.
+const NAMED_STEP_MILLIS: u64 = 2;
+
+/// The host steps over [`NAMED_STEP_MILLIS`] since the last beat, by part:
+/// every [`host_work`] and [`host_part`] name; the last takes any other.
+static HOST_STEPS: stela_boot_core::service_watch::HostSteps<13> =
+    stela_boot_core::service_watch::HostSteps::new([
+        "slice end",
+        "beat",
+        "beat step",
+        "reports",
+        "idle service",
+        "display",
+        "gpu job",
+        "drain",
+        "publish",
+        "profile",
+        "stored pages",
+        "watchdog",
+        "other",
+    ]);
 
 /// A single host step that kept its PE from guest code this long is named:
 /// XNU on another core times a lock that PE's guest may hold, a mutex

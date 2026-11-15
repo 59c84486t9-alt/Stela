@@ -237,7 +237,9 @@ impl Pe {
                 if stored_report.is_none_or(|before| {
                     counter.wrapping_sub(before) >= super::run::BEAT_SECONDS * host::COUNTER_HZ
                 }) {
-                    report_stored_pages(&machine, counter);
+                    super::run::host_part("stored pages", pe, || {
+                        report_stored_pages(&machine, counter)
+                    });
                     stored_report = Some(counter);
                 }
             }
@@ -300,14 +302,16 @@ impl Pe {
                 }
                 stop => stopped(pe, stop),
             }
-            hub.publish(pe, machine.counts());
+            super::run::host_part("publish", pe, || hub.publish(pe, machine.counts()));
             // Whether the boot processor's Linux step returns.
-            super::step_watchdog::look();
+            super::run::host_part("watchdog", pe, super::step_watchdog::look);
             if machine.step_timing().is_some() {
-                hub.add_system_exits(pe, &machine.take_system_exits());
-                if machine.has_hot_samples() {
-                    hub.add_hot_samples(|hot| machine.take_hot_samples(hot));
-                }
+                super::run::host_part("profile", pe, || {
+                    hub.add_system_exits(pe, &machine.take_system_exits());
+                    if machine.has_hot_samples() {
+                        hub.add_hot_samples(|hot| machine.take_hot_samples(hot));
+                    }
+                });
             }
             // A PE whose guest waits sends the serial queue in its wait; one
             // whose guest runs only once none did for a while: each burst is

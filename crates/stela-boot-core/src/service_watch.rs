@@ -100,6 +100,69 @@ impl Default for LongSteps {
     }
 }
 
+/// The host steps of a beat that kept a PE from its guest for at least a
+/// floor, by part: how many, the longest and the PE that took it. Frame
+/// pacing feels a few milliseconds where XNU's watchdogs feel only a
+/// quarter second ([`LongSteps`]), so every such step is counted and the
+/// beat names each part in one line ([`Self::line`]). A step under the
+/// floor costs the caller one comparison; one over it a scan of the
+/// parts' names and two atomic updates. A name not among them counts as
+/// the last part.
+pub struct HostSteps<const N: usize> {
+    parts: [&'static str; N],
+    counts: [AtomicU64; N],
+    /// The longest step's ticks above [`PE_BITS`], its PE below.
+    longest: [AtomicU64; N],
+}
+
+/// The bits of [`HostSteps::longest`] that hold the PE.
+const PE_BITS: u32 = 8;
+
+impl<const N: usize> HostSteps<N> {
+    pub const fn new(parts: [&'static str; N]) -> Self {
+        Self {
+            parts,
+            counts: [const { AtomicU64::new(0) }; N],
+            longest: [const { AtomicU64::new(0) }; N],
+        }
+    }
+
+    /// Count a step of `part` on PE `pe` that took `ticks`, at least the
+    /// floor.
+    pub fn record(&self, part: &str, pe: usize, ticks: u64) {
+        let index = self
+            .parts
+            .iter()
+            .position(|name| *name == part)
+            .unwrap_or(N - 1);
+        self.counts[index].fetch_add(1, Ordering::Relaxed);
+        let pe = (pe as u64).min((1 << PE_BITS) - 1);
+        let packed = ticks.min(u64::MAX >> PE_BITS) << PE_BITS | pe;
+        self.longest[index].fetch_max(packed, Ordering::Relaxed);
+    }
+
+    /// `HOST STEPS over_ms=<floor> <part>=<steps>/<longest_us>us/pe<pe> ...`
+    /// for every part with a step since the last call, `hz` counter ticks
+    /// a second; `None` when no step reached the floor. Each part's counts
+    /// start again.
+    pub fn line(&self, floor_ms: u64, hz: u64) -> Option<String> {
+        let mut line = format!("HOST STEPS over_ms={floor_ms}");
+        let mut any = false;
+        for (index, part) in self.parts.iter().enumerate() {
+            let steps = self.counts[index].swap(0, Ordering::Relaxed);
+            let longest = self.longest[index].swap(0, Ordering::Relaxed);
+            if steps == 0 {
+                continue;
+            }
+            any = true;
+            let micros = u128::from(longest >> PE_BITS) * 1_000_000 / u128::from(hz.max(1));
+            let pe = longest & ((1 << PE_BITS) - 1);
+            line += &format!(" {}={steps}/{micros}us/pe{pe}", part.replace(' ', "_"));
+        }
+        any.then_some(line)
+    }
+}
+
 /// Whether work that waits for others to do it has waited `limit` counter
 /// ticks: since `since`, at counter `now`. A `since` after `now`, as
 /// another core's counter may read, has not waited.
@@ -408,6 +471,27 @@ mod tests {
         assert!(long.worth(600, 100));
         assert!(!long.worth(1000, 100));
         assert!(long.worth(2000, 100));
+    }
+
+    #[test]
+    fn host_steps_name_each_part_once_a_beat_with_its_longest_step_and_pe() {
+        let steps = HostSteps::new(["drain", "display", "other"]);
+        assert_eq!(steps.line(2, 1_000_000), None);
+        steps.record("drain", 3, 9_000);
+        steps.record("drain", 5, 12_000);
+        steps.record("drain", 1, 2_000);
+        steps.record("idle service", 7, 4_000);
+        assert_eq!(
+            steps.line(2, 1_000_000).as_deref(),
+            Some("HOST STEPS over_ms=2 drain=3/12000us/pe5 other=1/4000us/pe7")
+        );
+        // Each beat counts afresh.
+        assert_eq!(steps.line(2, 1_000_000), None);
+        steps.record("display", 300, 3_000);
+        assert_eq!(
+            steps.line(2, 1_000_000).as_deref(),
+            Some("HOST STEPS over_ms=2 display=1/3000us/pe255")
+        );
     }
 
     #[test]
