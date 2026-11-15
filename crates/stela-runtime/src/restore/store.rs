@@ -173,7 +173,10 @@ impl Cursors {
                     || kept.progress.produced() != at
             });
             if self.0.len() == Self::LIMIT {
-                self.0.pop_front();
+                // A free cursor goes first: a pending one holds a read that
+                // is asked again, which would start its member over.
+                let oldest = self.0.iter().position(|kept| kept.pending.is_none());
+                self.0.remove(oldest.unwrap_or(0));
             }
             self.0.push_back(Cursor {
                 name: name.unwrap_or_else(|| entry.name.clone()),
@@ -496,8 +499,10 @@ impl<R: ReadAt> Store<R> {
     pub fn manifest(&self) -> &PayloadManifest {
         &self.manifest
     }
+    /// Drop the cursors no read waits for, once no transfer reads: a
+    /// pending read's cursor stays for the read asked again.
     pub(super) fn release_cursors(&mut self) {
-        self.cursors.0.clear();
+        self.cursors.0.retain(|cursor| cursor.pending.is_some());
     }
 
     pub fn reader_mut(&mut self) -> &mut R {

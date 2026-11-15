@@ -1365,3 +1365,40 @@ fn an_answer_asked_again_goes_on_from_what_it_read() {
     assert!(store.reader.served > served);
     store.answered(false);
 }
+
+/// A read whose source ran out of time keeps its cursor when the
+/// transfers end and when other reads take every free cursor: asked
+/// again, it goes on where it stopped in its deflated member instead of
+/// inflating the member from its start.
+#[test]
+fn a_pending_reads_cursor_outlives_the_transfers_and_other_reads() {
+    let mut store = firmware(2 * MAX_READ_BYTES, 1_000, true, |memory| {
+        Stick::new(memory, 1_300, None)
+    });
+    let half = MAX_READ_BYTES as u64;
+    // Read up to the middle of the SEP image, then run out of time in the
+    // read after it.
+    store.read_at("sep.im4p", 0, MAX_READ_BYTES).unwrap();
+    store.reader.turn();
+    store.reader.spent = TURN_US;
+    assert!(matches!(
+        store.read_at("sep.im4p", half, MAX_READ_BYTES),
+        Err(Error::Pending)
+    ));
+    store.reader.unbound();
+    store.release_cursors();
+    for index in 0..2 * Cursors::LIMIT {
+        store
+            .read_at(&format!("fw{}.im4p", index % 10), 0, 64)
+            .unwrap();
+    }
+    let served = store.reader.served;
+    let compressed = store.archive.find("sep.im4p").unwrap().compressed_bytes;
+    let bytes = store.read_at("sep.im4p", half, MAX_READ_BYTES).unwrap();
+    assert_eq!(bytes.len(), MAX_READ_BYTES);
+    assert!(
+        store.reader.served - served < compressed * 3 / 4,
+        "served {} of the member's {compressed}",
+        store.reader.served - served
+    );
+}
