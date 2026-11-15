@@ -386,6 +386,7 @@ impl<D: Devices> Drop for Held<'_, D> {
         }
         // Only the holder writes these.
         let held = self.board.hub.ticks().wrapping_sub(self.since);
+        self.state.devices.lock_released(self.waited, held);
         let call = self.call as usize;
         self.board.held[call].fetch_add(held, Ordering::Relaxed);
         if held > self.board.longest[call].load(Ordering::Relaxed) {

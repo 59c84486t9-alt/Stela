@@ -168,7 +168,20 @@ pub struct Activity {
     /// answered before taking the IRQ), and their ticks from rise to fall.
     pub unclaimed: u64,
     pub unclaimed_ticks: u64,
+    /// Calls on a board shared between PEs that accessed this controller
+    /// ([`Spi::touched`]), the host counter ticks they waited for the
+    /// board's lock and held it, summed, and the longest hold: the part of
+    /// each access spent on the board, apart from the guest's own code and
+    /// its exits between accesses.
+    pub locked: u64,
+    pub lock_waited_ticks: u64,
+    pub lock_held_ticks: u64,
+    pub longest_lock_held_ticks: u64,
 }
+
+/// Set by each register access of a [`Spi`] that has one; the board's lock
+/// release clears it ([`Spi::touched`]).
+pub type TouchStamp = alloc::rc::Rc<core::cell::Cell<bool>>;
 
 /// CPUs [`Activity::claims_by_cpu`] counts apart.
 pub const CLAIM_CPUS: usize = 32;
@@ -185,6 +198,8 @@ pub struct Spi {
     answered: bool,
     /// The AIC's last claim of this controller's input, when wired.
     claims: Option<ClaimStamp>,
+    /// Marked at each register access, when wired ([`Spi::touched`]).
+    touch: Option<TouchStamp>,
     /// The current command's first and latest register access.
     selected: Option<(u64, u64)>,
     control: u32,
@@ -214,6 +229,7 @@ impl Spi {
             raiser: usize::MAX,
             answered: false,
             claims: None,
+            touch: None,
             selected: None,
             control: 0,
             config: 0,
@@ -283,6 +299,21 @@ impl Spi {
     pub fn watch_claims(&mut self, claims: ClaimStamp) {
         self.claims = Some(claims);
     }
+    /// Mark `touch` at each register access, which the board's owner reads
+    /// at each release of its lock to count that call's lock time here
+    /// ([`Self::locked`]).
+    pub fn touched(&mut self, touch: TouchStamp) {
+        self.touch = Some(touch);
+    }
+    /// Count one call that accessed this controller: it waited `waited`
+    /// host counter ticks for the board's lock and held it `held`.
+    pub fn locked(&mut self, waited: u64, held: u64) {
+        let activity = &mut self.activity;
+        activity.locked += 1;
+        activity.lock_waited_ticks += waited;
+        activity.lock_held_ticks += held;
+        activity.longest_lock_held_ticks = activity.longest_lock_held_ticks.max(held);
+    }
     /// The claim of the line since it last rose at `raised`, if any.
     fn claim_since(&self, raised: u64) -> Option<(u64, usize)> {
         self.claims
@@ -310,6 +341,9 @@ impl Spi {
             activity.claimed_by_raiser += u64::from(cpu == self.raiser);
         }
         self.activity.accesses += 1;
+        if let Some(touch) = &self.touch {
+            touch.set(true);
+        }
         if self.nor.selected() {
             let first = self.selected.map_or(now, |(first, _)| first);
             self.selected = Some((first, now));

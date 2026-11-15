@@ -480,6 +480,33 @@ fn the_host_copies_the_nor_image_only_when_a_nor_exists() {
     assert_eq!(AppleDevices::new().nor_image(), None);
 }
 
+/// The board's lock time of a call counts against the NOR's controller
+/// when the call accessed it, and only then: another device's access, or a
+/// call that touched no register, leaves the NOR's counts alone.
+#[test]
+fn a_lock_release_counts_against_the_nor_only_after_its_access() {
+    let (mut d, _console, _supply, [uart, _, spi]) = powered_serial_controllers();
+    d.lock_released(9, 9);
+    d.write(0, spi + 0x30, 4, 7, 0).unwrap();
+    d.lock_released(3, 40);
+    d.read(0, uart, 4, 0).unwrap();
+    d.lock_released(5, 11);
+    assert_eq!(d.read(0, spi + 0x30, 4, 0), Ok(7));
+    d.lock_released(0, 25);
+    d.lock_released(2, 2);
+    let nor = d.take_nor_activity().unwrap();
+    assert_eq!(
+        (
+            nor.locked,
+            nor.lock_waited_ticks,
+            nor.lock_held_ticks,
+            nor.longest_lock_held_ticks
+        ),
+        (2, 3, 65, 40)
+    );
+    assert_eq!(nor.accesses, 2);
+}
+
 #[test]
 fn pmgr_serial_constructor_hooks_gate_mmio_and_preserve_kept_configuration() {
     let (mut d, console, supply, [uart, i2c, spi]) = powered_serial_controllers();

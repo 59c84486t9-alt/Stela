@@ -101,11 +101,13 @@ impl AppleDevices {
     /// external CS requires the placed GPIO bank.
     pub fn add_spi_nor(&mut self, placement: &stela_soc_data::board::SpiNor) -> Result<()> {
         let device = placement.device;
-        let spi = self.bus.add(Box::new(Spi::new(
+        let mut nor = Spi::new(
             placement.image.clone(),
             AicInput::new(0, device.irq as u16),
             placement.select.is_some(),
-        )));
+        );
+        nor.touched(self.nor_touch.clone());
+        let spi = self.bus.add(Box::new(nor));
         self.bus
             .map(spi, device.physical, device.bytes, 0)
             .map_err(|e| refuse!("SPI placement: {e}", ?e))?;

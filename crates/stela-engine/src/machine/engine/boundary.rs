@@ -481,6 +481,11 @@ pub trait Devices {
     }
     /// Supply that PE's execution PC immediately before its sample trigger.
     fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
+    /// A board shared between PEs ([`parallel::SharedDevices`]) is about to
+    /// release its lock after one call that waited `waited` host counter
+    /// ticks for it and held it `held`, its publication included: the
+    /// devices may count the time against whatever that call touched.
+    fn lock_released(&mut self, _waited: u64, _held: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
     /// Classify a scalar read and serve it when it is plain, in one call: a
     /// board shared between PEs takes its lock once for the three.

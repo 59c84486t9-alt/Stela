@@ -1202,12 +1202,17 @@ struct Pending {
     starts: Vec<Start>,
     service: bool,
     register_calls: usize,
+    /// Each release of the board's lock: what its call waited and held.
+    released: Vec<(u64, u64)>,
 }
 
 /// The one IMPLEMENTATION DEFINED register [`Pending`] serves.
 const SERVED: Encoding = Encoding::new(3, 5, 15, 0, 1);
 
 impl Devices for Pending {
+    fn lock_released(&mut self, waited: u64, held: u64) {
+        self.released.push((waited, held));
+    }
     fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
         Ok(0)
     }
@@ -1428,6 +1433,47 @@ fn a_handle_counts_the_ticks_it_waited_for_the_lock() {
     let (waited, again) = waiter.join().unwrap();
     assert!(waited > 0);
     assert_eq!(again, 0);
+}
+
+/// Each call tells the devices, before it releases the board's lock, the
+/// ticks it waited for it and held it, as the lock's own counts have them,
+/// so a model can count them against what the call touched.
+#[test]
+fn each_call_tells_the_devices_its_lock_wait_and_hold() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let hub = Hub::new(2, Ticks(reads));
+    let home = SharedDevices::new(Pending::default(), hub);
+    let mut worker = home.worker();
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    let released = |home: &SharedDevices<Pending>| home.with(|d| d.released.clone());
+    let access = |home: &SharedDevices<Pending>| home.lock_times()[Call::Access as usize].held;
+    let held = access(&home);
+    assert!(held > 0);
+    assert_eq!(released(&home).last(), Some(&(0, held)), "uncontended");
+    let board = Arc::clone(&home.board);
+    let locked = board.devices.lock().unwrap();
+    let waiter = std::thread::spawn(move || {
+        worker.write(1, 0, 4, 0, 0).unwrap();
+        worker.take_lock_wait()
+    });
+    // Bounded: the waiter blocks on the lock within five seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while board.waits[Call::Access as usize].load(Ordering::Relaxed) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never waited"
+        );
+        std::thread::yield_now();
+    }
+    drop(locked);
+    let waited = waiter.join().unwrap();
+    assert!(waited > 0);
+    let all = released(&home);
+    assert_eq!(
+        all.last(),
+        Some(&(waited, access(&home) - held)),
+        "its own wait"
+    );
 }
 
 #[test]

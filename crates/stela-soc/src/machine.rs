@@ -213,8 +213,10 @@ pub struct AppleDevices {
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
     coprocessors: Vec<(&'static str, DeviceId)>,
-    /// The SPI controller holding the NOR die.
+    /// The SPI controller holding the NOR die, and the mark its accesses
+    /// set for [`Devices::lock_released`].
     nor: Option<DeviceId>,
+    nor_touch: crate::spi::TouchStamp,
     /// StelaGPU's call gates (`gpu_gate`), a GPU's each.
     gpu_gates: Vec<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
@@ -667,6 +669,7 @@ impl AppleDevices {
             gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
+            nor_touch: Default::default(),
             gpu_gates: Vec::new(),
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
@@ -992,6 +995,16 @@ impl Devices for AppleDevices {
         self.pc_samplers
             .iter()
             .find_map(|&(cpu, register, _)| (physical == register && bytes == 4).then_some(cpu))
+    }
+
+    /// A call that accessed the NOR's controller counts its lock time
+    /// there; any other costs one load.
+    fn lock_released(&mut self, waited: u64, held: u64) {
+        if self.nor_touch.replace(false)
+            && let Some(spi) = self.nor.and_then(|id| self.bus.device_mut::<Spi>(id))
+        {
+            spi.locked(waited, held);
+        }
     }
 
     fn observe_pc_sample(&mut self, physical: u64, pc: u64) {
