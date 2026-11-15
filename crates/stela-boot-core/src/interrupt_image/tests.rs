@@ -122,3 +122,17 @@ fn terminal_backing_never_reuses_an_ordinary_saved_image() {
     assert_eq!(core::mem::align_of::<Backing<BYTES>>(), 64);
     assert_eq!(core::mem::size_of::<Backing<BYTES>>(), BYTES);
 }
+
+#[test]
+fn nmi_double_fault_and_machine_check_each_have_their_own_stack() {
+    let terminal = TERMINAL_VECTORS.map(ist);
+    assert_eq!(terminal, [NMI_IST, DOUBLE_FAULT_IST, MACHINE_CHECK_IST]);
+    for (index, stack) in terminal.iter().enumerate() {
+        assert!((1..=7).contains(stack));
+        assert_ne!(*stack, ORDINARY_IST);
+        assert!(!terminal[index + 1..].contains(stack));
+    }
+    for vector in (0..=255u8).filter(|vector| !TERMINAL_VECTORS.contains(vector)) {
+        assert_eq!(ist(vector), ORDINARY_IST);
+    }
+}

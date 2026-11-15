@@ -98,26 +98,23 @@ impl Tables {
         image: *const u8,
         active: [u64; 2],
     ) -> Option<stela_boot_core::interrupt_image::Captured<'_>> {
-        let slot = if self.fault_stack.frame_address()? == frame.addr() {
-            0
-        } else if self.fatal_stack.frame_address()? == frame.addr() {
-            1
+        let terminal = self
+            .terminal_stacks
+            .iter()
+            .position(|stack| stack.frame_address() == Some(frame.addr()));
+        let (slot, stack) = if self.fault_stack.frame_address()? == frame.addr() {
+            (0, &self.fault_stack)
         } else {
-            return None;
+            (1, &self.terminal_stacks[terminal?])
         };
         if active[slot] != 1 {
             return None;
         }
         let owner = self.xstate.as_ref()?;
-        let stack = if slot == 0 {
-            &self.fault_stack
-        } else {
-            &self.fatal_stack
-        };
         // SAFETY: original permanently pinned descriptor/UnsafeCell backing,
         // exact active slot and assembly-provided addresses. The same-slot
         // active check halts BEFORE allocating/saving another image. IF0 alone
-        // is not the exclusion: NMI/DF/MCE use the separate terminal IST and
+        // is not the exclusion: NMI/DF/MCE use their own terminal ISTs and
         // never return; nested terminal entries also halt before image reuse.
         // The image region is initialized by Stack::new and never overlaps
         // Rust's downward-growing handler stack or the mutable hardware Frame.
@@ -129,7 +126,14 @@ impl Tables {
                 handler_bytes: HANDLER_STACK_BYTES,
             })
         }?;
-        if usize::from(matches!(captured.frame.vector, 2 | 8 | 18)) != slot {
+        // The entry ran on the stack its vector's gate names.
+        let vector = u8::try_from(captured.frame.vector).ok()?;
+        let ist = stela_boot_core::interrupt_image::ist(vector);
+        let expected = match ist {
+            stela_boot_core::interrupt_image::ORDINARY_IST => None,
+            ist => Some(super::terminal_index(ist)),
+        };
+        if expected != terminal {
             return None;
         }
         Some(captured)

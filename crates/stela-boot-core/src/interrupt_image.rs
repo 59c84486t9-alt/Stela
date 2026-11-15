@@ -33,6 +33,31 @@ pub struct Frame {
     pub ss: u64,
 }
 
+/// The interrupt stack (the TSS's IST index) every ordinary vector runs on.
+pub const ORDINARY_IST: u8 = 1;
+/// The double fault's own stack.
+pub const DOUBLE_FAULT_IST: u8 = 2;
+/// The machine check's own stack.
+pub const MACHINE_CHECK_IST: u8 = 3;
+/// The NMI's own stack. NMIs are not blocked while a #MC or #DF handler
+/// runs, and a TLB shootdown sends them to any processor slow to answer:
+/// one on a stack it shared with such a handler would overwrite that
+/// handler's live frames, so each of the three has its own, as Linux gives
+/// NMI, #DF and #MC separate IST entries (arch/x86/include/asm/page_64_types.h).
+pub const NMI_IST: u8 = 4;
+/// The terminal vectors: NMI, double fault and machine check.
+pub const TERMINAL_VECTORS: [u8; 3] = [2, 8, 18];
+
+/// The interrupt stack `vector` runs on.
+pub const fn ist(vector: u8) -> u8 {
+    match vector {
+        2 => NMI_IST,
+        8 => DOUBLE_FAULT_IST,
+        18 => MACHINE_CHECK_IST,
+        _ => ORDINARY_IST,
+    }
+}
+
 /// Hardware entries and the Rust handler stack write this allocation. A
 /// shared descriptor reference must not freeze any part of the whole stack.
 #[repr(C, align(64))]
