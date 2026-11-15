@@ -274,6 +274,15 @@ impl CompileLock {
             .then(|| CompileGuard(self))
     }
 
+    /// Holds the lock unless another holds it, for as long as what owns
+    /// the answer keeps it, on any processor: a job that runs in slices.
+    pub fn try_hold_shared(self: &alloc::sync::Arc<Self>) -> Option<SharedHold> {
+        self.held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then(|| SharedHold(self.clone()))
+    }
+
     /// Whether the call served now deferred a compilation.
     pub fn deferred(&self) -> bool {
         self.deferred.load(Ordering::Acquire)
@@ -310,6 +319,16 @@ impl Default for CompileLock {
 pub struct CompileGuard<'a>(&'a CompileLock);
 
 impl Drop for CompileGuard<'_> {
+    fn drop(&mut self) {
+        self.0.held.store(false, Ordering::Release);
+    }
+}
+
+/// The compile lock, held by its owner until it drops this
+/// ([`CompileLock::try_hold_shared`]).
+pub struct SharedHold(alloc::sync::Arc<CompileLock>);
+
+impl Drop for SharedHold {
     fn drop(&mut self) {
         self.0.held.store(false, Ordering::Release);
     }

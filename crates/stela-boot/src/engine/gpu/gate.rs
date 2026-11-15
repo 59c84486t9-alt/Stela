@@ -10,7 +10,7 @@
 //! compiler's own lock ([`run_job`]): a call that needs one is answered
 //! not ready, and its guest thread sleeps and calls again.
 use super::{
-    BOOT_CPU, Bound, Installed, PAGE, client, installed, look_again, pump_waiting,
+    BOOT_CPU, Bound, Installed, PAGE, client, installed, look_again, pump_waiting, slice,
     stack::{self, Stack},
 };
 use crate::{engine::host, output};
@@ -26,7 +26,7 @@ use stela_contracts::gate::{BundleReport, GateService, MemoryRange, window};
 pub(in crate::engine) use stela_drivers::gpu::metal::deferred::Taker;
 use stela_drivers::gpu::metal::{
     compiler::{self, AirCompiler},
-    deferred::busy_pause_millis,
+    deferred::{busy_pause_after_slice, busy_pause_millis},
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
     native::{
@@ -36,7 +36,7 @@ use stela_drivers::gpu::metal::{
         Attachment,
         open::{Gpu, OpenError, open, reopen},
     },
-    service::{Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
+    service::{JobSlice, Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
     timing::{ExitWatch, Totals},
     vulkan::physical::PciBusInfo,
 };
@@ -49,7 +49,7 @@ use stela_loader::{apple_device_tree::DeviceTree, stela_gpu};
 type Shared = SharedService<NativeBackend, AirCompiler>;
 
 /// A process's main stack, as big as the deepest compile LLVM bounds.
-const STACK_BYTES: usize = 16 << 20;
+pub(super) const STACK_BYTES: usize = 16 << 20;
 
 /// How long a GPU's accepted work may go without progress as the PC stops:
 /// with the guest stopped, an event it waits on will never signal.
@@ -96,10 +96,12 @@ fn run(stack: u64, body: &mut dyn FnMut()) {
 
 /// A moment of a wait with no bound: on the boot processor it pumps, as the
 /// holder may wait for Linux, which only runs there; one Linux step can take
-/// tens of milliseconds.
+/// tens of milliseconds. It resumes a job waiting between slices, which may
+/// hold what this waits for: the compile lock, or a lock of Mesa's.
 pub(super) fn relax() {
     // What this waits for may be retiring a mapping, which waits for this.
     crate::native_mmio::shootdown::service();
+    slice::help();
     if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
         pump_waiting();
     }
@@ -203,24 +205,24 @@ static EXITS: ExitWatch = ExitWatch::new();
 /// phase: no turn should come near it.
 const LONG_TURN_MILLIS: u64 = 50;
 
-/// A deferred job this long or longer is reported, each one longer than any
-/// before: its processor's guest took no interrupt meanwhile, and XNU
-/// panics when a processor stays out of its guest for about half a second.
+/// One host step of a deferred job this long or longer is reported, each
+/// one longer than any before: its processor's guest took no interrupt
+/// meanwhile, and XNU panics when a processor stays out of its guest for
+/// about half a second. A slice should end within a few milliseconds.
 const LONG_JOB_MILLIS: u64 = 100;
 
-/// The longest deferred job reported so far, in TSC ticks.
+/// The longest step of a deferred job reported so far, in TSC ticks.
 static LONGEST_JOB: AtomicU64 = AtomicU64::new(0);
 
-/// Runs one deferred compilation, between two slices of a processor's guest
-/// and never inside a guest's call: a job runs whole, as the compilers have
-/// no point to stop at, so a processor with no guest work to do takes it
-/// first, and its guest's next interrupt waits for the job (a few to
-/// hundreds of milliseconds, a very large kernel seconds). Other processors'
-/// guests run meanwhile, and the guest clock does not wait for a processor
-/// whose guest waits. Off the boot processor the job runs with interrupts
-/// on; on it with only the doorbell and the TLB shootdown open ([`run`]), so
-/// a shootdown another processor sends is acknowledged at once rather than
-/// after the job. Whether one ran.
+/// Runs a slice of a deferred compilation, between two slices of a
+/// processor's guest and never inside a guest's call: a slice ends at the
+/// job's first allocation, wait or host call past [`slice::SLICE_MICROS`],
+/// so a job of seconds holds no processor out of its guest for long
+/// (`slice`). A processor with no guest work to do takes a job first.
+/// Off the boot processor a slice runs with interrupts on; on it with only
+/// the doorbell and the TLB shootdown open, so a shootdown another
+/// processor sends is acknowledged at once rather than after the slice.
+/// Whether one ran.
 pub(in crate::engine) fn run_job(taker: Taker) -> bool {
     let Some(gpu) = installed() else {
         return false;
@@ -231,44 +233,79 @@ pub(in crate::engine) fn run_job(taker: Taker) -> bool {
         return false;
     }
     let older = millis * taker.after_millis();
-    let ran = shared().iter().any(|service| {
+    let resume_after = millis * taker.resume_after_millis();
+    let mut ran = None;
+    for service in shared().iter() {
         if !service.jobs_waiting() {
-            return false;
+            continue;
         }
         let run = || {
             if taker == Taker::Boot {
-                service.run_job(older)
+                service.run_job(older, resume_after)
             } else {
                 // SAFETY: an AP's host work between slices, which holds nothing
                 // its interrupts' handlers take; they save the vector state.
-                unsafe { with_interrupts(|| service.run_job(older)) }
+                unsafe { with_interrupts(|| service.run_job(older, resume_after)) }
             }
         };
-        let began = host::rdtsc();
-        let ran = measured_job(run);
-        let took = host::rdtsc().wrapping_sub(began);
-        if ran
-            && took >= LONG_JOB_MILLIS * millis
-            && LONGEST_JOB.fetch_max(took, Ordering::Relaxed) < took
-        {
-            output::arguments(format_args!(
-                "GPU LONG JOB ms={} taker={taker:?} pe={}: its guest took no interrupt meanwhile\n",
-                took / millis.max(1),
-                host::processor()
-            ));
+        if let Some(step) = measured_job(service.job_between_slices(), run) {
+            note_long_step(step.ticks, millis, taker);
+            ran = Some(step);
+            break;
         }
-        ran
-    });
-    if taker == Taker::Busy {
-        // After a job, busy processors leave the next to a waiting one for
-        // the spacing; with none due, they look again soon, so that the
-        // spacing never adds to a job's wait.
-        NEXT_BUSY_JOB.store(
-            host::rdtsc().wrapping_add(millis * busy_pause_millis(ran)),
-            Ordering::Relaxed,
-        );
     }
-    ran
+    if taker == Taker::Busy {
+        // After a slice, busy processors leave the next to a waiting one
+        // for as long as it took; with none due, they look again soon, so
+        // that the spacing never adds to a job's wait.
+        let pause = match ran {
+            Some(step) => busy_pause_after_slice(step.ticks, millis),
+            None => millis * busy_pause_millis(false),
+        };
+        NEXT_BUSY_JOB.store(host::rdtsc().wrapping_add(pause), Ordering::Relaxed);
+    }
+    ran.is_some()
+}
+
+/// Reports a job's host step of `ticks`, each one longer than any before
+/// once it reaches [`LONG_JOB_MILLIS`].
+fn note_long_step(ticks: u64, millis: u64, taker: Taker) {
+    if ticks >= LONG_JOB_MILLIS * millis && LONGEST_JOB.fetch_max(ticks, Ordering::Relaxed) < ticks
+    {
+        output::arguments(format_args!(
+            "GPU LONG JOB ms={} taker={taker:?} pe={}: its guest took no interrupt meanwhile\n",
+            ticks / millis.max(1),
+            host::processor()
+        ));
+    }
+}
+
+/// Resumes a job that waits between slices, for a wait outside every job
+/// ([`slice::help`]); never starts one.
+pub(super) fn resume_job() {
+    for service in shared().iter() {
+        if service.job_between_slices() {
+            if let Some(gpu) = installed() {
+                let millis = gpu.tsc_hz / 1000;
+                if let Some(step) = measured_job(true, || service.run_job(u64::MAX, 0)) {
+                    note_long_step(step.ticks, millis, Taker::Waiting);
+                }
+            }
+            return;
+        }
+    }
+}
+
+/// The C library's core for the jobs on the compile stack at `top`: one
+/// past every processor's from the top of the processors' range, one for
+/// each compile stack, so that a job keeps its thread-local values on
+/// whichever processor resumes it ([`slice::job_core`]).
+pub(super) fn job_core(top: u64) -> core::ffi::c_uint {
+    let index = COMPILE_STACKS
+        .iter()
+        .position(|stack| stack.load(Ordering::Relaxed) == top)
+        .unwrap_or(COMPILE_STACKS.len());
+    (slice::LIBC_PROCESSORS - 1 - index) as core::ffi::c_uint
 }
 
 /// Whether a busy processor may look for a job ([`Taker::Busy`]) now: a
@@ -281,31 +318,44 @@ pub(in crate::engine) fn busy_job_due() -> bool {
 /// `GPU JOBS` line, and the carved bytes that job started from.
 static JOB_RISE: AtomicU64 = AtomicU64::new(0);
 static JOB_RISE_FROM: AtomicU64 = AtomicU64::new(0);
-/// Set while a processor measures the job it runs.
+/// Set while a job is measured, from its first slice to its end.
 static MEASURING: AtomicBool = AtomicBool::new(false);
+/// Set while the measured job waits between slices, keeping the heap's mark.
+static MEASURED_BETWEEN: AtomicBool = AtomicBool::new(false);
+/// The carved bytes the measured job started from.
+static MEASURED_FROM: AtomicU64 = AtomicU64::new(0);
 
-/// Runs `run`, and when it ran a job, keeps how far the heap's carved
-/// bytes rose above where they were: a compile's own peak, as jobs run one
-/// at a time, with what other processors carved meanwhile. One processor
-/// measures at a time, as the heap keeps one mark.
-fn measured_job(run: impl FnOnce() -> bool) -> bool {
-    if MEASURING
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        return run();
+/// Runs `run`, and for a job it began, keeps how far the heap's carved
+/// bytes rose above where they were until the job ended: a compile's own
+/// peak, as jobs run one at a time, with what other processors carved
+/// meanwhile. One job is measured at a time, as the heap keeps one mark.
+/// `between`: a job waits between slices, which `run` may resume.
+fn measured_job(between: bool, run: impl FnOnce() -> Option<JobSlice>) -> Option<JobSlice> {
+    let measure = !between
+        && MEASURING
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok();
+    if measure {
+        MEASURED_FROM.store(crate::ALLOCATOR.mark() as u64, Ordering::Relaxed);
     }
-    let from = crate::ALLOCATOR.mark();
-    let ran = run();
-    if ran {
-        let rise = crate::ALLOCATOR.marked_peak().saturating_sub(from) as u64;
+    let step = run();
+    let began = measure && step.is_some_and(|step| step.started);
+    let ended = step.is_some_and(|step| step.finished)
+        && (began || MEASURED_BETWEEN.swap(false, Ordering::AcqRel));
+    if ended {
+        let from = MEASURED_FROM.load(Ordering::Relaxed);
+        let rise = (crate::ALLOCATOR.marked_peak() as u64).saturating_sub(from);
         if rise > JOB_RISE.load(Ordering::Relaxed) {
             JOB_RISE.store(rise, Ordering::Relaxed);
-            JOB_RISE_FROM.store(from as u64, Ordering::Relaxed);
+            JOB_RISE_FROM.store(from, Ordering::Relaxed);
         }
+        MEASURING.store(false, Ordering::Release);
+    } else if began {
+        MEASURED_BETWEEN.store(true, Ordering::Release);
+    } else if measure {
+        MEASURING.store(false, Ordering::Release);
     }
-    MEASURING.store(false, Ordering::Release);
-    ran
+    step
 }
 
 /// Runs `body` with this processor's interrupts on.
@@ -330,12 +380,14 @@ fn report(reason: &str) {
 }
 
 /// Logs each distinct error or warning NVK reports, such as why a call failed
-/// with only a generic result.
+/// with only a generic result: in a job too, where no slice ends in it.
 fn driver_message(text: &str) {
     static SEEN: Seen<128> = Seen::new();
     if let Some(unheld) = SEEN.first_time(text) {
-        output::arguments(format_args!("GPU DRIVER {text}{unheld}\n"));
-        report_peaks();
+        slice::without_yields(|| {
+            output::arguments(format_args!("GPU DRIVER {text}{unheld}\n"));
+            report_peaks();
+        });
     }
 }
 
@@ -831,11 +883,13 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         let jobs = service.take_job_report();
         if jobs.ran != 0 || jobs.deferred != 0 {
             output::arguments(format_args!(
-                "GPU JOBS ran={} total_us={} longest_us={} longest_queued_us={} deferred={} \
-                 repeated={} waiting={} heap_rise={}M from={}M\n",
+                "GPU JOBS ran={} total_us={} longest_us={} slices={} longest_slice_us={} \
+                 longest_queued_us={} deferred={} repeated={} waiting={} heap_rise={}M from={}M\n",
                 jobs.ran,
                 micros(jobs.ticks),
                 micros(jobs.longest),
+                jobs.slices,
+                micros(jobs.longest_slice),
                 micros(jobs.longest_queued),
                 jobs.deferred,
                 jobs.repeated,
@@ -1162,6 +1216,9 @@ fn open_gpu(
                     free.store(compiling.top(), Ordering::Relaxed);
                 }
                 service.set_compile_stack(compiling.top());
+                // Jobs run in slices there; their allocations end them.
+                service.set_job_slicer(slice::start);
+                stela_boot_core::heap::set_allocation_hook(slice::allocation_point);
                 core::mem::forget(compiling);
                 // Imports' exports and driver imports run after their turn
                 // on a stack of their own; without one they stay in it. So

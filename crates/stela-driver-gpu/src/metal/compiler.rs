@@ -74,7 +74,7 @@ use core::{
 use triomphe::Arc;
 
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
-pub use nir_cache::{CompileGuard, CompileLock};
+pub use nir_cache::{CompileGuard, CompileLock, SharedHold};
 use nir_cache::{NirCache, ReflectionCache, ReflectionKey, Returned};
 
 /// The shader stages the AIR frontend lowers completely; other constructs

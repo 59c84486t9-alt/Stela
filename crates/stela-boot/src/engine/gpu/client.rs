@@ -961,6 +961,9 @@ static WITHDRAWN: AtomicU64 = AtomicU64::new(0);
 /// A call a task performs past that is reported and waited for, and one
 /// still running at [`posted_call::STOP_MS`] stops the boot, naming it.
 fn posted_wait(gpu: &Installed, request: &Request, code: u32) -> Option<i64> {
+    if super::slice::can_end() {
+        return job_wait(gpu, request, code);
+    }
     let millis = (gpu.tsc_hz / 1000).max(1);
     let posted = request.posted;
     let ms = || host::rdtsc().wrapping_sub(posted) / millis;
@@ -1002,6 +1005,56 @@ fn posted_wait(gpu: &Installed, request: &Request, code: u32) -> Option<i64> {
                 posted_call::STOP_MS
             ));
         }
+    }
+    Some(request.result.load(Ordering::Acquire))
+}
+
+/// [`posted_wait`] in a deferred job's slice, which no guest waits on: the
+/// slice gives its processor back while the call waits, and the call is not
+/// withdrawn for a wait a task would end, as a Linux process blocks in its
+/// ioctl. Only a call no task took by [`posted_call::STOP_MS`] is withdrawn,
+/// failing with ETIMEDOUT, and one a task still performs then stops the
+/// boot, naming it, as for a guest's call.
+fn job_wait(gpu: &Installed, request: &Request, code: u32) -> Option<i64> {
+    let millis = (gpu.tsc_hz / 1000).max(1);
+    let posted = request.posted;
+    let stop_at = posted.saturating_add(posted_call::STOP_MS * millis);
+    let done = || request.done.load(Ordering::Acquire) != 0;
+    post(request);
+    if let Err(error) = gpu.events.notify() {
+        output::fatal(format_args!(
+            "the host's Linux environment failed: {error:?}"
+        ));
+    }
+    while !done() {
+        if host::rdtsc() >= stop_at {
+            if request.withdrawable() && request.claim.withdraw() {
+                output::arguments(format_args!(
+                    "GPU call {code:#x} withdrawn after {} ms in a deferred job on PE {}: \
+                     no task took it; answered ETIMEDOUT\n",
+                    host::rdtsc().wrapping_sub(posted) / millis,
+                    host::processor()
+                ));
+                return None;
+            }
+            spin(gpu, request, stop_at.saturating_add(millis));
+            if !done() {
+                output::fatal(format_args!(
+                    "a GPU call ({code:#x}) of a deferred job still ran after {} ms",
+                    posted_call::STOP_MS
+                ));
+            }
+            break;
+        }
+        // The boot processor serves the call only from its run loop, so a
+        // slice there gives it back at once; one that cannot runs Linux.
+        if host::processor() == BOOT_CPU.load(Ordering::Relaxed) && !super::slice::can_end() {
+            spin(gpu, request, stop_at);
+            continue;
+        }
+        super::slice::wait_point();
+        crate::native_mmio::shootdown::service();
+        hint::spin_loop();
     }
     Some(request.result.load(Ordering::Acquire))
 }
@@ -1469,7 +1522,7 @@ unsafe extern "C" fn stela_libc_log(pointer: *const u8, size: usize) {
     // SAFETY: the C library's live text.
     let bytes = unsafe { slice::from_raw_parts(pointer, size) };
     if let Ok(line) = str::from_utf8(bytes) {
-        output::arguments(format_args!("{line}"));
+        super::slice::without_yields(|| output::arguments(format_args!("{line}")));
     }
 }
 
@@ -1499,9 +1552,10 @@ extern "C" fn stela_libc_now_ns() -> u64 {
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_core() -> c_uint {
-    installed()
-        .and_then(current_thread)
-        .map_or_else(host::processor, |thread| thread.core)
+    match installed().and_then(current_thread) {
+        Some(thread) => thread.core,
+        None => super::slice::job_core().unwrap_or_else(host::processor),
+    }
 }
 
 /// The core a thread of the platform's own runs as: past the C library's
@@ -1541,6 +1595,8 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
         return hint::spin_loop();
     };
     let Some(thread) = current_thread(gpu) else {
+        // A job's slice past its time gives its processor back here.
+        super::slice::wait_point();
         return super::gate::relax();
     };
     let sleeping = &SLEEPING[thread.core as usize - PROCESSORS];

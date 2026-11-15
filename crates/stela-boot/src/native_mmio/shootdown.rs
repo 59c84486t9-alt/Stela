@@ -218,6 +218,22 @@ pub(crate) unsafe fn job<R>(body: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Whether [`job`] here runs its body with interrupts on: they are on, or
+/// the task priority is no higher than the one it raises.
+#[cfg(feature = "nvk")]
+pub(crate) fn job_opens() -> bool {
+    let flags: u64;
+    // SAFETY: reads RFLAGS through the stack, which the push and pop balance.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+    if flags & RFLAGS_IF != 0 {
+        return true;
+    }
+    let priority: u64;
+    // SAFETY: CPL0 read of the task priority.
+    unsafe { asm!("mov {}, cr8", out(reg) priority, options(nomem, nostack, preserves_flags)) };
+    priority <= JOB_PRIORITY
+}
+
 /// After the caller cleared the leaf entries of `retired` (all of them, or
 /// `None` when they are not one range) and flushed its own TLB: shoot them
 /// down on every other joined processor. Whether each acknowledged within

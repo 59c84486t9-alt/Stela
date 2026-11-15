@@ -196,7 +196,7 @@ fn run_deferred(
     // A processor whose guest waits runs the job, which blocks.
     let runner = {
         let shared = shared.clone();
-        std::thread::spawn(move || shared.run_job(0))
+        std::thread::spawn(move || shared.run_job(0, 0).is_some())
     };
     while shared.jobs_waiting() {
         std::thread::yield_now();
@@ -302,7 +302,7 @@ fn a_texture_whose_memory_a_job_makes_holds_no_turn_meanwhile() {
     assert_eq!(status(&mut memory_a, texture_a), Status::Pending);
     let runner = {
         let shared = shared.clone();
-        std::thread::spawn(move || shared.run_job(0))
+        std::thread::spawn(move || shared.run_job(0, 0).is_some())
     };
     while shared.jobs_waiting() {
         std::thread::yield_now();
@@ -348,7 +348,7 @@ fn a_job_never_runs_inside_its_callers_call_however_long_it_waits() {
     assert_eq!(shared.take_job_report().ran, 0);
     assert!(shared.jobs_waiting());
     // Host work between guest slices runs it; the call then completes.
-    assert!(shared.run_job(0));
+    assert!(shared.run_job(0, 0).is_some());
     shared.serve(a, commit, &mut memory).unwrap();
     assert_eq!(status(&mut memory, commit), Status::Ok);
     let report = shared.take_job_report();
@@ -403,4 +403,103 @@ fn a_deferred_call_whose_record_takes_no_pending_fails_with_the_fault() {
     let call: GateCall = wire::read(&GuestMemory::read(&mut memory, span).unwrap()).unwrap();
     assert_eq!(call.status, u32::MAX);
     assert!(!shared.jobs_waiting());
+}
+
+/// A job run in slices on a thread of its own, as a platform runs one on its
+/// compile stack: [`threaded::pause`] gives the processor back, and the next
+/// `resume` runs the job on.
+mod threaded {
+    extern crate std;
+
+    use crate::metal::deferred::Sliced;
+    use alloc::boxed::Box;
+    use std::{
+        cell::RefCell,
+        sync::mpsc::{Receiver, Sender, channel},
+    };
+
+    std::thread_local! {
+        static BACK: RefCell<Option<(Receiver<()>, Sender<bool>)>> = const { RefCell::new(None) };
+    }
+
+    /// Ends the slice the job runs in.
+    pub(super) fn pause() {
+        BACK.with(|back| {
+            if let Some((go, ended)) = &*back.borrow() {
+                ended.send(false).unwrap();
+                go.recv().unwrap();
+            }
+        });
+    }
+
+    struct Threaded {
+        go: Sender<()>,
+        ended: Receiver<bool>,
+    }
+
+    impl Sliced for Threaded {
+        fn resume(&mut self) -> bool {
+            self.go.send(()).unwrap();
+            self.ended.recv().unwrap()
+        }
+    }
+
+    pub(super) fn start(_stack: u64, body: Box<dyn FnOnce() + Send>) -> Box<dyn Sliced> {
+        let (go, go_job) = channel();
+        let (ended_job, ended) = channel();
+        std::thread::spawn(move || {
+            go_job.recv().unwrap();
+            let finished = ended_job.clone();
+            BACK.with(|back| *back.borrow_mut() = Some((go_job, ended_job)));
+            body();
+            finished.send(true).unwrap();
+        });
+        Box::new(Threaded { go, ended })
+    }
+}
+
+/// A long compilation runs as bounded host steps: each `run_job` runs one
+/// slice and gives the processor back, the call stays a short `Pending`
+/// answer between slices, no taker that must wait resumes it early, and the
+/// call completes once the last slice ran, as with a job run whole.
+#[test]
+fn a_long_job_runs_in_bounded_slices_and_its_call_completes_as_before() {
+    let mut service = service();
+    let a = connect(&mut service);
+    let (pipeline, buffer) = pipeline(&mut service, a);
+    let compiler = service.device().compiler_mut();
+    compiler.defer_next = true;
+    compiler.job_steps = Some((5, threaded::pause));
+    let shared = SharedService::new(service, host(|_| {}));
+    shared.set_compile_stack(1);
+    shared.set_job_slicer(threaded::start);
+    let mut memory = Memory::default();
+    let commit = dispatching(&mut memory, pipeline, buffer);
+    shared.serve(a, commit, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, commit), Status::Pending);
+    // A wait that only resumes starts nothing.
+    assert_eq!(shared.run_job(u64::MAX, 0), None);
+    let first = shared.run_job(0, 0).expect("the job starts");
+    assert_eq!((first.started, first.finished), (true, false));
+    for _ in 0..4 {
+        assert!(shared.job_between_slices());
+        shared.serve(a, commit, &mut memory).unwrap();
+        assert_eq!(status(&mut memory, commit), Status::Pending);
+        // The boot processor leaves a job another resumes.
+        assert_eq!(shared.run_job(0, u64::MAX), None);
+        let slice = shared.run_job(u64::MAX, 0).expect("a wait resumes it");
+        assert_eq!((slice.started, slice.finished), (false, false));
+    }
+    let last = shared.run_job(0, 0).expect("the job ends");
+    assert_eq!((last.started, last.finished), (false, true));
+    assert!(!shared.jobs_waiting());
+    assert_eq!(shared.run_job(0, 0), None);
+    shared.serve(a, commit, &mut memory).unwrap();
+    assert_eq!(status(&mut memory, commit), Status::Ok);
+    let report = shared.take_job_report();
+    assert_eq!((report.ran, report.slices), (1, 6));
+    assert!(report.longest_slice <= report.longest);
+    let mut turn = shared.try_turn().unwrap();
+    assert_eq!(turn.device().compiler_mut().adopted, 1);
+    assert!(submitted(&mut turn).contains(&Command::Dispatch([4, 1, 1])));
 }
