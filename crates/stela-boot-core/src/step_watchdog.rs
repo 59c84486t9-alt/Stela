@@ -246,9 +246,106 @@ pub fn message(stage: &str, stuck: &Stuck) -> String {
     }
 }
 
+/// How long the boot processor's dispatcher may wait idle, while it runs
+/// alone, with neither its timer interrupt nor a raised wake: the timer's
+/// heartbeat fires every millisecond, so a second without it is a lost
+/// interrupt, not a late one. A halted processor counts no cycles, so the
+/// counter's limit never ends such a wait; the dispatcher then polls the
+/// time-stamp counter instead of halting, and stops the boot past this.
+pub const IDLE_LIMIT_MS: u64 = 1000;
+
+/// Whether an idle wait entered at `entered` has gone [`IDLE_LIMIT_MS`]
+/// without a wake at `now`, both by the time-stamp counter at `tsc_hz`.
+/// Never with no known rate.
+pub fn idle_overdue(entered: u64, now: u64, tsc_hz: u64) -> bool {
+    tsc_hz != 0 && millis(now.wrapping_sub(entered), tsc_hz) >= IDLE_LIMIT_MS
+}
+
+/// The local APIC registers an idle stop names: the timer's entry and
+/// counts, the task priority, and the in-service and requested vectors
+/// (eight 32-bit registers each, vector 0 in bit 0 of the first).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IdleApic {
+    pub lvt_timer: u32,
+    pub initial: u32,
+    pub current: u32,
+    pub tpr: u32,
+    pub in_service: [u32; 8],
+    pub requested: [u32; 8],
+}
+
+/// The highest vector set in an ISR or IRR image.
+fn highest(bits: &[u32; 8]) -> Option<u32> {
+    bits.iter()
+        .enumerate()
+        .rev()
+        .find(|(_, word)| **word != 0)
+        .map(|(index, word)| index as u32 * 32 + 31 - word.leading_zeros())
+}
+
+fn vector(vector: Option<u32>) -> String {
+    vector.map_or_else(|| String::from("none"), |vector| format!("{vector:#x}"))
+}
+
+/// The stop's reason when the dispatcher's idle wait outlived
+/// [`IDLE_LIMIT_MS`] (`waited_ms`) during `stage`.
+pub fn idle_message(stage: &str, waited_ms: u64, apic: &IdleApic) -> String {
+    format!(
+        "the boot processor's timer interrupt did not arrive for {waited_ms} ms while Linux's \
+         work waited idle ({stage}): LVT timer {:#x}{}, count {} of {}, TPR {:#x}, highest \
+         vector in service {}, highest requested {}",
+        apic.lvt_timer,
+        if apic.lvt_timer & 1 << 16 != 0 {
+            " (masked)"
+        } else {
+            ""
+        },
+        apic.current,
+        apic.initial,
+        apic.tpr,
+        vector(highest(&apic.in_service)),
+        vector(highest(&apic.requested)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_wait_is_overdue_only_after_the_limit_by_the_counter() {
+        let entered = u64::MAX - HZ / 2;
+        assert!(!idle_overdue(entered, entered + HZ / 1000, HZ));
+        assert!(!idle_overdue(entered, entered.wrapping_add(HZ - 1), HZ));
+        // Across the counter's wrap, a whole second later.
+        assert!(idle_overdue(entered, entered.wrapping_add(HZ), HZ));
+        assert!(!idle_overdue(entered, entered.wrapping_add(10 * HZ), 0));
+    }
+
+    #[test]
+    fn an_idle_stop_names_the_timer_and_the_vectors_that_block_it() {
+        let mut apic = IdleApic {
+            lvt_timer: 0x20,
+            initial: 2400,
+            current: 0,
+            tpr: 0,
+            ..IdleApic::default()
+        };
+        apic.in_service[1] = 1 << 17;
+        apic.requested[1] = 1;
+        apic.requested[6] = 1 << 3;
+        assert_eq!(
+            idle_message("the GPU's probe", 1000, &apic),
+            "the boot processor's timer interrupt did not arrive for 1000 ms while Linux's work \
+             waited idle (the GPU's probe): LVT timer 0x20, count 0 of 2400, TPR 0x0, highest \
+             vector in service 0x31, highest requested 0xc3"
+        );
+        apic.lvt_timer |= 1 << 16;
+        apic.in_service = [0; 8];
+        assert!(idle_message("Linux driver work", 1200, &apic).contains(
+            "LVT timer 0x10020 (masked), count 0 of 2400, TPR 0x0, highest vector in service none"
+        ));
+    }
 
     const HZ: u64 = 2_400_000_000;
 

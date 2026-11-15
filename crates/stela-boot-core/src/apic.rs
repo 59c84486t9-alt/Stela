@@ -23,7 +23,13 @@ const CPUID_X2APIC: u32 = 1 << 21;
 /// IA32_APIC_BASE: the register page's physical address.
 pub const BASE_ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
+/// Task priority.
+pub const TPR: u32 = 0x80;
 pub const EOI: u32 = 0xb0;
+/// The first of the eight in-service (`ISR`) and interrupt request (`IRR`)
+/// registers, 10h apart, vector 0 in bit 0 of the first.
+pub const ISR: u32 = 0x100;
+pub const IRR: u32 = 0x200;
 pub const SPURIOUS: u32 = 0xf0;
 pub const LVT_TIMER: u32 = 0x320;
 pub const LVT_LINT0: u32 = 0x350;

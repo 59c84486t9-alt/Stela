@@ -58,6 +58,11 @@ static LOOKING: AtomicBool = AtomicBool::new(false);
 /// The start of the step a watcher sent the NMI for; 0 while none was.
 static SENT: AtomicU64 = AtomicU64::new(0);
 
+/// The boot processor while it runs alone with Linux's work, from
+/// [`install`] to [`retire`], with or without a counter; `u32::MAX` else.
+/// Its dispatcher then polls instead of halting ([`alone_idle_stage`]).
+static ALONE: AtomicU32 = AtomicU32::new(u32::MAX);
+
 /// What the boot is doing, for the stop's reason.
 static STAGE: AtomicPtr<&'static str> = AtomicPtr::new(core::ptr::null_mut());
 static DRIVER_WORK: &str = "Linux driver work";
@@ -215,6 +220,7 @@ fn interrupt(counter: u8) -> bool {
 /// APIC's performance counter entry.
 pub(super) unsafe fn install(tsc_hz: u64) {
     TSC_HZ.store(tsc_hz, Ordering::Relaxed);
+    ALONE.store(super::host::local::processor(), Ordering::Relaxed);
     let found = probe().and_then(|(counter, width)| {
         let start = decide::start_value(tsc_hz, width).ok_or("the limit does not fit its width")?;
         // A counter a hypervisor accepts but never advances raises nothing.
@@ -266,6 +272,7 @@ pub(super) unsafe fn install(tsc_hz: u64) {
 /// for good, and the APIC entry back to what it was. From now on the other
 /// processors watch its steps ([`look`]), with or without a counter.
 pub(super) fn retire() {
+    ALONE.store(u32::MAX, Ordering::Relaxed);
     let counter = COUNTER.swap(NONE, Ordering::AcqRel);
     if counter != NONE {
         WATCH.disarm();
@@ -338,6 +345,19 @@ pub(super) fn stage(stage: &'static &'static str) {
 /// What the boot is doing is no longer named.
 pub(super) fn clear_stage() {
     STAGE.store(core::ptr::null_mut(), Ordering::Relaxed);
+}
+
+/// What the boot is doing, when this is the boot processor running alone
+/// with Linux's work: its dispatcher's idle wait is then bounded by
+/// `stela_boot_core::step_watchdog::IDLE_LIMIT_MS`, which a halted wait
+/// whose interrupt never comes would not be (it counts no cycles).
+pub(crate) fn alone_idle_stage() -> Option<&'static str> {
+    if ALONE.load(Ordering::Relaxed) != super::host::local::processor() {
+        return None;
+    }
+    let stage = STAGE.load(Ordering::Relaxed);
+    // SAFETY: `stage` stores only references to statics.
+    Some(unsafe { stage.as_ref() }.copied().unwrap_or(DRIVER_WORK))
 }
 
 /// Put the counter back: a step returned at `now`.

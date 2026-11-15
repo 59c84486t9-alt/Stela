@@ -436,6 +436,8 @@ struct State {
     guest: AtomicU64,
     idle: AtomicU64,
     heartbeat: AtomicU64,
+    /// Timer interrupts taken, which end a polled idle wait ([`State::poll`]).
+    ticks: AtomicU64,
 }
 // SAFETY: pointer fields never leave the owning CPU, every effect checks
 // affinity first, and process mutation excludes the same real ISR with CLI.
@@ -468,11 +470,67 @@ impl State {
             let ticks = self.cpu.controller().read(apic::CURRENT);
             Some(u64::from(ticks) * 1_000_000 / self.apic_hz)
         };
-        // SAFETY: caller supplies the live IDT/LAPIC and the explicit wait scope.
-        unsafe { crate::native_idle::wait(budget) };
+        match crate::engine::alone_idle_stage() {
+            // SAFETY: as below.
+            Some(stage) => unsafe { self.poll(stage) },
+            // SAFETY: caller supplies the live IDT/LAPIC and the explicit wait scope.
+            None => unsafe { crate::native_idle::wait(budget) },
+        }
         self.idle.store(NONE, Ordering::Relaxed);
         self.pending.swap(false, Ordering::AcqRel);
         self.rearm(self.cpu.sample()?)
+    }
+
+    /// Wait for the next timer interrupt or a raised wake with interrupts
+    /// enabled, polling the time-stamp counter instead of halting: on the
+    /// boot processor running alone, where a halted wait whose interrupt
+    /// never comes counts no cycles for the step watchdog and leaves a
+    /// black screen. Past `IDLE_LIMIT_MS` (the heartbeat fires every
+    /// millisecond) the boot stops with the local APIC state that kept the
+    /// interrupt away.
+    ///
+    /// # Safety
+    /// As [`crate::native_idle::wait`]: interrupts disabled on entry, the
+    /// live IDT and local APIC, and the caller's explicit wait scope.
+    unsafe fn poll(&self, stage: &str) {
+        use stela_boot_core::step_watchdog::{IDLE_LIMIT_MS, IdleApic, idle_message, idle_overdue};
+        let ticks = self.ticks.load(Ordering::Relaxed);
+        let tsc_hz = crate::firmware::tsc_hz();
+        let entered = crate::apic::rdtsc();
+        // SAFETY: the caller's contract; interrupts are taken between polls.
+        unsafe { asm!("sti", options(nostack)) };
+        loop {
+            if self.pending.load(Ordering::Acquire) || self.ticks.load(Ordering::Relaxed) != ticks {
+                break;
+            }
+            if idle_overdue(entered, crate::apic::rdtsc(), tsc_hz) {
+                // SAFETY: as above.
+                unsafe { asm!("cli", options(nostack)) };
+                // An interrupt held off by a long system management call
+                // was taken before the CLI, after the check above.
+                if self.pending.load(Ordering::Acquire)
+                    || self.ticks.load(Ordering::Relaxed) != ticks
+                {
+                    return;
+                }
+                let apic = self.cpu.controller();
+                let mut state = IdleApic {
+                    lvt_timer: apic.read(apic::LVT_TIMER),
+                    initial: apic.read(apic::INITIAL),
+                    current: apic.read(apic::CURRENT),
+                    tpr: apic.read(apic::TPR),
+                    ..IdleApic::default()
+                };
+                for word in 0..8 {
+                    state.in_service[word] = apic.read(apic::ISR + 0x10 * word as u32);
+                    state.requested[word] = apic.read(apic::IRR + 0x10 * word as u32);
+                }
+                crate::output::fatal(idle_message(stage, IDLE_LIMIT_MS, &state));
+            }
+            core::hint::spin_loop();
+        }
+        // SAFETY: as above.
+        unsafe { asm!("cli", options(nostack)) };
     }
 
     fn rearm(&self, now: u64) -> Result<(), WorkError> {
@@ -748,6 +806,7 @@ impl Installed {
                 guest: AtomicU64::new(NONE),
                 idle: AtomicU64::new(NONE),
                 heartbeat: AtomicU64::new(now.checked_add(TICK_NS).ok_or(WorkError::Exhausted)?),
+                ticks: AtomicU64::new(0),
             });
             // Complete fallible hardware validation before publishing an IRQ
             // registration. A changed controller must leave no orphaned Arc.
@@ -990,6 +1049,7 @@ pub(crate) fn interrupt() {
     if state.cpu.affinity().is_err() {
         return;
     } // Other physical CPUs own their timers.
+    state.ticks.fetch_add(1, Ordering::Relaxed);
     let result = (|| {
         let now = state.cpu.sample()?;
         let heartbeat = state.heartbeat.load(Ordering::Relaxed);
