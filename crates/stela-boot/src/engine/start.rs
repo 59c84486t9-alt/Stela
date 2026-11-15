@@ -236,6 +236,11 @@ fn start(handoff: u64) -> Started {
             lines,
         )
     });
+    // SAFETY: CPL0 on the boot processor, which runs PE 0, with interrupts
+    // off and its descriptors installed; nothing else writes its P-state
+    // registers. After the stop record is armed, so that a fault here
+    // leaves its report. The APs ask for theirs when they are ready.
+    unsafe { stela_boot_core::host_performance::request_full_performance() };
     // Use the physmap directly: its CPU and physical bases have the
     // same alignment phase. A separately placed heap alias cannot in general
     // satisfy higher-order CPU/physical page alignment simultaneously.
@@ -909,6 +914,10 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     output::arguments(format_args!(
         "NATIVE ACTIVE workers={active_workers} parked=0 source_PEs={}\n",
         full_profile.processors.len().max(1),
+    ));
+    output::arguments(format_args!(
+        "{}",
+        stela_boot_core::host_performance::summary()
     ));
     if loaded_tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");

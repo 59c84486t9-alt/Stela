@@ -43,6 +43,8 @@ pub mod handoff_records;
 pub mod heap;
 pub mod host_identity;
 pub mod host_memory;
+#[cfg(target_arch = "x86_64")]
+pub mod host_performance;
 pub mod host_resources;
 pub mod hpet;
 pub mod interrupt_image;

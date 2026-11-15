@@ -292,6 +292,10 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             *argument.descriptors.get() = Some(descriptors);
             *argument.doorbells.get() = Some(host::doorbell_counter());
         }
+        // SAFETY: CPL0 on this ready AP with interrupts masked and its own
+        // descriptors installed, before it runs a PE; nothing else writes
+        // its P-state registers.
+        unsafe { stela_boot_core::host_performance::request_full_performance() };
         Ok(owner)
     })()
     .and_then(|owner| {
