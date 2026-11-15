@@ -101,6 +101,8 @@ struct Sample {
 struct Clock {
     epoch: RtcEpoch,
     sample: Cell<Option<Sample>>,
+    /// The last upcount a reader was given ([`RtcClock::read_ticks`]).
+    read: Cell<Option<u64>>,
     /// The last counter refused for preceding the publication, with it.
     regression: Cell<Option<(u64, u64)>>,
 }
@@ -125,6 +127,7 @@ impl RtcClock {
         Ok(Self(Rc::new(Clock {
             epoch,
             sample: Cell::new(None),
+            read: Cell::new(None),
             regression: Cell::new(None),
         })))
     }
@@ -189,6 +192,25 @@ impl RtcClock {
             .get()
             .map(|sample| sample.ticks)
             .ok_or(refuse!("PMU RTC has no actual counter publication"))
+    }
+
+    /// The upcount a guest read of the PMIC or the SMC returns: the
+    /// published count, or one tick past the last count a read returned
+    /// when the publication has not passed it. The guest's system counter
+    /// holds while a PE with guest work is kept from running (the engine's
+    /// clock), and the count follows it, but a Mac's PMIC oscillator keeps
+    /// counting meanwhile: XNU's `AppleDialogSPMIPMURTC` takes an upcount
+    /// no higher than the last it read as the RTC running backwards ("RTC
+    /// count backward detected"). A tick is 30.5 us; the publication passes
+    /// the reads again within as many ticks once the counter moves.
+    pub fn read_ticks(&self) -> Result<u64> {
+        let published = self.published_ticks()?;
+        let ticks = match self.0.read.get() {
+            Some(last) if published <= last && last + 1 < LIMIT => last + 1,
+            _ => published,
+        };
+        self.0.read.set(Some(ticks));
+        Ok(ticks)
     }
 
     /// First counter at which the oscillator reaches a tick in this epoch.
@@ -347,6 +369,31 @@ mod tests {
         let clock = RtcClock::new(last).unwrap();
         assert_eq!(clock.ticks_at(5 + FREQUENCY_HZ), None);
     }
+    #[test]
+    fn reads_while_the_counter_holds_still_count_up() {
+        // #121: six reads of one held count all returned 0x89287fe2.
+        let clock = RtcClock::new(RtcEpoch {
+            counter: 0,
+            ticks: 0x8928_7fe2,
+        })
+        .unwrap();
+        let smc = clock.clone();
+        assert!(clock.read_ticks().is_err());
+        clock.publish(0).unwrap();
+        let reads: Vec<_> = (0..6).map(|_| clock.read_ticks().unwrap()).collect();
+        assert_eq!(reads, (0x8928_7fe2..0x8928_7fe8).collect::<Vec<_>>());
+        // The SMC's key reads the same upcount, after the PMIC's.
+        assert_eq!(smc.read_ticks(), Ok(0x8928_7fe8));
+        // The counter moves on: the publication counts again once past the
+        // reads, and the published count itself is never changed.
+        clock.publish(counter_ticks(3)).unwrap();
+        assert_eq!(clock.published_ticks(), Ok(0x8928_7fe5));
+        assert_eq!(clock.read_ticks(), Ok(0x8928_7fe9));
+        clock.publish(FREQUENCY_HZ).unwrap();
+        assert_eq!(clock.read_ticks(), Ok(0x8928_7fe2 + RTC_HZ));
+        assert_eq!(clock.read_ticks(), Ok(0x8928_7fe3 + RTC_HZ));
+    }
+
     #[test]
     fn explicit_epoch_is_shared_and_has_no_implicit_sample() {
         let clock = RtcClock::new(RtcEpoch {

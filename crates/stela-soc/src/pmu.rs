@@ -518,14 +518,14 @@ impl SpmiSlave for Pmu {
             }
         }
         self.publish_time(now)?;
-        // One sample serves every upcount byte of the access.
-        let raw = if self.rtc.is_some() {
-            (self
-                .clock
-                .published_ticks()
-                .map_err(SlaveError::Unsupported)?
-                << 1)
-                .to_le_bytes()
+        // One sample serves every upcount byte of the access, and only an
+        // access of the upcount reads it (`RtcClock::read_ticks`).
+        let raw = if self.rtc.is_some()
+            && cells
+                .iter()
+                .any(|(_, cell)| matches!(cell, Byte::Upcount(_)))
+        {
+            (self.clock.read_ticks().map_err(SlaveError::Unsupported)? << 1).to_le_bytes()
         } else {
             [0; 8]
         };

@@ -18,7 +18,7 @@ impl RtcBinding {
         }
     }
     pub fn value(&self) -> Result<[u8; 6]> {
-        let ticks = self.clock.published_ticks()?;
+        let ticks = self.clock.read_ticks()?;
         let bytes = ticks.to_le_bytes();
         Ok(bytes[..6].try_into().expect("six bytes"))
     }

@@ -171,12 +171,14 @@ fn smc_and_spmi_sample_one_epoch_while_calendar_offset_has_one_pmu_owner() {
     raw[..6].copy_from_slice(&sram.get(6));
     let logical = u64::from_le_bytes(raw);
     assert_eq!(logical, 987654321 + 3 * RTC_HZ);
+    // Each read at the same count is a tick past the last any reader got,
+    // as a PMIC oscillator counts on while the system counter holds.
     pmu.read(rtc.upcount, &mut raw[..6], now).unwrap();
-    assert_eq!(u64::from_le_bytes(raw) >> 1, logical);
+    assert_eq!(u64::from_le_bytes(raw) >> 1, logical + 1);
     pmu.write(0x1411, &[9, 8, 7, 6, 5, 4], now).unwrap();
     send(&mut smc, request(READ, 1, 6, 0, rtc::KEY));
     raw[..6].copy_from_slice(&sram.get(6));
-    assert_eq!(u64::from_le_bytes(raw), logical);
+    assert_eq!(u64::from_le_bytes(raw), logical + 2);
     assert!(pmu.read(rtc.upcount, &mut raw[..6], now - 1).is_err());
     assert_eq!(clock.published_ticks(), Ok(logical));
 }
