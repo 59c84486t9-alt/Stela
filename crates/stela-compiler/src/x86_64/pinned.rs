@@ -112,10 +112,7 @@ fn take(asm: &mut Asm, size: Size, destination: Gpr, register: Register) {
 
 /// `destination` = `value`, in the fewest bytes.
 fn constant(asm: &mut Asm, destination: Gpr, value: u64) {
-    match u32::try_from(value) {
-        Ok(low) => asm.mov_imm32(destination, low),
-        Err(_) => asm.mov_imm64(destination, value),
-    }
+    asm.mov_imm(destination, value);
 }
 
 /// The result in `work` stored if it is not already home, then NZCV.
@@ -470,7 +467,7 @@ pub(super) fn emit_direct_with_add_sub_capture(
             match i32::try_from(immediate as i64) {
                 Ok(short) => asm.alu_imm(logical(kind), size, work, short),
                 Err(_) => {
-                    asm.mov_imm64(Gpr::Rcx, immediate);
+                    constant(&mut asm, Gpr::Rcx, immediate);
                     asm.alu(logical(kind), size, work, Gpr::Rcx);
                 }
             }
@@ -491,7 +488,7 @@ pub(super) fn emit_direct_with_add_sub_capture(
                 WideMove::Not if width == Width::W32 => {
                     asm.mov_imm32(work, !value as u32);
                 }
-                WideMove::Not => asm.mov_imm64(work, !value),
+                WideMove::Not => constant(&mut asm, work, !value),
                 WideMove::Keep => {
                     take(&mut asm, Size::Qword, work, destination);
                     // The field brought down to bits 15:0, replaced, and
@@ -667,6 +664,82 @@ mod tests {
                     assert_eq!(state.nzcv, expected << 28);
                 }
             }
+        }
+    }
+
+    /// MOVZ and MOVN into X0 (R15) take the shortest MOV of their value.
+    #[test]
+    fn wide_moves_take_their_shortest_mov() {
+        for (width, kind, immediate, shift, expected) in [
+            (
+                Width::X64,
+                WideMove::Zero,
+                0x1234,
+                0,
+                &[0x41, 0xbf, 0x34, 0x12, 0, 0][..],
+            ),
+            (
+                Width::X64,
+                WideMove::Zero,
+                0x8000,
+                16,
+                &[0x41, 0xbf, 0, 0, 0, 0x80],
+            ),
+            (
+                Width::X64,
+                WideMove::Zero,
+                1,
+                32,
+                &[0x49, 0xbf, 0, 0, 0, 0, 1, 0, 0, 0],
+            ),
+            (
+                Width::X64,
+                WideMove::Not,
+                0,
+                0,
+                &[0x49, 0xc7, 0xc7, 0xff, 0xff, 0xff, 0xff],
+            ),
+            (
+                Width::X64,
+                WideMove::Not,
+                0x7fff,
+                16,
+                &[0x49, 0xc7, 0xc7, 0xff, 0xff, 0x00, 0x80],
+            ),
+            (
+                Width::X64,
+                WideMove::Not,
+                0x8000,
+                16,
+                &[0x49, 0xbf, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff],
+            ),
+            (
+                Width::X64,
+                WideMove::Not,
+                1,
+                32,
+                &[0x49, 0xbf, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xff, 0xff, 0xff],
+            ),
+            (
+                Width::W32,
+                WideMove::Not,
+                0,
+                0,
+                &[0x41, 0xbf, 0xff, 0xff, 0xff, 0xff],
+            ),
+        ] {
+            let code = direct(Operation::MoveWide {
+                width,
+                kind,
+                destination: Register::X(0),
+                immediate,
+                shift,
+            });
+            assert_eq!(
+                &code[..],
+                expected,
+                "{width:?} {kind:?} {immediate:#x} {shift}"
+            );
         }
     }
 

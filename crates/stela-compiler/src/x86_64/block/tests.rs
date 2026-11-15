@@ -3784,3 +3784,128 @@ fn dead_nzcv_captures_leave_the_frame_emitters_state() {
     }
     assert!(cases > 6000);
 }
+
+/// MOVZ, MOVN and MOVK in both widths at every shift, with immediates at
+/// the edges of the zero-extended and sign-extended 32-bit moves, into
+/// pinned and frame registers, after a CMP whose NZCV a B.cond, a CSEL and
+/// MRS read after them: the pinned system-mode block, the frame block, an
+/// ordinary block (whose regions take the constants) and a model agree.
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn wide_moves_match_the_model_in_every_form() {
+    use crate::{
+        GuestState, Lifter, Options, TargetCpu,
+        aarch64::Decoder,
+        block::{BlockProfile, CompilationPlan},
+        state::Limit,
+        x86_64::{MemoryChecks, NativeSystem, native, pinned},
+    };
+    const CMP_X1_X2: u32 = 0xeb02_003f;
+    const B_EQ: u32 = 0x5400_0200;
+    /// CSEL X13, X3, X4, LT.
+    const CSEL_X13: u32 = 0x9a84_b06d;
+    const MRS_X14_NZCV: u32 = 0xd53b_420e;
+    let host = TargetCpu::detect();
+    let mut runs = 0;
+    for target in [TargetCpu::Baseline, TargetCpu::X86_64_V3, host] {
+        if !host.supports(target) {
+            continue;
+        }
+        for wide in [false, true] {
+            for opc in [0u32, 2, 3] {
+                for hw in 0..if wide { 4 } else { 2 } {
+                    for immediate in [0u32, 1, 0x7fff, 0x8000, 0xfffe, 0xffff] {
+                        for rd in [0u32, 1, 5, 8, 19, 30] {
+                            let word = u32::from(wide) << 31
+                                | opc << 29
+                                | 0x1280_0000
+                                | hw << 21
+                                | immediate << 5
+                                | rd;
+                            let words = [CMP_X1_X2, word, B_EQ, CSEL_X13, MRS_X14_NZCV];
+                            let instructions: Vec<_> = words
+                                .iter()
+                                .enumerate()
+                                .map(|(index, &word)| {
+                                    Decoder
+                                        .lift(GuestAddress(0x1000 + 4 * index as u64), word)
+                                        .unwrap()
+                                })
+                                .collect();
+                            let end = GuestAddress(0x1000 + 4 * words.len() as u64);
+                            let (system, _) = emit_system_mode(
+                                &instructions,
+                                None,
+                                end,
+                                target,
+                                MemoryChecks::DEFAULT,
+                                NativeSystem::NONE,
+                            );
+                            let system = pinned::entered(&system.x86_64_code);
+                            let frame = emit_for_target(
+                                &instructions,
+                                None,
+                                end,
+                                target,
+                                MemoryChecks::DEFAULT,
+                            )
+                            .x86_64_code;
+                            // An ordinary block ends at the B.EQ.
+                            let source: Vec<u8> = words[..2]
+                                .iter()
+                                .flat_map(|word| word.to_le_bytes())
+                                .collect();
+                            let ordinary = CompilationPlan::new(
+                                &source,
+                                GuestAddress(0x1000),
+                                &Options::new(BlockProfile::ORDINARY, target),
+                            )
+                            .unwrap()
+                            .compile()
+                            .unwrap()
+                            .native
+                            .x86_64_code;
+                            for (left, right) in [(1, 1), (1, 2), (u64::MAX, 0), (0, u64::MAX)] {
+                                let mut initial = GuestState {
+                                    lower_limit: Limit(u64::MAX),
+                                    ..GuestState::default()
+                                };
+                                for (register, x) in initial.x.iter_mut().enumerate() {
+                                    *x = 0x0123_4567_89ab_cdef_u64.rotate_left(register as u32 * 5);
+                                }
+                                initial.x[1] = left;
+                                initial.x[2] = right;
+                                let shift = 16 * hw;
+                                let field = u64::from(immediate) << shift;
+                                let old = initial.x[rd as usize];
+                                let value = match opc {
+                                    0 => !field,
+                                    2 => field,
+                                    _ => old & !(0xffff << shift) | field,
+                                };
+                                let value = if wide { value } else { value & 0xffff_ffff };
+                                let label =
+                                    alloc::format!("{word:08x} {left:#x} {right:#x} {target:?}");
+                                let mut expected = initial.clone();
+                                let exit = native::run(&frame, &mut expected);
+                                assert_eq!(expected.x[rd as usize], value, "{label}");
+                                let mut actual = initial.clone();
+                                let system_exit = native::run(&system, &mut actual);
+                                assert_eq!((system_exit, &actual), (exit, &expected), "{label}");
+                                let mut actual = initial.clone();
+                                native::run(&ordinary, &mut actual);
+                                assert_eq!(
+                                    (actual.x[rd as usize], actual.nzcv),
+                                    (value, expected.nzcv),
+                                    "{label}"
+                                );
+                                runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 2000, "{runs}");
+}

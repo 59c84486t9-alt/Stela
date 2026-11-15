@@ -351,6 +351,22 @@ impl<'a> Asm<'a> {
         self.opcode_reg(Size::Qword, 0xb8, destination);
         self.data(&value.to_le_bytes());
     }
+    /// `destination = value` in its shortest form, none of which changes
+    /// RFLAGS: `mov r32, imm32` (5 or 6 bytes, zero-extended), `mov r64,
+    /// simm32` (7 bytes, sign-extended) or `movabs r64, imm64` (10 bytes).
+    /// The sign-extended form is taken for R0-R15 only. Not for a guest
+    /// address, whose field a stored block relocates ([`Self::guest_imm64`]).
+    pub(crate) fn mov_imm(&mut self, destination: Gpr, value: u64) {
+        if let Ok(low) = u32::try_from(value) {
+            self.mov_imm32(destination, low);
+        } else if let Ok(signed) = i32::try_from(value as i64)
+            && destination.number() < 16
+        {
+            self.mov_rm_imm32(Size::Qword, destination, signed);
+        } else {
+            self.mov_imm64(destination, value);
+        }
+    }
     /// `movabs destination, address`: a guest address, whose field the
     /// code records among its relocations so that the block, stored, moves
     /// with its page. Every guest address a block's code holds is emitted
@@ -818,6 +834,49 @@ mod tests {
         build(&mut asm);
         let count = asm.instructions();
         (code, count)
+    }
+
+    #[test]
+    fn constant_moves_take_the_shortest_form_at_each_edge() {
+        use Gpr::*;
+        for (destination, value, expected) in [
+            (Rax, 0, &[0xb8, 0, 0, 0, 0][..]),
+            (Rax, 0x7fff_ffff, &[0xb8, 0xff, 0xff, 0xff, 0x7f]),
+            (Rax, 0x8000_0000, &[0xb8, 0, 0, 0, 0x80]),
+            (Rax, 0xffff_ffff, &[0xb8, 0xff, 0xff, 0xff, 0xff]),
+            (R9, 0xffff_ffff, &[0x41, 0xb9, 0xff, 0xff, 0xff, 0xff]),
+            (Rax, 0x1_0000_0000, &[0x48, 0xb8, 0, 0, 0, 0, 1, 0, 0, 0]),
+            (
+                Rax,
+                0xffff_ffff_8000_0000,
+                &[0x48, 0xc7, 0xc0, 0, 0, 0, 0x80],
+            ),
+            (Rcx, u64::MAX, &[0x48, 0xc7, 0xc1, 0xff, 0xff, 0xff, 0xff]),
+            (
+                R15,
+                u64::MAX - 1,
+                &[0x49, 0xc7, 0xc7, 0xfe, 0xff, 0xff, 0xff],
+            ),
+            (
+                Rax,
+                0xffff_ffff_7fff_ffff,
+                &[0x48, 0xb8, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff],
+            ),
+            (
+                R16,
+                u64::MAX,
+                &[
+                    0xd5, 0x18, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                ],
+            ),
+        ] {
+            let (code, count) = bytes(|a| a.mov_imm(destination, value));
+            assert_eq!(
+                (&code[..], count),
+                (expected, 1),
+                "{destination:?} {value:#x}"
+            );
+        }
     }
 
     #[test]

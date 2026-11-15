@@ -157,7 +157,7 @@ pub fn guest_immediate(code: &mut Code, destination: HostGpr, address: crate::Gu
 
 pub fn immediate(code: &mut Code, destination: HostGpr, value: u64, width: Width) {
     match width {
-        Width::X64 => code.asm().mov_imm64(destination.gpr(), value),
+        Width::X64 => code.asm().mov_imm(destination.gpr(), value),
         Width::W32 => code.asm().mov_imm32(destination.gpr(), value as u32),
     }
 }

@@ -45,7 +45,7 @@ fn direct_region_keeps_interleaved_lz4_products_through_their_shifts() {
     assert_eq!(ordinary.stats.state_loads, 5);
     assert_eq!(ordinary.stats.in_place_source_uses, 3);
     assert_eq!(ordinary.stats.exit_stores, 2);
-    assert_eq!(ordinary.code.len(), 84);
+    assert_eq!(ordinary.code.len(), 79);
     assert_eq!(
         ordinary
             .source_map
