@@ -110,6 +110,11 @@ pub(super) trait Io {
     fn signals(&self) -> bool {
         false
     }
+    /// Whether a device that leaves the bus and comes back is started
+    /// again for this transport's disks ([`super::resume`]).
+    fn resumable(&self) -> bool {
+        false
+    }
     /// Whether a submitted transfer may have completed, for [`Self::reap`];
     /// a look at memory alone.
     fn posted(&self) -> bool {
@@ -271,6 +276,9 @@ impl Io for Native {
         self.controller
             .try_borrow()
             .is_ok_and(|controller| controller.signals())
+    }
+    fn resumable(&self) -> bool {
+        true
     }
     fn posted(&self) -> bool {
         self.controller

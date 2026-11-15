@@ -193,6 +193,14 @@ impl Node {
         self.wedge_bot();
         self.bot.as_mut().unwrap().acks_reset = true;
     }
+    /// The BOT peer's RAM medium.
+    pub fn bot_media(&mut self) -> &mut [u8] {
+        self.bot.as_mut().expect("BOT peer required").media()
+    }
+    /// Fail every READ that covers `block` with MEDIUM ERROR.
+    pub fn bot_unreadable(&mut self, block: usize) {
+        self.bot.as_mut().expect("BOT peer required").unreadable = Some(block);
+    }
     pub fn bot_wedged(&self) -> bool {
         self.bot.as_ref().expect("BOT peer required").wedged
     }

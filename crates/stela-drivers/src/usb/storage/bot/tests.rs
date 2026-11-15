@@ -1327,6 +1327,7 @@ fn real_block_api_chunks_units_checks_bounds_and_never_copies_short_reads() {
             running: None,
             next_tag: 0,
             cache_refused: false,
+            first_blocks: None,
         });
     }
     let mut bytes = vec![0; MAX_TD * 2 + 512];
@@ -1822,6 +1823,7 @@ fn metadata_warmup_limits_and_last_sector_split_reach_block_commands() {
         running: None,
         next_tag: 0,
         cache_refused: false,
+        first_blocks: None,
     };
     let before = state.borrow().history.len();
     let mut data = vec![0; 128 * 1024];

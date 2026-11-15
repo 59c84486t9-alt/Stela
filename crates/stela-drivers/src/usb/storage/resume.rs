@@ -6,10 +6,18 @@
 //! number, it is started again in steps from the guest's service turns, as
 //! an input device that arrives is: its settle time, max LUN and each
 //! unit's probe end a step at every wait, under the same deadlines as at
-//! boot. The units that probe with the identity they were published with,
-//! capacity included, go on with the fresh transport, as after a port reset
-//! (`media::Owner::revalidate`). Any other storage device, or this one when
-//! it cannot be told apart, stays unused until the next boot.
+//! boot. Identity strings do not tell two sticks of one model apart: many
+//! share a fixed serial number, and two of them may be swapped on a port.
+//! So each unit's first blocks (`FIRST_BLOCKS`: the protective MBR and GPT
+//! header, whose disk GUID and CRCs differ between tables made apart) are
+//! read at publication, followed through every write Stela makes to them,
+//! and read again in steps from the device that came back. The units that
+//! probe with the identity they were published with, capacity included,
+//! and hold the same first blocks go on with the fresh transport, as after
+//! a port reset (`media::Owner::revalidate`). Any other storage device, this
+//! one with another medium, or one whose first blocks did not read or were
+//! not known stays unused until the next boot: a disk taken by mistake
+//! would get the old disk's writes.
 use super::bot::{
     ResumeBuffers, max_lun_answer, max_lun_request, resume_buffers, scan_command_time, scanned,
 };
@@ -35,6 +43,10 @@ pub(in crate::usb) const RETURNED_TOO_OFTEN: &str = "storage device of a disk in
 pub(in crate::usb) const RETURNED_CHANGED: &str = "storage device of a disk in use came back after boot without its Bulk-Only interface, kept unused until the next boot";
 /// Why a device whose units probed as others is not taken.
 pub(in crate::usb) const OTHER_IDENTITY: &str = "storage device came back after boot at the port of a disk in use with another identity, kept unused until the next boot";
+/// Why a device whose units hold other first blocks is not taken.
+pub(in crate::usb) const OTHER_MEDIUM: &str = "storage device came back after boot at the port of a disk in use with its identity but a different medium (its first blocks differ), kept unused until the next boot";
+/// Why a device whose first blocks could not be compared is not taken.
+pub(in crate::usb) const UNCHECKED_MEDIUM: &str = "storage device came back after boot at the port of a disk in use, but its medium could not be compared (its first blocks did not read, or a write to them was not seen to complete), kept unused until the next boot";
 
 /// The disk owner a device that came back after boot is started again
 /// for, and the Bulk-Only setting it is configured with.
@@ -143,8 +155,9 @@ pub(in crate::usb) fn buffers(dma: &mut dyn DmaAllocator) -> Result<ResumeBuffer
 
 /// Start `device`, configured with `returning`'s setting, again for its
 /// disks, in steps: wait out its settle time (Linux `delay_use`), ask its
-/// max LUN and probe each published unit. How many units go on; none
-/// means the device is another one and nothing was taken.
+/// max LUN, probe each published unit and read its first blocks. How many
+/// units go on, or why nothing was taken ([`Owner::resume`]); `Err`
+/// where the transport failed, which takes nothing either.
 #[expect(
     clippy::result_large_err,
     reason = "The failed operation and its exact cause, as the reset path reports them."
@@ -154,7 +167,7 @@ pub(in crate::usb) async fn resume(
     device: &Device,
     returning: Returning,
     buffers: ResumeBuffers,
-) -> Result<usize, (String, BlockError)> {
+) -> Result<Result<usize, &'static str>, (String, BlockError)> {
     let Returning {
         owner,
         interface,
@@ -191,7 +204,7 @@ pub(in crate::usb) async fn resume(
         0
     };
     if max_lun != owner.borrow().transport.max_lun() {
-        return Ok(0);
+        return Ok(Err(OTHER_IDENTITY));
     }
     let mut bot = Bot::resumed(io, device, &interface, buffers, max_lun)
         .map_err(|error| fail("BOT transport", error))?;
@@ -203,13 +216,20 @@ pub(in crate::usb) async fn resume(
             clock,
         };
         let identity = probe_with(&mut steps, lun, &location, &serial).await;
+        let first = match &identity {
+            Ok((identity, _)) => Some(first_blocks_with(&mut steps, lun, identity).await),
+            Err(_) => None,
+        };
         if bot.poisoned() {
-            let error = identity.err().unwrap_or(BlockError::Unsupported(
-                "USB storage transport quarantined during its probe",
-            ));
+            let error = match (identity, first) {
+                (Err(error), _) | (_, Some(Err(error))) => error,
+                _ => BlockError::Unsupported("USB storage transport quarantined during its probe"),
+            };
             return Err(fail(&format!("{location} probe"), error));
         }
-        probed.push((lun, identity));
+        // A first-blocks read that failed leaves the unit unchecked, never
+        // taken.
+        probed.push((lun, identity, first.and_then(Result::ok)));
     }
     scanned(&command_us);
     Ok(owner.borrow_mut().resume(bot, probed))

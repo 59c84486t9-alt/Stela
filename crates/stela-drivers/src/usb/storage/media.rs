@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux sd.c::sd_check_events/media_not_present/sd_revalidate_disk and
 // scsi_lib.c::scsi_io_completion_action. See NOTICE.
+use super::resume::{OTHER_IDENTITY, OTHER_MEDIUM, UNCHECKED_MEDIUM};
 use super::*;
 
 pub(super) fn no_media(sense: &Sense) -> bool {
@@ -21,9 +22,58 @@ pub(super) fn changed(sense: &Sense, removable: bool) -> bool {
 const RESET_LIMIT: usize = 3;
 const RESET_WINDOW_US: u64 = 60_000_000;
 
-/// A unit's LUN and what its probe gave: its identity and whether its
-/// medium is removable.
-pub(super) type Probed<L> = (L, Result<(Identity, bool), BlockError>);
+/// A unit's LUN, what its probe gave (its identity and whether its medium
+/// is removable), and its first blocks ([`FIRST_BLOCKS`]) where they read.
+pub(super) type Probed<L> = (L, Result<(Identity, bool), BlockError>, Option<Vec<u8>>);
+
+/// What a command does to a unit's first blocks ([`FIRST_BLOCKS`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Touch {
+    /// It leaves the medium as it is.
+    None,
+    /// It writes `blocks` blocks at `lba` with its data.
+    Write { lba: u64, blocks: u64 },
+    /// It may change any block, in a way not followed here.
+    Unknown,
+}
+
+/// What `cdb` with `data` does to the medium: the WRITE and WRITE AND
+/// VERIFY commands write their range; any other command that sends data,
+/// MODE SELECT aside, and FORMAT UNIT, WRITE SAME, SANITIZE and a
+/// non-data ATA PASS-THROUGH (an erase or sanitize) may write anywhere. A
+/// command that only reads, ATA PASS-THROUGH data-in among them, leaves it.
+fn touch(cdb: &[u8], data: &Data<'_>) -> Touch {
+    let be = |bytes: &[u8]| bytes.iter().fold(0u64, |v, b| v << 8 | u64::from(*b));
+    let range = match (cdb.first().copied(), cdb.len()) {
+        // WRITE (6): a length of zero is 256 blocks.
+        (Some(0x0a), 6..) => Some((
+            be(&cdb[1..4]) & 0x1f_ffff,
+            match cdb[4] {
+                0 => 256,
+                blocks => u64::from(blocks),
+            },
+        )),
+        // WRITE (10), WRITE AND VERIFY (10).
+        (Some(scsi::WRITE_10 | 0x2e), 10..) => Some((be(&cdb[2..6]), be(&cdb[7..9]))),
+        // WRITE (12), WRITE AND VERIFY (12).
+        (Some(0xaa | 0xae), 12..) => Some((be(&cdb[2..6]), be(&cdb[6..10]))),
+        // WRITE (16), WRITE AND VERIFY (16).
+        (Some(scsi::WRITE_16 | 0x8e), 16..) => Some((be(&cdb[2..10]), be(&cdb[10..14]))),
+        _ => None,
+    };
+    match (range, data) {
+        (Some((lba, blocks)), _) => Touch::Write { lba, blocks },
+        // MODE SELECT (6) and (10) set parameters only.
+        (None, Data::Out(_)) if matches!(cdb.first(), Some(0x15 | 0x55)) => Touch::None,
+        (None, Data::Out(_)) => Touch::Unknown,
+        (None, Data::None)
+            if matches!(cdb.first(), Some(0x04 | 0x41 | 0x48 | 0x85 | 0x93 | 0xa1)) =>
+        {
+            Touch::Unknown
+        }
+        (None, _) => Touch::None,
+    }
+}
 
 pub(super) struct Owner<T: Scsi> {
     pub transport: T,
@@ -66,6 +116,9 @@ struct Begun<L> {
     attention: bool,
     /// A command a port reset ended may still run once more.
     rebound: bool,
+    /// The unit's first blocks once the command completes, where it
+    /// writes them ([`Owner::first_blocks_after`]).
+    first_blocks: Option<Option<Vec<u8>>>,
 }
 /// A begun command's data, kept for its retry.
 enum Retry {
@@ -94,6 +147,12 @@ struct Unit<L> {
     identity: Identity,
     valid: Rc<Cell<bool>>,
     removable: bool,
+    /// The unit's first blocks ([`FIRST_BLOCKS`]) as the medium holds
+    /// them: read at publication, and followed through every write to them
+    /// that completed. `None` once a write to them failed or could not be
+    /// followed, or the medium changed: a device that comes back is then
+    /// not taken for this unit ([`Owner::resume`]).
+    first_blocks: Option<Vec<u8>>,
 }
 impl<T: Scsi> Owner<T> {
     pub fn new(transport: T, prefix: String, serial: String) -> Self {
@@ -146,10 +205,57 @@ impl<T: Scsi> Owner<T> {
                 valid.set(false);
             }
         }
-        for unit in &self.units {
+        for unit in &mut self.units {
             if unit.lun == lun {
                 unit.valid.set(false);
+                // Its publication ended for another medium, which a device
+                // that comes back must never revive.
+                unit.first_blocks = None;
             }
+        }
+    }
+    /// What `lun`'s first blocks hold once `cdb` with `data` completes:
+    /// `None` where it leaves them, `Some(None)` where what it leaves is
+    /// not known (a range not followed, or blocks not known before).
+    fn first_blocks_after(
+        &self,
+        lun: T::Lun,
+        cdb: &[u8],
+        data: &Data<'_>,
+    ) -> Option<Option<Vec<u8>>> {
+        let unit = self.units.iter().find(|unit| unit.lun == lun)?;
+        let size = unit.identity.block_size as usize;
+        let count = unit.identity.blocks.min(FIRST_BLOCKS);
+        let (lba, blocks) = match touch(cdb, data) {
+            Touch::None => return None,
+            Touch::Unknown => return Some(None),
+            Touch::Write { lba, blocks } if lba >= count || blocks == 0 => return None,
+            Touch::Write { lba, blocks } => (lba, blocks),
+        };
+        let Data::Out(bytes) = data else {
+            return Some(None);
+        };
+        if blocks.checked_mul(size as u64) != Some(bytes.len() as u64) {
+            return Some(None);
+        }
+        let end = lba.saturating_add(blocks).min(count);
+        let mut first = match &unit.first_blocks {
+            Some(first) if first.len() == count as usize * size => first.clone(),
+            // A write over all of them gives them whatever they held.
+            _ if lba == 0 && end == count => alloc::vec![0; count as usize * size],
+            _ => return Some(None),
+        };
+        for block in lba..end {
+            let at = (block - lba) as usize * size;
+            let to = block as usize * size;
+            first[to..to + size].copy_from_slice(&bytes[at..at + size]);
+        }
+        Some(Some(first))
+    }
+    /// Keep `first` as `lun`'s first blocks.
+    fn keep_first_blocks(&mut self, lun: T::Lun, first: Option<Vec<u8>>) {
+        if let Some(unit) = self.units.iter_mut().find(|unit| unit.lun == lun) {
+            unit.first_blocks = first;
         }
     }
     fn reconcile(&mut self, disks: &mut [Disk<Self>]) {
@@ -165,12 +271,13 @@ impl<T: Scsi> Owner<T> {
             }
         }
         self.units = disks
-            .iter()
+            .iter_mut()
             .map(|disk| Unit {
                 lun: disk.lun,
                 identity: disk.identity.clone(),
                 valid: disk.media.clone(),
                 removable: disk.removable,
+                first_blocks: disk.first_blocks.take(),
             })
             .collect();
     }
@@ -244,6 +351,10 @@ impl<T: Scsi> Owner<T> {
         let started = self
             .transport
             .begin(begun.lun, &begun.cdb, begun.data.data())?;
+        // Until the write to them completes, the first blocks hold either.
+        if begun.first_blocks.is_some() {
+            self.keep_first_blocks(begun.lun, None);
+        }
         self.begun = Some(begun);
         Some(match started {
             Ok(()) => Ok(()),
@@ -300,6 +411,11 @@ impl<T: Scsi> Owner<T> {
             begun.generation = self.transport.generation();
             return self.retry(begun);
         }
+        if result.is_ok()
+            && let Some(Some(first)) = begun.first_blocks
+        {
+            self.keep_first_blocks(begun.lun, Some(first));
+        }
         Some(result)
     }
 
@@ -336,6 +452,9 @@ impl<T: Scsi> Owner<T> {
             }))
         ) {
             self.invalidate();
+            for unit in &mut self.units {
+                unit.first_blocks = None;
+            }
         }
     }
 
@@ -409,27 +528,46 @@ impl<T: Scsi> Owner<T> {
 
     /// Take `transport`, bound to the device after it left the bus and came
     /// back, when a published unit probed (`probed`) with the identity it
-    /// was published with: that unit's disks go on, as after a port reset
-    /// ([`Self::revalidate`]), and every other unit ends. A command begun on
-    /// the old transport ends failed. With no unit the same, nothing is
-    /// taken: the device is another one. How many units go on.
-    pub(super) fn resume(&mut self, transport: T, probed: Vec<Probed<T::Lun>>) -> usize {
-        let same = |unit: &Unit<T::Lun>| {
-            probed.iter().any(|(lun, probed)| {
-                *lun == unit.lun
-                    && probed.as_ref().is_ok_and(|(identity, removable)| {
-                        *removable == unit.removable
-                            && Identity {
-                                features: unit.identity.features,
-                                ..identity.clone()
-                            } == unit.identity
-                    })
-            })
+    /// was published with and its first blocks hold what this owner kept
+    /// of them: the same medium. That unit's disks go on, as after a port
+    /// reset ([`Self::revalidate`]), and every other unit ends. A command
+    /// begun on the old transport ends failed. How many units go on; with
+    /// no unit the same, nothing is taken, and why: the device is another
+    /// one, holds another medium, or its medium could not be compared.
+    pub(super) fn resume(
+        &mut self,
+        transport: T,
+        probed: Vec<Probed<T::Lun>>,
+    ) -> Result<usize, &'static str> {
+        let verdict = |unit: &Unit<T::Lun>| {
+            let Some((_, identified, first)) = probed.iter().find(|(lun, ..)| *lun == unit.lun)
+            else {
+                return Err(OTHER_IDENTITY);
+            };
+            let same = identified.as_ref().is_ok_and(|(identity, removable)| {
+                *removable == unit.removable
+                    && Identity {
+                        features: unit.identity.features,
+                        ..identity.clone()
+                    } == unit.identity
+            });
+            match (first, &unit.first_blocks) {
+                _ if !same => Err(OTHER_IDENTITY),
+                (Some(first), Some(kept)) if first == kept => Ok(()),
+                (Some(_), Some(_)) => Err(OTHER_MEDIUM),
+                _ => Err(UNCHECKED_MEDIUM),
+            }
         };
-        let kept: Vec<bool> = self.units.iter().map(same).collect();
-        let count = kept.iter().filter(|kept| **kept).count();
+        let verdicts: Vec<Result<(), &'static str>> = self.units.iter().map(verdict).collect();
+        let count = verdicts.iter().filter(|verdict| verdict.is_ok()).count();
         if count == 0 {
-            return 0;
+            // The most telling reason: another medium, then one that could
+            // not be compared, then another device.
+            let why = [OTHER_MEDIUM, UNCHECKED_MEDIUM]
+                .into_iter()
+                .find(|why| verdicts.contains(&Err(why)))
+                .unwrap_or(OTHER_IDENTITY);
+            return Err(why);
         }
         if self.begun.take().is_some() && self.ended.is_none() {
             self.ended = Some(Err(BlockError::Unsupported(
@@ -444,10 +582,10 @@ impl<T: Scsi> Owner<T> {
         self.expecting_reset = true;
         self.rebinds += 1;
         self.returned += 1;
-        for (unit, kept) in self.units.iter().zip(kept) {
-            unit.valid.set(kept);
+        for (unit, verdict) in self.units.iter().zip(verdicts) {
+            unit.valid.set(verdict.is_ok());
         }
-        count
+        Ok(count)
     }
 
     /// After a device reset, keep each published unit whose probe gives the
@@ -482,6 +620,9 @@ impl<T: Scsi> Scsi for Owner<T> {
     fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         self.transport.take_failed_data()
     }
+    fn resumable(&self) -> bool {
+        self.transport.resumable()
+    }
     fn take_failure_status(&mut self) -> Option<String> {
         let status = self.transport.take_failure_status();
         self.failure_status.take().or(status)
@@ -495,7 +636,18 @@ impl<T: Scsi> Scsi for Owner<T> {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
-        self.run(lun, cdb, |transport| transport.command(lun, cdb, data))
+        // Until the write to them completes, the first blocks hold either.
+        let first = self.first_blocks_after(lun, cdb, &data);
+        if first.is_some() {
+            self.keep_first_blocks(lun, None);
+        }
+        let result = self.run(lun, cdb, |transport| transport.command(lun, cdb, data));
+        if result.is_ok()
+            && let Some(Some(first)) = first
+        {
+            self.keep_first_blocks(lun, Some(first));
+        }
+        result
     }
     fn read_into(
         &mut self,
@@ -584,6 +736,7 @@ impl<T: Scsi> Scsi for Owner<T> {
                 "a USB storage transport runs one command at a time",
             )));
         }
+        let first_blocks = self.first_blocks_after(lun, cdb, &data);
         self.begin_attempt(Begun {
             lun,
             cdb: cdb.to_vec(),
@@ -591,6 +744,7 @@ impl<T: Scsi> Scsi for Owner<T> {
             generation: self.transport.generation(),
             attention: true,
             rebound: true,
+            first_blocks,
         })
     }
     fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
@@ -907,6 +1061,47 @@ mod tests {
             }
         }
     }
+    /// Each write form gives its range; another command that sends data,
+    /// or one that formats, sanitizes or passes ATA through, may write
+    /// anywhere; reads and parameter commands leave the medium.
+    #[test]
+    fn commands_that_write_give_their_range_and_others_are_unknown_or_none() {
+        let out = Data::Out(&[]);
+        assert_eq!(
+            touch(&[0x0a, 0x01, 0x00, 0x02, 0, 0], &out),
+            Touch::Write {
+                lba: 0x1_0002,
+                blocks: 256
+            }
+        );
+        let ten = scsi::read_write(true, false, 1, 3);
+        assert_eq!(
+            touch(ten.as_ref(), &out),
+            Touch::Write { lba: 1, blocks: 3 }
+        );
+        let mut twelve = [0; 12];
+        twelve[0] = 0xaa;
+        twelve[5] = 7;
+        twelve[9] = 2;
+        assert_eq!(touch(&twelve, &out), Touch::Write { lba: 7, blocks: 2 });
+        let sixteen = scsi::read_write(true, true, 1 << 33, 4);
+        assert_eq!(
+            touch(sixteen.as_ref(), &out),
+            Touch::Write {
+                lba: 1 << 33,
+                blocks: 4
+            }
+        );
+        assert_eq!(touch(&[0x15, 0, 0, 0, 12, 0], &out), Touch::None);
+        assert_eq!(touch(&[0x42; 10], &out), Touch::Unknown);
+        assert_eq!(touch(&[0x04, 0, 0, 0, 0, 0], &Data::None), Touch::Unknown);
+        assert_eq!(touch(&[0x85; 16], &Data::None), Touch::Unknown);
+        assert_eq!(touch(&[0x85; 16], &Data::In(512)), Touch::None);
+        let read = scsi::read_write(false, false, 0, 2);
+        assert_eq!(touch(read.as_ref(), &Data::In(1024)), Touch::None);
+        assert_eq!(touch(&scsi::synchronize_cache(), &Data::None), Touch::None);
+    }
+
     #[test]
     fn a_hung_uas_command_resets_the_port_and_a_changed_capacity_ends_the_disk() {
         use crate::block::BlockDevice;

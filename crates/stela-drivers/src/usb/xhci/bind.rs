@@ -395,10 +395,8 @@ async fn resume_storage(
         }
     };
     match storage::resume::resume(shared, device, returning, buffers).await {
-        Ok(0) => found
-            .unused
-            .push((device.location.clone(), storage::resume::OTHER_IDENTITY)),
-        Ok(units) => found.resumed.push((device.location.clone(), units)),
+        Ok(Ok(units)) => found.resumed.push((device.location.clone(), units)),
+        Ok(Err(why)) => found.unused.push((device.location.clone(), why)),
         Err((operation, error)) => found
             .failures
             .push((format!("{} {operation}", device.location), error)),

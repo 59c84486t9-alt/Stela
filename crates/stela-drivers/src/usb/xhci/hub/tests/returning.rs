@@ -175,3 +175,98 @@ fn another_storage_device_at_the_port_of_a_disk_in_use_stays_unused() {
     drop(model);
     assert!(booted.disk.read(1, &mut [0; 512]).is_err());
 }
+
+/// Another stick of the same model, serial number and capacity at the
+/// port, as cheap sticks with a fixed serial number are: its first blocks
+/// (here a GPT header with another disk GUID) differ, so it is reported
+/// unused, gets none of the old disk's writes, and the disk stays ended.
+#[test]
+fn a_device_with_the_same_identity_but_another_medium_stays_unused() {
+    let mut booted = Booted::new();
+    booted.leave();
+    {
+        let mut model = booted.model.borrow_mut();
+        let media = model.nodes.get_mut(&0).unwrap().bot_media();
+        media[512..520].copy_from_slice(b"EFI PART");
+        media[512 + 56..512 + 72].fill(0x33);
+    }
+    let commands = booted.model.borrow().nodes[&0].bot_commands().len();
+    booted.plug();
+    let other = booted.settle(POLL_US);
+    assert!(other.resumed.is_empty());
+    assert!(other.failures.is_empty(), "{:?}", other.failures);
+    assert_eq!(other.unused.len(), 1, "{:?}", other.unused);
+    assert_eq!(other.unused[0].1, crate::usb::storage::resume::OTHER_MEDIUM);
+    let model = booted.model.borrow();
+    assert!(
+        model.nodes[&0].bot_commands()[commands..]
+            .iter()
+            .all(|(_, opcode)| *opcode != 0x2a),
+        "nothing is written to it"
+    );
+    drop(model);
+    assert!(booted.disk.read(1, &mut [0; 512]).is_err());
+}
+
+/// A device whose first blocks do not read when it comes back cannot be
+/// told apart from another: it stays unused and the disk stays ended.
+#[test]
+fn a_device_whose_first_blocks_do_not_read_when_it_comes_back_stays_unused() {
+    let mut booted = Booted::new();
+    booted.leave();
+    booted
+        .model
+        .borrow_mut()
+        .nodes
+        .get_mut(&0)
+        .unwrap()
+        .bot_unreadable(1);
+    booted.plug();
+    let back = booted.settle(POLL_US);
+    assert!(back.resumed.is_empty());
+    assert!(
+        back.unused
+            .iter()
+            .any(|(_, why)| *why == crate::usb::storage::resume::UNCHECKED_MEDIUM),
+        "{:?} {:?}",
+        back.unused,
+        back.failures
+    );
+    assert!(booted.disk.read(1, &mut [0; 512]).is_err());
+}
+
+/// Stela's own writes to the first blocks, as the installer's new GPT,
+/// queued or waited for and partly past them, are followed: the device
+/// that comes back with them is started again.
+#[test]
+fn the_first_blocks_written_while_the_disk_is_in_use_still_match_when_it_comes_back() {
+    use crate::block::Command;
+    let mut booted = Booted::new();
+    let tag = booted
+        .disk
+        .start(Command::Write {
+            lba: 0,
+            data: alloc::vec![0x11; 512],
+            fua: false,
+        })
+        .unwrap();
+    let written = (0..POLLS)
+        .find_map(|_| booted.disk.finish(tag))
+        .expect("the queued write ends");
+    assert!(matches!(written, Ok(None)), "{written:?}");
+    booted.disk.write(1, &[0x22; 1024]).unwrap();
+    booted.leave();
+    booted.plug();
+    let back = booted.settle(POLL_US);
+    assert_eq!(
+        back.resumed.len(),
+        1,
+        "{:?} {:?}",
+        back.unused,
+        back.failures
+    );
+    let mut sectors = [0; 1536];
+    booted.disk.read(0, &mut sectors).unwrap();
+    assert!(sectors[..512].iter().all(|byte| *byte == 0x11));
+    assert!(sectors[512..].iter().all(|byte| *byte == 0x22));
+}

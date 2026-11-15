@@ -146,6 +146,12 @@ trait Scsi {
     }
     /// What the last command's data phase moved in before it failed.
     fn take_failed_data(&mut self) -> Option<Vec<u8>>;
+    /// Whether the device, should it leave the bus and come back, is
+    /// started again for this transport's disks ([`resume`]): each unit's
+    /// first blocks are then kept at publication to compare it by.
+    fn resumable(&self) -> bool {
+        false
+    }
     fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>, _removable: bool) {}
     fn max_lun(&self) -> u8 {
         0
@@ -227,6 +233,9 @@ trait Scsi {
 }
 impl<I: Io> Scsi for Bot<I> {
     type Lun = u8;
+    fn resumable(&self) -> bool {
+        self.io.resumable()
+    }
     fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         Bot::command(self, lun, cdb, data)
     }
@@ -425,6 +434,10 @@ struct Disk<T: Scsi> {
     /// COMMAND OPERATION CODE: it has no cache command, and its flushes
     /// complete without one, as Linux `sd_sync_cache` takes that answer.
     cache_refused: bool,
+    /// The unit's first blocks as its publication read them, which its
+    /// owner keeps to compare a device that comes back by
+    /// ([`media::Owner::resume`]); taken when the owner takes the unit.
+    first_blocks: Option<Vec<u8>>,
 }
 
 /// Units that answered SYNCHRONIZE CACHE as an invalid opcode since the
@@ -702,6 +715,17 @@ fn publication<T: Scsi>(
             rotation: Rotation::Unreported,
         };
     }
+    // The medium a device that comes back is compared by. A unit whose
+    // first blocks do not read publishes as before; its device is then
+    // never started again.
+    let first_blocks = {
+        let mut transport = owner.borrow_mut();
+        if transport.resumable() {
+            block_on(first_blocks_with(&mut Now(&mut *transport), lun, &identity)).ok()
+        } else {
+            None
+        }
+    };
     Ok(Disk {
         bot: owner.clone(),
         lun,
@@ -711,6 +735,7 @@ fn publication<T: Scsi>(
         running: None,
         next_tag: 0,
         cache_refused: false,
+        first_blocks,
     })
 }
 
@@ -1141,6 +1166,29 @@ async fn capacity16_with<C: Commands>(bot: &mut C, lun: C::Lun) -> Result<(u64, 
         .checked_add(1)
         .ok_or(BlockError::Unsupported("USB storage capacity overflow"))?;
     Ok((blocks, u32::from_be_bytes(bytes[8..12].try_into().unwrap())))
+}
+
+/// The blocks at the start of a unit's medium that tell it apart from
+/// another of the same model, serial number and capacity: the protective
+/// MBR and the GPT header, whose disk GUID and CRCs differ between any two
+/// tables made apart, or whatever a medium without a GPT holds there.
+pub(super) const FIRST_BLOCKS: u64 = 2;
+
+/// Read the unit's first blocks ([`FIRST_BLOCKS`], fewer on a smaller
+/// medium) with `identity`'s geometry.
+async fn first_blocks_with<C: Commands>(
+    bot: &mut C,
+    lun: C::Lun,
+    identity: &Identity,
+) -> Result<Vec<u8>, BlockError> {
+    let blocks = identity.blocks.min(FIRST_BLOCKS);
+    let bytes = blocks as usize * identity.block_size as usize;
+    let cdb = scsi::read_write(false, false, 0, blocks as u32);
+    let read = bot.command(lun, cdb.as_ref(), Data::In(bytes)).await?;
+    if read.len() != bytes {
+        return Err(BlockError::Protocol("short USB first-blocks read"));
+    }
+    Ok(read)
 }
 
 /// A Bulk-Only unit's block zero, read before MODE SENSE as Linux sd's
@@ -1717,6 +1765,7 @@ mod tests {
             running: None,
             next_tag: 0,
             cache_refused: false,
+            first_blocks: None,
         }
     }
 
