@@ -2051,6 +2051,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                             });
                         self.queue.clock.retire(
                             flight.serial,
+                            flight.submits,
                             flight.committed,
                             seen,
                             [ns(times[0]), ns(times[1])],

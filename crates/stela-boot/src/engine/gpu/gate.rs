@@ -736,7 +736,7 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         output::arguments(format_args!(
             "GPU TIMES timed={} busy_us={} average_us={} longest_us={}@{}:{} idle_us={} \
              overlap_us={} placed={} queued_us={}/{} noticed_us={}/{} waiting={} \
-             span_us={}@{}:{}/{}:{}\n",
+             span_us={}@{}:{}/{}:{} longest_submits={}\n",
             times.timed,
             times.busy_ns / 1000,
             average(times.busy_ns, times.timed) / 1000,
@@ -756,6 +756,7 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             times.span_index,
             times.span_count,
             times.span_entries,
+            times.longest_submits,
         ));
     }
     // With `--profile`: the GPU's own time per pass, conversion and copy.

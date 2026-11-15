@@ -37,6 +37,11 @@ pub struct GpuTimes {
     /// The longest command buffer's serial and its pipelines' entry points.
     pub longest_serial: u64,
     pub longest_entries: String,
+    /// The `vkQueueSubmit2` calls the longest command buffer took. Its time
+    /// runs from its first submission's start to its last one's end, so with
+    /// more than one it holds the host's gaps between them (held segments,
+    /// sparse binds), not only the GPU's work.
+    pub longest_submits: u64,
     /// The longest span between two of a command buffer's marks (its start,
     /// the ends of its first passes and dispatches, its end): GPU
     /// nanoseconds, the command buffer, the span's index among its spans,
@@ -129,12 +134,14 @@ impl GpuClock {
 
     /// Counts a retired command buffer: committed at `committed` and seen
     /// complete at `seen`, platform ticks, run from `start` to `end`, GPU
-    /// nanoseconds. `entries` names its pipelines when it is the longest;
-    /// `spans` are the GPU nanoseconds between its marks with the entry
-    /// points each span bound.
+    /// nanoseconds, in `submits` submissions. `entries` names its pipelines
+    /// when it is the longest; `spans` are the GPU nanoseconds between its
+    /// marks with the entry points each span bound.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn retire(
         &mut self,
         serial: u64,
+        submits: u64,
         committed: u64,
         seen: u64,
         [start, end]: [u64; 2],
@@ -161,6 +168,7 @@ impl GpuClock {
             times.longest_ns = busy;
             times.longest_serial = serial;
             times.longest_entries = names(entries());
+            times.longest_submits = submits;
         }
         if let Some(previous) = self.previous_end {
             if start >= previous {
@@ -205,6 +213,7 @@ mod tests {
         // later, ran 100 ns; seen 30 ticks after its end.
         clock.retire(
             7,
+            1,
             400_005_000,
             400_005_250,
             [200_001_010, 200_001_110],
@@ -244,14 +253,15 @@ mod tests {
     #[test]
     fn counts_gaps_and_overlaps_between_command_buffers() {
         let mut clock = GpuClock::default();
-        clock.retire(1, 0, 0, [100, 200], Vec::new, core::iter::empty());
-        clock.retire(2, 0, 0, [250, 300], Vec::new, core::iter::empty());
-        clock.retire(3, 0, 0, [280, 400], Vec::new, core::iter::empty());
+        clock.retire(1, 1, 0, 0, [100, 200], Vec::new, core::iter::empty());
+        clock.retire(2, 1, 0, 0, [250, 300], Vec::new, core::iter::empty());
+        clock.retire(3, 3, 0, 0, [280, 400], Vec::new, core::iter::empty());
         let times = clock.take();
         assert_eq!(times.idle_ns, 50);
         assert_eq!(times.overlap_ns, 20);
         assert_eq!(times.busy_ns, 270);
         assert_eq!(times.longest_serial, 3);
+        assert_eq!(times.longest_submits, 3, "the longest's submissions");
         // Without two readings nothing is placed.
         assert_eq!(times.placed, 0);
     }
