@@ -192,45 +192,103 @@ impl Controller {
 
     /// Linux's interrupt-time `nvme_complete_async_event` and its work,
     /// between commands: act on a completed Asynchronous Event Request and
-    /// request the next event. A failed request is not repeated; a
-    /// persistent internal error resets the controller, which requests
-    /// events again.
-    pub(super) fn service_events(&mut self) -> Result<(), BlockError> {
+    /// request the next event; whether that is done, which the scan it may
+    /// queue waits for. Nothing here waits: a log the event asks for is an
+    /// errand ([`Self::errand`]) and a firmware activation's pause is
+    /// looked at once a call, so the work goes on over later calls. A
+    /// failed request is not repeated; a persistent internal error resets
+    /// the controller, which requests events again.
+    pub(super) fn service_events(&mut self) -> Result<bool, BlockError> {
         if self.events.request.is_some()
             && !self.busy()
             && let Err(error) = self.admin_completion(None)
         {
             return Err(self.poison(error));
         }
-        let Some((result, status)) = self.events.completed.take() else {
-            return Ok(());
+        let Some((result, status)) = self.events.completed else {
+            return Ok(true);
         };
         if status != 0 {
-            return Ok(());
+            self.events.completed = None;
+            return Ok(true);
         }
         match (result & 0x7, result >> 8 & 0xff) {
             (EVENT_NOTICE, NOTICE_NAMESPACES_CHANGED) => {
                 // nvme_scan_work clears the Changed Namespace List first.
-                self.read_log(LOG_CHANGED_NAMESPACES, PAGE)?;
+                let log = Purpose::Log(LOG_CHANGED_NAMESPACES);
+                if !self.log_read(log, PAGE)? {
+                    return Ok(false);
+                }
                 self.scans += 1;
             }
             (EVENT_NOTICE, NOTICE_FIRMWARE_ACTIVATION) => {
                 // nvme_fw_act_work: commands wait while processing is paused,
                 // up to MTFA or the admin timeout, then the Firmware Slot
                 // Information log clears the event.
-                let timeout = match self.events.activation_us {
-                    0 => self.admin_timeout_us,
-                    activation => activation,
+                let deadline = match self.events.activation {
+                    Some(deadline) => deadline,
+                    None => {
+                        let timeout = match self.events.activation_us {
+                            0 => self.admin_timeout_us,
+                            activation => activation,
+                        };
+                        let deadline = self.deadline(timeout)?;
+                        self.events.activation = Some(deadline);
+                        deadline
+                    }
                 };
-                match self.wait_status(timeout, |status| status & PROCESSING_PAUSED == 0) {
-                    Ok(()) => self.read_log(LOG_FIRMWARE_SLOT, 512)?,
-                    Err(BlockError::Timeout) => return self.reset_and_settle(),
+                let paused = match self.registers.read32(STATUS) {
+                    Ok(REMOVED) => return Err(self.poison(removed())),
+                    Ok(status) => status & PROCESSING_PAUSED != 0,
                     Err(error) => return Err(self.poison(error)),
+                };
+                if paused {
+                    if deadline.passed() {
+                        self.events.activation = None;
+                        self.events.completed = None;
+                        self.reset();
+                    }
+                    return Ok(false);
                 }
+                if !self.log_read(Purpose::Log(LOG_FIRMWARE_SLOT), 512)? {
+                    return Ok(false);
+                }
+                self.events.activation = None;
             }
-            (EVENT_ERROR, ERROR_PERSISTENT_INTERNAL) => return self.reset_and_settle(),
+            (EVENT_ERROR, ERROR_PERSISTENT_INTERNAL) => {
+                self.events.completed = None;
+                self.reset();
+                return Ok(false);
+            }
             _ => {}
         }
-        self.request_event()
+        self.events.completed = None;
+        self.request_event()?;
+        Ok(true)
+    }
+
+    /// The errand reading log `purpose` of `bytes` for an event: whether it
+    /// ended. Its failure is only logged, as `nvme_get_log`'s is, unless it
+    /// failed the controller, or reset it: the reset requests events and
+    /// queues a scan of its own, so the event is done with.
+    fn log_read(&mut self, purpose: Purpose, bytes: usize) -> Result<bool, BlockError> {
+        let Purpose::Log(log) = purpose else {
+            unreachable!("a log errand");
+        };
+        match self.errand(purpose, true, |controller| {
+            controller.log_command(log, bytes)
+        }) {
+            Ok(None) => Ok(false),
+            Ok(Some(_)) => Ok(true),
+            Err(_) => {
+                self.ready()?;
+                if self.recovery.is_some() {
+                    self.events.completed = None;
+                    self.events.activation = None;
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
     }
 }

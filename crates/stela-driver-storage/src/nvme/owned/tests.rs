@@ -1611,19 +1611,26 @@ fn async_events_are_handled_and_requested_again_like_nvme_complete_async_event()
         m.post_event(result);
         m.blocks += 1024;
     };
+    // An event's log and the rescan's Identify commands go out with one
+    // start and are taken at a later one, which never waits for them.
+    let commands = |disk: &mut Namespace| {
+        for _ in 0..4 {
+            disk.flush().unwrap();
+        }
+    };
     // A namespace change clears the changed list and rescans: the
     // namespace grew.
     event(2);
-    disk.flush().unwrap();
+    commands(disk);
     assert_eq!(disk.identity().blocks, 2048);
     // A firmware activation reads the slot log once processing resumes.
     event(2 | 1 << 8);
-    disk.flush().unwrap();
+    commands(disk);
     assert_eq!(disk.identity().blocks, 2048);
     // A persistent internal error resets the controller, whose rescan
     // sees the namespace grow again.
     event(3 << 8);
-    disk.flush().unwrap();
+    commands(disk);
     assert_eq!(disk.identity().blocks, 4096);
     let m = f.model.lock().unwrap();
     assert_eq!(m.event_configs, [1 << 8 | 1 << 9; 2]);

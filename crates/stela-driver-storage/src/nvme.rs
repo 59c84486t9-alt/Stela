@@ -572,6 +572,43 @@ enum Recovery {
     },
 }
 
+/// An admin command the driver sends of its own between I/O commands, for
+/// an asynchronous event or a namespace rescan, as Linux's event and scan
+/// work items do: published without waiting and looked for at later calls,
+/// until its deadline, as a reset's bring-up commands are. A processor that
+/// starts a guest's command never waits out an admin command, which a
+/// controller may take its whole timeout to answer.
+struct Errand {
+    purpose: Purpose,
+    id: u16,
+    /// Whether it moves data through the admin page.
+    data: bool,
+    deadline: crate::Deadline,
+    /// Its opcode and Identify CNS or feature, for a report.
+    name: &'static str,
+    /// Its result and status once its completion was taken.
+    completed: Option<(u32, u32)>,
+}
+
+/// What an [`Errand`] is for: the Get Log Page that acts on an event, or a
+/// rescan's Identify of `cns` for a namespace, at scan count `scans`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    Log(u32),
+    Identify {
+        namespace: u32,
+        cns: u32,
+        scans: u64,
+    },
+}
+
+/// An Identify's page, or the controller's refusal as its bare status.
+type Answer = Result<Vec<u8>, BlockError>;
+
+/// How a scan asks for the Identify of a CNS: the answer, or `None` while
+/// the command is out ([`Controller::scan_ids`]).
+type AskIdentify<'a> = dyn FnMut(&mut Controller, u32) -> Result<Option<Answer>, BlockError> + 'a;
+
 /// Linux's asynchronous events: what Identify Controller enables, the
 /// outstanding Asynchronous Event Request and a completion not yet acted on.
 #[derive(Default)]
@@ -581,6 +618,9 @@ struct Events {
     activation_us: u64,
     request: Option<u16>,
     completed: Option<(u32, u32)>,
+    /// While a firmware activation pauses processing: when the wait for it
+    /// ends ([`Controller::service_events`]).
+    activation: Option<crate::Deadline>,
 }
 
 impl Events {
@@ -705,6 +745,9 @@ struct Controller {
     events: Events,
     /// The Abort commands sent and not yet completed.
     aborts: Vec<u16>,
+    /// The admin command of an event or a rescan that is out
+    /// ([`Controller::errand`]).
+    errand: Option<Errand>,
     limits: Limits,
     /// What Linux's quirk tables say of this controller ([`Quirks`]).
     quirks: Quirks,
@@ -886,6 +929,9 @@ pub struct Namespace {
     scanned: u64,
     /// Set once a rescan removed the namespace.
     removed: Option<BlockError>,
+    /// The rescan in progress: the scan count it answers and the Identify
+    /// answers it has, by CNS ([`Namespace::rescan`]).
+    rescanning: Option<(u64, Vec<(u32, Answer)>)>,
 }
 
 /// Reset `function`'s controller, bring up its queues and return its usable
@@ -953,6 +999,7 @@ pub fn attach(
         host_memory_enabled: false,
         events: Events::default(),
         aborts: Vec::new(),
+        errand: None,
         limits: Limits::default(),
         quirks: Quirks::for_device(function.vendor, function.device)
             | Quirks::for_platform(function.vendor, function.device, platform),
@@ -1153,6 +1200,7 @@ fn discover(
             ids,
             scanned: scans,
             removed: None,
+            rescanning: None,
             identity: Identity {
                 transport: Transport::Nvme,
                 location: format!("{location} namespace {namespace}"),
@@ -1404,22 +1452,65 @@ impl Namespace {
     /// or namespace-change notice, once asynchronous events are acted on:
     /// a namespace no longer allocated, or whose identifiers changed, is
     /// removed; otherwise its size and format are updated. A refused
-    /// Identify leaves the namespace as it was. Admin commands of its own:
-    /// only while no command runs.
-    fn rescan(&mut self, controller: &mut Controller) -> Result<(), BlockError> {
+    /// Identify leaves the namespace as it was. Whether the namespace is
+    /// scanned at the controller's count. Its admin commands are errands
+    /// ([`Controller::errand`]), sent only while no command runs and looked
+    /// for at later calls, as Linux's scan work runs beside its requests:
+    /// this never waits for one, and commands go on meanwhile.
+    fn rescan(&mut self, controller: &mut Controller) -> Result<bool, BlockError> {
         controller.ready()?;
         if let Some(error) = &self.removed {
             return Err(error.clone());
         }
-        controller.service_events()?;
-        if self.scanned == controller.scans {
-            return Ok(());
+        if !controller.service_events()? {
+            return Ok(false);
         }
-        let scans = controller.scans;
-        let Scan::Found(mut ids, independent) = controller.namespace_ids(self.namespace)? else {
-            self.scanned = scans;
-            return Ok(());
+        if self.scanned == controller.scans {
+            self.rescanning = None;
+            return Ok(true);
+        }
+        let (scans, namespace) = (controller.scans, self.namespace);
+        let mut answers = match self.rescanning.take() {
+            Some((at, answers)) if at == scans => answers,
+            _ => Vec::new(),
         };
+        let mut ask =
+            |controller: &mut Controller, cns: u32| -> Result<Option<Answer>, BlockError> {
+                if let Some((_, answer)) = answers.iter().find(|(asked, _)| *asked == cns) {
+                    return Ok(Some(answer.clone()));
+                }
+                let purpose = Purpose::Identify {
+                    namespace,
+                    cns,
+                    scans,
+                };
+                let command = |controller: &Controller| controller.identify_command(cns, namespace);
+                let Some((_, status)) = controller.errand(purpose, true, command)? else {
+                    return Ok(None);
+                };
+                let answer = match status {
+                    0 => Ok(controller.admin_data.bytes()[..PAGE].to_vec()),
+                    status => Err(BlockError::Device { status }),
+                };
+                answers.push((cns, answer.clone()));
+                Ok(Some(answer))
+            };
+        let (mut ids, independent) = match controller.scan_ids(&mut ask)? {
+            None => {
+                self.rescanning = Some((scans, answers));
+                return Ok(false);
+            }
+            Some(Scan::Passed(_)) => {
+                self.scanned = scans;
+                return Ok(true);
+            }
+            Some(Scan::Found(ids, independent)) => (ids, independent),
+        };
+        let Some(data) = ask(controller, IDENTIFY_NAMESPACE)? else {
+            self.rescanning = Some((scans, answers));
+            return Ok(false);
+        };
+        self.scanned = scans;
         let (version, max_transfer, max_command_bytes) = (
             controller.version,
             controller.max_transfer,
@@ -1427,20 +1518,15 @@ impl Namespace {
         );
         let (commands, limits, quirks) =
             (controller.commands, controller.limits, controller.quirks);
-        let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
+        let data = match data {
             Ok(data) => data,
-            Err(BlockError::Device { .. }) => {
-                self.scanned = scans;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
+            Err(_) => return Ok(true),
         };
         if !independent && !quirks.contains(Quirks::BOGUS_IDS) {
-            ids.fill(version, data);
+            ids.fill(version, &data);
         }
         let allocated = data[NAMESPACE_CAPACITY] != [0; 8];
-        let format = plain_format(data, max_transfer);
-        self.scanned = scans;
+        let format = plain_format(&data, max_transfer);
         match format {
             Ok(Some(format)) if allocated && ids == self.ids => {
                 self.identity.blocks = format.blocks;
@@ -1458,7 +1544,7 @@ impl Namespace {
                     },
                     quirks,
                 );
-                Ok(())
+                Ok(true)
             }
             Err(error) if allocated && ids == self.ids => {
                 // nvme_update_ns_info hides a namespace it cannot use.
@@ -1480,7 +1566,14 @@ impl Namespace {
     fn command_to(&mut self, command: Command, destination: Option<&mut [u8]>) -> Finished {
         let controller = self.controller.clone();
         let mut controller = controller.borrow_mut();
-        self.rescan(&mut controller)?;
+        // A caller that waits sees the rescan to its end: its errands go
+        // once every queued command ended.
+        controller.settle()?;
+        while !self.rescan(&mut controller)? {
+            controller.advance();
+            crate::waiting();
+            core::hint::spin_loop();
+        }
         let command = command.within(&self.identity, 0)?;
         let block = self.identity.block_size as usize;
         controller.run(self.namespace, block, command, destination)
@@ -1561,8 +1654,8 @@ impl BlockDevice for Namespace {
         self.removed.is_some() || self.controller.borrow().room()
     }
 
-    /// Asynchronous events and rescans run admin commands, which wait: only
-    /// while no command runs, as Linux's work items run between requests.
+    /// Asynchronous events and rescans move on first, never waiting
+    /// ([`Self::rescan`]).
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         self.start_with(command, true)
     }
@@ -1608,17 +1701,14 @@ impl BlockDevice for Namespace {
 }
 
 impl Namespace {
-    /// Asynchronous events and rescans run admin commands, which wait: only
-    /// while no command runs, as Linux's work items run between requests.
-    /// The doorbell rings at once when `ring`.
+    /// Asynchronous events and rescans move on first, never waiting
+    /// ([`Self::rescan`]): their admin commands go only while no command
+    /// runs, as Linux's work items run between requests, and are looked
+    /// for at later starts. The doorbell rings at once when `ring`.
     fn start_with(&mut self, command: Command, ring: bool) -> Result<u32, BlockError> {
         let controller = self.controller.clone();
         let mut controller = controller.borrow_mut();
-        if !controller.busy() {
-            parts::timed(parts::Part::Rescan, || self.rescan(&mut controller))?;
-        } else if let Some(error) = &self.removed {
-            return Err(error.clone());
-        }
+        parts::timed(parts::Part::Rescan, || self.rescan(&mut controller))?;
         let command = command.within(&self.identity, 0)?;
         let block = self.identity.block_size as usize;
         parts::timed(parts::Part::Start, || {

@@ -120,6 +120,7 @@ impl Protocol {
             ids: namespace.ids.clone(),
             scanned: namespace.scanned,
             removed: namespace.removed.clone(),
+            rescanning: None,
         }
     }
     pub(crate) fn snapshot(&self) -> Snapshot {

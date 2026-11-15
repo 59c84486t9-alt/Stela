@@ -103,6 +103,7 @@ impl Controller {
     pub(super) fn outstanding(&self, id: u16) -> bool {
         self.events.request == Some(id)
             || self.aborts.contains(&id)
+            || self.errand.as_ref().is_some_and(|errand| errand.id == id)
             || self
                 .tags
                 .iter()
@@ -360,14 +361,17 @@ impl Controller {
     }
 
     /// Whether [`Self::start`] answers now: a tag and the pages of the
-    /// largest command are free and no reset runs, or the controller failed
-    /// or shut down, which it refuses at once rather than leaving the
-    /// command waiting for room it never gets.
+    /// largest command are free, or the controller failed or shut down,
+    /// which it refuses at once rather than leaving the command waiting
+    /// for room it never gets. During a reset a start waits for its end
+    /// under its tag, as Linux's quiesced queues hold requests, and the
+    /// looks for its result move the reset on: a reset that no command
+    /// waits for, as one an event or a lost errand began, has no other
+    /// caller to move it.
     pub(super) fn room(&self) -> bool {
         self.fault.is_some()
             || self.shut_down
-            || (self.recovery.is_none()
-                && self.pool.free.len() >= pages_for(self.max_transfer)
+            || (self.pool.free.len() >= pages_for(self.max_transfer)
                 && self.tags.iter().any(|tag| matches!(tag, Tag::Free)))
     }
 
@@ -394,13 +398,22 @@ impl Controller {
             .tags
             .iter()
             .position(|tag| matches!(tag, Tag::Free))
-            .filter(|_| self.recovery.is_none())
             .ok_or(BlockError::Protocol("every NVMe tag is in use"))?;
         debug_assert!(self.held[tag].is_empty());
         self.held[tag] = self
             .pool
             .take(command_pages(&command))
             .ok_or(BlockError::Protocol("every NVMe bounce page is in use"))?;
+        if self.recovery.is_some() {
+            // Sent once the reset ends ([`Self::restarted`]).
+            self.tags[tag] = Tag::Waiting {
+                namespace,
+                block,
+                command,
+                retries: 0,
+            };
+            return Ok(tag as u32);
+        }
         self.submit_with(tag, namespace, block, command, 0, ring);
         Ok(tag as u32)
     }
@@ -506,8 +519,9 @@ impl Controller {
             }
             return;
         }
-        // Abort and event completions, which the I/O commands do not wait for.
-        if (self.events.request.is_some() || !self.aborts.is_empty())
+        // Abort, event and errand completions, which the I/O commands do not
+        // wait for.
+        if (self.events.request.is_some() || !self.aborts.is_empty() || self.errand.is_some())
             && let Err(error) = self.admin_completion(None)
         {
             self.poison(error);

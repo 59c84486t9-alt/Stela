@@ -134,6 +134,9 @@ impl Controller {
         }
         self.io.restart();
         self.aborts.clear();
+        // The errand's command went with the admin queue: its owner sends
+        // it again.
+        self.errand = None;
         // The disable ended the Asynchronous Event Request; the host memory
         // buffer is offered back with the bring-up.
         self.events.request = None;
@@ -360,6 +363,7 @@ impl Controller {
         self.limits.deallocate = le32(page, NVM_DEALLOCATE_RANGE_LIMIT);
     }
 
+    #[cfg(test)]
     pub(super) fn reset_and_settle(&mut self) -> Result<(), BlockError> {
         self.reset();
         self.settle()

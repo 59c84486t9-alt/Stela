@@ -65,6 +65,7 @@ impl Fixture {
             host_memory_enabled: false,
             events: Events::default(),
             aborts: Vec::new(),
+            errand: None,
             limits: Limits::default(),
             quirks: Quirks::NONE,
         };
@@ -77,6 +78,7 @@ impl Fixture {
                 ids: Ids::default(),
                 scanned: 0,
                 removed: None,
+                rescanning: None,
                 identity: Identity {
                     transport: Transport::Nvme,
                     location: "fixture".into(),
@@ -117,6 +119,7 @@ fn a_timeout_aborts_then_a_controller_that_stays_down_poisons_its_siblings() {
         ids: Ids::default(),
         scanned: 0,
         removed: None,
+        rescanning: None,
     };
     {
         let c = fixture.disk.controller.borrow();
@@ -1191,8 +1194,9 @@ fn a_command_past_its_deadline_is_aborted_then_resets_the_controller_and_runs_ag
         let controller = disk.controller.borrow();
         assert!(matches!(controller.recovery, Some(Recovery::Disabling(..))));
         assert_eq!(controller.registers.read32(CONFIGURATION).unwrap(), 0);
-        assert!(!disk.room());
     }
+    // A start meanwhile waits for the reset's end under its tag.
+    assert!(disk.room());
     // CSTS.RDY is clear: it is enabled again.
     assert_eq!(disk.finish(read), None);
     {
@@ -1712,4 +1716,185 @@ fn a_batch_of_starts_rings_the_submission_doorbell_once() {
     let fourth = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
     assert_eq!(doorbell(disk), 4);
     let _ = fourth;
+}
+
+/// The Identify Namespace page of a 512-byte format of `blocks` blocks,
+/// all allocated.
+fn allocated(blocks: u64) -> Vec<u8> {
+    let mut page = namespace(blocks, 0, &[(0, 9 << 16)], 0);
+    page[NAMESPACE_CAPACITY].copy_from_slice(&blocks.to_le_bytes());
+    page
+}
+
+/// Answer the errand that is out with `status`, `page` in the admin page.
+fn answer_errand(controller: &mut Controller, page: &[u8], status: u32) -> Purpose {
+    let errand = controller.errand.as_ref().expect("an errand is out");
+    let (id, purpose) = (errand.id, errand.purpose);
+    controller.admin_data.bytes_mut()[..page.len()].copy_from_slice(page);
+    post_admin(controller, id, status);
+    purpose
+}
+
+/// A rescan's Identify goes out with a start, which runs its own command
+/// at once, and a later start takes its answer: no start waits for an
+/// admin command, where one waited up to the admin timeout (60 s) and a
+/// controller that never answered held its processor that long.
+#[test]
+fn a_rescan_sends_its_identify_without_waiting_and_a_later_start_takes_it() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    disk.controller.borrow_mut().scans = 1;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut c = disk.controller.borrow_mut();
+        running_id(&c, read);
+        let offset = usize::from(c.admin.tail - 1) * 64;
+        assert_eq!(c.admin.submissions.bytes()[offset], ADMIN_IDENTIFY);
+        let purpose = answer_errand(&mut c, &allocated(2048), 0);
+        assert_eq!(
+            purpose,
+            Purpose::Identify {
+                namespace: 1,
+                cns: IDENTIFY_NAMESPACE,
+                scans: 1
+            }
+        );
+        // The errand's answer is taken while the read runs.
+        let id = running_id(&c, read);
+        post(&mut c, id, 0);
+    }
+    assert_eq!(disk.finish(read), Some(Ok(Some(vec![0; 512]))));
+    assert_eq!(disk.scanned, 0);
+    let write = disk.start(write_command(0)).unwrap();
+    assert_eq!(disk.scanned, 1);
+    assert_eq!(disk.identity.blocks, 2048);
+    let c = disk.controller.borrow();
+    assert!(c.errand.is_none());
+    running_id(&c, write);
+}
+
+fn write_command(lba: u64) -> Command {
+    Command::Write {
+        lba,
+        data: vec![0x31; 512],
+        fua: false,
+    }
+}
+
+/// An errand past its deadline fails the start that finds it and resets
+/// the controller, as a lost admin command does; with no command running,
+/// the next start waits for the reset under its tag and its looks move
+/// the reset on, after which it runs. Before, the reset was waited out in
+/// the start, and a start during a reset found no room.
+#[test]
+fn a_lost_errand_resets_the_controller_and_the_next_start_moves_the_reset_on() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let clock = {
+        let mut c = disk.controller.borrow_mut();
+        c.scans = 1;
+        c.errand(
+            Purpose::Identify {
+                namespace: 1,
+                cns: IDENTIFY_NAMESPACE,
+                scans: 1,
+            },
+            true,
+            |c| c.identify_command(IDENTIFY_NAMESPACE, 1),
+        )
+        .unwrap();
+        assert!(c.errand.is_some());
+        c.clock
+    };
+    let started = clock.try_start().unwrap();
+    while clock.try_elapsed_us(started).unwrap() < 1000 {
+        core::hint::spin_loop();
+    }
+    let lost = disk.start(write_command(0)).unwrap_err();
+    assert_eq!(
+        lost,
+        within(identify_name(IDENTIFY_NAMESPACE), BlockError::Timeout)
+    );
+    assert!(disk.room());
+    let write = disk.start(write_command(1)).unwrap();
+    assert!(matches!(
+        disk.controller.borrow().tags[write as usize],
+        Tag::Waiting { .. }
+    ));
+    // CSTS.RDY is clear: the controller is enabled again, then ready.
+    assert_eq!(disk.finish(write), None);
+    {
+        let c = disk.controller.borrow();
+        assert!(matches!(c.recovery, Some(Recovery::Enabling(_))));
+        c.registers.write32(STATUS, READY).unwrap();
+    }
+    for _ in 0..4 {
+        assert_eq!(disk.finish(write), None);
+        let mut c = disk.controller.borrow_mut();
+        let Some(Recovery::Admin { id, .. }) = c.recovery else {
+            panic!("no bring-up command");
+        };
+        post_admin(&mut c, id, 0);
+    }
+    assert_eq!(disk.finish(write), None);
+    let mut c = disk.controller.borrow_mut();
+    assert!(c.recovery.is_none());
+    let id = running_id(&c, write);
+    post(&mut c, id, 0);
+    drop(c);
+    assert_eq!(disk.finish(write), Some(Ok(None)));
+}
+
+/// A namespace-change notice's Get Log Page is an errand too: the start
+/// that took the notice runs its command, and a later one ends the log,
+/// queues a scan and requests the next event. Before, the start waited
+/// for the log.
+#[test]
+fn a_namespace_notice_reads_its_log_without_waiting() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    {
+        let mut c = disk.controller.borrow_mut();
+        c.events.supported = 1 << 8;
+        c.request_event().unwrap();
+        let request = c.events.request.unwrap();
+        let entry = usize::from(c.admin.head) * 16;
+        let phase = u32::from(c.admin.phase) << 16;
+        c.admin
+            .completions
+            .write(entry, EVENT_NOTICE | NOTICE_NAMESPACES_CHANGED << 8);
+        let tail = u32::from(c.admin.tail);
+        c.admin.completions.write(entry + 8, tail);
+        c.admin
+            .completions
+            .write(entry + 12, phase | u32::from(request));
+    }
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    {
+        let mut c = disk.controller.borrow_mut();
+        running_id(&c, read);
+        assert_eq!(c.scans, 0);
+        let offset = usize::from(c.admin.tail - 1) * 64;
+        assert_eq!(c.admin.submissions.bytes()[offset], ADMIN_GET_LOG_PAGE);
+        assert_eq!(
+            answer_errand(&mut c, &[0; 16], 0),
+            Purpose::Log(LOG_CHANGED_NAMESPACES)
+        );
+        let id = running_id(&c, read);
+        post(&mut c, id, 0);
+    }
+    assert_eq!(disk.finish(read), Some(Ok(Some(vec![0; 512]))));
+    let write = disk.start(write_command(0)).unwrap();
+    let c = disk.controller.borrow();
+    assert_eq!(c.scans, 1);
+    assert!(c.events.request.is_some() && c.events.completed.is_none());
+    // The scan the notice queued has sent its Identify.
+    assert!(matches!(
+        c.errand.as_ref().map(|errand| errand.purpose),
+        Some(Purpose::Identify { scans: 1, .. })
+    ));
+    running_id(&c, write);
 }

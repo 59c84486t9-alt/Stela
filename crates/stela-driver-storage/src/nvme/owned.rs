@@ -492,6 +492,7 @@ unsafe fn attach_with_timeout(
         host_memory_enabled: false,
         events: super::Events::default(),
         aborts: alloc::vec::Vec::new(),
+        errand: None,
         limits: super::Limits::default(),
         quirks,
     };
