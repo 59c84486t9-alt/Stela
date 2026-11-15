@@ -467,6 +467,16 @@ pub(in crate::engine) fn take(wanted: (usize, usize), firmware: Shown<'_>) {
     }
 }
 
+/// The mode of the display [`take`] took, before the board's DCP takes it.
+pub(in crate::engine) fn taken_size() -> Option<(usize, usize)> {
+    // SAFETY: the one boot CPU, after `take` and before `scanout`.
+    let taken = unsafe { &(*TAKEN.0.get()).0 };
+    taken.as_ref().map(|(_, display)| {
+        let (width, height) = display.size();
+        (width as usize, height as usize)
+    })
+}
+
 /// The scanout of the display [`take`] took, in its own mode, for the
 /// board's DCP.
 pub(in crate::engine) fn scanout() -> Option<Box<dyn Scanout>> {
@@ -495,25 +505,40 @@ pub(in crate::engine) fn drawn_without_display() -> bool {
     super::installed().is_some_and(|gpu| !gpu.start.bound.is_empty())
 }
 
-/// With no display taken and the firmware's `screen` gone, a scanout in
-/// that screen's mode, the guest's, that shows the first display a bound
-/// GPU detects later in it. None when no GPU's node is open.
-pub(in crate::engine) fn awaited(screen: Framebuffer) -> Option<Box<dyn Scanout>> {
+/// With no display taken and the firmware's `screen` gone, or with no
+/// firmware screen at all ([`guest_screen::DEFAULT`]), a scanout in the
+/// guest's mode that shows the first display a bound GPU detects later in
+/// it. None when no GPU's node is open.
+///
+/// [`guest_screen::DEFAULT`]: stela_boot_core::guest_screen::DEFAULT
+pub(in crate::engine) fn awaited(screen: Option<Framebuffer>) -> Option<Box<dyn Scanout>> {
     let gpu = super::installed()?;
     // SAFETY: the one boot CPU, after `take`.
     let waiting = core::mem::take(unsafe { &mut (*TAKEN.0.get()).1 });
     if waiting.is_empty() {
         return None;
     }
-    let (width, height) = screen.resolution();
+    use stela_boot_core::guest_screen;
+    let ((width, height), refresh, size_mm) = match screen {
+        Some(screen) => (
+            screen.resolution(),
+            screen.refresh_millihertz(),
+            screen.size_mm(),
+        ),
+        None => (
+            guest_screen::DEFAULT,
+            guest_screen::DEFAULT_REFRESH_MILLIHERTZ,
+            None,
+        ),
+    };
     let mut scanout = KmsScanout::new(
         ScanoutMode {
             width: width as u32,
             height: height as u32,
             format: ScanoutFormat::Bgra8888,
         },
-        screen.refresh_millihertz(),
-        screen.size_mm(),
+        refresh,
+        size_mm,
         gpu.tsc_hz,
     );
     scanout.waiting = waiting;

@@ -23,13 +23,24 @@ pub(super) fn load(
     built: Option<&[(String, Vec<u8>)]>,
     nvram: Option<Nvram>,
 ) -> GuestImage {
-    // A bundle uses the firmware's framebuffer mode.
-    let framebuffer = handoff
-        .screen
-        .filter(|_| options.bundle)
-        .and_then(|screen| {
-            display::boot_framebuffer(screen.resolution(), options.dram_base + options.ram_bytes)
-        });
+    // A bundle uses the firmware's framebuffer mode, else the started GPU
+    // display's, else the default mode: the device tree's display geometry
+    // needs one.
+    let framebuffer = options
+        .bundle
+        .then(|| {
+            #[cfg(feature = "nvk")]
+            let gpu = gpu::display::taken_size();
+            #[cfg(not(feature = "nvk"))]
+            let gpu = None;
+            let firmware = handoff.screen.map(|screen| screen.resolution());
+            let chosen = stela_boot_core::guest_screen::choose(firmware, gpu);
+            if let Some(line) = stela_boot_core::guest_screen::line(chosen) {
+                output::arguments(format_args!("{line}"));
+            }
+            display::boot_framebuffer(chosen.0, options.dram_base + options.ram_bytes)
+        })
+        .flatten();
     if options.bundle {
         crate::status::begin("Loading macOS into memory");
         let files = &handoff.files[..handoff.file_count];

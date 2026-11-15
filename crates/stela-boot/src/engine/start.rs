@@ -1669,7 +1669,7 @@ fn place_devices(
     let scanout = gpu::display::scanout()
         .map(mirrored)
         .or_else(|| firmware_scanout(gpu::display::drawn_without_display()))
-        .or_else(|| gpu::display::awaited(handoff.screen?).map(mirrored));
+        .or_else(|| gpu::display::awaited(handoff.screen).map(mirrored));
     #[cfg(not(feature = "nvk"))]
     let scanout = firmware_scanout(false);
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
