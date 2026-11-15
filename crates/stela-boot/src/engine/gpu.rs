@@ -1000,10 +1000,9 @@ fn claim(
     let (mut bars, mut resources) = (Vec::new(), ManuallyDrop::new(Vec::new()));
     let function_bars = function.bars().map_err(ServiceError::Config)?;
     if !matches!(function_bars[0], Some(Bar::Memory { prefetchable: false, size, .. }) if size >= PAGE)
-        || function.config().read16(4).map_err(ServiceError::Config)? & 2 == 0
     {
         return Err(ServiceError::Refused(
-            "the GPU's register BAR does not decode",
+            "the GPU's register BAR is not a usable MMIO region",
         ));
     }
     for (region, bar) in placement.regions.iter_mut().zip(function_bars) {
@@ -1039,6 +1038,23 @@ fn claim(
                 | if wide { RESOURCE_WIDE } else { 0 },
         };
     }
+    // Stela intentionally keeps bus mastering disabled until the Linux GPU
+    // driver explicitly enables it. BAR sizing leaves PCI memory decoding
+    // disabled on this firmware, so enable only memory space after every BAR
+    // has passed resource validation and been claimed.
+    let command = function.config().read16(4).map_err(ServiceError::Config)?;
+    let memory_enabled = command | 2;
+    function
+        .config()
+        .write16(4, memory_enabled)
+        .map_err(ServiceError::Config)?;
+    let actual = function.config().read16(4).map_err(ServiceError::Config)?;
+    if actual & 2 == 0 || (actual ^ command) & 4 != 0 {
+        return Err(ServiceError::Refused(
+            "GPU memory decoding did not enable while keeping bus mastering unchanged",
+        ));
+    }
+    output::arguments(format_args!(
     let config = function
         .config()
         .retain_epoch()
