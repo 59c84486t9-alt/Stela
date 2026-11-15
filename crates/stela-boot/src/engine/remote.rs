@@ -106,8 +106,9 @@ impl Remote {
         Ok(Self(Ranges::new(http, manifest.source.bytes)))
     }
 
-    /// Have every later read wait for the network at most
-    /// `ranges::BUDGET_MS`: from when the restore host serves on a PE.
+    /// Have the reads from now on wait for the network at most
+    /// `ranges::BUDGET_MS` in all, until the next call: the restore host
+    /// calls it at each of its turns on a PE.
     pub fn bound(&mut self) {
         self.0.bound();
     }

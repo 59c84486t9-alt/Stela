@@ -14,7 +14,9 @@
 //! all, split among the streams. A range that fails resumes from its last
 //! byte received, a few times. Once [`Ranges::bound`] is set, a read waits
 //! at most [`BUDGET_MS`] for the network and otherwise fails as blocked
-//! (`ReadAt::blocked`); the same read later goes on from what arrived. A
+//! (`ReadAt::blocked`); the same read later goes on from what arrived. The
+//! budget counts from the bound, so the many reads one request makes (a
+//! deflated member's refills) share it. A
 //! restarted stream keeps the bytes its reads used as a segment
 //! ([`SEGMENT_BYTES`] in all), so a request that reads several members
 //! again from its first finds those it already read.
@@ -112,6 +114,8 @@ pub struct Ranges<S: RangeSource> {
     segments: VecDeque<(u64, Vec<u8>)>,
     /// Whether reads wait for the network at most [`BUDGET_MS`].
     bounded: bool,
+    /// When [`Ranges::bound`] was last called: the budget counts from it.
+    since: u64,
     /// The last read failed only because its time ran out.
     blocked: bool,
 }
@@ -127,6 +131,7 @@ impl<S: RangeSource> Ranges<S> {
             ahead: false,
             segments: VecDeque::new(),
             bounded: false,
+            since: 0,
             blocked: false,
         }
     }
@@ -154,9 +159,12 @@ impl<S: RangeSource> Ranges<S> {
         self.segments.iter().map(|(_, bytes)| bytes.len()).sum()
     }
 
-    /// Have every later read wait for the network at most [`BUDGET_MS`].
+    /// Have the reads from now on wait for the network at most
+    /// [`BUDGET_MS`] in all, until the next call: a caller that serves on a
+    /// processor whose guest waits bounds each of its turns.
     pub fn bound(&mut self) {
         self.bounded = true;
+        self.since = self.source.millis();
     }
 
     /// Closes every range and frees the buffers, returning the capacity
@@ -273,16 +281,22 @@ impl<S: RangeSource> Ranges<S> {
         Ok(())
     }
 
-    /// Fills a stream up to `until`: bounded, within [`BUDGET_MS`], and
-    /// after a failure not before its backoff ends; unbounded, waiting
-    /// those out. A failure's count goes on across bounded reads.
+    /// Fills a stream up to `until`: bounded, within what is left of
+    /// [`BUDGET_MS`] since the bound, taking what already arrived even when
+    /// none is, and after a failure not before its backoff ends; unbounded,
+    /// waiting those out. A failure's count goes on across bounded reads.
     fn fill(&mut self, at: usize, until: u64) -> Result<(), NetError> {
-        let started = self.source.millis();
+        let started = match self.bounded {
+            true => self.since,
+            false => self.source.millis(),
+        };
+        let mut looked = false;
         while self.streams[at].end() < until {
             let spent = self.source.millis().saturating_sub(started);
-            if self.bounded && spent >= BUDGET_MS {
+            if self.bounded && spent >= BUDGET_MS && looked {
                 return Err(self.block("the read's time ran out"));
             }
+            looked = true;
             let (failures, failed_at) = (self.streams[at].failures, self.streams[at].failed_at);
             if failures > 0 {
                 let backoff = 1000 << (failures - 1);
@@ -320,6 +334,10 @@ impl<S: RangeSource> Ranges<S> {
                     true => BUDGET_MS.saturating_sub(spent) * 1000,
                     false => WAIT_US,
                 };
+                // A spent budget waits no more; the look above blocks.
+                if wait == 0 {
+                    continue;
+                }
                 if let Err(error) = self.source.wait(wait.min(WAIT_US)) {
                     self.stop(at);
                     return Err(error);

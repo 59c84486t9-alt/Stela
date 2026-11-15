@@ -226,6 +226,39 @@ fn a_bounded_read_after_a_failure_waits_out_its_backoff_as_pending() {
 }
 
 #[test]
+fn a_bounded_turns_reads_share_one_budget() {
+    // A trickling network: each look hands over 4 KiB and takes a
+    // millisecond, so one 64 KiB read fits the budget but a request's run
+    // of such reads, a deflated member's refills, does not.
+    const PIECE: usize = 64 << 10;
+    let mut reader = ranges();
+    reader.source_mut().chunk = 4 << 10;
+    reader.bound();
+    let started = reader.source().now;
+    let mut offset = GIB;
+    let mut done = 0;
+    let blocked = loop {
+        match read(&mut reader, offset, PIECE) {
+            Ok(()) => {
+                done += 1;
+                offset += PIECE as u64;
+            }
+            Err(error) => break error,
+        }
+        assert!(done < 16, "the reads never ran out of time");
+    };
+    assert!(matches!(blocked, NetError::Timeout(_)));
+    assert!(reader.blocked());
+    assert!(done <= 1, "{done} reads after the budget was spent");
+    let held = reader.source().now - started;
+    assert!(held <= BUDGET_MS + 2, "held the processor {held} ms");
+    // The next turn goes on with the same read from what arrived.
+    reader.bound();
+    read(&mut reader, offset, PIECE).unwrap();
+    assert_eq!(reader.ranges(), 1);
+}
+
+#[test]
 fn reads_past_the_end_are_refused() {
     let mut reader = ranges();
     assert!(matches!(
