@@ -651,6 +651,11 @@ pub(crate) unsafe fn observe_descriptors() -> Descriptors {
 
 /// Report an x86 exception that is a Stela failure, never a guest event.
 pub fn fatal(frame: &Frame) -> ! {
+    // A watcher's NMI after the boot stopped names no new failure: the
+    // stop's reason stays the one shown.
+    if frame.vector == 2 {
+        output::nmi_after_stop(format_args!("an NMI at rip={:#x}", frame.rip));
+    }
     report(frame);
     // Linux's minimum-deadline callbacks stop on `ud2` after recording why.
     if let Some(error) = stela_linux::owner::minimum_failure() {

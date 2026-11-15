@@ -24,6 +24,7 @@
 //! boot processor itself pays nothing more than the step's own stores: no
 //! NMI goes to a processor that runs no Linux step, as a guest's or a
 //! parked one does not.
+use crate::first_stop::FirstStop;
 use alloc::{format, string::String};
 
 /// How long no step may return before the watchdog stops the boot: half of
@@ -153,9 +154,18 @@ pub enum Look {
 
 /// One watcher's look at the boot processor's step (`began`, 0 between
 /// steps) at `now` of a count at `counter_hz`, given the `last` sighting.
-/// Each step has its own start, so an unchanged one is the same step.
-pub fn look(last: Option<Sighting>, began: u64, now: u64, counter_hz: u64) -> Look {
-    if began == 0 || counter_hz == 0 {
+/// Each step has its own start, so an unchanged one is the same step. Once
+/// the boot stopped (`stop`) the watch ends: the boot processor stays
+/// inside the step it stopped in, and an NMI would replace the stop's
+/// reason with a timeout of that step.
+pub fn look(
+    stop: &FirstStop,
+    last: Option<Sighting>,
+    began: u64,
+    now: u64,
+    counter_hz: u64,
+) -> Look {
+    if began == 0 || counter_hz == 0 || stop.began() {
         return Look::Idle;
     }
     match last {
@@ -538,30 +548,31 @@ mod tests {
     fn another_processor_finds_a_step_stuck_once_it_saw_it_run_for_the_limit() {
         const COUNT_HZ: u64 = 1_000_000_000;
         let at = |seconds: u64| 5 * COUNT_HZ + seconds * COUNT_HZ;
+        let watching = FirstStop::new();
         // Nothing runs: nothing to watch, whatever was seen before.
-        assert_eq!(look(None, 0, at(0), COUNT_HZ), Look::Idle);
+        assert_eq!(look(&watching, None, 0, at(0), COUNT_HZ), Look::Idle);
         let seen = Sighting {
             began: 77,
             seen_at: at(0),
         };
-        assert_eq!(look(Some(seen), 0, at(40), COUNT_HZ), Look::Idle);
-        assert_eq!(look(None, 77, at(0), 0), Look::Idle);
+        assert_eq!(look(&watching, Some(seen), 0, at(40), COUNT_HZ), Look::Idle);
+        assert_eq!(look(&watching, None, 77, at(0), 0), Look::Idle);
         // A step first seen is remembered, by the watcher's own count.
-        assert_eq!(look(None, 77, at(0), COUNT_HZ), Look::New(seen));
+        assert_eq!(look(&watching, None, 77, at(0), COUNT_HZ), Look::New(seen));
         // The same step, within the limit, and past it.
         assert_eq!(
-            look(Some(seen), 77, at(LIMIT_SECONDS) - 1, COUNT_HZ),
+            look(&watching, Some(seen), 77, at(LIMIT_SECONDS) - 1, COUNT_HZ),
             Look::Running
         );
         assert_eq!(
-            look(Some(seen), 77, at(LIMIT_SECONDS + 2), COUNT_HZ),
+            look(&watching, Some(seen), 77, at(LIMIT_SECONDS + 2), COUNT_HZ),
             Look::Overdue {
                 quiet_ms: (LIMIT_SECONDS + 2) * 1000
             }
         );
         // Another step since, however long the watch: a new sighting.
         assert_eq!(
-            look(Some(seen), 78, at(LIMIT_SECONDS + 2), COUNT_HZ),
+            look(&watching, Some(seen), 78, at(LIMIT_SECONDS + 2), COUNT_HZ),
             Look::New(Sighting {
                 began: 78,
                 seen_at: at(LIMIT_SECONDS + 2)
@@ -570,9 +581,31 @@ mod tests {
         // A count that went back (another watcher's earlier reading) is
         // no overdue.
         assert_eq!(
-            look(Some(seen), 77, at(0) - COUNT_HZ, COUNT_HZ),
+            look(&watching, Some(seen), 77, at(0) - COUNT_HZ, COUNT_HZ),
             Look::Running
         );
+    }
+
+    #[test]
+    fn the_watch_ends_at_the_first_stop() {
+        const COUNT_HZ: u64 = 1_000_000_000;
+        let seen = Sighting {
+            began: 77,
+            seen_at: COUNT_HZ,
+        };
+        let overdue = COUNT_HZ * (LIMIT_SECONDS + 30);
+        let stop = FirstStop::new();
+        assert!(matches!(
+            look(&stop, Some(seen), 77, overdue, COUNT_HZ),
+            Look::Overdue { .. }
+        ));
+        // The boot processor stopped inside the step: its fatal stop never
+        // returns, and the step never does either.
+        assert_eq!(stop.claim(0), crate::first_stop::Claim::First);
+        assert_eq!(look(&stop, Some(seen), 77, overdue, COUNT_HZ), Look::Idle);
+        assert_eq!(look(&stop, None, 77, overdue, COUNT_HZ), Look::Idle);
+        stop.finish(0);
+        assert_eq!(look(&stop, Some(seen), 77, overdue, COUNT_HZ), Look::Idle);
     }
 
     #[test]

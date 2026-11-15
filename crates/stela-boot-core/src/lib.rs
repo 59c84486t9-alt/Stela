@@ -36,6 +36,7 @@ pub mod firmware_connect;
 pub mod firmware_pages;
 pub mod firmware_state;
 pub mod firmware_time;
+pub mod first_stop;
 pub mod gpu_status;
 pub mod guarded_stacks;
 pub mod guest_timeouts;

@@ -22,6 +22,7 @@ use core::{
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_boot_core::first_stop::{Claim, FirstStop};
 use stela_drivers::block::{BlockDevice, BlockError, Submission};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
@@ -1069,6 +1070,9 @@ pub fn terminate(code: u32) -> ! {
 /// (`stop_record::carry`). Call only while firmware boot services and its
 /// system table remain live.
 pub(crate) fn early_fatal(message: &str) -> ! {
+    if let Claim::Later { first_here } = FIRST_STOP.claim(stopping_processor()) {
+        later_stop(&message, first_here)
+    }
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     firmware_console("\nStela stopped: ");
     firmware_console(message);
@@ -1081,7 +1085,57 @@ pub(crate) fn early_fatal(message: &str) -> ! {
     halt(0x11)
 }
 
+/// The boot's first stop: the one whose reason is shown and recorded.
+pub static FIRST_STOP: FirstStop = FirstStop::new();
+
+/// This processor's APIC ID, without the engine's per-processor state, which
+/// a stop before it exists has none of.
+fn stopping_processor() -> u32 {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    match __cpuid(0).eax >= 0xb && __cpuid_count(0xb, 0).ebx != 0 {
+        true => __cpuid_count(0xb, 0).edx,
+        false => __cpuid(1).ebx >> 24,
+    }
+}
+
+/// A stop raised after the boot's first stop began, on another processor
+/// or after the first finished (a watcher's NMI to the stopped processor):
+/// one line names it, and the first stop's reason stays the one on the
+/// screen and in the kept record. The processor that made the first stop
+/// goes back to its wait for the power button; any other halts.
+fn later_stop(message: &dyn core::fmt::Display, first_here: bool) -> ! {
+    arguments(format_args!(
+        "\nSTELA LATER STOP {message}; the first stop's reason above stands\n"
+    ));
+    unqueue_serial();
+    if first_here {
+        crate::stop::wait()
+    }
+    loop {
+        // SAFETY: a stopped boot resumes no task on this processor.
+        unsafe { core::arch::asm!("cli", "hlt", options(nomem, nostack)) };
+    }
+}
+
+/// An NMI once a stop began, which only a watcher's look that raced the
+/// stop or a platform's NMI sends: a later stop ([`later_stop`]), even on
+/// the processor still stopping, as nothing in the stop's own work raises
+/// one. Returns while no stop began. Allocates nothing: the first stop may
+/// be the heap's.
+pub(crate) fn nmi_after_stop(message: impl core::fmt::Display) {
+    if !FIRST_STOP.began() {
+        return;
+    }
+    let first_here = match FIRST_STOP.claim(stopping_processor()) {
+        Claim::Later { first_here } => first_here,
+        Claim::First | Claim::Within => true,
+    };
+    later_stop(&message, first_here)
+}
+
 fn halt(code: u32) -> ! {
+    // Any stop after this one is a later one, and watchers end.
+    FIRST_STOP.finish(stopping_processor());
     debug_exit(code);
     // After the debug-exit attempt no task resumes; the stop answers only
     // the PC's power button.
@@ -1161,6 +1215,9 @@ fn stop_advice(reason: Option<&str>) -> &'static str {
 }
 
 pub fn fatal(message: impl core::fmt::Display) -> ! {
+    if let Claim::Later { first_here } = FIRST_STOP.claim(stopping_processor()) {
+        later_stop(&message, first_here)
+    }
     let message = alloc::string::ToString::to_string(&message);
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     // The reason reaches the port before any later step can stop for good.

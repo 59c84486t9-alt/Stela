@@ -299,7 +299,8 @@ pub(super) fn retire() {
 /// Look at the boot processor's step, from another processor between two
 /// of its guest slices: send the NMI once a step has run for the whole
 /// limit by the looks' own count. Never to a boot processor that runs no
-/// step, as one running guest code or parked does not.
+/// step, as one running guest code or parked does not, nor once the boot
+/// stopped (`output::FIRST_STOP`): a stop inside a step never returns.
 pub(super) fn look() {
     let began = RUNNING.began.load(Ordering::Relaxed);
     if began == 0 {
@@ -316,7 +317,13 @@ pub(super) fn look() {
             seen_at: SEEN_AT.load(Ordering::Relaxed),
         }),
     };
-    match decide::look(last, began, host::fresh_counter(), host::COUNTER_HZ) {
+    match decide::look(
+        &output::FIRST_STOP,
+        last,
+        began,
+        host::fresh_counter(),
+        host::COUNTER_HZ,
+    ) {
         Look::New(sighting) => {
             SEEN_AT.store(sighting.seen_at, Ordering::Relaxed);
             SEEN_BEGAN.store(sighting.began, Ordering::Relaxed);
