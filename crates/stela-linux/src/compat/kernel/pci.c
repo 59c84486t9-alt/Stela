@@ -385,15 +385,47 @@ void pci_disable_device(struct pci_dev *dev)
     }
 }
 
-void pci_set_master(struct pci_dev *dev)
+enum pci_busmaster_result {
+    PCI_BUSMASTER_OK,
+    PCI_BUSMASTER_ACCESS_FAILED,
+    PCI_BUSMASTER_READBACK_FAILED,
+    PCI_BUSMASTER_NOT_STUCK,
+};
+
+/* Keep the config-space operation separately testable: some PCI functions
+ * report a successful write even when the Bus Master Enable bit stays clear. */
+static enum pci_busmaster_result pci_enable_bus_master(struct pci_dev *dev)
 {
     u16 command;
-    if (pci_read_config_word(dev, PCI_COMMAND, &command))
+    int error = pci_read_config_word(dev, PCI_COMMAND, &command);
+    if (error)
+        return PCI_BUSMASTER_ACCESS_FAILED;
+    if (!(command & PCI_COMMAND_MASTER)) {
+        error = pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER);
+        if (error)
+            return PCI_BUSMASTER_ACCESS_FAILED;
+    }
+    error = pci_read_config_word(dev, PCI_COMMAND, &command);
+    if (error)
+        return PCI_BUSMASTER_READBACK_FAILED;
+    if (!(command & PCI_COMMAND_MASTER))
+        return PCI_BUSMASTER_NOT_STUCK;
+    return PCI_BUSMASTER_OK;
+}
+
+void pci_set_master(struct pci_dev *dev)
+{
+    switch (pci_enable_bus_master(dev)) {
+    case PCI_BUSMASTER_OK:
+        dev->is_busmaster = 1;
+        return;
+    case PCI_BUSMASTER_ACCESS_FAILED:
         stela_linux_fatal("PCI bus-master access failed without completion");
-    if (!(command & PCI_COMMAND_MASTER) &&
-        pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER))
-        stela_linux_fatal("PCI bus-master access failed without completion");
-    dev->is_busmaster = 1;
+    case PCI_BUSMASTER_READBACK_FAILED:
+        stela_linux_fatal("PCI bus-master readback failed without completion");
+    case PCI_BUSMASTER_NOT_STUCK:
+        stela_linux_fatal("PCI bus-master enable did not stick");
+    }
 }
 
 /* Option ROMs, following drivers/pci/rom.c. The owner assigned the ROM
@@ -490,6 +522,7 @@ void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 
 static u8 config[256];
 static int config_error;
+static bool ignore_bus_master_write;
 static u8 rom_window[0x1000] __aligned(PAGE_SIZE);
 
 static int read_config(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 *value)
@@ -508,6 +541,9 @@ static int write_config(struct pci_bus *bus, unsigned int devfn, int where, int 
 {
 	(void)bus;
 	(void)devfn;
+    if (ignore_bus_master_write && where == PCI_COMMAND && size == 2 &&
+        (value & PCI_COMMAND_MASTER))
+        return 0;
 	memcpy(&config[where], &value, (size_t)size);
 	return 0;
 }
@@ -588,6 +624,12 @@ int main(void)
 
 	dev.resource[0].flags = IORESOURCE_MEM;
 	assert(!pci_enable_device(&dev) && !pci_enable_device(&dev));
+    config[PCI_COMMAND] = PCI_COMMAND_MEMORY;
+    ignore_bus_master_write = true;
+    assert(pci_enable_bus_master(&dev) == PCI_BUSMASTER_NOT_STUCK);
+    assert(!(config[PCI_COMMAND] & PCI_COMMAND_MASTER));
+    assert(!dev.is_busmaster);
+    ignore_bus_master_write = false;
 	pci_set_master(&dev);
 	assert(config[PCI_COMMAND] == (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER));
 	pci_disable_device(&dev);
