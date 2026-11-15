@@ -1636,20 +1636,28 @@ fn place_devices(
     let firmware = |name: &str| -> Option<&[u8]> {
         carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
-    let firmware_scanout = || {
+    // `copied`: a bound GPU draws the frames, with no display of its own.
+    let firmware_scanout = |copied: bool| {
         handoff
             .screen
             .filter(|screen| screen.available())
             .map(|screen| {
                 let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-                alloc::boxed::Box::new(display::GopScanout::new(screen, options.scanout_mirror))
+                let scanout = display::GopScanout::new(screen, options.scanout_mirror);
+                let scanout = match copied {
+                    true => scanout.copying_gpu_frames(),
+                    false => scanout,
+                };
+                alloc::boxed::Box::new(scanout)
                     as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
             })
     };
     // The firmware's scanout keeps its newest frame itself; a GPU's is
-    // wrapped to keep one for `--scanout-mirror`. With neither a GPU's
-    // display nor the firmware's screen, which a bound GPU's reset ended, the
-    // guest keeps that screen's mode and a GPU's display found later shows it.
+    // wrapped to keep one for `--scanout-mirror`. A bound GPU with no display
+    // leaves the firmware's screen on another adapter showing its frames
+    // (`GopScanout::copying_gpu_frames`). With neither a GPU's display nor
+    // the firmware's screen, which a bound GPU's reset ended, the guest keeps
+    // that screen's mode and a GPU's display found later shows it.
     #[cfg(feature = "nvk")]
     let mirrored = |scanout: alloc::boxed::Box<dyn stela_soc::machine::Scanout>| match options
         .scanout_mirror
@@ -1660,10 +1668,10 @@ fn place_devices(
     #[cfg(feature = "nvk")]
     let scanout = gpu::display::scanout()
         .map(mirrored)
-        .or_else(firmware_scanout)
+        .or_else(|| firmware_scanout(gpu::display::drawn_without_display()))
         .or_else(|| gpu::display::awaited(handoff.screen?).map(mirrored));
     #[cfg(not(feature = "nvk"))]
-    let scanout = firmware_scanout();
+    let scanout = firmware_scanout(false);
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();

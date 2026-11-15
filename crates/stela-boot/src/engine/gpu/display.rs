@@ -488,6 +488,13 @@ pub(in crate::engine) fn scanout() -> Option<Box<dyn Scanout>> {
     Some(Box::new(scanout))
 }
 
+/// Whether a GPU is bound, so it draws macOS's frames, while [`scanout`]
+/// found no display taken: only the firmware's screen, on an adapter no
+/// bound GPU's start ended, can show them, each frame copied.
+pub(in crate::engine) fn drawn_without_display() -> bool {
+    super::installed().is_some_and(|gpu| !gpu.start.bound.is_empty())
+}
+
 /// With no display taken and the firmware's `screen` gone, a scanout in
 /// that screen's mode, the guest's, that shows the first display a bound
 /// GPU detects later in it. None when no GPU's node is open.

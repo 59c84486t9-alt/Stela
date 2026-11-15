@@ -8,6 +8,13 @@ use stela_loader::host_firmware::recipes::nvidia_chip;
 /// Blackwell: every chip `recipes::nvidia_chip` names), as people know them.
 pub const SUPPORTED: &str = "an NVIDIA GeForce GTX 16 or RTX 20, 30, 40 or 50 series GPU";
 
+/// The boot screen's line when the NVIDIA GPU started with no screen
+/// connected and macOS is shown on the screen the PC started on, which
+/// another display adapter drives (a laptop with no display mux).
+pub const SHOWN_BY_COPY: &str = "No screen is connected to the NVIDIA GPU, so Stela copies each \
+    frame of macOS to the screen the PC started on. The picture is slower than on a screen \
+    connected to the GPU.";
+
 /// Why an NVIDIA GPU did not start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
