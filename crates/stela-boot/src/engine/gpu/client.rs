@@ -40,6 +40,7 @@ use core::{
         AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
     },
 };
+use stela_boot_core::gpu_requests::{HostCall, Request as Code};
 use stela_boot_core::page_window::Cache;
 use stela_boot_core::posted_call::{self, Claim};
 use stela_drivers::platform::work::{WorkError, service::Idle};
@@ -759,12 +760,24 @@ unsafe extern "C" fn wake_waiters(_: *mut c_void) {
     unsafe { client::wake() };
 }
 
-/// An ioctl by its request code; every other request as zero.
+/// An ioctl by its request code; every other host call by a small code of
+/// its own ([`HostCall`]), which the reports name.
 fn request_code(operation: &Operation) -> u32 {
-    match *operation {
-        Operation::Control { request, .. } => request,
-        _ => 0,
-    }
+    let call = match *operation {
+        Operation::Control { request, .. } => return request,
+        Operation::Open(_) => HostCall::Open,
+        Operation::Close(_) => HostCall::Close,
+        Operation::Duplicate(_) => HostCall::Duplicate,
+        Operation::Device(_) => HostCall::Device,
+        Operation::Map { .. } => HostCall::Map,
+        Operation::Unmap(_) => HostCall::Unmap,
+        Operation::Fault { .. } => HostCall::Fault,
+        Operation::Thread(_) => HostCall::Thread,
+        Operation::Wake => HostCall::Wake,
+        Operation::Export(..) => HostCall::Export,
+        Operation::Shutdown => HostCall::Shutdown,
+    };
+    call.code()
 }
 
 /// Request counts and ticks by request code plus one, in slots that fill in
@@ -1126,7 +1139,7 @@ fn slowest_line(tsc_hz: u64) -> Option<alloc::string::String> {
     let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
     let mut line = alloc::string::String::from("GPU SERVED LONGEST request:longest_us/shootdowns");
     for &(request, longest, shootdowns) in rows.iter().take(SHOWN) {
-        let _ = write!(line, " {request:#x}:{}/{shootdowns}", micros(longest));
+        let _ = write!(line, " {}:{}/{shootdowns}", Code(request), micros(longest));
     }
     Some(line)
 }
@@ -1297,7 +1310,7 @@ fn workers_line(tsc_hz: u64) -> Option<alloc::string::String> {
         let code = slot.0.load(Ordering::Relaxed);
         let took = ms(slot.1.load(Ordering::Relaxed));
         if code != 0 && took >= 1000 {
-            let _ = write!(serving, " {:#x}:{took}ms", code.wrapping_sub(1));
+            let _ = write!(serving, " {}:{took}ms", Code(code.wrapping_sub(1)));
         }
     }
     if queue.is_empty() && serving.is_empty() {

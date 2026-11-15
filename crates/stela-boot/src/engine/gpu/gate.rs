@@ -978,22 +978,38 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         micros(shot)
     ));
     for &(request, count, waited) in posted.iter().take(SHOWN) {
-        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(waited)));
+        output::arguments(format_args!(
+            " {}:{count}/{}",
+            stela_boot_core::gpu_requests::Request(request),
+            micros(waited)
+        ));
     }
     // How long they waited for the boot CPU to take them.
     output::arguments(format_args!("\nGPU TAKEN request:count/us"));
     for &(request, count, taken) in client::take_taken().iter().take(SHOWN) {
-        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(taken)));
+        output::arguments(format_args!(
+            " {}:{count}/{}",
+            stela_boot_core::gpu_requests::Request(request),
+            micros(taken)
+        ));
     }
     // How long they waited for a worker to take them.
     output::arguments(format_args!("\nGPU QUEUED request:count/us"));
     for &(request, count, queued) in client::take_queued().iter().take(SHOWN) {
-        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(queued)));
+        output::arguments(format_args!(
+            " {}:{count}/{}",
+            stela_boot_core::gpu_requests::Request(request),
+            micros(queued)
+        ));
     }
     // What performing them took the service task, waits for the GPU included.
     output::arguments(format_args!("\nGPU SERVED request:count/us"));
     for &(request, count, took) in client::take_served().iter().take(SHOWN) {
-        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(took)));
+        output::arguments(format_args!(
+            " {}:{count}/{}",
+            stela_boot_core::gpu_requests::Request(request),
+            micros(took)
+        ));
     }
     output::arguments(format_args!("\n"));
 }
