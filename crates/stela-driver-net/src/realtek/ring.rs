@@ -115,11 +115,13 @@ impl Ring {
     }
 }
 /// A completed receive descriptor's frame length without the FCS, as Linux
-/// `rtl8169_rx_interrupt` decodes it: none with an error bit, none for a
-/// fragment (a frame over one buffer), and none outside 14..=1514 bytes.
+/// `rtl_rx` decodes it: none with the error summary (RxRES, which Linux's
+/// `rtl8169_check_rx_desc_error` alone tests: RWT, RUNT and CRC only say
+/// which error it was), none for a fragment (a frame over one buffer), and
+/// none outside 14..=1514 bytes.
 fn received_length(status: u32) -> Option<usize> {
     let length = (status & LENGTH) as usize;
-    (status & RX_ERRORS == 0
+    (status & RX_RES == 0
         && status & (FIRST | LAST) == FIRST | LAST
         && (18..=MAX_FRAME + 4).contains(&length))
     .then(|| length - 4)
@@ -160,9 +162,16 @@ mod tests {
         // the 14-bit length change neither the length nor the verdict.
         let above = (7 << 14) | (1 << 17) | (1 << 18) | (7 << 25) | END;
         assert_eq!(received_length(whole | above | 64), Some(60));
-        // RWT, RES, RUNT and CRC each drop the frame.
-        for bit in 19..=22 {
-            assert_eq!(received_length(whole | (1 << bit) | 64), None, "{bit}");
+        // The error summary drops the frame, with or without its reason.
+        assert_eq!(received_length(whole | RX_RES | 64), None);
+        for bit in [19, 20, 22] {
+            assert_eq!(
+                received_length(whole | RX_RES | (1 << bit) | 64),
+                None,
+                "{bit}"
+            );
+            // A reason bit without the summary is no error to Linux.
+            assert_eq!(received_length(whole | (1 << bit) | 64), Some(60), "{bit}");
         }
         // Fragments of a frame over one buffer are dropped, as Linux does.
         for fragment in [FIRST, LAST, 0] {
