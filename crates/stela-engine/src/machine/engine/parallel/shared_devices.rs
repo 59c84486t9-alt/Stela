@@ -778,11 +778,8 @@ impl<D: Devices> SharedDevices<D> {
 
     /// The registers at `physical` served under their device's own lock,
     /// if any ([`Devices::own_lock_registers`]).
-    fn own_at(&self, physical: u64) -> Option<Arc<dyn OwnLockRegisters>> {
-        self.own
-            .as_ref()
-            .filter(|own| own.serves(physical))
-            .cloned()
+    fn own_at(&self, physical: u64) -> Option<&dyn OwnLockRegisters> {
+        self.own.as_deref().filter(|own| own.serves(physical))
     }
 
     /// An access by PE `cpu` at `now` under its device's own lock, which
