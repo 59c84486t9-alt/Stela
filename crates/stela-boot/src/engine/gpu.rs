@@ -2445,7 +2445,7 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
     }
     let [device, pages, files, stacks] = UNMAPS.each_ref().map(take);
     #[cfg(feature = "nvk")]
-    let nvkm = nvkm_report();
+    let nvkm = nvkm_report() + &perf_report();
     #[cfg(not(feature = "nvk"))]
     let nvkm = String::new();
     let pumps = format!(
@@ -2651,6 +2651,28 @@ fn nvkm_report() -> String {
         ));
     }
     times + &sizes
+}
+
+/// `\nGPU PERF pstate=… seen=… gpc_mhz=min/mean/max mem_mhz=min/max …`: the
+/// GPU's P-state and clocks as GSP-RM reported them since the last report
+/// (`stela_drivers::gpu::gsp_perf`), at the first report after GSP starts and
+/// then when they changed. Empty otherwise.
+#[cfg(feature = "nvk")]
+fn perf_report() -> String {
+    use stela_drivers::gpu::gsp_perf::{Report, Reported};
+    unsafe extern "C" {
+        /// `nvkm/subdev/gsp/rm/r535/perf.c`, which nouveau updates only
+        /// atomically.
+        static nvkm_perf: Report;
+    }
+    static REPORTED: Reported = Reported::new();
+    // SAFETY: nouveau's static report, which it only updates atomically.
+    let report = unsafe { &nvkm_perf };
+    report
+        .take()
+        .and_then(|taken| REPORTED.line(&taken))
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default()
 }
 
 /// The function of the timer-list timer due first when Linux last looked,

@@ -15,6 +15,7 @@ pub mod metal;
 pub mod nouveau;
 
 pub mod cold;
+pub mod gsp_perf;
 pub mod nouveau_chip;
 
 #[cfg(feature = "linux-kernel")]
