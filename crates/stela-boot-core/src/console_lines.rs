@@ -212,6 +212,37 @@ impl Queued {
         }
     }
 
+    /// For a stop: lines dropped so far, then the waiting lines in order
+    /// while `more` allows, each to `write`; the lines `more` stopped are
+    /// counted to `dropped` after them. Leaves this empty without
+    /// allocating or freeing: the lines are written in place and their
+    /// storage is left behind, as the stop may be the heap's, or interrupt
+    /// a processor inside it. Returns the lines written.
+    pub fn write_at_stop(
+        &mut self,
+        mut dropped: impl FnMut(u64),
+        mut more: impl FnMut() -> bool,
+        mut write: impl FnMut(&Line),
+    ) -> usize {
+        if self.dropped != 0 {
+            dropped(core::mem::take(&mut self.dropped));
+        }
+        let mut written = 0;
+        for line in &self.lines {
+            if !more() {
+                break;
+            }
+            write(line);
+            written += 1;
+        }
+        let left = self.lines.len() - written;
+        if left != 0 {
+            dropped(left as u64);
+        }
+        core::mem::forget(core::mem::take(&mut self.lines));
+        written
+    }
+
     /// Lines waiting.
     pub fn len(&self) -> usize {
         self.lines.len()
@@ -269,6 +300,53 @@ mod tests {
         assert_eq!(written, ["a", "b", "c", "e"]);
         assert_eq!(drops, [1]);
         assert!(writing.is_empty());
+    }
+
+    #[test]
+    fn a_stop_writes_every_waiting_line_in_order_and_counts_the_rest() {
+        let line = |text: &str| Line {
+            text: text.into(),
+            bytes: text.len(),
+            complete: true,
+            beginning: true,
+        };
+        // Lines the home PE took and has not written, then lines still
+        // queued under the board's lock: the stop writes both, in order.
+        let mut writing = Queued::default();
+        writing.push(line("a"), 4);
+        let mut queued = Queued::default();
+        for text in ["b", "c", "d"] {
+            queued.push(line(text), 2);
+        }
+        let mut written = Vec::new();
+        let mut drops = Vec::new();
+        assert_eq!(
+            writing.write_at_stop(
+                |count| drops.push(count),
+                || true,
+                |line| written.push(line.text.clone())
+            ),
+            1
+        );
+        let mut budget = 1;
+        assert_eq!(
+            queued.write_at_stop(
+                |count| drops.push(count),
+                || {
+                    budget -= 1;
+                    budget >= 0
+                },
+                |line| written.push(line.text.clone()),
+            ),
+            1
+        );
+        assert_eq!(written, ["a", "b"]);
+        // "d" past the queue's limit, then "c" past the stop's budget.
+        assert_eq!(drops, [1, 1]);
+        assert!(writing.is_empty() && queued.is_empty());
+        // Nothing is written twice.
+        queued.write_at_stop(|count| drops.push(count), || true, |_| unreachable!());
+        assert_eq!(drops, [1, 1]);
     }
 
     fn lines(bytes: &[u8]) -> Vec<String> {

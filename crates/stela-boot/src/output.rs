@@ -1002,6 +1002,11 @@ pub fn now() -> u64 {
     rdtsc()
 }
 
+/// The counter's rate; 0 before it is known.
+pub fn counter_hz() -> u64 {
+    TSC_HZ.load(Ordering::Relaxed)
+}
+
 /// Milliseconds since counter value `start`; 0 before the rate is known.
 pub fn millis_since(start: u64) -> u64 {
     match TSC_HZ.load(Ordering::Relaxed) {
@@ -1073,6 +1078,7 @@ pub(crate) fn early_fatal(message: &str) -> ! {
     if let Claim::Later { first_here } = FIRST_STOP.claim(stopping_processor()) {
         later_stop(&message, first_here)
     }
+    crate::engine::write_guest_output_at_stop();
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     firmware_console("\nStela stopped: ");
     firmware_console(message);
@@ -1104,6 +1110,9 @@ fn stopping_processor() -> u32 {
 /// screen and in the kept record. The processor that made the first stop
 /// goes back to its wait for the power button; any other halts.
 fn later_stop(message: &dyn core::fmt::Display, first_here: bool) -> ! {
+    // Whatever guest lines the first stop has not written, as its
+    // processor may be the one that stopped making progress.
+    crate::engine::write_guest_output_at_stop();
     arguments(format_args!(
         "\nSTELA LATER STOP {message}; the first stop's reason above stands\n"
     ));
@@ -1218,6 +1227,8 @@ pub fn fatal(message: impl core::fmt::Display) -> ! {
     if let Claim::Later { first_here } = FIRST_STOP.claim(stopping_processor()) {
         later_stop(&message, first_here)
     }
+    // The guest's last lines, which often explain the stop, before it.
+    crate::engine::write_guest_output_at_stop();
     let message = alloc::string::ToString::to_string(&message);
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     // The reason reaches the port before any later step can stop for good.
@@ -1249,6 +1260,7 @@ pub fn fatal(message: impl core::fmt::Display) -> ! {
 /// GPUs to rest and unloads their firmware first, unlike [`fatal`].
 #[cfg(feature = "nvk")]
 pub fn stopping(message: &str) {
+    crate::engine::write_guest_output_at_stop();
     arguments(format_args!("\nSTELA STOP {message}\n"));
     unqueue_serial();
     stopped(message, &|| "Stela stopped. The PC turns off.");
