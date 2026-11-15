@@ -551,6 +551,88 @@ impl Processors {
     }
 }
 
+/// The slowest of the late acknowledgements since the last report: how many
+/// came late, the longest wait, and the processor behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Late {
+    pub count: u64,
+    pub ticks: u64,
+    pub apic: u32,
+    pub doing: Doing,
+    /// Where its NMI gate found it, when an NMI answered.
+    pub rip: Option<u64>,
+}
+
+/// Late acknowledgements, kept for one report a period at most
+/// ([`Lates::take`]). Retirements note them at once; the details of the
+/// longest may mix two that end together, which only a report reads.
+#[derive(Debug)]
+pub struct Lates {
+    count: AtomicU64,
+    ticks: AtomicU64,
+    apic: AtomicU32,
+    doing: AtomicU64,
+    /// One past the NMI's instruction, 0 when no NMI answered.
+    rip: AtomicU64,
+    /// The TSC of the last report.
+    reported: AtomicU64,
+}
+
+impl Default for Lates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Lates {
+    pub const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            apic: AtomicU32::new(0),
+            doing: AtomicU64::new(0),
+            rip: AtomicU64::new(0),
+            reported: AtomicU64::new(0),
+        }
+    }
+
+    /// A retirement waited `ticks` for the processor with `apic` ID, doing
+    /// `doing`, which its NMI gate answered at `rip` when one did.
+    pub fn note(&self, ticks: u64, apic: u32, doing: Doing, rip: Option<u64>) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        if self.ticks.fetch_max(ticks, Ordering::Relaxed) < ticks {
+            self.apic.store(apic, Ordering::Relaxed);
+            self.doing.store(doing as u64, Ordering::Relaxed);
+            self.rip
+                .store(rip.map_or(0, |rip| rip.wrapping_add(1)), Ordering::Relaxed);
+        }
+    }
+
+    /// What came late since the last report, when there is any and the
+    /// last report is at least `period` ticks before `now`: one caller gets
+    /// it and the record starts again.
+    pub fn take(&self, now: u64, period: u64) -> Option<Late> {
+        let reported = self.reported.load(Ordering::Relaxed);
+        if self.count.load(Ordering::Relaxed) == 0
+            || (reported != 0 && now.wrapping_sub(reported) < period)
+            || self
+                .reported
+                .compare_exchange(reported, now.max(1), Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return None;
+        }
+        let rip = self.rip.swap(0, Ordering::Relaxed);
+        Some(Late {
+            count: self.count.swap(0, Ordering::Relaxed),
+            ticks: self.ticks.swap(0, Ordering::Relaxed),
+            apic: self.apic.load(Ordering::Relaxed),
+            doing: Doing::of(self.doing.load(Ordering::Relaxed)),
+            rip: rip.checked_sub(1),
+        })
+    }
+}
+
 /// A root bridge's memory window as firmware describes it: bus addresses
 /// `minimum..=maximum`, which the CPU reaches at `translation` above them.
 #[derive(Clone, Copy, Debug)]
@@ -939,6 +1021,42 @@ mod tests {
         assert!(processors.poke(ap, next));
         assert!(!processors.poke(MAX_PROCESSORS, next));
         assert!(!processors.take_poke(MAX_PROCESSORS));
+    }
+
+    /// Late acknowledgements reach one report a period at most, which
+    /// names the longest and counts the rest.
+    #[test]
+    fn late_acknowledgements_are_reported_once_a_period() {
+        let lates = Lates::new();
+        assert_eq!(lates.take(5, 100), None);
+        lates.note(30, 0x10, Doing::Masked, None);
+        lates.note(70, 0x30, Doing::Masked, Some(0xabc));
+        lates.note(50, 0x20, Doing::Job, Some(0));
+        assert_eq!(
+            lates.take(1000, 100),
+            Some(Late {
+                count: 3,
+                ticks: 70,
+                apic: 0x30,
+                doing: Doing::Masked,
+                rip: Some(0xabc),
+            })
+        );
+        // Nothing new: nothing to say; something new within the period
+        // waits for its end.
+        assert_eq!(lates.take(2000, 100), None);
+        lates.note(40, 0x8, Doing::Retiring, Some(0));
+        assert_eq!(lates.take(1050, 100), None);
+        assert_eq!(
+            lates.take(1100, 100),
+            Some(Late {
+                count: 1,
+                ticks: 40,
+                apic: 0x8,
+                doing: Doing::Retiring,
+                rip: Some(0),
+            })
+        );
     }
 
     #[test]

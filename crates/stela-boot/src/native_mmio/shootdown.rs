@@ -30,7 +30,7 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
 };
-use stela_boot_core::aperture::{Doing, RANGE_PAGES};
+use stela_boot_core::aperture::{Doing, Lates, RANGE_PAGES};
 
 /// How long a retirement waits before it reports the processors it waits
 /// for.
@@ -360,12 +360,26 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
     let escalation = (tsc_hz / 1_000_000 * NMI_MICROS).max(1);
     let mut escalate = escalation;
     let mut reported = false;
+    // The last processor found holding it up, and what it did then.
+    let mut holder = None;
     // A peer may be publishing a retirement at the same time and cannot
     // finish until this processor acknowledges its generation.
-    while !PROCESSORS.flushed(generation, me) {
-        service();
+    loop {
         let now = crate::engine::host::rdtsc();
         let waited = now.wrapping_sub(start);
+        let Some((slot, apic)) = PROCESSORS
+            .sharers()
+            .find(|&(slot, _)| Some(slot) != me && PROCESSORS.pending(slot, generation))
+        else {
+            if let Some((slot, apic, doing)) = holder
+                && waited >= tsc_hz / 1_000_000 * LATE_MICROS
+            {
+                late(waited, slot, apic, doing, generation, now, tsc_hz);
+            }
+            return true;
+        };
+        holder = Some((slot, apic, PROCESSORS.doing(slot).0));
+        service();
         if waited >= escalate {
             nmi_late(&sender, generation, me, tsc_hz);
             escalate = waited.saturating_add(escalation);
@@ -380,7 +394,46 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
         }
         core::hint::spin_loop();
     }
-    true
+}
+
+/// An acknowledgement that took this long is late: a line names it, once a
+/// [`LATE_REPORT_SECONDS`] at most ([`late`]).
+const LATE_MICROS: u64 = 1000;
+/// The most often a late acknowledgement gets a line: a heartbeat's period.
+const LATE_REPORT_SECONDS: u64 = 10;
+
+/// The late acknowledgements since the last line.
+static LATES: Lates = Lates::new();
+
+/// A retirement of `generation` waited `ticks` for the processor in `slot`
+/// with `apic` ID, doing `doing`: note it, and name the longest of those
+/// since the last line, once a [`LATE_REPORT_SECONDS`] at most.
+fn late(ticks: u64, slot: usize, apic: u32, doing: Doing, generation: u64, now: u64, tsc_hz: u64) {
+    LATES.note(ticks, apic, doing, PROCESSORS.nmi_answer(slot, generation));
+    let Some(report) = LATES.take(now, tsc_hz.saturating_mul(LATE_REPORT_SECONDS)) else {
+        return;
+    };
+    unsafe extern "C" {
+        static __ImageBase: u8;
+    }
+    let micros = u128::from(report.ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    match report.rip {
+        Some(rip) => crate::output::arguments(format_args!(
+            "NATIVE MMIO shootdown late count={} longest_us={micros} apic={:#x} doing={} \
+             answered=nmi rip={rip:#x} (image+{:#x})\n",
+            report.count,
+            report.apic,
+            report.doing.name(),
+            rip.wrapping_sub(&raw const __ImageBase as u64),
+        )),
+        None => crate::output::arguments(format_args!(
+            "NATIVE MMIO shootdown late count={} longest_us={micros} apic={:#x} doing={} \
+             answered=itself\n",
+            report.count,
+            report.apic,
+            report.doing.name(),
+        )),
+    }
 }
 
 /// Send an NMI to each processor that still holds up `generation` and has
