@@ -98,15 +98,24 @@ pub const FAILURE_REASONS: [&[u8]; 2] = [b"iboot-failure-reason", b"iboot-failur
 /// Stela's own record of the automatic repair of a missing Metal plugin
 /// (`stela_boot_core::bundle_repair`), in `system`: [`BUNDLE_REPAIR_PENDING`]
 /// asks the next macOS boot to be the repair's single-user maintenance boot,
-/// which sets it to [`BUNDLE_REPAIR_ATTEMPTED`] before it boots, so a failed
-/// or interrupted repair is never retried by itself. The engine removes it
-/// once a boot finds the plugin installed. [`BUNDLE_REPAIR_INSTALLED`] is
+/// which sets it to [`BUNDLE_REPAIR_ATTEMPTED`] before it boots. If that repair
+/// fails, the engine queues one bounded retry; Stela removes the record once
+/// a boot finds the plugin installed. [`BUNDLE_REPAIR_INSTALLED`] is
 /// what a finished erase install leaves: the next macOS boot is the same
 /// maintenance boot and removes the record, so a normal boot that still
 /// finds the plugin missing asks for the repair as usual.
 pub const BUNDLE_REPAIR: &[u8] = b"stela-bundle-repair";
 pub const BUNDLE_REPAIR_PENDING: &[u8] = b"pending";
 pub const BUNDLE_REPAIR_ATTEMPTED: &[u8] = b"attempted";
+/// One bounded retry after a repair boot did not create the Metal plugin.
+pub const BUNDLE_REPAIR_RETRY: &[u8] = b"retry";
+pub const BUNDLE_REPAIR_RETRIED: &[u8] = b"retried";
+/// One retry using the direct directory creation repair sequence.
+pub const BUNDLE_REPAIR_RETRY_AGAIN: &[u8] = b"retry2";
+pub const BUNDLE_REPAIR_RETRIED_AGAIN: &[u8] = b"retried2";
+/// One diagnostic repair after a directory-creation command stalled.
+pub const BUNDLE_REPAIR_RETRY_PROBE: &[u8] = b"retry3";
+pub const BUNDLE_REPAIR_RETRIED_PROBE: &[u8] = b"retried3";
 pub const BUNDLE_REPAIR_INSTALLED: &[u8] = b"installed";
 const TRUE: &[u8] = b"true";
 const FALSE: &[u8] = b"false";
@@ -532,6 +541,15 @@ pub fn select(variables: &Variables) -> Result<Selection> {
             BUNDLE_REPAIR_PENDING => selection
                 .assigned
                 .push((BUNDLE_REPAIR, BUNDLE_REPAIR_ATTEMPTED)),
+            BUNDLE_REPAIR_RETRY => selection
+                .assigned
+                .push((BUNDLE_REPAIR, BUNDLE_REPAIR_RETRIED)),
+            BUNDLE_REPAIR_RETRY_AGAIN => selection
+                .assigned
+                .push((BUNDLE_REPAIR, BUNDLE_REPAIR_RETRIED_AGAIN)),
+            BUNDLE_REPAIR_RETRY_PROBE => selection
+                .assigned
+                .push((BUNDLE_REPAIR, BUNDLE_REPAIR_RETRIED_PROBE)),
             BUNDLE_REPAIR_INSTALLED => selection.consumed.push(BUNDLE_REPAIR),
             _ => return Ok(selection),
         }

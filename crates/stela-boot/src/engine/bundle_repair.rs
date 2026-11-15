@@ -18,10 +18,16 @@ static PERSISTENT: AtomicBool = AtomicBool::new(false);
 static CHANGE: AtomicU8 = AtomicU8::new(0);
 
 const BOOTS: [Boot; 3] = [Boot::Normal, Boot::SingleUser, Boot::Repair];
-const RECORDS: [Record; 5] = [
+const RECORDS: [Record; 11] = [
     Record::None,
     Record::Pending,
     Record::Attempted,
+    Record::Retry,
+    Record::Retried,
+    Record::RetryAgain,
+    Record::RetriedAgain,
+    Record::RetryProbe,
+    Record::RetriedProbe,
     Record::Installed,
     Record::Other,
 ];
@@ -68,6 +74,9 @@ pub(super) fn decide(report: Report) -> Decision {
     );
     let change = match decision {
         Decision::Repair => Some(Change::Request),
+        Decision::Retry => Some(Change::Retry),
+        Decision::RetryAgain => Some(Change::RetryAgain),
+        Decision::RetryProbe => Some(Change::RetryProbe),
         Decision::Continue(change) => change,
         _ => None,
     };
@@ -97,6 +106,9 @@ pub(super) fn at_stop(image: &mut Image) -> Vec<(usize, Vec<u8>)> {
         1 => Change::Request,
         2 => Change::Forget,
         3 => Change::Installed,
+        4 => Change::Retry,
+        5 => Change::RetryAgain,
+        6 => Change::RetryProbe,
         _ => return Vec::new(),
     };
     let result = (|| -> Result<Vec<(usize, Vec<u8>)>, alloc::string::String> {

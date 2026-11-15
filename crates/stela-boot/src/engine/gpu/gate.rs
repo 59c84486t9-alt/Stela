@@ -442,10 +442,11 @@ fn bundle(report: BundleReport) {
                 "GPU StelaGPU.bundle is not installed ({report:?}); this single-user boot may install it\n"
             ));
         }
-        (Decision::Repair, _) => {
+        (Decision::Repair | Decision::Retry | Decision::RetryAgain | Decision::RetryProbe, _) => {
+            let retry = decided != Decision::Repair;
             output::arguments(format_args!(
-                "GPU StelaGPU.bundle is not installed and a kext cannot create its \
-                 directories; restarting once into a single-user boot that creates them\n"
+                "GPU StelaGPU.bundle is not installed; restarting into a single-user directory repair{}\n",
+                if retry { " (bounded retry)" } else { "" }
             ));
             super::super::service::request_restart();
         }

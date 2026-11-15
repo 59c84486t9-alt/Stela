@@ -554,6 +554,8 @@ enum ConsoleRepair {
     #[default]
     Unknown,
     Driving(stela_boot_core::bundle_repair::Driver),
+    /// The automatic repair ended; continue isolating its console until reset.
+    Closed,
     Off,
 }
 
@@ -593,7 +595,7 @@ impl GuestConsole {
             ));
         }
         if restart {
-            self.repair = ConsoleRepair::Off;
+            self.repair = ConsoleRepair::Closed;
             output::arguments(format_args!(
                 "BUNDLE REPAIR restarting the PC; the next boot tries the kext once\n"
             ));
@@ -608,9 +610,13 @@ impl ConsoleSink for GuestConsole {
             driver.tick(Self::millis());
             let byte = driver.next_byte();
             self.report_repair();
-            if byte.is_some() {
-                return byte;
-            }
+            // An automatic repair owns the guest console. Do not forward
+            // host COM1 input here: a stray 0x03 killed launchd's single-user
+            // shell before the previous repair command was sent.
+            return byte;
+        }
+        if matches!(self.repair, ConsoleRepair::Closed) {
+            return None;
         }
         let input = &CONSOLE_INPUT;
         let taken = input.taken.load(Ordering::Relaxed);
@@ -623,6 +629,10 @@ impl ConsoleSink for GuestConsole {
     }
 
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
+        if let Some(driver) = self.repair() {
+            driver.byte(byte, Self::millis());
+            self.report_repair();
+        }
         if let Some(fragment) = self.lines.push(byte) {
             if let Ok(mut panic) = GUEST_PANIC.0.try_borrow_mut() {
                 panic.observe(&fragment);

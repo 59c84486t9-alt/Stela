@@ -14,21 +14,20 @@
 //!
 //! So a normal boot that finds the plugin missing records
 //! [`BUNDLE_REPAIR_PENDING`] in NVRAM at its stop and restarts. The loader
-//! turns that into one single-user boot with filesystem protection off
+//! turns that into a single-user boot with filesystem protection off
 //! (`--bundle-repair`) and records [`BUNDLE_REPAIR_ATTEMPTED`] before it
-//! boots, so neither a failure nor a power loss in the middle repeats the
-//! repair by itself. In that boot the engine types [`steps`] at the guest's
-//! root console ([`Driver`]), as the manual remedy does: it mounts the Data
-//! volume, creates the plugin's directories root-owned and 0755, marks them
+//! boots. If the plugin is still missing on the following normal boot, Stela
+//! queues one bounded retry; after that it stops instead of looping. In that
+//! boot the engine types [`steps`] at the guest's root console ([`Driver`]).
+//! The automatic repair isolates guest console input so a stray Ctrl-C cannot
+//! kill launchd's single-user shell. It explicitly unlocks and mounts Data
+//! before creating the directories, making them root-owned and 0755, and marking them
 //! restricted, syncs, remounts it read-only and restarts quickly
-//! ([`REBOOT`]). The next boot's kext then creates the
-//! files in place. Only mounting and the directories are required: a
-//! failing optional step is logged and the repair goes on. A failed
-//! required step still syncs and restarts, and a repair whose shell stops
-//! answering restarts the PC, so the next normal boot always tries the kext
-//! once. A boot that finds the plugin installed removes the record; one
-//! that finds it missing after an attempt stops with the manual remedy
-//! ([`decide`]).
+//! ([`REBOOT`]). The next boot's kext then creates the files in place. Only the directories
+//! are required; a failing optional step is logged and the repair goes on. A
+//! failed required step still syncs and restarts. A boot that finds the
+//! plugin installed removes the record; a second failed repair stops with
+//! the manual remedy ([`decide`]).
 //!
 //! A finished erase install knows the plugin is missing without a boot to
 //! find it: it records [`BUNDLE_REPAIR_INSTALLED`] ([`Change::Installed`]),
@@ -49,7 +48,9 @@ use alloc::{
     vec::Vec,
 };
 use stela_loader::boot_selection::{
-    BUNDLE_REPAIR, BUNDLE_REPAIR_ATTEMPTED, BUNDLE_REPAIR_INSTALLED, BUNDLE_REPAIR_PENDING, lookup,
+    BUNDLE_REPAIR, BUNDLE_REPAIR_ATTEMPTED, BUNDLE_REPAIR_INSTALLED, BUNDLE_REPAIR_PENDING,
+    BUNDLE_REPAIR_RETRIED, BUNDLE_REPAIR_RETRIED_AGAIN, BUNDLE_REPAIR_RETRIED_PROBE,
+    BUNDLE_REPAIR_RETRY, BUNDLE_REPAIR_RETRY_AGAIN, BUNDLE_REPAIR_RETRY_PROBE, lookup,
 };
 use stela_soc_data::nor::nvram::{Partition, Variables};
 
@@ -91,6 +92,18 @@ pub enum Record {
     None,
     Pending,
     Attempted,
+    /// A second repair is queued after the first one did not install the bundle.
+    Retry,
+    /// The bounded retry has also run and did not install the bundle.
+    Retried,
+    /// A fresh bounded retry queued by the updated direct-directory repair.
+    RetryAgain,
+    /// The updated repair retry has also run without installing the bundle.
+    RetriedAgain,
+    /// A final diagnostic retry is queued after the directory command stalled.
+    RetryProbe,
+    /// The diagnostic retry ran; do not repeat it.
+    RetriedProbe,
     /// An erase install's request, which the loader removes when it takes
     /// it.
     Installed,
@@ -106,6 +119,12 @@ impl Record {
             None => Self::None,
             Some(BUNDLE_REPAIR_PENDING) => Self::Pending,
             Some(BUNDLE_REPAIR_ATTEMPTED) => Self::Attempted,
+            Some(BUNDLE_REPAIR_RETRY) => Self::Retry,
+            Some(BUNDLE_REPAIR_RETRIED) => Self::Retried,
+            Some(BUNDLE_REPAIR_RETRY_AGAIN) => Self::RetryAgain,
+            Some(BUNDLE_REPAIR_RETRIED_AGAIN) => Self::RetriedAgain,
+            Some(BUNDLE_REPAIR_RETRY_PROBE) => Self::RetryProbe,
+            Some(BUNDLE_REPAIR_RETRIED_PROBE) => Self::RetriedProbe,
             Some(BUNDLE_REPAIR_INSTALLED) => Self::Installed,
             Some(_) => Self::Other,
         }
@@ -121,6 +140,12 @@ pub enum Change {
     Forget,
     /// An erase install finished: the first macOS boot repairs.
     Installed,
+    /// Queue the one bounded retry after an earlier attempt failed.
+    Retry,
+    /// Queue one fresh retry after correcting the stalled repair command.
+    RetryAgain,
+    /// Queue one diagnostic retry after direct directory creation also stalled.
+    RetryProbe,
 }
 
 impl Change {
@@ -134,6 +159,33 @@ impl Change {
                 }
                 variables
                     .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_PENDING)
+                    .map_err(|error| format!("{error:?}"))?;
+                Ok(true)
+            }
+            Self::Retry => {
+                if Record::read(variables) == Record::Retry {
+                    return Ok(false);
+                }
+                variables
+                    .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_RETRY)
+                    .map_err(|error| format!("{error:?}"))?;
+                Ok(true)
+            }
+            Self::RetryAgain => {
+                if Record::read(variables) == Record::RetryAgain {
+                    return Ok(false);
+                }
+                variables
+                    .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_RETRY_AGAIN)
+                    .map_err(|error| format!("{error:?}"))?;
+                Ok(true)
+            }
+            Self::RetryProbe => {
+                if Record::read(variables) == Record::RetryProbe {
+                    return Ok(false);
+                }
+                variables
+                    .set(Partition::System, BUNDLE_REPAIR, BUNDLE_REPAIR_RETRY_PROBE)
                     .map_err(|error| format!("{error:?}"))?;
                 Ok(true)
             }
@@ -166,6 +218,12 @@ pub enum Decision {
     Log,
     /// Record the request and restart into the repair.
     Repair,
+    /// Queue one bounded repair retry, then stop rather than loop forever.
+    Retry,
+    /// Queue the fresh retry after the repair command was corrected.
+    RetryAgain,
+    /// Queue one final diagnostic repair, then stop rather than loop.
+    RetryProbe,
     /// Stop with the manual remedy; `attempted` when the automatic repair
     /// already ran and did not help, or cannot run.
     StopMissing { attempted: bool },
@@ -189,7 +247,16 @@ pub fn decide(report: Report, boot: Boot, record: Record, persistent: bool) -> D
             Record::None | Record::Other | Record::Pending | Record::Installed => {
                 Decision::StopMissing { attempted: false }
             }
+            Record::Attempted if persistent => Decision::Retry,
             Record::Attempted => Decision::StopMissing { attempted: true },
+            Record::Retried if persistent => Decision::RetryAgain,
+            Record::RetriedAgain if persistent => Decision::RetryProbe,
+            Record::Retried | Record::RetriedAgain | Record::RetriedProbe => {
+                Decision::StopMissing { attempted: true }
+            }
+            Record::Retry | Record::RetryAgain | Record::RetryProbe => {
+                Decision::StopMissing { attempted: false }
+            }
         },
     }
 }
@@ -222,14 +289,22 @@ pub fn steps() -> Vec<Step> {
         required: false,
     };
     Vec::from([
-        // The Data volume, as the single-user banner says for a machine
-        // with a SEP.
+        // Confirm the interactive shell is still alive before filesystem work.
+        // Automatic repair isolates the guest from host COM1 input so a stray
+        // Ctrl-C cannot terminate launchd's single-user shell.
+        step("/bin/echo STELA-REPAIR-SHELL-ALIVE".into(), 10),
+        // Single-user mode has not completed launchd's normal mount phases.
+        // Mount the Data volume before creating the bundle directories.
         step("/sbin/mount -P 1".into(), 120),
         step("/usr/libexec/init_data_protection".into(), 180),
         step("/sbin/mount -P 2".into(), 180),
-        step(format!("/bin/test -d {PLUGINS}"), 30),
-        // Each named last, so `-m` gives each its mode.
-        step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
+        // Log the resulting mount flags and target path state for this test.
+        optional("/sbin/mount".into(), 15),
+        optional(
+            "/bin/ls -ld /System/Volumes/Data /System/Volumes/Data/Library /System/Volumes/Data/Library/GPUBundles".into(),
+            15,
+        ),
+        step(format!("/bin/mkdir -p -m 0755 {directories}"), 60),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),
@@ -260,6 +335,8 @@ pub const BANNER_SECONDS: u64 = 1800;
 /// starts the shell after it, and input before the shell reads may be
 /// flushed.
 pub const SETTLE_SECONDS: u64 = 5;
+/// How long the root prompt may take to answer the newline probe.
+pub const PROMPT_SECONDS: u64 = 15;
 /// How long the guest may take to restart after [`REBOOT`] in all.
 pub const RESTART_SECONDS: u64 = 120;
 /// How long the guest's console may stay silent after [`REBOOT`]: the
@@ -271,6 +348,8 @@ pub const QUIET_SECONDS: u64 = 30;
 pub enum Failure {
     /// No single-user banner in time.
     NoShell,
+    /// The banner appeared but no root prompt answered the newline probe.
+    NoPrompt,
     /// Step `index` printed no exit status in time.
     Timeout { index: usize },
     /// Step `index` exited with `status`.
@@ -283,6 +362,10 @@ impl core::fmt::Display for Failure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoShell => write!(f, "no single-user shell within {BANNER_SECONDS} s"),
+            Self::NoPrompt => write!(
+                f,
+                "no root prompt after newline probe within {PROMPT_SECONDS} s"
+            ),
             Self::Timeout { index } => {
                 write!(f, "step {} printed no exit status in time", index + 1)
             }
@@ -328,6 +411,11 @@ enum State {
     Settle {
         until: u64,
     },
+    /// A newline was sent to elicit the live root prompt. No commands are
+    /// typed until the prompt itself is observed on the UART.
+    Prompt {
+        deadline: u64,
+    },
     Step {
         index: usize,
         deadline: u64,
@@ -348,6 +436,7 @@ pub struct Driver {
     state: State,
     input: Vec<u8>,
     sent: usize,
+    prompt: Vec<u8>,
     events: Vec<Event>,
 }
 
@@ -362,6 +451,7 @@ impl Driver {
             },
             input: Vec::new(),
             sent: 0,
+            prompt: Vec::new(),
             events: Vec::new(),
         }
     }
@@ -393,11 +483,11 @@ impl Driver {
     pub fn line(&mut self, text: &str, now: u64) {
         match self.state {
             State::Banner { .. } if text.contains(BANNER) => {
-                self.events.push(Event::Shell);
                 self.state = State::Settle {
                     until: now + SETTLE_SECONDS * MILLIS,
                 };
             }
+            State::Prompt { .. } if text.trim_end().ends_with('#') => self.shell_ready(now),
             State::Step { index, .. } => {
                 let marker = Self::marker(index);
                 // The shell's echo of the command holds the marker before
@@ -435,6 +525,34 @@ impl Driver {
         }
     }
 
+    /// Observe raw guest UART bytes so a shell prompt without a trailing
+    /// newline is recognized before the first repair command is typed.
+    pub fn byte(&mut self, byte: u8, now: u64) {
+        if !matches!(self.state, State::Prompt { .. }) {
+            return;
+        }
+        if byte == b'\n' {
+            self.prompt.clear();
+            return;
+        }
+        if byte == b'\r' {
+            return;
+        }
+        self.prompt.push(byte);
+        if self.prompt.len() > 128 {
+            self.prompt.drain(..self.prompt.len() - 128);
+        }
+        if self.prompt.ends_with(b"# ") {
+            self.prompt.clear();
+            self.shell_ready(now);
+        }
+    }
+
+    fn shell_ready(&mut self, now: u64) {
+        self.events.push(Event::Shell);
+        self.advance(0, now);
+    }
+
     /// Send step `index`, or after the last, the restart.
     fn advance(&mut self, index: usize, now: u64) {
         if index < self.steps.len() {
@@ -457,7 +575,15 @@ impl Driver {
     pub fn tick(&mut self, now: u64) {
         match self.state {
             State::Banner { deadline } if now >= deadline => self.fail(Failure::NoShell),
-            State::Settle { until } if now >= until => self.advance(0, now),
+            State::Settle { until } if now >= until => {
+                // A plain newline asks the single-user shell to print its
+                // prompt. Never send Ctrl-C to clear or probe the console.
+                self.input.push(b'\n');
+                self.state = State::Prompt {
+                    deadline: now + PROMPT_SECONDS * MILLIS,
+                };
+            }
+            State::Prompt { deadline } if now >= deadline => self.fail(Failure::NoPrompt),
             State::Step { index, deadline } if now >= deadline => {
                 self.fail(Failure::Timeout { index })
             }
@@ -496,7 +622,7 @@ impl Driver {
 /// The log line for `event`.
 pub fn describe(event: &Event) -> String {
     match event {
-        Event::Shell => "BUNDLE REPAIR single-user shell up".to_string(),
+        Event::Shell => "BUNDLE REPAIR root shell prompt confirmed".to_string(),
         Event::Sent { index, command } => {
             format!("BUNDLE REPAIR step {} sent: {command}", index + 1)
         }

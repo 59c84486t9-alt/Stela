@@ -94,8 +94,9 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
     let steps = steps();
     let commands: Vec<&str> = steps.iter().map(|step| step.command.as_str()).collect();
     assert_eq!(
-        &commands[..3],
+        &commands[..4],
         [
+            "/bin/echo STELA-REPAIR-SHELL-ALIVE",
             "/sbin/mount -P 1",
             "/usr/libexec/init_data_protection",
             "/sbin/mount -P 2"
@@ -111,16 +112,14 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
     assert!(!commands.iter().any(|command| command.contains("xattr")));
     let chflags = format!("/usr/bin/chflags restricted {all}");
     assert!(commands.contains(&chflags.as_str()));
-    // Only the restricted flag and the read-only remount after the sync are
-    // optional.
+    // Mount/path diagnostics are optional, as are restricted flags/remount.
     let remount = "/sbin/mount -u -r /System/Volumes/Data";
     for step in &steps {
-        assert_eq!(
-            step.required,
-            step.command != chflags && step.command != remount,
-            "{}",
-            step.command
-        );
+        let optional = step.command == chflags
+            || step.command == remount
+            || step.command == "/sbin/mount"
+            || step.command.starts_with("/bin/ls -ld ");
+        assert_eq!(step.required, !optional, "{}", step.command);
     }
     assert_eq!(&commands[commands.len() - 2..], ["/bin/sync", remount]);
     // The restart skips the unmount walk that stalled; the sync stays.
@@ -187,6 +186,12 @@ fn start(driver: &mut Driver, now: &mut u64) {
     assert_eq!(driver.next_byte(), None);
     *now += SETTLE_SECONDS * 1000;
     driver.tick(*now);
+    // The only probe is a newline. Commands wait until the root prompt answers.
+    assert_eq!(driver.next_byte(), Some(b'\n'));
+    for byte in b"-sh-3.2# " {
+        *now += 1;
+        driver.byte(*byte, *now);
+    }
 }
 
 fn pump(
@@ -243,20 +248,20 @@ fn a_failing_required_step_syncs_and_restarts_without_the_rest() {
     let mut driver = Driver::new(steps(), now);
     let mut console = Console::new();
     start(&mut driver, &mut now);
-    let status = |command: &str| Some(u32::from(command.starts_with("/sbin/mount -P 2")) * 66);
+    let status = |command: &str| Some(u32::from(command == "/sbin/mount -P 2") * 66);
     pump(&mut driver, &mut console, &mut now, &status);
     // The guest restarts itself, so the engine need not.
     assert!(!driver.failed());
-    assert_eq!(console.lines.len(), 4);
-    assert_eq!(console.lines[3], SYNC_AND_REBOOT);
+    assert_eq!(console.lines.len(), 5);
+    assert_eq!(console.lines[4], SYNC_AND_REBOOT);
     let events = driver.take_events();
     assert!(events.contains(&Event::Failed(Failure::Exit {
-        index: 2,
+        index: 3,
         status: 66
     })));
     assert_eq!(events.last(), Some(&Event::Rebooting { repaired: false }));
     // A later status line types nothing more.
-    driver.line("STELA-REPAIR-4-rc=0", now);
+    driver.line("STELA-REPAIR-5-rc=0", now);
     assert_eq!(driver.next_byte(), None);
     assert!(driver.take_events().is_empty());
     // No restart in time: the engine restarts the PC.
@@ -271,7 +276,7 @@ fn a_failing_optional_step_is_logged_and_the_repair_goes_on() {
     let mut driver = Driver::new(steps(), now);
     let mut console = Console::new();
     start(&mut driver, &mut now);
-    let status = |command: &str| Some(u32::from(command.starts_with("/usr/bin/chflags")));
+    let status = |command: &str| Some(u32::from(command == "/sbin/mount"));
     pump(&mut driver, &mut console, &mut now, &status);
     assert!(!driver.failed());
     let chflags = steps().iter().position(|step| !step.required).unwrap();
@@ -296,6 +301,14 @@ fn no_banner_and_a_silent_step_time_out() {
     assert_eq!(driver.take_events(), [Event::Failed(Failure::NoShell)]);
     assert_eq!(driver.next_byte(), None);
 
+    let mut driver = Driver::new(steps(), 0);
+    driver.line(BANNER, 1);
+    driver.tick(1 + SETTLE_SECONDS * 1000);
+    assert_eq!(driver.next_byte(), Some(b'\n'));
+    driver.tick(1 + (SETTLE_SECONDS + PROMPT_SECONDS) * 1000);
+    assert_eq!(driver.take_events(), [Event::Failed(Failure::NoPrompt)]);
+    assert_eq!(driver.next_byte(), None);
+
     // A step whose command never returns (no `echo` output: the console
     // only echoes the typed line).
     let mut now = 0;
@@ -310,7 +323,7 @@ fn no_banner_and_a_silent_step_time_out() {
     assert!(
         driver
             .take_events()
-            .contains(&Event::Failed(Failure::Timeout { index: 1 }))
+            .contains(&Event::Failed(Failure::Timeout { index: 2 }))
     );
 }
 
@@ -324,7 +337,7 @@ fn only_the_current_step_s_status_line_counts() {
     // The shell's echo of the command, another step's marker and a marker
     // whose step number only starts the same are all ignored.
     for line in [
-        "-sh-3.2# /sbin/mount -P 1; echo STELA-REPAIR-1-rc=$?",
+        "-sh-3.2# /bin/echo STELA-REPAIR-SHELL-ALIVE; echo STELA-REPAIR-1-rc=$?",
         "STELA-REPAIR-2-rc=0",
         "STELA-REPAIR-11-rc=0",
     ] {
