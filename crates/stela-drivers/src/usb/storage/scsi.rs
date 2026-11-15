@@ -170,6 +170,16 @@ pub(super) fn write_protected(mode: &[u8]) -> Option<bool> {
         .then(|| mode[2] & WRITE_PROTECT != 0)
 }
 
+/// The write-protect bit of a write-protect test's mode data, as Linux
+/// `sd_read_write_protect_flag` reads it: `scsi_mode_sense` zeroes its buffer
+/// before the command and reads the header from it whatever the data length
+/// says, so a reply shorter than the header reads as zeros past what arrived
+/// and a unit that returns too little is writable.
+pub(super) fn write_protect_flag(mode: &[u8]) -> bool {
+    mode.get(2)
+        .is_some_and(|parameter| parameter & WRITE_PROTECT != 0)
+}
+
 /// A WRITE (10) of no blocks with FUA, to ask a transport's quirks whether
 /// the unit may take FUA writes.
 pub(super) fn write_10_fua() -> [u8; 10] {

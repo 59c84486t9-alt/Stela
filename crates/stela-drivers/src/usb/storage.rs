@@ -1124,8 +1124,7 @@ async fn probe_identified_with<C: Commands>(
                 )
                 .await
             {
-                Ok(mode) => scsi::write_protected(&mode)
-                    .ok_or(BlockError::Unsupported("short MODE SENSE data"))?,
+                Ok(mode) => scsi::write_protect_flag(&mode),
                 // MODE SENSE is optional only when the unit reports an
                 // unsupported CDB. USB/transport errors cannot default to writable.
                 Err(BlockError::Sense(sense)) if sense.key == Sense::ILLEGAL_REQUEST => false,
