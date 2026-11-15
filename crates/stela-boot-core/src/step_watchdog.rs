@@ -247,18 +247,75 @@ pub fn message(stage: &str, stuck: &Stuck) -> String {
 }
 
 /// How long the boot processor's dispatcher may wait idle, while it runs
-/// alone, with neither its timer interrupt nor a raised wake: the timer's
-/// heartbeat fires every millisecond, so a second without it is a lost
-/// interrupt, not a late one. A halted processor counts no cycles, so the
-/// counter's limit never ends such a wait; the dispatcher then polls the
-/// time-stamp counter instead of halting, and stops the boot past this.
+/// alone, with neither its timer interrupt nor a raised wake, in each of
+/// the two windows [`IdleWatch`] counts: the timer's heartbeat fires every
+/// millisecond, so a second without it is a lost interrupt, not a late one.
+/// A halted processor counts no cycles, so the counter's limit never ends
+/// such a wait; the dispatcher then polls the time-stamp counter instead of
+/// halting, and stops the boot past both windows.
 pub const IDLE_LIMIT_MS: u64 = 1000;
 
-/// Whether an idle wait entered at `entered` has gone [`IDLE_LIMIT_MS`]
-/// without a wake at `now`, both by the time-stamp counter at `tsc_hz`.
-/// Never with no known rate.
-pub fn idle_overdue(entered: u64, now: u64, tsc_hz: u64) -> bool {
-    tsc_hz != 0 && millis(now.wrapping_sub(entered), tsc_hz) >= IDLE_LIMIT_MS
+/// A polled idle wait's clock, by the time-stamp counter, from the wait's
+/// entry with no timer interrupt or wake since. The boot stops only after
+/// two whole [`IDLE_LIMIT_MS`] windows: the second starts where the first
+/// ran out, so a counter that jumped forward sooner than the timer's
+/// interrupt came (firmware that writes the counter, a hypervisor that
+/// delivers the timer late) ends at most the first, and the timer armed at
+/// the entry fires within the second. A counter that
+/// steps back starts its window again instead of reading as overdue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdleWatch {
+    /// Where the running window began.
+    since: u64,
+    /// The milliseconds the windows before it counted.
+    counted: u64,
+    /// The first window ran out.
+    confirming: bool,
+}
+
+/// What an idle wait does after [`IdleWatch::check`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Idle {
+    /// Keep polling with interrupts open.
+    Wait,
+    /// Stop the boot: no timer interrupt or wake for `waited_ms`.
+    Stop { waited_ms: u64 },
+}
+
+impl IdleWatch {
+    /// A wait entered when the counter read `entered`.
+    pub fn new(entered: u64) -> Self {
+        Self {
+            since: entered,
+            counted: 0,
+            confirming: false,
+        }
+    }
+
+    /// The wait at counter `now`, still with no interrupt or wake, at
+    /// `tsc_hz`. Never stops with no known rate.
+    pub fn check(&mut self, now: u64, tsc_hz: u64) -> Idle {
+        if tsc_hz == 0 {
+            return Idle::Wait;
+        }
+        let Some(ticks) = now.checked_sub(self.since) else {
+            self.since = now;
+            return Idle::Wait;
+        };
+        let elapsed = millis(ticks, tsc_hz);
+        if elapsed < IDLE_LIMIT_MS {
+            return Idle::Wait;
+        }
+        if !self.confirming {
+            self.confirming = true;
+            self.counted = elapsed;
+            self.since = now;
+            return Idle::Wait;
+        }
+        Idle::Stop {
+            waited_ms: self.counted.saturating_add(elapsed),
+        }
+    }
 }
 
 /// The local APIC registers an idle stop names: the timer's entry and
@@ -312,14 +369,69 @@ pub fn idle_message(stage: &str, waited_ms: u64, apic: &IdleApic) -> String {
 mod tests {
     use super::*;
 
+    /// Polls `watch` from `from` to `to` in steps of `step`, as the idle
+    /// loop does, returning the first stop.
+    fn poll(watch: &mut IdleWatch, from: u64, to: u64, step: u64) -> Option<u64> {
+        let mut now = from;
+        while now <= to {
+            if let Idle::Stop { waited_ms } = watch.check(now, HZ) {
+                return Some(waited_ms);
+            }
+            now += step;
+        }
+        None
+    }
+
     #[test]
-    fn an_idle_wait_is_overdue_only_after_the_limit_by_the_counter() {
-        let entered = u64::MAX - HZ / 2;
-        assert!(!idle_overdue(entered, entered + HZ / 1000, HZ));
-        assert!(!idle_overdue(entered, entered.wrapping_add(HZ - 1), HZ));
-        // Across the counter's wrap, a whole second later.
-        assert!(idle_overdue(entered, entered.wrapping_add(HZ), HZ));
-        assert!(!idle_overdue(entered, entered.wrapping_add(10 * HZ), 0));
+    fn a_lost_timer_interrupt_stops_the_wait_after_two_windows() {
+        let entered = 1 << 40;
+        let mut watch = IdleWatch::new(entered);
+        // The first window running out only starts the second.
+        assert_eq!(poll(&mut watch, entered, entered + HZ, HZ / 1000), None);
+        assert_eq!(
+            poll(&mut watch, entered + HZ, entered + 3 * HZ, HZ / 1000),
+            Some(2000)
+        );
+    }
+
+    #[test]
+    fn a_counter_that_jumps_forward_once_does_not_stop_the_wait() {
+        // The counter reads 10 s past the entry at the first poll, before
+        // the timer armed at the entry has fired: firmware that writes the
+        // counter forward, or a hypervisor that delivers the timer after
+        // the counter moved. The timer fires a millisecond later.
+        let entered = 1 << 40;
+        let mut watch = IdleWatch::new(entered);
+        assert_eq!(watch.check(entered + 10 * HZ, HZ), Idle::Wait);
+        let tick = entered + 10 * HZ + HZ / 1000;
+        assert_eq!(poll(&mut watch, entered + 10 * HZ, tick, HZ / 10_000), None);
+    }
+
+    #[test]
+    fn a_counter_that_steps_back_starts_its_window_again() {
+        // Firmware that writes the counter back: a step back must not read
+        // as a whole wrap of the counter, which would be overdue at once.
+        let entered = 1 << 40;
+        let mut watch = IdleWatch::new(entered);
+        assert_eq!(watch.check(entered - 1, HZ), Idle::Wait);
+        assert_eq!(
+            poll(&mut watch, entered - 1, entered + HZ / 2, HZ / 1000),
+            None
+        );
+        // Then a lost interrupt still stops it, two windows on.
+        let mut watch = IdleWatch::new(entered);
+        assert_eq!(watch.check(entered - HZ, HZ), Idle::Wait);
+        assert_eq!(
+            poll(&mut watch, entered - HZ, entered + 2 * HZ, HZ / 1000),
+            Some(2000)
+        );
+    }
+
+    #[test]
+    fn an_idle_wait_with_no_known_rate_never_stops() {
+        let mut watch = IdleWatch::new(0);
+        assert_eq!(watch.check(u64::MAX / 2, 0), Idle::Wait);
+        assert_eq!(watch.check(u64::MAX, 0), Idle::Wait);
     }
 
     #[test]

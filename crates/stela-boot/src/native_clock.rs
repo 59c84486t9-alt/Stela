@@ -485,25 +485,26 @@ impl State {
     /// enabled, polling the time-stamp counter instead of halting: on the
     /// boot processor running alone, where a halted wait whose interrupt
     /// never comes counts no cycles for the step watchdog and leaves a
-    /// black screen. Past `IDLE_LIMIT_MS` (the heartbeat fires every
-    /// millisecond) the boot stops with the local APIC state that kept the
-    /// interrupt away.
+    /// black screen. After two `IDLE_LIMIT_MS` windows with neither (the
+    /// heartbeat fires every millisecond; `IdleWatch` lets a counter jump
+    /// end only the first) the boot stops with the local APIC state that
+    /// kept the interrupt away.
     ///
     /// # Safety
     /// As [`crate::native_idle::wait`]: interrupts disabled on entry, the
     /// live IDT and local APIC, and the caller's explicit wait scope.
     unsafe fn poll(&self, stage: &str) {
-        use stela_boot_core::step_watchdog::{IDLE_LIMIT_MS, IdleApic, idle_message, idle_overdue};
+        use stela_boot_core::step_watchdog::{Idle, IdleApic, IdleWatch, idle_message};
         let ticks = self.ticks.load(Ordering::Relaxed);
         let tsc_hz = crate::firmware::tsc_hz();
-        let entered = crate::apic::rdtsc();
+        let mut watch = IdleWatch::new(crate::apic::rdtsc());
         // SAFETY: the caller's contract; interrupts are taken between polls.
         unsafe { asm!("sti", options(nostack)) };
         loop {
             if self.pending.load(Ordering::Acquire) || self.ticks.load(Ordering::Relaxed) != ticks {
                 break;
             }
-            if idle_overdue(entered, crate::apic::rdtsc(), tsc_hz) {
+            if let Idle::Stop { waited_ms } = watch.check(crate::apic::rdtsc(), tsc_hz) {
                 // SAFETY: as above.
                 unsafe { asm!("cli", options(nostack)) };
                 // An interrupt held off by a long system management call
@@ -525,7 +526,7 @@ impl State {
                     state.in_service[word] = apic.read(apic::ISR + 0x10 * word as u32);
                     state.requested[word] = apic.read(apic::IRR + 0x10 * word as u32);
                 }
-                crate::output::fatal(idle_message(stage, IDLE_LIMIT_MS, &state));
+                crate::output::fatal(idle_message(stage, waited_ms, &state));
             }
             core::hint::spin_loop();
         }

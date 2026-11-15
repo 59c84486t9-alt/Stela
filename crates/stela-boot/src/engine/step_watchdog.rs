@@ -348,9 +348,10 @@ pub(super) fn clear_stage() {
 }
 
 /// What the boot is doing, when this is the boot processor running alone
-/// with Linux's work: its dispatcher's idle wait is then bounded by
-/// `stela_boot_core::step_watchdog::IDLE_LIMIT_MS`, which a halted wait
-/// whose interrupt never comes would not be (it counts no cycles).
+/// with Linux's work: its dispatcher's idle wait is then bounded by two
+/// `stela_boot_core::step_watchdog::IDLE_LIMIT_MS` windows (`IdleWatch`),
+/// which a halted wait whose interrupt never comes would not be (it counts
+/// no cycles).
 pub(crate) fn alone_idle_stage() -> Option<&'static str> {
     if ALONE.load(Ordering::Relaxed) != super::host::local::processor() {
         return None;
