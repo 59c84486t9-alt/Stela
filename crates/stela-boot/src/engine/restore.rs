@@ -332,6 +332,10 @@ pub struct Experiment {
     backpressure: MuxBackpressure,
     /// The counter's rate, for [`PREFETCH_MICROS`].
     tsc_hz: u64,
+    /// The answer that waits for its reads ([`Self::report_waiting`]): its
+    /// serial, the counter when it began waiting, and when the log names
+    /// it next, in milliseconds after that.
+    waiting: Option<(u64, u64, u64)>,
 }
 
 /// How long the guest runs on after its restore fails. A failure is often
@@ -357,6 +361,11 @@ const PREFETCH_CHUNKS: usize = 8;
 /// read waits for the network (`ranges::BUDGET_MS`): its PE's guest waits
 /// meanwhile, and one job's read moves 1 MiB at most.
 const PREFETCH_MICROS: u64 = 20_000;
+
+/// How long an answer waits for its reads before the log names it, and
+/// how often the log names it again while it waits.
+const WAITING_REPORT_MS: u64 = 30_000;
+const WAITING_REPEAT_MS: u64 = 300_000;
 
 /// Native services kept for the whole restore session.
 pub struct Services {
@@ -922,6 +931,7 @@ impl Experiment {
             installed_macos,
             backpressure: MuxBackpressure::default(),
             tsc_hz: handoff.tsc_hz,
+            waiting: None,
         })
     }
     /// Read ahead from the host's storage, without the guest's devices.
@@ -961,7 +971,44 @@ impl Experiment {
         if !self.terminal {
             self.driver.answers.store.reader_mut().bound(self.tsc_hz);
             self.driver.work();
+            self.report_waiting();
         }
+    }
+
+    /// Name in the log an answer that has waited for its reads for
+    /// [`WAITING_REPORT_MS`], and again every [`WAITING_REPEAT_MS`]: its
+    /// request's type and the bytes it read and keeps, which grow while it
+    /// moves on, however slow the source.
+    fn report_waiting(&mut self) {
+        let Some(progress) = self.driver.answers.store.answer_progress() else {
+            self.waiting = None;
+            return;
+        };
+        let (serial, since, next) = match self.waiting {
+            Some(waiting) if waiting.0 == progress.serial => waiting,
+            _ => (progress.serial, output::now(), WAITING_REPORT_MS),
+        };
+        let waited = output::millis_since(since);
+        let next = match waited >= next {
+            true => {
+                output::arguments(format_args!(
+                    "{} ANSWER WAITING {} for {} s over {} turns: read {} KiB, kept {} KiB{}\n",
+                    self.mode.label(),
+                    progress.data_type,
+                    waited / 1000,
+                    progress.turns,
+                    progress.read >> 10,
+                    progress.kept >> 10,
+                    match progress.full {
+                        true => ", a result too large to keep is read again",
+                        false => "",
+                    }
+                ));
+                next + WAITING_REPEAT_MS
+            }
+            false => next,
+        };
+        self.waiting = Some((serial, since, next));
     }
 
     /// The image sent so far and the share of polls the host was behind
