@@ -1459,6 +1459,14 @@ impl HostDisks {
                 Self::report_callback(serial, callbacks, tsc_hz, "periodic");
             }
         }
+        let refused = stela_drivers::usb::storage::take_cache_refusals();
+        if refused != 0 {
+            output::arguments(format_args!(
+                "HOST USB DISK units={refused} refused SYNCHRONIZE CACHE as an invalid opcode \
+                 (sense 05/20): their flushes complete without it, as Linux's sd_sync_cache \
+                 takes that answer\n"
+            ));
+        }
         // Where NVMe commands' starts and finishes went on the host: each
         // part's calls and microseconds since the last report
         // (`stela_drivers::storage::nvme::parts`); a start holds its doorbell,

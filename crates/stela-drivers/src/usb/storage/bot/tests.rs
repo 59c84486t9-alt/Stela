@@ -1326,6 +1326,7 @@ fn real_block_api_chunks_units_checks_bounds_and_never_copies_short_reads() {
             removable,
             running: None,
             next_tag: 0,
+            cache_refused: false,
         });
     }
     let mut bytes = vec![0; MAX_TD * 2 + 512];
@@ -1820,6 +1821,7 @@ fn metadata_warmup_limits_and_last_sector_split_reach_block_commands() {
         removable: false,
         running: None,
         next_tag: 0,
+        cache_refused: false,
     };
     let before = state.borrow().history.len();
     let mut data = vec![0; 128 * 1024];
@@ -2044,8 +2046,11 @@ fn an_owned_begun_command_is_retried_as_a_waiting_one_is() {
     };
     // A class reset ends one command; the device's UNIT ATTENTION after it
     // is retried once.
+    // (A flush would send nothing: the unit reports no write cache.)
     state.borrow_mut().fault = Fault::Phase;
-    let tag = disks[1].start(Command::Flush).unwrap();
+    let tag = disks[1]
+        .start(Command::Read { lba: 0, bytes: 512 })
+        .unwrap();
     assert!(finish(&mut disks[1], tag).is_err());
     state.borrow_mut().fault = Fault::None;
     state.borrow_mut().now += RESET_RECOVERY_US;

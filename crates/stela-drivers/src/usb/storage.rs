@@ -17,7 +17,10 @@ use crate::{
 #[cfg(test)]
 use alloc::vec;
 use alloc::{format, rc::Rc, string::String, vec::Vec};
-use core::cell::{Cell, RefCell};
+use core::{
+    cell::{Cell, RefCell},
+    sync::atomic::{AtomicU32, Ordering},
+};
 mod media;
 pub use media::UsbStorage;
 mod bot;
@@ -416,6 +419,34 @@ struct Disk<T: Scsi> {
     /// ([`Disk::start`]).
     running: Option<Running>,
     next_tag: u32,
+    /// The unit answered SYNCHRONIZE CACHE with ILLEGAL REQUEST, INVALID
+    /// COMMAND OPERATION CODE: it has no cache command, and its flushes
+    /// complete without one, as Linux `sd_sync_cache` takes that answer.
+    cache_refused: bool,
+}
+
+/// Units that answered SYNCHRONIZE CACHE as an invalid opcode since the
+/// last [`take_cache_refusals`]: each counts once, when it first refused.
+static CACHE_REFUSALS: AtomicU32 = AtomicU32::new(0);
+
+/// The units that refused SYNCHRONIZE CACHE as an invalid opcode since the
+/// last call, for a log line; their later flushes send no command.
+pub fn take_cache_refusals() -> u32 {
+    CACHE_REFUSALS.swap(0, Ordering::Relaxed)
+}
+
+/// Whether `error` is a unit's answer that it implements no such command
+/// (ILLEGAL REQUEST, INVALID COMMAND OPERATION CODE), which Linux
+/// `sd_sync_cache` counts as no error for SYNCHRONIZE CACHE.
+fn invalid_opcode(error: &BlockError) -> bool {
+    matches!(
+        error,
+        BlockError::Sense(Sense {
+            key: Sense::ILLEGAL_REQUEST,
+            asc: 0x20,
+            ..
+        })
+    )
 }
 
 /// A block command a unit runs as consecutive SCSI commands, none waited
@@ -677,6 +708,7 @@ fn publication<T: Scsi>(
         removable,
         running: None,
         next_tag: 0,
+        cache_refused: false,
     })
 }
 
@@ -1074,6 +1106,27 @@ impl<T: Scsi> Disk<T> {
             }
         }
     }
+    /// Whether a flush sends SYNCHRONIZE CACHE: Linux sends it only to a
+    /// unit reporting a write cache (WCE), and none to one that refused it
+    /// as an invalid opcode. Without one a flush completes at once.
+    fn synchronizes(&self) -> bool {
+        self.identity.features.write_cache && !self.cache_refused
+    }
+    /// A SYNCHRONIZE CACHE's `result`: an invalid-opcode answer is no error,
+    /// as Linux `sd_sync_cache` takes it, and the unit is sent the command
+    /// no more; it is counted once for the log ([`take_cache_refusals`]).
+    fn synchronized(&mut self, result: Result<(), BlockError>) -> Result<(), BlockError> {
+        match result {
+            Err(error) if invalid_opcode(&error) => {
+                if !self.cache_refused {
+                    self.cache_refused = true;
+                    CACHE_REFUSALS.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+            result => result,
+        }
+    }
     fn check_media(&self) -> Result<(), BlockError> {
         if self.media.get() {
             Ok(())
@@ -1139,7 +1192,9 @@ impl<T: Scsi> Disk<T> {
                 running.result = Some(Ok(read.then_some(data)));
                 return;
             }
-            Command::Flush if running.done == 0 => (scsi::Cdb::Ten(scsi::synchronize_cache()), 0),
+            Command::Flush if running.done == 0 && self.synchronizes() => {
+                (scsi::Cdb::Ten(scsi::synchronize_cache()), 0)
+            }
             Command::Flush => {
                 self.running.as_mut().unwrap().result = Some(Ok(None));
                 return;
@@ -1246,7 +1301,11 @@ impl<T: Scsi> BlockDevice for Disk<T> {
 
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         self.check_media()?;
-        self.io(&scsi::synchronize_cache(), BlockData::None)
+        if !self.synchronizes() {
+            return Ok(());
+        }
+        let result = self.io(&scsi::synchronize_cache(), BlockData::None);
+        self.synchronized(result)
     }
 
     /// A transport that begins commands without waiting runs one block
@@ -1286,7 +1345,10 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             return None;
         }
         if let Some(length) = self.running.as_ref()?.begun {
-            let ended = self.bot.borrow_mut().end()?;
+            let mut ended = self.bot.borrow_mut().end()?;
+            if matches!(self.running.as_ref()?.command, Command::Flush) {
+                ended = self.synchronized(ended.map(drop)).map(|()| Vec::new());
+            }
             let running = self.running.as_mut()?;
             running.begun = None;
             match ended {
@@ -1437,11 +1499,27 @@ mod tests {
         delays: RefCell<Vec<u64>>,
         failed: Option<Vec<u8>>,
         minimum_error: Option<BlockError>,
+        /// Each command's operation code, in order.
+        opcodes: Vec<u8>,
+        /// The begun command's result, until it ends.
+        begun: Option<Result<Vec<u8>, BlockError>>,
     }
     impl Scsi for Unit {
         type Lun = u8;
-        fn command(&mut self, _: u8, _: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        fn queued(&self) -> bool {
+            true
+        }
+        fn begin(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Option<Result<(), BlockError>> {
+            let result = self.command(lun, cdb, data);
+            self.begun = Some(result);
+            Some(Ok(()))
+        }
+        fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+            self.begun.take()
+        }
+        fn command(&mut self, _: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
             self.commands += 1;
+            self.opcodes.push(cdb[0]);
             self.now.set(self.now.get() + 1_000_000);
             match self.senses.pop_front().flatten() {
                 // A failed read still moves its data.
@@ -1485,6 +1563,8 @@ mod tests {
                 delays: RefCell::new(Vec::new()),
                 failed: None,
                 minimum_error: None,
+                opcodes: Vec::new(),
+                begun: None,
             })),
             lun: 0,
             identity: Identity {
@@ -1504,6 +1584,7 @@ mod tests {
             removable,
             running: None,
             next_tag: 0,
+            cache_refused: false,
         }
     }
 
@@ -1563,5 +1644,61 @@ mod tests {
         let mut unit = disk(false, &[reset; 400]);
         assert!(unit.flush_cache().is_err());
         assert_eq!(unit.bot.borrow().commands, 181);
+    }
+    /// A flush run as a queued command ([`BlockDevice::start`]).
+    fn queued_flush(disk: &mut Disk<Unit>) -> Finished {
+        let tag = disk.start(Command::Flush).unwrap();
+        disk.finish(tag).expect("the unit's commands end at once")
+    }
+
+    #[test]
+    fn a_unit_without_a_write_cache_is_sent_no_synchronize_cache() {
+        let mut unit = disk(false, &[]);
+        unit.identity.features.write_cache = false;
+        assert_eq!(unit.flush_cache(), Ok(()));
+        assert_eq!(queued_flush(&mut unit), Ok(None));
+        assert!(unit.bot.borrow().opcodes.is_empty());
+        // One reporting a write cache is sent it, either way.
+        let mut cached = disk(false, &[]);
+        assert_eq!(cached.flush_cache(), Ok(()));
+        assert_eq!(queued_flush(&mut cached), Ok(None));
+        assert_eq!(
+            cached.bot.borrow().opcodes,
+            [scsi::SYNCHRONIZE_CACHE_10, scsi::SYNCHRONIZE_CACHE_10]
+        );
+    }
+
+    #[test]
+    fn synchronize_cache_refused_as_an_invalid_opcode_completes_and_is_sent_no_more() {
+        let sense = |asc| {
+            Some(Sense {
+                key: Sense::ILLEGAL_REQUEST,
+                asc,
+                ascq: 0,
+            })
+        };
+        take_cache_refusals();
+        // Queued, as the stores write: the refusal completes the flush.
+        let mut unit = disk(false, &[sense(0x20)]);
+        assert_eq!(queued_flush(&mut unit), Ok(None));
+        assert_eq!(queued_flush(&mut unit), Ok(None));
+        assert_eq!(unit.flush_cache(), Ok(()));
+        assert_eq!(unit.bot.borrow().opcodes, [scsi::SYNCHRONIZE_CACHE_10]);
+        // Waited for, the same.
+        let mut unit = disk(false, &[sense(0x20)]);
+        assert_eq!(unit.flush_cache(), Ok(()));
+        assert_eq!(queued_flush(&mut unit), Ok(None));
+        assert_eq!(unit.bot.borrow().commands, 1);
+        assert_eq!(take_cache_refusals(), 2);
+        assert_eq!(take_cache_refusals(), 0);
+        // Writes still go to the unit.
+        assert_eq!(unit.write(0, &[0; 512]), Ok(()));
+        assert_eq!(unit.bot.borrow().opcodes[1], scsi::WRITE_10);
+        // Any other failure stays one, and the command is sent again.
+        let mut unit = disk(false, &[sense(0x24)]);
+        assert!(matches!(queued_flush(&mut unit), Err(BlockError::Sense(_))));
+        assert_eq!(queued_flush(&mut unit), Ok(None));
+        assert_eq!(unit.bot.borrow().commands, 2);
+        assert_eq!(take_cache_refusals(), 0);
     }
 }
