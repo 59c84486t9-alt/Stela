@@ -30,7 +30,8 @@ pub(super) fn lock_timeout_arguments(tsc_hz: u64) -> String {
 /// `partition`: its macOS, its staged update or its recoveryOS.
 fn from_disk(
     partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
-    options: &Options,
+    options: &mut Options,
+    adopt_ecid: bool,
     bluetooth: bool,
     tsc_hz: u64,
 ) -> Vec<(String, Vec<u8>)> {
@@ -97,6 +98,7 @@ fn from_disk(
     } else {
         stela_boot_core::bundle_repair::Boot::Normal
     });
+    let mut ecid = options.ecid;
     let result = if options.upgrade {
         bundle::upgrade_from_disk(partition, options.boot_volume, &defaults)
     } else if let Some(kind) = options.recovery {
@@ -106,14 +108,25 @@ fn from_disk(
         let request = installed::Request {
             volume: options.boot_volume,
             kexts: &kexts,
+            adopt_ecid,
             ..installed::Request::default()
         };
         let mut defaults = defaults;
         if options.safe_boot {
             defaults.boot_args.push_str(" -x");
         }
-        bundle::from_disk(partition, &request, &defaults)
+        bundle::from_disk(partition, &request, &defaults).map(|(files, own)| {
+            ecid = own;
+            files
+        })
     };
+    if ecid != options.ecid {
+        output::arguments(format_args!(
+            "IDENTITY the installed macOS's boot ticket names another ECID than this USB's \
+             options, which a USB made again has: this start uses the install's\n"
+        ));
+        options.ecid = ecid;
+    }
     let files = result.unwrap_or_else(|error| {
         output::fatal(format_args!(
             "no boot bundle could be built from the Preboot volume: {error}"
@@ -459,6 +472,7 @@ fn open_host(
     // An installed macOS starts only as the machine it was installed as,
     // which its machine state names; the USB's `--ecid` is its own, for the
     // installs it makes, and differs when the USB was made again since.
+    let mut named = false;
     if devices.preboot.is_some() && options.install.is_none() && options.nor.is_some() {
         let at = match state_in_storage {
             true => 0,
@@ -471,6 +485,7 @@ fn open_host(
             .services
             .get_mut(at)
             .and_then(|device| nor::recorded_ecid(&mut **device, state_in_storage));
+        named = recorded.is_some();
         if let Some(recorded) = recorded
             && options.ecid != Some(recorded)
         {
@@ -481,10 +496,14 @@ fn open_host(
             options.ecid = Some(recorded);
         }
     }
+    // A machine state from before it named its ECID: the system's own boot
+    // ticket names it.
+    let adopt_ecid = !named && options.install.is_none();
     let built = devices.preboot.take().map(|partition| {
         from_disk(
             partition,
             options,
+            adopt_ecid,
             devices.host_bluetooth.is_some(),
             handoff.tsc_hz,
         )
@@ -683,9 +702,9 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
         {
             output::fatal(
                 "this macOS was installed by a Stela USB with another machine identity (ECID) \
-                 than this USB's, and its disk does not name it. Start it with the USB that \
-                 installed it once, or put that USB's --ecid (the ecid line of a boot log it \
-                 wrote) on the macOS line of EFI\\stela\\choices.cfg. Install macOS replaces it.",
+                 than this USB's, and neither its machine state nor its boot ticket names the \
+                 one it was installed as. Start it with the USB that installed it, or run \
+                 Install macOS, which replaces it.",
             );
         }
         bundle_repair::nvram(&opened.2.proxy);

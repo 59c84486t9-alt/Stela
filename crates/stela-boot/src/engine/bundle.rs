@@ -473,6 +473,9 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
     }
 }
 
+/// A boot bundle's files by name, `bundle.json` first.
+pub type Files = Vec<(String, Vec<u8>)>;
+
 /// Build the boot bundle of the installed system on `partition`, an APFS
 /// container or a disk image with a GUID partition table, as `request`
 /// names it, with `options` (`stela-dev boot prepare`'s defaults and the boot's
@@ -482,7 +485,7 @@ pub fn from_disk(
     partition: Box<dyn BlockDevice>,
     request: &installed::Request,
     options: &Options,
-) -> Result<Vec<(String, Vec<u8>)>> {
+) -> Result<(Files, Option<u64>)> {
     let (offset, installed) =
         installed::prepare_disk(&mut Bytes::new(partition), request, options)?;
     output::arguments(format_args!(
@@ -500,7 +503,7 @@ pub fn from_disk(
         .map_err(|error| refuse!("bundle.json: {error}", %error))?;
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(installed.bundle.files);
-    Ok(files)
+    Ok((files, installed.ecid))
 }
 
 /// Build the boot bundle of the macOS update staged on `partition`'s Update

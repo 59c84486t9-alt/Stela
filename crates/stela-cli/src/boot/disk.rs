@@ -41,6 +41,7 @@ impl Prepare {
             volume,
             authority: None,
             kexts: &kexts,
+            adopt_ecid: false,
         };
         let (offset, installed) = installed::prepare_disk(&mut image, &request, &options)?;
         let provenance = serde_json::json!({

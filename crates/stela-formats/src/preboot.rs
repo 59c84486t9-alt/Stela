@@ -357,6 +357,42 @@ fn cryptex1_ticket_name<'a>(
     names.find(|name| name.starts_with("apticket.") && name.ends_with(&suffix))
 }
 
+/// The ECID a personalized Cryptex1 ticket's name carries
+/// (`apticket.<board>.<ECID>.im4m`); `None` for any other name.
+fn cryptex1_ticket_ecid(name: &str) -> Option<u64> {
+    let name = name.strip_prefix("apticket.")?.strip_suffix(".im4m")?;
+    let (board, ecid) = name.split_once('.')?;
+    if board.is_empty() || ecid.is_empty() || ecid.len() > 16 {
+        return None;
+    }
+    let ecid = u64::from_str_radix(ecid, 16).ok()?;
+    (ecid != 0).then_some(ecid)
+}
+
+/// The ECIDs the volume group's personalized Cryptex1 tickets are named
+/// for: the machine the system was installed as, which restored names the
+/// ticket after. Empty when the group has no `cryptex1/current`.
+pub fn cryptex1_ticket_ecids<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+) -> Result<Vec<u64>> {
+    let path = format!("{group}/{CRYPTEX_CURRENT}");
+    let device = &mut container.device;
+    let Ok(directory) = preboot.lookup(device, &path, true) else {
+        return Ok(Vec::new());
+    };
+    let mut ecids: Vec<u64> = preboot
+        .entries(device, directory.oid)?
+        .iter()
+        .filter(|entry| entry.kind == FileKind::Regular)
+        .filter_map(|entry| cryptex1_ticket_ecid(&entry.name))
+        .collect();
+    ecids.sort_unstable();
+    ecids.dedup();
+    Ok(ecids)
+}
+
 /// The hardware model a Cryptex1 ticket at `path` was written for, lower case:
 /// restored names `apticket.<model>[.<ECID>].im4m` after `HW.target`, and
 /// libignition finds them by the booted system's.
@@ -520,6 +556,25 @@ pub fn read<R: ReadAt>(
 mod tests {
     use super::*;
     use crate::apfs::tests::fixture;
+
+    #[test]
+    fn a_personalized_ticket_names_its_ecid_and_no_other_name_does() {
+        assert_eq!(
+            cryptex1_ticket_ecid("apticket.j775dev.E9C9C9E095A32.im4m"),
+            Some(0xe_9c9c_9e09_5a32)
+        );
+        assert_eq!(cryptex1_ticket_ecid("apticket.j473ap.1.im4m"), Some(1));
+        // The ticket no machine personalized, other files, and no ECID.
+        assert_eq!(cryptex1_ticket_ecid("apticket.j473ap.im4m"), None);
+        assert_eq!(cryptex1_ticket_ecid("apticket.j473ap.0.im4m"), None);
+        assert_eq!(cryptex1_ticket_ecid("apticket.j473ap.XYZ.im4m"), None);
+        assert_eq!(
+            cryptex1_ticket_ecid("apticket.j473ap.11112222333344445.im4m"),
+            None
+        );
+        assert_eq!(cryptex1_ticket_ecid("root_hash.j473ap.12AB.im4m"), None);
+        assert_eq!(cryptex1_ticket_ecid("apticket..12AB.im4m"), None);
+    }
 
     #[test]
     fn an_active_file_names_one_boot_hash() {

@@ -103,6 +103,10 @@ pub struct Request<'a> {
     pub authority: Option<&'a dyn PolicyAuthority>,
     /// Kexts to link against the system's boot collection (`aux_kc`).
     pub kexts: &'a [Kext<'a>],
+    /// Start the system as the machine its one personalized Cryptex1 ticket
+    /// names when it holds none for the options' ECID: the ECID is an
+    /// option of the USB that installed, and a USB made again has another.
+    pub adopt_ecid: bool,
 }
 
 /// The collection of `request`'s kexts, linked against `kernel`, and what
@@ -431,6 +435,8 @@ pub fn select<R: ReadAt>(
 
 /// A bundle and where on the container its objects came from.
 pub struct Installed {
+    /// The ECID the bundle starts the system as ([`Request::adopt_ecid`]).
+    pub ecid: Option<u64>,
     pub bundle: Bundle,
     pub preboot: Volume,
     pub set: BootSet,
@@ -552,6 +558,12 @@ impl<R: ReadAt> Disk<'_, R> {
             },
             bytes: parts.payload.to_vec(),
         }))
+    }
+
+    /// The ECIDs the system's personalized Cryptex1 tickets name.
+    fn cryptex1_ecids(&mut self) -> Result<Vec<u64>> {
+        preboot::cryptex1_ticket_ecids(self.container, &self.preboot, &self.set.volume_group)
+            .within(|| refuse!("the Cryptex1 tickets"))
     }
 
     /// The machine's personalized Cryptex1 manifest.
@@ -698,11 +710,18 @@ pub fn prepare<R: ReadAt>(
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
     let pivot_root_hash = disk.opaque(BASE_SYSTEM_ROOT_HASH_TYPE)?;
     let firmware_version = disk.iboot_build()?;
-    let cryptex1_manifest = options
-        .ecid
+    let mut ecid = options.ecid;
+    let mut cryptex1_manifest = ecid
         .map(|ecid| disk.cryptex1_manifest(ecid))
         .transpose()?
         .flatten();
+    if cryptex1_manifest.is_none()
+        && request.adopt_ecid
+        && let [own] = disk.cryptex1_ecids()?[..]
+    {
+        ecid = Some(own);
+        cryptex1_manifest = disk.cryptex1_manifest(own)?;
+    }
     let (product_version, product_build) = disk.system_version()?;
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
@@ -781,6 +800,7 @@ pub fn prepare<R: ReadAt>(
         firmware_version: firmware_version.as_deref(),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
+    options.ecid = ecid;
     options.security.kexts = kexts;
     options.boot_command = Some(crate::handoff::installed_command(
         options.boot_command,
@@ -814,6 +834,7 @@ pub fn prepare<R: ReadAt>(
         ));
     }
     Ok(Installed {
+        ecid,
         bundle,
         preboot: disk.preboot,
         set: disk.set,
