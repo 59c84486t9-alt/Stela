@@ -185,16 +185,21 @@ fn binary_word(operation: BinaryOperation, format: Format, lanes: u32) -> Option
 }
 
 /// Whether a lane may exit: FMULX's infinity times zero (two on Arm, for
-/// which the host raises invalid), or a minimum normal quotient (the host
-/// may find its tininess after rounding).
+/// which the host raises invalid), a minimum normal quotient, or a product
+/// whose unflushed result is the minimum normal (the host finds tininess
+/// after rounding, Arm before).
 fn exits(operation: BinaryOperation, format: Format, fpcr: u32, left: u64, right: u64) -> bool {
+    use BinaryOperation::{Multiply, MultiplyExtended, NegatedMultiply};
     let magnitude = |bits: u64| bits & !format.sign_mask();
     let special = |a: u64, b: u64| magnitude(a) == 0 && magnitude(b) == format.exponent_mask();
-    (operation == BinaryOperation::MultiplyExtended
-        && (special(left, right) || special(right, left)))
-        || operation == BinaryOperation::Divide
-            && floating::evaluate(format, operation, fpcr, left, right)
-                .is_ok_and(|outcome| magnitude(outcome.bits) == 1 << format.fraction_bits())
+    let minimum = |control: u32| {
+        floating::evaluate(format, operation, control, left, right)
+            .is_ok_and(|outcome| magnitude(outcome.bits) == 1 << format.fraction_bits())
+    };
+    (operation == MultiplyExtended && (special(left, right) || special(right, left)))
+        || operation == BinaryOperation::Divide && minimum(fpcr)
+        || matches!(operation, Multiply | MultiplyExtended | NegatedMultiply)
+            && minimum(input_flushing(fpcr))
         || floating::evaluate(format, operation, fpcr, left, right).is_ok_and(|outcome| {
             floating::evaluate(format, operation, input_flushing(fpcr), left, right).is_ok_and(
                 |unflushed| flushed_output(format, fpcr, outcome.exceptions, unflushed.bits),

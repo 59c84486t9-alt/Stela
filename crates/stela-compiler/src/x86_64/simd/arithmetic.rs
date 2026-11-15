@@ -3,6 +3,12 @@ use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size};
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod boundary_tests;
 mod half;
 #[cfg(all(
     test,
@@ -501,15 +507,17 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
         NAN_REGISTERS,
     );
     // These lanes take the helper: FMULX's infinity times zero, two rather
-    // than the default NaN; a quotient rounded to the minimum normal (sums
-    // are exact when tiny, and products find tininess before rounding, but
-    // a quotient's is not known); and under FZ a result Arm flushes.
+    // than the default NaN; a product or quotient rounded to the minimum
+    // normal, which may be tiny before rounding (Arm, AH clear) but not
+    // after (the host), so the host's underflow status does not tell
+    // UFC, nor under FZ whether Arm flushes it (sums are exact when
+    // tiny); and under FZ a quotient Arm flushes.
     let checked = HELPER_LANES;
     packed(code, Host::Xor, checked, checked);
     if operand.operation == BinaryOperation::MultiplyExtended {
         packed(code, Host::Or, checked, NAN_REGISTERS.mask);
     }
-    if operand.operation == BinaryOperation::Divide {
+    if divide || zero_product(operand.operation) {
         minimum_normal_lanes(code, operand.format, LEFT_VECTOR, MINIMUM_SCRATCH);
         packed(code, Host::Or, checked, MINIMUM_SCRATCH[0]);
     }
@@ -545,9 +553,9 @@ fn rounded_path(code: &mut Code, operand: &Operand, right: u8, helper: &mut Vec<
 /// environment, after the operation: a nonzero result below the minimum
 /// normal is tiny, and so is a zero product of nonzero inputs (`saved`
 /// holds the flushed left input), which the host rounded to zero. A product
-/// rounded to the minimum normal is tiny exactly when inexact, which only
-/// the host's underflow status tells: [`reject_flushed_underflow`] sends
-/// it to the helper. A sum tiny before rounding is exact. The flushed lanes
+/// rounded to the minimum normal may be tiny before rounding, which the
+/// host (tininess after rounding) does not tell: [`rounded_path`] sends
+/// those lanes to the helper. A sum tiny before rounding is exact. The flushed lanes
 /// add UFC to R11D and give up their host status: a scalar has none left,
 /// and a vector reruns the operation with those lanes' inputs zero for the
 /// other lanes' status. Clobbers XMM2, XMM5, XMM7, `saved`, `right` and

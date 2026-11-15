@@ -3,8 +3,9 @@
 //! target the host runs: every inline completion matches the reference in
 //! its lanes and FPSR, every exit leaves the state unchanged, and covered
 //! products must complete inline: under FZ too, unless a lane rounds to
-//! the minimum normal from below (tiny exactly when inexact, which the
-//! host's status does not tell per lane).
+//! the minimum normal (tiny before rounding exactly when its exact value is
+//! below it, which the host, finding tininess after rounding, does not
+//! tell; `boundary_tests` covers those).
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
@@ -195,11 +196,10 @@ fn tiny_products_match_the_reference() {
                                 evaluate(format, operation, fpcr & !FPCR_FZ, left, right);
                             unflushed.is_ok_and(|outcome| {
                                 outcome.bits & !(1 << (format.bits() - 1)) == minimum_normal
-                                    && outcome.exceptions & UNDERFLOW != 0
                             })
                         });
                         let covered = fpcr & (FPCR_EXCEPTION_ENABLE_MASK | FPCR_AH) == 0
-                            && (fpcr & FPCR_FZ == 0 || !rounds_to_minimum)
+                            && !rounds_to_minimum
                             && inputs
                                 .iter()
                                 .zip(&outcomes)

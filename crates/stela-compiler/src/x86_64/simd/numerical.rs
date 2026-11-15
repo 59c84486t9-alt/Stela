@@ -1179,9 +1179,13 @@ pub(super) fn commit_invalid_status(code: &mut Code) {
 /// Accumulate IXC, UFC, OFC and DZC from ECX's MXCSR status, which all
 /// move to FPSR by one shift. With FPCR.FZ, FIZ and AH clear, the host's
 /// unflushed result in Arm's rounding mode is the guest's, and its status
-/// is FPSR's: both detect tininess before rounding and report underflow
-/// for an inexact tiny result, and overflow with inexact. Denormal-operand
-/// status has no FPSR flag there.
+/// is FPSR's, except for an inexact result rounded to the minimum normal:
+/// Arm detects tininess before rounding, the host after, so the host
+/// reports no underflow where the exact value was below the minimum normal.
+/// Callers send results exactly the minimum normal to the helper
+/// ([`minimum_normal_lanes`]) unless the operation cannot round to it from
+/// below. Both report overflow with inexact. Denormal-operand status has no
+/// FPSR flag there.
 pub(super) fn commit_rounded_status(code: &mut Code) {
     let mut asm = code.asm();
     asm.alu_imm32(
@@ -1202,12 +1206,12 @@ pub(super) fn commit_rounded_status(code: &mut Code) {
 /// Leave in EAX the dword sign mask of the lanes of `source` that are a
 /// NaN, or with `minimum_normal` exactly the minimum normal of either
 /// sign, for [`reject_exceptional_lanes`]. A NaN needs Arm's NaN
-/// selection. SSE products find tininess before rounding, as Arm with AH
-/// clear does (`arithmetic::tiny_tests`), but a host may find it after for
-/// other operations, which differs only for an inexact result rounded to
-/// the minimum normal (measured on an x86-64 host: FMA of the Single
-/// minimum normal minus its square, and CVTSD2SS of a Double just below
-/// it, raise no underflow). It runs in the private environment, whose
+/// selection. The host finds tininess after rounding, Arm with AH clear
+/// before, which differs only for an inexact result rounded to the minimum
+/// normal (measured on an x86-64 host: MULSS of 0x3f800001 and 0x007fffff,
+/// FMA of the Single minimum normal minus its square, and CVTSD2SS of a
+/// Double just below it, raise no underflow;
+/// `arithmetic::boundary_tests`). It runs in the private environment, whose
 /// status the compares may change. A scalar compares its low lane only.
 /// Clobbers the `scratch` registers, the last two only with
 /// `minimum_normal`.

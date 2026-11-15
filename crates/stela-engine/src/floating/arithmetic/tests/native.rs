@@ -194,11 +194,12 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
     // With FZ, FIZ and AH clear, every lane completes, NaNs and invalid
     // operations included, but FMULX's infinity times zero (an exact two,
     // for which the host raises invalid) and a minimum normal quotient
-    // (the host may find its tininess after rounding).
+    // (the host may find its tininess after rounding), and a product whose
+    // unflushed result is the minimum normal (the host finds tininess after
+    // rounding, Arm before).
     // FZ and FIZ flush the inputs first. Under FZ a tiny sum or product
-    // flushes inline; a product rounded to the minimum normal from below
-    // exits, and a quotient Arm flushes (UFC) or the host's minimum normal
-    // quotient.
+    // flushes inline; a quotient Arm flushes (UFC) or the host's minimum
+    // normal quotient exits.
     if state.fpcr & FPCR_AH == 0 {
         let flush_inputs = if state.fpcr & FPCR_FZ != 0 {
             state.fpcr & !FPCR_FZ | FPCR_FIZ
@@ -217,18 +218,22 @@ fn native_domain(state: &GuestState, operand: &Operand) -> bool {
             };
             let special = |x, y| zero(x) && infinite(y);
             let extended = operand.operation == BinaryOperation::MultiplyExtended;
+            let product = matches!(
+                operand.operation,
+                BinaryOperation::Multiply
+                    | BinaryOperation::NegatedMultiply
+                    | BinaryOperation::MultiplyExtended
+            );
             let outcome = evaluate(format, operand.operation, state.fpcr, a, b).unwrap();
             let unflushed = evaluate(format, operand.operation, flush_inputs, a, b).unwrap();
             let small = unflushed.bits & !sign_mask(format);
             !(extended && (special(flushed(a), flushed(b)) || special(flushed(b), flushed(a))))
                 && (operand.operation != BinaryOperation::Divide
                     || outcome.bits & !sign_mask(format) != minimum)
+                && !(product && small == minimum)
                 && !(state.fpcr & FPCR_FZ != 0
-                    && if operand.operation == BinaryOperation::Divide {
-                        outcome.exceptions & UNDERFLOW != 0 || small == minimum
-                    } else {
-                        small == minimum && unflushed.exceptions & UNDERFLOW != 0
-                    })
+                    && operand.operation == BinaryOperation::Divide
+                    && (outcome.exceptions & UNDERFLOW != 0 || small == minimum))
         });
     }
     // FZ or FIZ with AH clear flush subnormal inputs (FZ raising IDC)
