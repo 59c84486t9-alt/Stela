@@ -12,6 +12,7 @@
 use crate::msr;
 use core::arch::asm;
 
+pub mod stale;
 pub mod startup;
 
 /// IA32_APIC_BASE: x2APIC mode enabled.

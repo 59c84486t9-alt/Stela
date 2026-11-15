@@ -471,8 +471,14 @@ impl State {
             Some(u64::from(ticks) * 1_000_000 / self.apic_hz)
         };
         match crate::engine::alone_idle_stage() {
-            // SAFETY: as below.
-            Some(stage) => unsafe { self.poll(stage) },
+            Some(stage) => {
+                // SAFETY: as below.
+                unsafe { self.poll(stage) };
+                // The boot processor alone writes no service report.
+                if let Some(line) = host::stale_in_service_report() {
+                    crate::output::arguments(format_args!("{line}\n"));
+                }
+            }
             // SAFETY: caller supplies the live IDT/LAPIC and the explicit wait scope.
             None => unsafe { crate::native_idle::wait(budget) },
         }
@@ -515,6 +521,15 @@ impl State {
                     return;
                 }
                 let apic = self.cpu.controller();
+                // This wait runs no handler, so a vector in service has
+                // none: one above the timer's class holds it off. End it,
+                // as the timer's handler does those below, and wait again.
+                if host::end_stale_in_service(&apic) {
+                    watch = IdleWatch::new(crate::apic::rdtsc());
+                    // SAFETY: as above.
+                    unsafe { asm!("sti", options(nostack)) };
+                    continue;
+                }
                 let mut state = IdleApic {
                     lvt_timer: apic.read(apic::LVT_TIMER),
                     initial: apic.read(apic::INITIAL),

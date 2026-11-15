@@ -1202,6 +1202,9 @@ impl ServiceTimes {
         if let Some(line) = super::gpu::pump_report(tsc_hz) {
             output::arguments(format_args!("{line}\n"));
         }
+        if let Some(line) = host::stale_in_service_report() {
+            output::arguments(format_args!("{line}\n"));
+        }
         #[cfg(feature = "nvk")]
         super::gpu::gate::report_calls(tsc_hz);
     }

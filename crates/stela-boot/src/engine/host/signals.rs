@@ -6,7 +6,76 @@ use super::*;
 pub fn timer_interrupt() {
     crate::native_clock::interrupt();
     local::interrupt();
-    state().apic.eoi();
+    let apic = &state().apic;
+    apic.eoi();
+    // No handler runs under this one (entries never nest), so a vector
+    // still in service after the timer's own EOI has none: end it. One
+    // register read when there is none.
+    if apic::stale::holds_stale(apic.read(apic::stale::PPR), task_priority()) {
+        end_stale_in_service(apic);
+    }
+}
+
+/// The task priority as CR8 holds it (TPR bits 7:4), without an APIC read.
+fn task_priority() -> u32 {
+    let cr8: u64;
+    // SAFETY: CPL0 read of the task priority.
+    unsafe { asm!("mov {}, cr8", out(reg) cr8, options(nomem, nostack, preserves_flags)) };
+    (cr8 as u32 & 0xf) << 4
+}
+
+/// The vectors found in service with no handler running and ended, and
+/// those already reported (vector 0 in bit 0 of the first word).
+static STALE_ENDED: [core::sync::atomic::AtomicU32; 8] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+static STALE_REPORTED: [core::sync::atomic::AtomicU32; 8] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+/// How many vectors were ended so.
+static STALE_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// End every vector in service on this processor, whose caller runs no
+/// handler with an EOI still due: in process code, or in a handler after
+/// its own EOI. Each is kept for [`stale_in_service_report`]. Whether any
+/// was ended.
+pub(crate) fn end_stale_in_service(apic: &Apic) -> bool {
+    let ended = apic::stale::end_stale(|offset| apic.read(offset), || apic.eoi());
+    let mut any = false;
+    for (word, bits) in STALE_ENDED.iter().zip(ended) {
+        if bits != 0 {
+            word.fetch_or(bits, core::sync::atomic::Ordering::Relaxed);
+            STALE_COUNT.fetch_add(
+                u64::from(bits.count_ones()),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            any = true;
+        }
+    }
+    any
+}
+
+/// A line naming each vector found in service with no handler running
+/// that no earlier line named, once: the interrupt whose handler did not
+/// end it is that device's or signal's.
+pub(crate) fn stale_in_service_report() -> Option<alloc::string::String> {
+    use core::fmt::Write;
+    let mut fresh = [0u32; 8];
+    for ((ended, reported), fresh) in STALE_ENDED.iter().zip(&STALE_REPORTED).zip(&mut fresh) {
+        let ended = ended.load(core::sync::atomic::Ordering::Relaxed);
+        *fresh = ended & !reported.fetch_or(ended, core::sync::atomic::Ordering::Relaxed);
+    }
+    if fresh == [0; 8] {
+        return None;
+    }
+    let mut line = alloc::string::String::from("UNSUPPORTED interrupt vectors");
+    for vector in apic::stale::vectors(&fresh) {
+        let _ = write!(line, " {vector:#x}");
+    }
+    let _ = write!(
+        line,
+        " stayed in service with no handler running, which held every vector of their class and below (the timer's too, while it was below them): each was ended with an EOI ({} so far)",
+        STALE_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    Some(line)
 }
 
 pub(crate) fn root_irq_active() -> bool {
