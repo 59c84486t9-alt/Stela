@@ -401,22 +401,40 @@ pub(crate) unsafe fn install(handler: Handler) {
 
 /// Turn AVX on where this CPU has it, which firmware leaves off, so host
 /// code that detects AVX or F16C through XCR0 finds it usable, and so that
-/// translated blocks may use FMA3, F16C and AVX2. The entry stubs save the
-/// enabled state whatever it is.
+/// translated blocks may use FMA3, F16C and AVX2; and the AVX-512 state
+/// (opmask, ZMM_Hi256, Hi16_ZMM) where the CPU has AVX-512F and XSAVE
+/// manages that state ([`super::xstate::wanted_xcr0`]), as Linux enables
+/// it. Every processor Stela starts, parked ones included, runs this from
+/// [`install_on`] before its extended state is captured, so each gets the
+/// XCR0 its own CPUID gives; the entry stubs save the enabled state
+/// whatever it is, into images sized for every component XSAVE manages
+/// (CPUID.(EAX=0DH,ECX=0):ECX).
 ///
 /// # Safety
 /// Ring 0 with interrupts masked, on a CPU whose extended state nothing has
 /// captured yet.
 pub(crate) unsafe fn enable_avx() {
-    use core::arch::x86_64::{__cpuid, _xgetbv, _xsetbv};
-    const XSAVE_AND_AVX: u32 = 1 << 26 | 1 << 28;
+    use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv, _xsetbv};
     const CR4_OSXSAVE: u64 = 1 << 18;
-    const XCR0_AVX: u64 = 0x7;
-    if __cpuid(1).ecx & XSAVE_AND_AVX != XSAVE_AND_AVX {
+    let maximum = __cpuid(0).eax;
+    let leaf = |leaf: u32, register: fn(core::arch::x86_64::CpuidResult) -> u32| {
+        if maximum >= leaf {
+            register(__cpuid_count(leaf, 0))
+        } else {
+            0
+        }
+    };
+    let Some(wanted) = super::xstate::wanted_xcr0(
+        maximum,
+        __cpuid(1).ecx,
+        leaf(7, |result| result.ebx),
+        leaf(0xd, |result| result.eax),
+    ) else {
         return;
-    }
-    // SAFETY: CPUID enumerates XSAVE and AVX, so CR4.OSXSAVE and these XCR0
-    // bits are defined; the caller holds this CPU in ring 0.
+    };
+    // SAFETY: CPUID enumerates XSAVE and AVX, and XSAVE manages the AVX-512
+    // bits where they are wanted, so CR4.OSXSAVE and these XCR0 bits are
+    // defined; the caller holds this CPU in ring 0.
     unsafe {
         let cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
@@ -428,8 +446,8 @@ pub(crate) unsafe fn enable_avx() {
             );
         }
         let xcr0 = _xgetbv(0);
-        if xcr0 & XCR0_AVX != XCR0_AVX {
-            _xsetbv(0, xcr0 | XCR0_AVX);
+        if xcr0 & wanted != wanted {
+            _xsetbv(0, xcr0 | wanted);
         }
     }
 }

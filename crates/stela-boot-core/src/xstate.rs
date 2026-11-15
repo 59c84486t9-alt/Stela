@@ -58,6 +58,27 @@ pub const FXSR_SSE_SSE2: u32 = (1 << 24) | (1 << 25) | (1 << 26);
 pub const EFER_FAST_FXSR: u64 = 1 << 14;
 pub const SAVE_ERROR_POINTERS: u32 = 1 << 2;
 
+/// CPUID.(EAX=07H,ECX=0):EBX bit 16: AVX-512F.
+pub const CPUID_AVX512F: u32 = 1 << 16;
+/// CPUID.01H:ECX's XSAVE and AVX bits.
+const CPUID_XSAVE_AND_AVX: u32 = XSAVE | 1 << 28;
+
+/// The XCR0 bits a processor turns on, from its CPUID: x87, SSE and AVX
+/// state where it has XSAVE and AVX, and the AVX-512 state (opmask,
+/// ZMM_Hi256, Hi16_ZMM) where it also has AVX-512F and XSAVE manages all
+/// three (`managed`, CPUID.(EAX=0DH,ECX=0):EAX), as Linux's
+/// `fpu__init_system_xstate` keeps a component only where XSAVE manages it
+/// and its CPUID feature is set (`xsave_cpuid_features`). None where XSAVE
+/// or AVX is missing, so XCR0 stays as firmware left it.
+pub fn wanted_xcr0(maximum: u32, leaf1_ecx: u32, leaf7_ebx: u32, managed: u32) -> Option<u64> {
+    if leaf1_ecx & CPUID_XSAVE_AND_AVX != CPUID_XSAVE_AND_AVX {
+        return None;
+    }
+    let avx512 =
+        maximum >= 0xd && leaf7_ebx & CPUID_AVX512F != 0 && u64::from(managed) & AVX512 == AVX512;
+    Some(X87 | SSE | AVX | if avx512 { AVX512 } else { 0 })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
     #[cfg(not(target_arch = "x86_64"))]
@@ -537,6 +558,38 @@ mod tests {
             .unwrap_err(),
             LayoutError::ResourceLimit
         );
+    }
+    #[test]
+    fn xcr0_gains_the_avx512_state_only_where_xsave_manages_it_and_avx512f_is_set() {
+        let xsave_avx = XSAVE | 1 << 28;
+        let all = (X87 | SSE | AVX | AVX512) as u32;
+        assert_eq!(
+            wanted_xcr0(0xd, xsave_avx, CPUID_AVX512F, all),
+            Some(X87 | SSE | AVX | AVX512)
+        );
+        // AVX-512 fused off (a hybrid part) while XSAVE still manages the
+        // state: Linux leaves it off.
+        assert_eq!(wanted_xcr0(0xd, xsave_avx, 0, all), Some(X87 | SSE | AVX));
+        // XSAVE manages only part of it, or the leaf is out of range.
+        for (maximum, managed) in [(0xd, (X87 | SSE | AVX | 1 << 5) as u32), (0xc, all)] {
+            assert_eq!(
+                wanted_xcr0(maximum, xsave_avx, CPUID_AVX512F, managed),
+                Some(X87 | SSE | AVX)
+            );
+        }
+        // No XSAVE or no AVX: XCR0 stays as firmware left it.
+        assert_eq!(wanted_xcr0(0xd, XSAVE, CPUID_AVX512F, all), None);
+        assert_eq!(wanted_xcr0(0xd, 1 << 28, CPUID_AVX512F, all), None);
+        // Every wanted mask is one the entry stubs' format admits.
+        let layout = Layout::discover(0xd, XSAVE, |_, subleaf| record(subleaf)).unwrap();
+        for mask in [X87 | SSE | AVX, X87 | SSE | AVX | AVX512] {
+            let controls = Controls {
+                cr4: CR4_FP_REQUIRED | CR4_OSXSAVE,
+                xcr0: Some(mask),
+                ..controls()
+            };
+            assert_eq!(layout.format(controls), Ok(SaveFormat::Xsave { mask }));
+        }
     }
 }
 
