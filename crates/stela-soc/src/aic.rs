@@ -162,6 +162,10 @@ use {
 
 const NAME: &str = "aic2";
 
+/// The system counter and CPU of the last event read that claimed a watched
+/// input ([`Aic2::watch_claims`]), shared with the model that drives it.
+pub type ClaimStamp = alloc::rc::Rc<core::cell::Cell<Option<(u64, CpuIndex)>>>;
+
 const INFO2: u64 = 0x0008;
 const RESET: u64 = 0x0010;
 
@@ -219,6 +223,8 @@ pub struct Aic2 {
     /// The CPUs whose SIQ_CFG_EL1 refuses IRQs ([`Aic2::steer`]).
     refusing: u64,
     counts: AicCounts,
+    /// An input whose claims are stamped, by index, for a diagnostic.
+    watched: Option<(usize, ClaimStamp)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,10 +329,23 @@ impl Aic2 {
             irq_level: 0,
             refusing: 0,
             counts: AicCounts::default(),
+            watched: None,
             config,
             layout,
             span,
         })
+    }
+    /// Stamp each event read that claims `input` with its count and CPU in
+    /// `stamp`: the driving model then splits its wait at the claim. Only a
+    /// diagnostic: nothing the guest reads changes. An input the
+    /// controller does not have is not watched.
+    pub fn watch_claims(&mut self, input: AicInput, stamp: ClaimStamp) {
+        let input = AicInput::from_vector(input.vector(self.config.max_irq), self.config.max_irq);
+        self.watched = input
+            .filter(|input| {
+                usize::from(input.die) < self.layout.dies.len() && input.irq < self.config.nr_irq
+            })
+            .map(|input| (self.input_index(input), stamp));
     }
     /// The delivery counts since the last call ([`AicCounts`]).
     pub fn take_counts(&mut self) -> AicCounts {
@@ -576,7 +595,7 @@ impl Aic2 {
             (1 << count) - 1
         }
     }
-    fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32> {
+    fn read_register(&mut self, register: Register, cpu: CpuIndex, now: u64) -> Result<u32> {
         Ok(match register {
             Register::Version => u32::from(self.config.version),
             Register::Info1 => {
@@ -603,6 +622,11 @@ impl Aic2 {
                 match self.pending_for(cpu) {
                     Some(irq) => {
                         self.counts.claimed += 1;
+                        if let Some((watched, stamp)) = &self.watched
+                            && *watched == irq
+                        {
+                            stamp.set(Some((now, cpu)));
+                        }
                         let (word, bit) = position(irq);
                         self.mask[word] |= bit;
                         let die = irq / usize::from(self.config.max_irq);
@@ -741,7 +765,9 @@ impl MmioDevice for Aic2 {
         let register = self
             .decode(offset)
             .ok_or_else(|| fail(Self::unknown_reason(offset).into()))?;
-        let value = self.read_register(register, access.cpu).map_err(fail)?;
+        let value = self
+            .read_register(register, access.cpu, access.now)
+            .map_err(fail)?;
         self.update(access);
         Ok(u64::from(value))
     }

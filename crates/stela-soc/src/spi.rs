@@ -21,6 +21,7 @@
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
 use crate::Result;
+use crate::aic::ClaimStamp;
 use alloc::vec::Vec;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
@@ -146,7 +147,31 @@ pub struct Activity {
     /// Ticks from each command's first register access to its last one
     /// before chip select rose, summed.
     pub selected_ticks: u64,
+    /// Rises during a register access, the rest during an advance or a
+    /// power change.
+    pub raised_in_access: u64,
+    /// Rises a CPU's AIC event read claimed before the driver's next
+    /// register access ([`Spi::watch_claims`]): ticks from the rise to the
+    /// claim (the host's delivery and the guest's own IRQ masking) and
+    /// from the claim to that access (the guest's handler, its work loop's
+    /// wake and scheduling), summed and the longest; the claims by CPU
+    /// (CPUs past the array in its last entry), and those by the CPU whose
+    /// access raised the line.
+    pub claimed: u64,
+    pub claim_ticks: u64,
+    pub longest_claim_ticks: u64,
+    pub answer_ticks: u64,
+    pub longest_answer_ticks: u64,
+    pub claims_by_cpu: [u32; CLAIM_CPUS],
+    pub claimed_by_raiser: u64,
+    /// Rises the line fell from with no claim since (the driver polled or
+    /// answered before taking the IRQ), and their ticks from rise to fall.
+    pub unclaimed: u64,
+    pub unclaimed_ticks: u64,
 }
+
+/// CPUs [`Activity::claims_by_cpu`] counts apart.
+pub const CLAIM_CPUS: usize = 32;
 
 pub struct Spi {
     nor: Nor,
@@ -154,6 +179,12 @@ pub struct Spi {
     activity: Activity,
     /// When the interrupt line last rose, while it stays high.
     raised: Option<u64>,
+    /// The CPU whose access raised it, and whether the driver's first
+    /// access after a claim of it was counted.
+    raiser: usize,
+    answered: bool,
+    /// The AIC's last claim of this controller's input, when wired.
+    claims: Option<ClaimStamp>,
     /// The current command's first and latest register access.
     selected: Option<(u64, u64)>,
     control: u32,
@@ -180,6 +211,9 @@ impl Spi {
             irq,
             activity: Activity::default(),
             raised: None,
+            raiser: usize::MAX,
+            answered: false,
+            claims: None,
             selected: None,
             control: 0,
             config: 0,
@@ -240,9 +274,41 @@ impl Spi {
     pub fn take_activity(&mut self) -> Activity {
         core::mem::take(&mut self.activity)
     }
+    /// This controller's AIC input.
+    pub fn irq(&self) -> AicInput {
+        self.irq
+    }
+    /// Split each interrupt wait at the AIC's claim of the line, which the
+    /// AIC writes to `claims` ([`crate::aic::Aic2::watch_claims`]).
+    pub fn watch_claims(&mut self, claims: ClaimStamp) {
+        self.claims = Some(claims);
+    }
+    /// The claim of the line since it last rose at `raised`, if any.
+    fn claim_since(&self, raised: u64) -> Option<(u64, usize)> {
+        self.claims
+            .as_ref()
+            .and_then(|claims| claims.get())
+            .filter(|&(at, _)| at >= raised)
+    }
     /// Count a register access at `now`, within the current command's
-    /// span while the die is selected.
+    /// span while the die is selected, and the driver's first access after
+    /// a claim of a raised line.
     fn accessed(&mut self, now: u64) {
+        if let Some(raised) = self.raised
+            && !self.answered
+            && let Some((claimed, cpu)) = self.claim_since(raised)
+        {
+            self.answered = true;
+            let activity = &mut self.activity;
+            let (claim, answer) = (claimed - raised, now.saturating_sub(claimed));
+            activity.claimed += 1;
+            activity.claim_ticks += claim;
+            activity.longest_claim_ticks = activity.longest_claim_ticks.max(claim);
+            activity.answer_ticks += answer;
+            activity.longest_answer_ticks = activity.longest_answer_ticks.max(answer);
+            activity.claims_by_cpu[cpu.min(CLAIM_CPUS - 1)] += 1;
+            activity.claimed_by_raiser += u64::from(cpu == self.raiser);
+        }
         self.activity.accesses += 1;
         if self.nor.selected() {
             let first = self.selected.map_or(now, |(first, _)| first);
@@ -271,7 +337,7 @@ impl Spi {
     fn status(&self) -> u32 {
         self.status | if self.threshold() { THRESHOLD } else { 0 }
     }
-    fn interrupt(&mut self, access: &mut Access<'_>) {
+    fn interrupt(&mut self, access: &mut Access<'_>, in_access: bool) {
         let status = self.status();
         let enabled = (status & RX_COMPLETE != 0 && self.config & IE_RX_COMPLETE != 0)
             || (status & THRESHOLD != 0 && self.config & IE_THRESHOLD != 0)
@@ -280,11 +346,18 @@ impl Spi {
         match (self.raised, level) {
             (None, true) => {
                 self.raised = Some(access.now);
+                self.raiser = access.cpu;
+                self.answered = false;
                 self.activity.interrupts += 1;
+                self.activity.raised_in_access += u64::from(in_access);
             }
             (Some(raised), false) => {
                 let ticks = access.now.saturating_sub(raised);
                 self.raised = None;
+                if !self.answered && self.claim_since(raised).is_none() {
+                    self.activity.unclaimed += 1;
+                    self.activity.unclaimed_ticks += ticks;
+                }
                 self.activity.interrupt_ticks += ticks;
                 self.activity.longest_interrupt_ticks =
                     self.activity.longest_interrupt_ticks.max(ticks);
@@ -413,7 +486,7 @@ impl Lifecycle for Spi {
             self.configuration = RESET_CONFIGURATION;
         }
         self.lifecycle = proposed;
-        self.interrupt(access);
+        self.interrupt(access, false);
     }
 }
 
@@ -482,7 +555,7 @@ impl MmioDevice for Spi {
             }
             _ => return Err(error(refuse!("unmodeled SPI register"))),
         };
-        self.interrupt(access);
+        self.interrupt(access, true);
         Ok(u64::from(value))
     }
     fn write(
@@ -606,14 +679,14 @@ impl MmioDevice for Spi {
             ) = saved;
             return Err(error(reason));
         }
-        self.interrupt(access);
+        self.interrupt(access, true);
         Ok(())
     }
 
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         self.pump()
             .map_err(|reason| Self::error(CTRL, Width::Word, Direction::Write, reason))?;
-        self.interrupt(access);
+        self.interrupt(access, false);
         Ok(None)
     }
 }
@@ -928,10 +1001,99 @@ mod tests {
                 interrupt_ticks: 2400,
                 longest_interrupt_ticks: 2400,
                 selected_ticks: 3000 - 24,
+                raised_in_access: 1,
+                // No AIC watches this controller: the wait is unsplit.
+                unclaimed: 1,
+                unclaimed_ticks: 2400,
+                ..Activity::default()
             }
         );
         assert!(spi.nor.selected());
         assert_eq!(spi.take_activity(), Activity::default());
+    }
+
+    /// A wait splits at the AIC's claim: rise to claim, and claim to the
+    /// driver's next register access, with the claiming CPU counted; a
+    /// claim before the rise, or none, leaves the wait unclaimed.
+    #[test]
+    fn activity_splits_each_interrupt_wait_at_the_aic_claim() {
+        let irq = AicInput::new(0, 749);
+        let mut spi = Spi::new(Image::fresh(), irq, false);
+        let claims = ClaimStamp::default();
+        spi.watch_claims(claims.clone());
+        let mut latch = InterruptLatch::new();
+        let at = |spi: &mut Spi,
+                  latch: &mut InterruptLatch,
+                  cpu: usize,
+                  now: u64,
+                  offset: u64,
+                  value: u32| {
+            write(spi, offset, value, &mut Access::new(cpu, now, latch));
+        };
+        at(&mut spi, &mut latch, 3, 0, PIN, 0);
+        at(&mut spi, &mut latch, 3, 10, CFG, IRQ_MODE | IE_TX_COMPLETE);
+        // A claim from before the rise is not this one's.
+        claims.set(Some((5, 1)));
+        at(&mut spi, &mut latch, 3, 20, TXCNT, 1);
+        at(&mut spi, &mut latch, 3, 30, TXDATA, 0x06);
+        at(&mut spi, &mut latch, 3, 40, CTRL, RUN);
+        assert!(latch.is_asserted(Wire::Aic(irq)));
+        // CPU 0 claims it at 1040; the driver reads STATUS on CPU 5 at
+        // 3040 and clears it at 3100.
+        claims.set(Some((1040, 0)));
+        assert_eq!(
+            spi.read(STATUS, Width::Word, &mut Access::new(5, 3040, &mut latch)),
+            Ok(u64::from(TX_COMPLETE))
+        );
+        at(&mut spi, &mut latch, 5, 3100, STATUS, TX_COMPLETE);
+        assert!(!latch.is_asserted(Wire::Aic(irq)));
+        // The second rise, by CPU 5, which claims it itself at once.
+        at(&mut spi, &mut latch, 5, 3980, PIN, CS_HIGH);
+        at(&mut spi, &mut latch, 5, 3990, PIN, 0);
+        at(&mut spi, &mut latch, 5, 4000, TXCNT, 1);
+        at(&mut spi, &mut latch, 5, 4010, TXDATA, 0x06);
+        claims.set(Some((4010, 5)));
+        at(&mut spi, &mut latch, 5, 4020, STATUS, TX_COMPLETE);
+        // A third the driver clears before any claim.
+        at(&mut spi, &mut latch, 5, 4980, PIN, CS_HIGH);
+        at(&mut spi, &mut latch, 5, 4990, PIN, 0);
+        at(&mut spi, &mut latch, 5, 5000, TXCNT, 1);
+        at(&mut spi, &mut latch, 5, 5010, TXDATA, 0x06);
+        at(&mut spi, &mut latch, 5, 5500, STATUS, TX_COMPLETE);
+        let activity = spi.take_activity();
+        let mut claims_by_cpu = [0; CLAIM_CPUS];
+        claims_by_cpu[0] = 1;
+        claims_by_cpu[5] = 1;
+        assert_eq!(
+            (
+                activity.interrupts,
+                activity.raised_in_access,
+                activity.claimed,
+                activity.claim_ticks,
+                activity.longest_claim_ticks,
+                activity.answer_ticks,
+                activity.longest_answer_ticks,
+                activity.claims_by_cpu,
+                activity.claimed_by_raiser,
+                activity.unclaimed,
+                activity.unclaimed_ticks,
+                activity.interrupt_ticks,
+            ),
+            (
+                3,
+                3,
+                2,
+                1000,
+                1000,
+                2000 + 10,
+                2000,
+                claims_by_cpu,
+                1,
+                1,
+                490,
+                3060 + 10 + 490
+            )
+        );
     }
 
     #[test]

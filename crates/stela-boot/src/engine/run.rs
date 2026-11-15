@@ -1506,9 +1506,23 @@ impl Heartbeat {
                     .filter(|nor| nor.accesses != 0)
                 {
                     let hz = stela_soc::counter::FREQUENCY_HZ;
+                    // Each wait split at the AIC's claim: rise to claim (the
+                    // host's delivery and the guest's masking), claim to the
+                    // driver's next access (the guest's handler and work
+                    // loop), the claiming PEs, and waits with no claim.
+                    let mut by_pe = alloc::string::String::new();
+                    for (pe, &count) in nor.claims_by_cpu.iter().enumerate() {
+                        if count != 0 {
+                            let sep = if by_pe.is_empty() { "" } else { "," };
+                            by_pe += &alloc::format!("{sep}{pe}:{count}");
+                        }
+                    }
                     output::arguments(format_args!(
                         "NOR SPI accesses={} commands={} bytes={} selected_ms={} interrupts={} \
-                         interrupt_wait_ms={} longest_interrupt_wait_us={}\n",
+                         interrupt_wait_ms={} longest_interrupt_wait_us={} raised_in_access={} \
+                         claimed={} claim_ms={} longest_claim_us={} answer_ms={} \
+                         longest_answer_us={} by_raiser={} claims_by_pe={} unclaimed={} \
+                         unclaimed_ms={}\n",
                         nor.accesses,
                         nor.commands,
                         nor.bytes,
@@ -1516,6 +1530,16 @@ impl Heartbeat {
                         nor.interrupts,
                         nor.interrupt_ticks * 1000 / hz,
                         nor.longest_interrupt_ticks * 1_000_000 / hz,
+                        nor.raised_in_access,
+                        nor.claimed,
+                        nor.claim_ticks * 1000 / hz,
+                        nor.longest_claim_ticks * 1_000_000 / hz,
+                        nor.answer_ticks * 1000 / hz,
+                        nor.longest_answer_ticks * 1_000_000 / hz,
+                        nor.claimed_by_raiser,
+                        if by_pe.is_empty() { "-" } else { &by_pe },
+                        nor.unclaimed,
+                        nor.unclaimed_ticks * 1000 / hz,
                     ));
                 }
                 survey_report(machine);

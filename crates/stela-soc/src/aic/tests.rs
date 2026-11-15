@@ -910,6 +910,49 @@ fn an_unsplit_devicetree_vector_names_its_die_by_max_irq() {
     }
 }
 
+/// A watched input's claims are stamped with the count and the claiming
+/// CPU; claims of other inputs, empty reads and a die-split vector leave
+/// the stamp as the last claim of the watched input left it.
+#[test]
+fn claims_of_a_watched_input_are_stamped() {
+    let mut aic = Aic2::new(Aic2Config {
+        cpus: 4,
+        default_cpus: 0b1111,
+        ..aic(1).config
+    })
+    .unwrap();
+    let mut latch = InterruptLatch::new();
+    let stamp = ClaimStamp::default();
+    aic.watch_claims(AicInput::new(0, 3), stamp.clone());
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    write(&mut aic, &mut latch, MASK_CLR, 1 << 3 | 1 << 4);
+    aic.set_input(
+        AicInput::new(0, 4),
+        true,
+        &mut Access::new(0, 10, &mut latch),
+    )
+    .unwrap();
+    let claim = |aic: &mut Aic2, latch: &mut InterruptLatch, cpu, now| {
+        aic.read(EVENT, Width::Word, &mut Access::new(cpu, now, latch))
+            .unwrap() as u32
+    };
+    assert_eq!(claim(&mut aic, &mut latch, 1, 20), EVENT_TYPE_IRQ | 4);
+    assert_eq!(stamp.get(), None);
+    aic.set_input(
+        AicInput::new(0, 3),
+        true,
+        &mut Access::new(0, 30, &mut latch),
+    )
+    .unwrap();
+    assert_eq!(claim(&mut aic, &mut latch, 2, 40), EVENT_TYPE_IRQ | 3);
+    assert_eq!(stamp.get(), Some((40, 2)));
+    assert_eq!(claim(&mut aic, &mut latch, 3, 50), 0);
+    assert_eq!(stamp.get(), Some((40, 2)));
+    // An input the controller does not have is not watched.
+    aic.watch_claims(AicInput::new(7, 3), stamp.clone());
+    assert!(aic.watched.is_none());
+}
+
 /// The event register is plain exactly while no IRQ is deliverable: served
 /// again then, it gives what the model gives; an input that rises, an
 /// unmask, a software trigger or a steering change moves the epoch first.

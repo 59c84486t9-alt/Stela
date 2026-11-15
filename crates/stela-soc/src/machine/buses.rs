@@ -111,6 +111,7 @@ impl AppleDevices {
             .map_err(|e| refuse!("SPI placement: {e}", ?e))?;
         self.register_power_device(device.physical, spi, false)?;
         self.nor = Some(spi);
+        self.watch_nor_claims();
         if let Some(pin) = placement.select {
             let (base, _) = self
                 .gpio
