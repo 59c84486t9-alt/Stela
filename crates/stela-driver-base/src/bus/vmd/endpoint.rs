@@ -431,6 +431,8 @@ impl<R: Registers> Drop for Endpoint<R> {
     }
 }
 
+#[cfg(test)]
+mod client_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(test)]

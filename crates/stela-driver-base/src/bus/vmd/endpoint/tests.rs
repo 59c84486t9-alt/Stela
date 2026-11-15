@@ -736,12 +736,20 @@ fn malformed_capabilities_active_translation_and_bar_profiles_are_refused() {
             let mut state = model.state.lock().unwrap();
             match case {
                 0 => state.set(NVME + 0x40, 2, 0x4410), // Link into PCIe body.
-                1 => state.set(NVME + 0x48, 2, 1 << 11), // NoSnoop enabled.
+                1 => {
+                    // NoSnoop enabled and kept set when the stop clears it.
+                    state.set(NVME + 0x48, 2, 1 << 11);
+                    state.stuck = Some((NVME + 0x48, 1 << 11));
+                }
                 2 => {
                     state.set(NVME + 0x100, 4, 0x0001_000f);
                     state.set(NVME + 0x106, 2, 0x8000);
                 }
-                _ => state.set(NVME + 0x100, 4, 0x0001_0010), // Unqualified SR-IOV.
+                _ => {
+                    // SR-IOV with its virtual functions enabled.
+                    state.set(NVME + 0x100, 4, 0x0001_0010);
+                    state.set(NVME + 0x108, 2, 1);
+                }
             }
         }
         let (mut host, bar) = fixture(model);

@@ -4,6 +4,9 @@
 use super::*;
 use crate::bus::pci::regs;
 
+/// PCI Express Device Control's Enable No Snoop.
+const NO_SNOOP: u16 = 1 << 11;
+
 /// Exclusive child configuration borrow. This supplies no
 /// `pci::Address`: a 32-bit VMD domain cannot be truncated to an ACPI segment.
 pub struct ChildConfig<'a, R: Registers> {
@@ -62,10 +65,11 @@ impl<R: Registers> ChildConfig<'_, R> {
 }
 
 impl<R: Registers> Host<R> {
-    /// Stop `child` as firmware may have left it: Bus Master and the MSI and
-    /// MSI-X enables cleared, INTx Disable set, each read back. Firmware
-    /// commonly leaves the NVMe controller behind VMD mastering; Linux's vmd
-    /// driver scans it as found and its NVMe driver resets the controller.
+    /// Stop `child` as firmware may have left it: Bus Master, the MSI and
+    /// MSI-X enables and Enable No Snoop cleared, INTx Disable set, each read
+    /// back. Firmware commonly leaves the NVMe controller behind VMD
+    /// mastering; Linux's vmd driver scans it as found and its NVMe driver
+    /// resets the controller.
     /// Nothing behind VMD reaches memory while the parent's own Bus Master
     /// is clear, so children are stopped only in that state. A child whose
     /// bits stay set is refused and the host poisoned: it would master once
@@ -102,15 +106,27 @@ impl<R: Registers> Host<R> {
             let entries = Capabilities::new(Transport(|offset, bytes| config.read(offset, bytes)))
                 .collect::<Result<Vec<_>, Error>>()?;
             for entry in entries {
-                let enable = match entry.id {
-                    5 => 1,          // MSI Enable
-                    0x11 => 1 << 15, // MSI-X Enable; Function Mask is kept.
+                let (relative, enable, clear) = match entry.id {
+                    5 => (2, 1, 1),                // MSI Enable
+                    0x11 => (2, 1 << 15, 1 << 15), // MSI-X Enable; Function Mask is kept.
+                    // Enable No Snoop, which the takeover clears on the
+                    // PC's own functions too. On an endpoint bit 15 is
+                    // Initiate Function Level Reset: written 0, never as read.
+                    0x10 => {
+                        let kind = word(&mut config, entry.offset + 2)? >> 4 & 15;
+                        let flr = if matches!(kind, 0 | 1 | 9) {
+                            1 << 15
+                        } else {
+                            0
+                        };
+                        (8, NO_SNOOP, NO_SNOOP | flr)
+                    }
                     _ => continue,
                 };
-                let control = word(&mut config, entry.offset + 2)?;
+                let control = word(&mut config, entry.offset + relative)?;
                 if control & enable != 0 {
-                    config.write(entry.offset + 2, 2, u32::from(control & !enable))?;
-                    if word(&mut config, entry.offset + 2)? & enable != 0 {
+                    config.write(entry.offset + relative, 2, u32::from(control & !clear))?;
+                    if word(&mut config, entry.offset + relative)? & enable != 0 {
                         return Err(unstopped);
                     }
                 }

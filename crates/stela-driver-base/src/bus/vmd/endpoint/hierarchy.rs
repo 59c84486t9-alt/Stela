@@ -238,10 +238,13 @@ impl Hierarchy {
             host.stop_child(child.address)?;
             children.push(capture(host, child)?);
         }
+        // A bridge's primary bus number is not checked: client VMD firmware
+        // leaves it 0 on the root ports below a host whose buses start at
+        // e0, and PCI Express routes by the secondary and subordinate numbers
+        // alone. Linux renumbers such a bridge; these numbers stay as found.
         for function in &children {
             if let Some(bridge) = function.bridge
-                && (bridge.buses as u8 != function.child.address.bus
-                    || bridge.secondary() <= function.child.address.bus
+                && (bridge.secondary() <= function.child.address.bus
                     || bridge.secondary() > bridge.subordinate()
                     || bridge.subordinate() > host.last_bus
                     || !function.capabilities.is_pcie())
