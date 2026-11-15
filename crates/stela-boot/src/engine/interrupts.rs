@@ -670,6 +670,20 @@ pub fn fatal(frame: &Frame) -> ! {
             output::Code::at(frame.rip),
         ))
     }
+    // A fault inside the firmware's variable service, which only a stop or
+    // a restart calls, is the firmware's: the stop it came from, if any, is
+    // on the line before.
+    if let Some(reason) = crate::stop_record::take_firmware_call().fault_reason(&alloc::format!(
+        "vector={} error={:#x} rip={:#x} cr2={:#x} rax={:#x} cr3={:#x}",
+        frame.vector,
+        frame.error,
+        frame.rip,
+        cr2(),
+        frame.rax,
+        cr3()
+    )) {
+        output::fatal(reason)
+    }
     output::fatal(format_args!(
         "unexpected x86 exception in the system engine: vector={} error={:#x} rip={:#x} \
          (image+{:#x}) code={} rax={:#x} cr2={:#x} cr3={:#x} drivers={drivers} \

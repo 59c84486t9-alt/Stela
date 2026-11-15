@@ -348,10 +348,82 @@ pub fn carried_notice(reason: Option<&str>, in_log: bool) -> String {
     notice
 }
 
+/// The firmware variable call a processor is inside, as Stela makes them
+/// after the firmware's boot services ended: only from a stop or a restart.
+/// Firmware may touch memory its map does not mark as runtime, such as its
+/// flash, which Stela's tables do not map (Linux maps none of it either,
+/// and on such a fault disables the services: `efi_crash_gracefully_on_page_fault`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FirmwareCall {
+    None = 0,
+    /// Writing a stop's last lines (`stela-boot`'s `stop_record::keep`).
+    Record = 1,
+    /// Setting `BootNext` before a restart.
+    BootNext = 2,
+}
+
+impl FirmwareCall {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Record,
+            2 => Self::BootNext,
+            _ => Self::None,
+        }
+    }
+
+    /// The reason an x86 exception inside this call stops with, where
+    /// `exception` gives its vector, error code and addresses; `None`
+    /// outside a call, where the exception is Stela's own.
+    pub fn fault_reason(self, exception: &str) -> Option<String> {
+        let (purpose, outcome) = match self {
+            Self::None => return None,
+            Self::Record => (
+                "to keep this stop's last lines",
+                "this PC keeps no record of the stop; the failure before this line is why \
+                 Stela stopped",
+            ),
+            Self::BootNext => (
+                "to start Stela again after the restart macOS asked for",
+                "the PC does not restart by itself",
+            ),
+        };
+        Some(alloc::format!(
+            "x86 exception inside the PC firmware's variable service, which Stela called \
+             {purpose} ({exception}): {outcome}"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
+
+    #[test]
+    fn a_fault_inside_a_firmware_call_names_the_call_and_what_it_leaves() {
+        for call in [
+            FirmwareCall::None,
+            FirmwareCall::Record,
+            FirmwareCall::BootNext,
+        ] {
+            assert_eq!(FirmwareCall::from_u8(call as u8), call);
+        }
+        assert_eq!(FirmwareCall::from_u8(9), FirmwareCall::None);
+        assert_eq!(FirmwareCall::None.fault_reason("vector=14"), None);
+        let record = FirmwareCall::Record
+            .fault_reason("vector=14 error=0x0 rip=0x777323ea cr2=0xffd0c058")
+            .unwrap();
+        assert!(
+            record.contains("PC firmware's variable service"),
+            "{record}"
+        );
+        assert!(record.contains("this stop's last lines"), "{record}");
+        assert!(record.contains("cr2=0xffd0c058"), "{record}");
+        assert!(record.contains("the failure before this line"), "{record}");
+        let restart = FirmwareCall::BootNext.fault_reason("vector=14").unwrap();
+        assert!(restart.contains("after the restart"), "{restart}");
+    }
 
     #[test]
     fn the_stop_reason_is_the_newest_fatal_line() {
