@@ -4,7 +4,7 @@
 //! leaves every processor's TLB, and where a PCI BAR sits in the CPU's
 //! physical space. Pure functions over observed register values and firmware
 //! descriptions, and the shootdown's generation bookkeeping.
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
 
 use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 
@@ -154,6 +154,9 @@ struct Sharer {
     acknowledged: AtomicU64,
     /// [`Doing`] in the low two bits, the TSC it began at above them.
     doing: AtomicU64,
+    /// Halted with no translation it uses before it flushes again
+    /// ([`Processors::enter_idle`]).
+    idle: AtomicBool,
 }
 
 /// The range one request retired, by generation; read like a sequence
@@ -223,6 +226,7 @@ impl Processors {
                     apic: AtomicU32::new(0),
                     acknowledged: AtomicU64::new(0),
                     doing: AtomicU64::new(0),
+                    idle: AtomicBool::new(false),
                 }
             }; MAX_PROCESSORS],
             recorded: [const {
@@ -302,6 +306,10 @@ impl Processors {
     /// recorded, the range.
     pub fn request(&self, retired: Option<core::ops::Range<u64>>) -> u64 {
         let generation = self.requested.fetch_add(1, Ordering::AcqRel) + 1;
+        // Ordered before the reads of every sharer's idle state, as
+        // [`Self::leave_idle`] orders its store before its next read of the
+        // request: either this sees it awake, or it sees this request.
+        fence(Ordering::SeqCst);
         if let Some(range) = retired {
             self.record(generation, range);
         }
@@ -385,6 +393,46 @@ impl Processors {
         })
     }
 
+    /// Slot `slot`'s processor, which flushed through its last request,
+    /// halts: until [`Self::leave_idle`] it makes no access through a
+    /// window translation, so a retirement need not wait for it and counts
+    /// it as acknowledged, as Linux skips a CPU in lazy TLB mode.
+    pub fn enter_idle(&self, slot: usize) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            sharer.idle.store(true, Ordering::Release);
+        }
+    }
+
+    /// Slot `slot`'s processor wakes: whether it was idle. When it was, it
+    /// flushes through [`Self::requested`] before any access through a
+    /// window translation; a request it does not see then waits for it.
+    pub fn leave_idle(&self, slot: usize) -> bool {
+        let Some(sharer) = self.sharers.get(slot) else {
+            return false;
+        };
+        // Only the processor itself writes its state.
+        if !sharer.idle.load(Ordering::Relaxed) {
+            return false;
+        }
+        sharer.idle.store(false, Ordering::Relaxed);
+        // Pairs with the fence in [`Self::request`].
+        fence(Ordering::SeqCst);
+        true
+    }
+
+    /// Whether slot `slot`'s processor is idle ([`Self::enter_idle`]).
+    pub fn idle(&self, slot: usize) -> bool {
+        self.sharers
+            .get(slot)
+            .is_some_and(|sharer| sharer.idle.load(Ordering::Relaxed))
+    }
+
+    /// Whether a retirement of `generation` waits for slot `slot`'s
+    /// processor: it neither acknowledged it nor is idle.
+    pub fn pending(&self, slot: usize, generation: u64) -> bool {
+        self.acknowledged(slot) < generation && !self.idle(slot)
+    }
+
     /// What slot `slot`'s processor does, and the TSC it began at.
     pub fn doing(&self, slot: usize) -> (Doing, u64) {
         self.sharers.get(slot).map_or((Doing::Masked, 0), |sharer| {
@@ -414,10 +462,10 @@ impl Processors {
     }
 
     /// Whether every sharer but `except` (the retiring processor's slot)
-    /// acknowledged `generation`.
+    /// acknowledged `generation` or is idle.
     pub fn flushed(&self, generation: u64, except: Option<usize>) -> bool {
         self.sharers()
-            .all(|(slot, _)| Some(slot) == except || self.acknowledged(slot) >= generation)
+            .all(|(slot, _)| Some(slot) == except || !self.pending(slot, generation))
     }
 }
 
@@ -729,6 +777,42 @@ mod tests {
             [((last - 1) * PAGE, last * PAGE)]
         );
         assert!(nothing(processors.plan(last, last)));
+    }
+
+    /// An idle processor holds up no retirement and is not asked to flush;
+    /// once it wakes it flushes every request since its last flush, and a
+    /// request after that waits for it again.
+    #[test]
+    fn an_idle_processor_counts_as_acknowledged_until_it_wakes() {
+        let processors = Processors::new();
+        let bsp = processors.join_bsp(0).unwrap();
+        let ap = processors.join_ap(2).unwrap();
+        let before = processors.request(Some(0x1000..0x2000));
+        processors.acknowledge(ap, before);
+        processors.enter_idle(ap);
+        assert!(processors.idle(ap));
+        let first = processors.request(Some(0x4000..0x5000));
+        let second = processors.request(Some(0x8000..0x9000));
+        assert!(!processors.pending(ap, second));
+        assert!(processors.flushed(second, Some(bsp)));
+        // Waking, it learns what it has to flush and holds up requests again.
+        assert!(processors.leave_idle(ap));
+        assert!(!processors.leave_idle(ap));
+        assert!(!processors.idle(ap));
+        assert!(processors.pending(ap, second));
+        assert!(!processors.flushed(second, Some(bsp)));
+        assert_eq!(
+            ranges(processors.plan(processors.acknowledged(ap), processors.requested())),
+            [(0x4000, 0x5000), (0x8000, 0x9000)]
+        );
+        processors.acknowledge(ap, second);
+        assert!(processors.flushed(first, Some(bsp)));
+        assert!(processors.flushed(second, Some(bsp)));
+        // The retiring processor's own idle state is never consulted, and a
+        // slot that never joined is never idle.
+        assert!(!processors.leave_idle(MAX_PROCESSORS));
+        processors.enter_idle(MAX_PROCESSORS);
+        assert!(!processors.idle(MAX_PROCESSORS));
     }
 
     #[test]

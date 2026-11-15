@@ -9,7 +9,11 @@
 //! native return, each engine wait and each turn of its executor's mailbox
 //! loop ([`service`]). Native epochs end at their deadlines, which bounds how
 //! long a processor runs without a safe point. A compile job, which runs
-//! whole for up to seconds, runs with the vector open ([`job`]).
+//! whole for up to seconds, runs with the vector open ([`job`]). A processor
+//! halted for its guest's wait is idle ([`idle`]): it makes no access through
+//! a window translation until it wakes and flushes ([`wake`]), so a
+//! retirement neither interrupts nor waits for it, as Linux leaves a CPU in
+//! lazy TLB mode alone.
 //!
 //! [`SHOOTDOWN_VECTOR`]: crate::engine::interrupts::SHOOTDOWN_VECTOR
 //! [`aperture::Processors::request`]: stela_boot_core::aperture::Processors::request
@@ -162,6 +166,36 @@ pub(crate) fn service() {
     PROCESSORS.acknowledge(slot, requested);
 }
 
+/// This processor halts until an interrupt: idle until the guard drops or
+/// an interrupt's handler begins ([`wake`]). The caller has serviced every
+/// request and makes no access through a window translation meanwhile.
+pub(crate) fn idle() -> Option<Idle> {
+    let slot = crate::engine::host::shootdown().0?;
+    PROCESSORS.enter_idle(slot);
+    Some(Idle)
+}
+
+/// An idle processor ([`idle`]); it wakes when this drops.
+pub(crate) struct Idle;
+
+impl Drop for Idle {
+    fn drop(&mut self) {
+        wake();
+    }
+}
+
+/// End this processor's idle state, if any, and flush what the requests it
+/// counted as acknowledged retired, before any other work: the first thing
+/// an interrupt's handler does, and the end of an idle wait.
+pub(crate) fn wake() {
+    let Some(slot) = crate::engine::host::shootdown().0 else {
+        return;
+    };
+    if PROCESSORS.leave_idle(slot) {
+        service();
+    }
+}
+
 /// Note what this processor does until the returned guard drops.
 fn doing(doing: Doing) -> Option<Restore> {
     let slot = crate::engine::host::shootdown().0?;
@@ -275,12 +309,14 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
     let _counted = Counted(start);
     let _doing = doing(Doing::Retiring);
     for (slot, apic) in PROCESSORS.sharers() {
-        if Some(slot) == me || PROCESSORS.acknowledged(slot) >= generation {
+        // An idle processor flushes as it wakes.
+        if Some(slot) == me || !PROCESSORS.pending(slot, generation) {
             continue;
         }
-        // A processor halted or in a job with the vector open takes it and
-        // sees the request stored above; one with interrupts off takes it
-        // at its next safe point, whether or not this delivery completes.
+        // A processor in a job with the vector open, or halted in a wait
+        // that is not idle, takes it and sees the request stored above; one
+        // with interrupts off takes it at its next safe point, whether or
+        // not this delivery completes.
         // SAFETY: every joined processor's IDT routes the vector to its
         // shootdown handler. No handler this processor may take while it
         // retires (the doorbell's, the shootdown's) writes the ICR.
@@ -350,7 +386,7 @@ pub(crate) fn count() -> u64 {
 fn report_unacknowledged(generation: u64, me: Option<usize>, now: u64, tsc_hz: u64, outcome: &str) {
     for (slot, apic) in PROCESSORS.sharers() {
         let acknowledged = PROCESSORS.acknowledged(slot);
-        if Some(slot) != me && acknowledged < generation {
+        if Some(slot) != me && PROCESSORS.pending(slot, generation) {
             // A processor never marked has been masked since it joined.
             let (doing, since) = PROCESSORS.doing(slot);
             let held_ms = (since != 0).then(|| now.saturating_sub(since) / (tsc_hz / 1000).max(1));

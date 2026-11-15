@@ -558,6 +558,8 @@ fn cr3() -> u64 {
 }
 
 pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_>) {
+    // A processor woken from an idle wait flushes what it skipped first.
+    crate::native_mmio::shootdown::wake();
     if crate::native_irq::dispatch(frame.vector as u8) {
         return;
     }
