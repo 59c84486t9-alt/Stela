@@ -98,6 +98,7 @@ pub(super) fn decide(report: Report) -> Decision {
     );
     let change = match decision {
         Decision::Repair => Some(Change::Request),
+        Decision::Retry => Some(Change::Retry),
         Decision::Continue(change) => change,
         _ => None,
     };

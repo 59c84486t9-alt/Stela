@@ -558,6 +558,8 @@ enum ConsoleRepair {
     #[default]
     Unknown,
     Driving(stela_boot_core::bundle_repair::Driver),
+    /// Keep host input isolated until reset after an automatic repair ends.
+    Closed,
     Off,
 }
 
@@ -605,7 +607,7 @@ impl GuestConsole {
             ));
         }
         if restart {
-            self.repair = ConsoleRepair::Off;
+            self.repair = ConsoleRepair::Closed;
             if unanswered && bundle_repair::unanswered() {
                 output::arguments(format_args!(
                     "BUNDLE REPAIR nothing ran; restarting the PC into one more repair boot\n"
@@ -634,6 +636,9 @@ impl ConsoleSink for GuestConsole {
         let taken = input.taken.load(Ordering::Relaxed);
         let put = input.put.load(Ordering::Acquire);
         if taken == put {
+            return None;
+        }
+        if matches!(self.repair, ConsoleRepair::Closed) {
             return None;
         }
         if matches!(self.repair, ConsoleRepair::Driving(_)) {

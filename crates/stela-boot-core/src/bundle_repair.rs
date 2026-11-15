@@ -112,7 +112,7 @@ pub enum Record {
     Installed,
     /// A repair whose shell never took input asks for one more.
     Retry,
-    /// The loader took [`Record::Retry`]: the second and last attempt.
+    /// The loader took [`Record::Retry`]: the second attempt.
     Retried,
     /// An attempt another Stela version took, or one that names no version
     /// as 0.4.1 and older left: this version repairs once by itself, as a
@@ -313,6 +313,8 @@ pub enum Decision {
     Log,
     /// Record the request and restart into the repair.
     Repair,
+    /// Queue one bounded retry.
+    Retry,
     /// Stop ([`stop_reason`]); `attempted` when the automatic repair
     /// already ran and did not help, otherwise it cannot run.
     StopMissing { attempted: bool },
@@ -339,7 +341,9 @@ pub fn decide(report: Report, boot: Boot, record: Record, persistent: bool) -> D
             | Record::Pending
             | Record::Installed
             | Record::Retry => Decision::StopMissing { attempted: false },
-            Record::Attempted | Record::Retried => Decision::StopMissing { attempted: true },
+            Record::Attempted if persistent => Decision::Retry,
+            Record::Attempted => Decision::StopMissing { attempted: true },
+            Record::Retried => Decision::StopMissing { attempted: true },
         },
     }
 }
@@ -423,9 +427,8 @@ pub fn steps() -> Vec<Step> {
         step("/sbin/mount -P 1".into(), 120),
         step("/usr/libexec/init_data_protection".into(), 180),
         step("/sbin/mount -P 2".into(), 180),
-        step(format!("/bin/test -d {PLUGINS}"), 30),
-        // Each named last, so `-m` gives each its mode.
-        step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
+        // Create the complete hierarchy even if GPUBundles is absent.
+        step(format!("/bin/mkdir -p -m 0755 {directories}"), 60),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),

@@ -20,12 +20,13 @@ fn variables(record: Option<&[u8]>) -> Variables {
 }
 
 #[test]
-fn a_normal_boot_repairs_once_and_then_stops_with_the_manual_remedy() {
+fn a_normal_boot_retries_a_missing_bundle_then_stops_with_the_manual_remedy() {
     let missing = |record| decide(Report::Missing, Boot::Normal, record, true);
     assert_eq!(missing(Record::None), Decision::Repair);
     assert_eq!(missing(Record::Other), Decision::Repair);
+    assert_eq!(missing(Record::Attempted), Decision::Retry);
     assert_eq!(
-        missing(Record::Attempted),
+        decide(Report::Missing, Boot::Normal, Record::Attempted, false),
         Decision::StopMissing { attempted: true }
     );
     // A request the loader did not take means NVRAM was not read for it.
@@ -119,8 +120,7 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
     assert!(!commands.iter().any(|command| command.contains("xattr")));
     let chflags = format!("/usr/bin/chflags restricted {all}");
     assert!(commands.contains(&chflags.as_str()));
-    // Only the restricted flag and the read-only remount after the sync are
-    // optional.
+    // Only restricted flags and the read-only remount are optional.
     let remount = "/sbin/mount -u -r /System/Volumes/Data";
     for step in &steps {
         assert_eq!(
@@ -271,7 +271,7 @@ fn a_failing_required_step_syncs_and_restarts_without_the_rest() {
     assert_eq!(console.lines[3], SYNC_AND_REBOOT);
     let events = driver.take_events();
     assert!(events.contains(&Event::Failed(Failure::Exit {
-        index: 2,
+        index: 3,
         status: 66
     })));
     assert_eq!(events.last(), Some(&Event::Rebooting { repaired: false }));
@@ -368,7 +368,7 @@ fn power_loss_in_the_middle_leaves_no_request_to_repeat() {
     assert_eq!(record, Record::Attempted);
     assert_eq!(
         decide(Report::Missing, Boot::Normal, record, true),
-        Decision::StopMissing { attempted: true }
+        Decision::Retry
     );
     // Once installed by hand, the record goes and a later loss repairs again.
     if let Decision::Continue(Some(change)) = decide(Report::Current, Boot::Normal, record, true) {
@@ -565,7 +565,7 @@ fn an_unanswered_repair_asks_for_one_more_and_stela_repair_rearms_a_finished_one
     assert!(selection.bundle_repair);
     stela_loader::boot_selection::consume(&mut vars, &selection).unwrap();
     assert_eq!(Record::read(&vars), Record::Retried);
-    // A normal boot after the second attempt stops as after the first.
+    // The bounded retry is the last automatic repair attempt.
     let missing = |record| decide(Report::Missing, Boot::Normal, record, true);
     assert_eq!(
         missing(Record::Retried),
@@ -765,7 +765,7 @@ fn an_attempt_another_stela_version_made_lets_this_one_repair_once() {
         assert_eq!(Record::read(&vars), Record::Attempted);
         assert_eq!(
             decide(Report::Missing, Boot::Normal, Record::read(&vars), true),
-            Decision::StopMissing { attempted: true }
+            Decision::Retry
         );
         // An installed plugin forgets the version with the record.
         assert!(Change::Forget.apply(&mut vars).unwrap());
