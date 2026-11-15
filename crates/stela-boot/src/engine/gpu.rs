@@ -2667,8 +2667,8 @@ fn nvkm_report() -> String {
     times + &sizes
 }
 
-/// `\nGPU PERF pstate=… seen=… gpc_mhz=min/mean/max mem_mhz=min/max …`: the
-/// GPU's P-state and clocks as GSP-RM reported them since the last report
+/// `\nGPU PERF pstate=… seen=… rounds=…`: the GPU's P-state as GSP-RM
+/// reported it since the last report
 /// (`stela_drivers::gpu::gsp_perf`), at the first report after GSP starts and
 /// then when they changed. Empty otherwise.
 #[cfg(feature = "nvk")]

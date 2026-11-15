@@ -1,53 +1,43 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 10:17:34 +0000
-Subject: [PATCH] feat(nouveau): sample GSP-RM's P-state and GPC and memory
- clocks every second for the host's log, asking no more for a control RM
- refuses
+Subject: [PATCH] feat(nouveau): sample GSP-RM's P-state every second for the
+ host's log, asking no more if RM refuses the control
 
 ---
- .../drm/nouveau/include/nvkm/core/counts.h    |  27 +++
- .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h |  14 ++
+ .../drm/nouveau/include/nvkm/core/counts.h    |  18 +++
+ .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h |  11 ++
  .../nouveau/nvkm/subdev/gsp/rm/r535/Kbuild    |   1 +
  .../drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c |  10 +-
- .../nvkm/subdev/gsp/rm/r535/nvrm/perf.h       |  56 +++++
- .../nouveau/nvkm/subdev/gsp/rm/r535/perf.c    | 221 ++++++++++++++++++
+ .../nvkm/subdev/gsp/rm/r535/nvrm/perf.h       |  20 +++
+ .../nouveau/nvkm/subdev/gsp/rm/r535/perf.c    | 118 ++++++++++++++++++
  .../gpu/drm/nouveau/nvkm/subdev/gsp/rm/rm.h   |   2 +
- 7 files changed, 328 insertions(+), 3 deletions(-)
+ 7 files changed, 177 insertions(+), 3 deletions(-)
  create mode 100644 drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/nvrm/perf.h
  create mode 100644 drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/perf.c
 
 diff --git a/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
-index 46f9ffaa063a3729b18a74afed06468f87c66acc..7603028428beb3378aec66bcc2fbe0dd3eb2bcfb 100644
+index 46f9ffaa063a3729b18a74afed06468f87c66acc..1e12c9f8774cbedb3f90987e1b01a18f1c16844b 100644
 --- a/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
 +++ b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
-@@ -28,6 +28,33 @@ enum nvkm_count {
+@@ -28,6 +28,24 @@ enum nvkm_count {
  
  extern u64 nvkm_counts[NVKM_COUNTS][3];
  
 +/*
 + * The GPU's performance state as GSP-RM reports it (gsp/rm/r535/perf.c),
 + * since a host last took it: the rounds that asked RM, the current P-state
-+ * as its NV2080_CTRL_PERF_PSTATES bit and every one seen, and RM's GPC and
-+ * memory clock samples. A status is the errno of a control RM refused, or
-+ * -ERANGE for an answer outside its layout's range, after which it is asked
-+ * no more. A host takes the counts with atomic swaps, the minimums back to
-+ * U32_MAX, and reads the rest.
++ * as its NV2080_CTRL_PERF_PSTATES bit and every one seen. The status is the
++ * errno of the control RM refused, or -ERANGE for an answer that is not one
++ * P-state, after which it is asked no more. A host takes the counts with
++ * atomic swaps and reads the rest.
 + */
 +struct nvkm_perf_report {
 +	u32 started;
 +	u32 rounds;
 +	u32 pstate;
 +	u32 pstates;
-+	u32 gpc_samples;
-+	u32 gpc_min_mhz;
-+	u32 gpc_max_mhz;
-+	u32 mem_min_mhz;
-+	u32 mem_max_mhz;
 +	s32 pstate_status;
-+	s32 clk_status;
-+	u32 reserved;
-+	u64 gpc_sum_mhz;
 +};
 +
 +extern struct nvkm_perf_report nvkm_perf;
@@ -56,10 +46,10 @@ index 46f9ffaa063a3729b18a74afed06468f87c66acc..7603028428beb3378aec66bcc2fbe0dd
  nvkm_count_value(enum nvkm_count kind, u64 ns)
  {
 diff --git a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
-index 9abad5a72edb4465d93f296d574929e69d3f67df..334a86ee76d52b87149438f3ce6d7e9b9919af2e 100644
+index 9abad5a72edb4465d93f296d574929e69d3f67df..5a52f502d3da84e665e195d139a1afd3333ca893 100644
 --- a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
 +++ b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
-@@ -219,6 +219,17 @@ struct nvkm_gsp {
+@@ -219,6 +219,14 @@ struct nvkm_gsp {
  	/* The last RPC function RM answered, for the reports at a stop. */
  	u32 last_answered;
  
@@ -69,15 +59,12 @@ index 9abad5a72edb4465d93f296d574929e69d3f67df..334a86ee76d52b87149438f3ce6d7e9b
 +		bool armed;
 +		/* RM refused the control: it is asked no more. */
 +		bool pstate_off;
-+		bool clk_off;
-+		/* RM's clock sample queue position from its last answer. */
-+		u32 super[6];
 +	} perf;
 +
  	/* Internal GSP-RM control handles. */
  	struct {
  		struct nvkm_gsp_client {
-@@ -299,6 +310,9 @@ static inline void
+@@ -299,6 +307,9 @@ static inline void
  nvkm_gsp_stopping(struct nvkm_gsp *gsp)
  {
  	if (gsp) {
@@ -139,10 +126,10 @@ index 5b053d3ae4cd94cac1e46543814cf1dad74ef327..d4bb3c3bceefd0e1d8e838dadf152a07
  
 diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/nvrm/perf.h b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/nvrm/perf.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..91b647f45a5b0e134645e578288cc5a2264fcc9b
+index 0000000000000000000000000000000000000000..978a1f494d9f42a2fe696701dd9dfb60e57c7ded
 --- /dev/null
 +++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/nvrm/perf.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,20 @@
 +/* SPDX-License-Identifier: MIT */
 +
 +/* Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved. */
@@ -152,8 +139,8 @@ index 0000000000000000000000000000000000000000..91b647f45a5b0e134645e578288cc5a2
 +#include <nvrm/nvtypes.h>
 +
 +/*
-+ * Excerpt of RM headers from https://github.com/NVIDIA/open-gpu-kernel-modules/tree/615.78.08.
-+ * GSP-RM refuses a control whose parameter size is not its own.
++ * Excerpt of RM headers from https://github.com/NVIDIA/open-gpu-kernel-modules/tree/615.78.08,
++ * which GSP-RM 570.144 answers in this layout.
 + */
 +
 +#define NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE (0x20802068) /* finn: Evaluated from "(FINN_NV20_SUBDEVICE_0_PERF_INTERFACE_ID << 8) | NV2080_CTRL_PERF_GET_CURRENT_PSTATE_PARAMS_MESSAGE_ID" */
@@ -162,49 +149,13 @@ index 0000000000000000000000000000000000000000..91b647f45a5b0e134645e578288cc5a2
 +    NvU32 currPstate;
 +} NV2080_CTRL_PERF_GET_CURRENT_PSTATE_PARAMS;
 +
-+typedef enum NV2080_CTRL_PMUMON_RETRIEVAL_MODE {
-+    NV2080_CTRL_PMUMON_RETRIEVAL_MODE_ALL_SAMPLES = 0,
-+    NV2080_CTRL_PMUMON_RETRIEVAL_MODE_LATEST_SAMPLE_ONLY = 1,
-+} NV2080_CTRL_PMUMON_RETRIEVAL_MODE;
-+
-+typedef struct NV2080_CTRL_PMUMON_SAMPLE {
-+    NV_DECLARE_ALIGNED(NvU64 timestamp, 8);
-+} NV2080_CTRL_PMUMON_SAMPLE;
-+
-+typedef struct NV2080_CTRL_PMUMON_GET_SAMPLES_SUPER {
-+    NvU32                             tailIndex;
-+    NvU32                             sequenceId;
-+    NvU32                             headIndex;
-+    NvU32                             numSamples;
-+    NvU32                             resetCount;
-+    NV2080_CTRL_PMUMON_RETRIEVAL_MODE retrievalMode;
-+} NV2080_CTRL_PMUMON_GET_SAMPLES_SUPER;
-+
-+#define NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES (0x20801037) /* finn: Evaluated from "(FINN_NV20_SUBDEVICE_0_CLK_INTERFACE_ID << 8) | NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS_MESSAGE_ID" */
-+
-+#define NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE_COUNT    (250U)
-+
-+#define NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE_INVALID  (0xFFFFFFFFU)
-+
-+typedef struct NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE {
-+    NV_DECLARE_ALIGNED(NV2080_CTRL_PMUMON_SAMPLE super, 8);
-+    NvU32 gpcClkFreqKHz;
-+    NvU32 dramClkFreqKHz;
-+    NvU32 nvdClkFreqKHz;
-+    NvU32 activeGpcClkFreqKHz;
-+} NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE;
-+
-+typedef struct NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS {
-+    NV2080_CTRL_PMUMON_GET_SAMPLES_SUPER super;
-+    NV_DECLARE_ALIGNED(NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE samples[NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE_COUNT], 8);
-+} NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS;
 +#endif
 diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/perf.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/perf.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9da4f2aebb
+index 0000000000000000000000000000000000000000..301fb82f7cc270fe5c10cdcf97301a60d024df80
 --- /dev/null
 +++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/perf.c
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,118 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * The GPU's performance state as GSP-RM reports it, for a host to read
@@ -212,11 +163,12 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 + *
 + * Under GSP-RM, RM's own performance policy picks P-states and clocks from
 + * the GPU's load, and nouveau requests none. A work item asks RM every
-+ * R535_GSP_PERF_MS for the current P-state and for the GPC and memory clock
-+ * samples its PMU monitor took since the last ask, and adds them to
-+ * nvkm_perf. A control RM refuses is asked no more: RM's error line names
-+ * it once, and nvkm_perf keeps the errno, so the host reports the state as
-+ * unknown.
++ * R535_GSP_PERF_MS for the current P-state and adds it to nvkm_perf. If RM
++ * refuses the control it is asked no more: RM's error line names it once,
++ * and nvkm_perf keeps the errno, so the host reports the state as unknown.
++ * Clocks are not read: the clock sample control's parameters are not in the
++ * RM headers this tree has for GSP-RM 570.144, and GSP-RM refused the
++ * 615.78.08 layout.
 + */
 +#include <rm/rpc.h>
 +
@@ -226,32 +178,7 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 +
 +#define R535_GSP_PERF_MS 1000
 +
-+struct nvkm_perf_report nvkm_perf = {
-+	.gpc_min_mhz = U32_MAX,
-+	.mem_min_mhz = U32_MAX,
-+};
-+
-+static void
-+r535_gsp_perf_min(u32 *slot, u32 value)
-+{
-+	u32 now = __atomic_load_n(slot, __ATOMIC_RELAXED);
-+
-+	while (value < now &&
-+	       !__atomic_compare_exchange_n(slot, &now, value, true,
-+					    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-+		;
-+}
-+
-+static void
-+r535_gsp_perf_max(u32 *slot, u32 value)
-+{
-+	u32 now = __atomic_load_n(slot, __ATOMIC_RELAXED);
-+
-+	while (value > now &&
-+	       !__atomic_compare_exchange_n(slot, &now, value, true,
-+					    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-+		;
-+}
++struct nvkm_perf_report nvkm_perf;
 +
 +/* A control RM refused, or answered implausibly: asked no more. */
 +static void
@@ -259,20 +186,6 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 +{
 +	*off = true;
 +	__atomic_store_n(status, ret, __ATOMIC_RELAXED);
-+}
-+
-+/* A clock sample in kHz, or 0 when RM has none for the domain. */
-+static int
-+r535_gsp_perf_mhz(u32 khz, u32 *mhz)
-+{
-+	*mhz = 0;
-+	if (khz == NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE_INVALID || !khz)
-+		return 0;
-+	/* Past 20 GHz the layout is not the one RM answers with. */
-+	if (khz > 20000000)
-+		return -ERANGE;
-+	*mhz = DIV_ROUND_CLOSEST(khz, 1000);
-+	return 0;
 +}
 +
 +/*
@@ -326,67 +239,6 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 +	__atomic_fetch_or(&nvkm_perf.pstates, pstate, __ATOMIC_RELAXED);
 +}
 +
-+/* Adds RM's clock samples, all of them plausible, to nvkm_perf. */
-+static void
-+r535_gsp_perf_add(const NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS *ctrl)
-+{
-+	u32 i, gpc, mem;
-+
-+	for (i = 0; i < ctrl->super.numSamples; i++) {
-+		r535_gsp_perf_mhz(ctrl->samples[i].gpcClkFreqKHz, &gpc);
-+		r535_gsp_perf_mhz(ctrl->samples[i].dramClkFreqKHz, &mem);
-+		if (gpc) {
-+			r535_gsp_perf_min(&nvkm_perf.gpc_min_mhz, gpc);
-+			r535_gsp_perf_max(&nvkm_perf.gpc_max_mhz, gpc);
-+			__atomic_fetch_add(&nvkm_perf.gpc_sum_mhz, gpc, __ATOMIC_RELAXED);
-+			__atomic_fetch_add(&nvkm_perf.gpc_samples, 1, __ATOMIC_RELAXED);
-+		}
-+		if (mem) {
-+			r535_gsp_perf_min(&nvkm_perf.mem_min_mhz, mem);
-+			r535_gsp_perf_max(&nvkm_perf.mem_max_mhz, mem);
-+		}
-+	}
-+}
-+
-+static void
-+r535_gsp_perf_clocks(struct nvkm_gsp *gsp)
-+{
-+	struct nvkm_gsp_object *subdevice = &gsp->internal.device.subdevice;
-+	NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS *ctrl;
-+	u32 count, i, mhz;
-+	int ret;
-+
-+	ctrl = nvkm_gsp_rm_ctrl_get(subdevice, NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES,
-+				    sizeof(*ctrl));
-+	if (IS_ERR(ctrl)) {
-+		r535_gsp_perf_refused(&gsp->perf.clk_off, &nvkm_perf.clk_status, PTR_ERR(ctrl));
-+		return;
-+	}
-+	/* RM's queue position from the last answer: samples since then. */
-+	BUILD_BUG_ON(sizeof(gsp->perf.super) != sizeof(ctrl->super));
-+	memcpy(&ctrl->super, gsp->perf.super, sizeof(ctrl->super));
-+	ctrl->super.retrievalMode = NV2080_CTRL_PMUMON_RETRIEVAL_MODE_ALL_SAMPLES;
-+	if (r535_gsp_perf_push(subdevice, (void **)&ctrl, sizeof(*ctrl),
-+			       &gsp->perf.clk_off, &nvkm_perf.clk_status))
-+		return;
-+
-+	/* Every sample plausible, or the answer is not in this layout. */
-+	count = ctrl->super.numSamples;
-+	ret = count > NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_SAMPLE_COUNT ? -ERANGE : 0;
-+	for (i = 0; !ret && i < count; i++) {
-+		ret = r535_gsp_perf_mhz(ctrl->samples[i].gpcClkFreqKHz, &mhz);
-+		if (!ret)
-+			ret = r535_gsp_perf_mhz(ctrl->samples[i].dramClkFreqKHz, &mhz);
-+	}
-+	if (!ret) {
-+		memcpy(gsp->perf.super, &ctrl->super, sizeof(gsp->perf.super));
-+		r535_gsp_perf_add(ctrl);
-+	}
-+	nvkm_gsp_rm_ctrl_done(subdevice, ctrl);
-+	if (ret)
-+		r535_gsp_perf_refused(&gsp->perf.clk_off, &nvkm_perf.clk_status, ret);
-+}
-+
 +static void
 +r535_gsp_perf_work(struct work_struct *work)
 +{
@@ -396,13 +248,10 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 +	if (READ_ONCE(gsp->stopping) || READ_ONCE(gsp->dead) || !gsp->running)
 +		return;
 +
-+	if (!gsp->perf.pstate_off)
-+		r535_gsp_perf_pstate(gsp);
-+	if (!gsp->perf.clk_off)
-+		r535_gsp_perf_clocks(gsp);
++	r535_gsp_perf_pstate(gsp);
 +	__atomic_fetch_add(&nvkm_perf.rounds, 1, __ATOMIC_RELAXED);
 +
-+	if (!gsp->perf.pstate_off || !gsp->perf.clk_off)
++	if (!gsp->perf.pstate_off)
 +		schedule_delayed_work(&gsp->perf.work, msecs_to_jiffies(R535_GSP_PERF_MS));
 +}
 +
@@ -414,7 +263,6 @@ index 0000000000000000000000000000000000000000..55fbe24f90ac6fcb2b436b55b1b00e9d
 +		INIT_DELAYED_WORK(&gsp->perf.work, r535_gsp_perf_work);
 +		gsp->perf.armed = true;
 +	}
-+	memset(gsp->perf.super, 0, sizeof(gsp->perf.super));
 +	__atomic_store_n(&nvkm_perf.started, 1, __ATOMIC_RELAXED);
 +	schedule_delayed_work(&gsp->perf.work, 0);
 +}
