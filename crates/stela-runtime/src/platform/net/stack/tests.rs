@@ -592,6 +592,74 @@ fn a_name_keeps_its_address_and_falls_back_to_it_when_a_lookup_fails() {
     assert_eq!(s.resolve_now("10.0.2.2"), Ok(SERVER_IP.into()));
 }
 
+/// smoltcp's resolver asks each server for 10 s and moves on at a poll after
+/// that. A lookup on a link that signals sleeps until smoltcp's next resend,
+/// 15 s after the first query, so a 15 s bound on the whole query ended it
+/// before the second server was asked. Each server now has its turn, and
+/// the lookup still ends within one turn per server.
+#[test]
+fn a_lookup_no_server_answers_asks_every_server_in_turn() {
+    use smoltcp::socket::udp;
+    /// The LAN's clock, whose sleeps jump to the time asked for.
+    #[derive(Clone)]
+    struct Jumping(TestClock);
+    impl Clock for Jumping {
+        fn now_us(&self) -> Result<u64, ClockError> {
+            self.0.now_us()
+        }
+        fn sleep(&self, until_us: u64) -> Result<(), ClockError> {
+            self.0.0.set(until_us.max(self.0.0.get()));
+            Ok(())
+        }
+    }
+    struct Signalling(Lan);
+    impl Link for Signalling {
+        fn mac(&self) -> Mac {
+            self.0.mac()
+        }
+        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+            self.0.transmit(frame)
+        }
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+            self.0.receive()
+        }
+        fn signals(&self) -> bool {
+            true
+        }
+    }
+    let clock = TestClock::default();
+    let mut lan = Lan::new(0, clock.clone());
+    // Three servers on the LAN that take every query and answer none.
+    let servers = [3, 4, 5].map(|host| Ipv4::new(10, 0, 2, host));
+    let listeners = servers.map(|server| {
+        lan.iface
+            .update_ip_addrs(|addresses| addresses.push(IpCidr::new(server.into(), 24)).unwrap());
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0; 8192]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 1], vec![0; 512]),
+        );
+        socket.bind((IpAddress::from(server), 53)).unwrap();
+        lan.sockets.add(socket)
+    });
+    let mut s = Stack::new(Signalling(lan), Jumping(clock), 7).unwrap();
+    s.set_config(Config {
+        address: Ipv4Cidr::new(CLIENT_IP, 24),
+        router: None,
+        dns: servers.to_vec(),
+    })
+    .unwrap();
+    let started = s.now().unwrap();
+    assert_eq!(s.resolve_now("cdn.example"), Err(NetError::Timeout("DNS")));
+    let took = s.now().unwrap() - started;
+    assert!(took <= 3 * DNS_SERVER_US + 1_000_000, "{took}");
+    let lan = &mut s.phy.link.0;
+    lan.step();
+    for (server, listener) in servers.iter().zip(listeners) {
+        let socket = lan.sockets.get_mut::<udp::Socket>(listener);
+        assert!(socket.can_recv(), "{server} was never asked");
+    }
+}
+
 #[test]
 fn raw_stream_keeps_partial_dynamic_writes_and_opaque_replies() {
     let clock = TestClock::default();

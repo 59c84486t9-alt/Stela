@@ -38,8 +38,14 @@ pub struct Config {
 /// seconds lost every request there. Other systems' clients ask for a
 /// minute or longer.
 const DHCP_WAIT_US: u64 = 60_000_000;
-/// smoltcp's resolver retries each server within this.
+/// How long a lookup waits for an address family and a DNS server before
+/// it asks one.
 const DNS_WAIT_US: u64 = 15_000_000;
+/// One server's turn at a query. smoltcp's resolver asks a server for 10 s
+/// (its `RETRANSMIT_TIMEOUT`), then moves on to the next at its first poll
+/// past that, which a lookup makes when this turn ends. It keeps at most
+/// `DNS_MAX_SERVER_COUNT` servers, so a query takes at most that many turns.
+const DNS_SERVER_US: u64 = 11_000_000;
 /// How long a name's address is used before it is looked up again.
 const RESOLVED_US: u64 = 300_000_000;
 /// A POST, from connection to the response's end.
@@ -203,6 +209,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             buffer: 0,
             raw: false,
             query: None,
+            asked: 0,
             ipv4_only: false,
             deadline: 0,
         };
@@ -229,9 +236,12 @@ struct Lookup {
     /// An opaque stream, which no idle time ends.
     raw: bool,
     query: Option<(dns::QueryHandle, DnsQueryType)>,
+    /// The servers whose turn at the query has begun ([`DNS_SERVER_US`]).
+    asked: usize,
     /// An IPv6 lookup failed, so only IPv4 is asked.
     ipv4_only: bool,
-    /// When the address family, server or answer being waited for is late.
+    /// When the address family or server being waited for is late, or the
+    /// current server's turn at the query ends.
     deadline: u64,
 }
 
@@ -585,9 +595,14 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 .start_query(self.iface.context(), &lookup.name, kind)
                 .map_err(|error| NetError::Dns(alloc::format!("{}: {error:?}", lookup.name)))?;
             lookup.query = Some((query, kind));
-            lookup.deadline = now.saturating_add(DNS_WAIT_US);
+            lookup.asked = 1;
+            lookup.deadline = now.saturating_add(DNS_SERVER_US);
             return Ok(None);
         };
+        let servers = self
+            .dns_servers
+            .len()
+            .min(smoltcp::config::DNS_MAX_SERVER_COUNT);
         let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
         let failure =
             match socket.get_query_result(query) {
@@ -598,6 +613,13 @@ impl<L: Link, C: Clock> Stack<L, C> {
                     });
                 }
                 Err(dns::GetQueryResultError::Pending) if now < lookup.deadline => return Ok(None),
+                // The next server's turn: smoltcp moves to it at the first
+                // poll past the last one's 10 s, which this wake makes.
+                Err(dns::GetQueryResultError::Pending) if lookup.asked < servers => {
+                    lookup.asked += 1;
+                    lookup.deadline = now.saturating_add(DNS_SERVER_US);
+                    return Ok(None);
+                }
                 Err(dns::GetQueryResultError::Pending) => {
                     socket.cancel_query(query);
                     NetError::Timeout("DNS")
@@ -641,6 +663,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 buffer,
                 raw,
                 query: None,
+                asked: 0,
                 ipv4_only: false,
                 deadline: 0,
             }),
