@@ -482,7 +482,13 @@ unsafe extern "C" fn wait_semaphore(
     if take() {
         return AE_OK;
     }
-    if timeout == WAIT_FOREVER && provider.sci.borrow().is_none() {
+    if timeout == 0 {
+        return AE_TIME;
+    }
+    // Only ACPICA's SCI work, on this one processor, signals a semaphore
+    // while AML waits: without it no wait, however long, can end, and one
+    // of 0xFFFE ms (an Acquire or Wait short of forever) would only spin.
+    if provider.sci.borrow().is_none() {
         provider.report(
             Gap::Wait,
             format_args!("semaphore wait has no interrupt progress source"),
