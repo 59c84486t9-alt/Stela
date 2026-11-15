@@ -187,6 +187,13 @@ unsafe impl NativeServices for Services<'_> {
         use stela_drivers::bus::pci::requester::preparation::PreparingRequester;
         let role = self.remappers.function_role(address);
         if role != FunctionRole::Physical {
+            // The defect, on this function or on one whose VF it could be.
+            if let Some(issue) = self.remappers.role_refusal(address) {
+                output::arguments(format_args!(
+                    "UNSUPPORTED Stela PCI function {address}: its role is unverified, as the \
+                     PCI census found {issue:?}\n"
+                ));
+            }
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
         }
         let prepared = match self.remappers.unremapped_preparation(self.mmio, address) {

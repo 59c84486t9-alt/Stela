@@ -73,14 +73,10 @@ impl Inventory {
         inventory.present.dedup();
         let mut virtuals = BTreeMap::new();
         let mut sources = Vec::new();
+        // Every function is examined, whatever an earlier one showed: an
+        // issue refuses only what it reaches ([`Inventory::refusal`]), and
+        // each PF's VFs must be known for the functions it does not reach.
         for &address in &inventory.present {
-            if inventory
-                .issues
-                .iter()
-                .any(|issue| issue.address().segment == address.segment)
-            {
-                continue;
-            }
             match function(address, &mut read32) {
                 Err(Issue::Config { error, .. }) => return Err(error),
                 Err(issue) => inventory.issues.push(issue),
@@ -90,7 +86,6 @@ impl Inventory {
                     for vf in vfs {
                         if virtuals.insert(vf, address).is_some() {
                             inventory.issues.push(Issue::Collision(vf));
-                            break;
                         }
                     }
                 }
@@ -150,16 +145,14 @@ impl Inventory {
         self.virtuals.extend(fresh.virtuals);
         self.issues.extend(fresh.issues);
     }
-    /// Refuse this segment after its owned topology observation failed.
+    /// Refuse the subtree of `address`, a bridge, after its owned topology
+    /// observation failed; the whole segment where its buses are unknown.
     pub fn invalidate_topology(&mut self, address: Address) {
         self.issues.push(Issue::Topology(address));
     }
-    pub fn role(&self, address: Address) -> FunctionRole {
-        if self
-            .issues
-            .iter()
-            .any(|issue| issue.address().segment == address.segment)
-        {
+    /// The function's role, given the bridges of the present topology.
+    pub fn role(&self, address: Address, bridges: &[Bridge]) -> FunctionRole {
+        if self.refusal(address, bridges).is_some() {
             FunctionRole::Unverified
         } else if self.virtuals.contains_key(&address) {
             FunctionRole::Virtual
@@ -169,8 +162,139 @@ impl Inventory {
             FunctionRole::Unverified
         }
     }
+    /// The first issue that reaches the function at `address`, which then
+    /// stays unverified. An issue concerns one function, whose own role and
+    /// SR-IOV state it leaves unknown: that function, and every function
+    /// that could be one of its VFs, which by the SR-IOV routing rules have
+    /// a higher requester ID and a bus that configuration requests route to
+    /// the same link as the function's own ([`Routes`]); a collision, every
+    /// function there; a failed bridge observation, the bridge's subtree.
+    /// Where the bridges do not form one tree of nested bus ranges, any
+    /// issue reaches its whole segment, as before.
+    pub fn refusal(&self, address: Address, bridges: &[Bridge]) -> Option<Issue> {
+        let routes = Routes::of(address.segment, bridges);
+        self.issues.iter().copied().find(|issue| {
+            reaches(*issue, address, routes.as_ref(), bridges)
+                // An issue at a VF puts its PF's SR-IOV state in doubt too.
+                || self.virtuals.get(&issue.address()).is_some_and(|&pf| {
+                    reaches(Issue::Sriov(pf), address, routes.as_ref(), bridges)
+                })
+        })
+    }
     pub fn issues(&self) -> &[Issue] {
         &self.issues
+    }
+}
+
+/// A PCI-to-PCI bridge of the present topology and the buses it routes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bridge {
+    pub address: Address,
+    pub secondary: u8,
+    pub subordinate: u8,
+}
+impl Bridge {
+    fn routes(&self, bus: u8) -> bool {
+        (self.secondary..=self.subordinate).contains(&bus)
+    }
+    fn width(&self) -> u8 {
+        self.subordinate - self.secondary
+    }
+}
+
+/// Where a segment's configuration requests go: each bus to the innermost
+/// bridge whose range holds it, or to the root complex. Two functions whose
+/// buses go to the same place share a link: a PF's VFs, whose requester IDs
+/// are the PF's plus its First VF Offset and strides, can only be on buses
+/// that route to the PF's own link, or configuration could not reach them.
+struct Routes<'a> {
+    bridges: alloc::vec::Vec<&'a Bridge>,
+}
+impl<'a> Routes<'a> {
+    /// The segment's routes, or None where its bridges do not form a tree:
+    /// a range that holds its own bridge's bus, ranges that overlap without
+    /// nesting, or a range outside the one its bridge's bus is in.
+    fn of(segment: u16, bridges: &'a [Bridge]) -> Option<Self> {
+        let routes = Self {
+            bridges: bridges
+                .iter()
+                .filter(|bridge| bridge.address.segment == segment)
+                .collect(),
+        };
+        for (index, bridge) in routes.bridges.iter().enumerate() {
+            if bridge.subordinate < bridge.secondary || bridge.routes(bridge.address.bus) {
+                return None;
+            }
+            for other in &routes.bridges[index + 1..] {
+                let disjoint =
+                    bridge.subordinate < other.secondary || other.subordinate < bridge.secondary;
+                let nested = (bridge.routes(other.secondary) && bridge.routes(other.subordinate))
+                    || (other.routes(bridge.secondary) && other.routes(bridge.subordinate));
+                if !disjoint && (!nested || bridge.width() == other.width()) {
+                    return None;
+                }
+            }
+            if let Some(parent) = routes.link(bridge.address.bus)
+                && !(parent.routes(bridge.secondary) && parent.routes(bridge.subordinate))
+            {
+                return None;
+            }
+        }
+        Some(routes)
+    }
+    /// The innermost bridge that routes `bus`, None for the root complex.
+    fn link(&self, bus: u8) -> Option<&'a Bridge> {
+        self.bridges
+            .iter()
+            .copied()
+            .filter(|bridge| bridge.routes(bus))
+            .min_by_key(|bridge| bridge.width())
+    }
+    fn same_link(&self, a: u8, b: u8) -> bool {
+        self.link(a).map(|bridge| bridge.address) == self.link(b).map(|bridge| bridge.address)
+    }
+}
+
+fn rid(address: Address) -> u16 {
+    u16::from(address.bus) << 8 | u16::from(address.device) << 3 | u16::from(address.function)
+}
+
+/// Whether the function at `address` could be a VF of the one at `pf`.
+fn follows(pf: Address, address: Address, routes: &Routes<'_>) -> bool {
+    rid(address) > rid(pf) && routes.same_link(pf.bus, address.bus)
+}
+
+/// Whether `issue` leaves the function at `address` unverified
+/// ([`Inventory::refusal`]); `routes` None refuses the whole segment.
+fn reaches(
+    issue: Issue,
+    address: Address,
+    routes: Option<&Routes<'_>>,
+    bridges: &[Bridge],
+) -> bool {
+    let at = issue.address();
+    if at.segment != address.segment {
+        return false;
+    }
+    if at == address {
+        return true;
+    }
+    let Some(routes) = routes else {
+        return true;
+    };
+    match issue {
+        Issue::Topology(bridge) => match bridges.iter().find(|known| known.address == bridge) {
+            Some(known) => known.routes(address.bus),
+            None => true,
+        },
+        // Two PFs claim one VF: either one's VFs, and both PFs, are on its
+        // link, and which function is whose is unknown.
+        Issue::Collision(vf) => routes.same_link(vf.bus, address.bus),
+        // The function's own SR-IOV state is unknown or refused: any VF it
+        // has follows it on its link.
+        Issue::Config { .. } | Issue::Read { .. } | Issue::Capability { .. } | Issue::Sriov(_) => {
+            follows(at, address, routes)
+        }
     }
 }
 
@@ -362,13 +486,13 @@ mod tests {
         ]);
         let inventory = capture(&spaces);
         assert!(inventory.issues().is_empty());
-        assert_eq!(inventory.role(PF), FunctionRole::Physical);
+        assert_eq!(inventory.role(PF, &[]), FunctionRole::Physical);
         for rid in [0x100, 0x102] {
-            assert_eq!(inventory.role(at(0, rid)), FunctionRole::Virtual);
+            assert_eq!(inventory.role(at(0, rid), &[]), FunctionRole::Virtual);
         }
-        assert_eq!(inventory.role(at(0, 0x101)), FunctionRole::Physical);
-        assert_eq!(inventory.role(at(3, 0x100)), FunctionRole::Physical);
-        assert_eq!(inventory.role(at(0, 0x200)), FunctionRole::Unverified);
+        assert_eq!(inventory.role(at(0, 0x101), &[]), FunctionRole::Physical);
+        assert_eq!(inventory.role(at(3, 0x100), &[]), FunctionRole::Physical);
+        assert_eq!(inventory.role(at(0, 0x200), &[]), FunctionRole::Unverified);
     }
     /// Linux `pci_cfg_space_size`: a conventional function has no extended
     /// space. An Intel PCH SMBus read at 0x100 through ECAM answers with its
@@ -392,18 +516,21 @@ mod tests {
         let spaces = BTreeMap::from([(PF, smbus), (gpu, express)]);
         let inventory = capture(&spaces);
         assert!(inventory.issues().is_empty(), "{:?}", inventory.issues());
-        assert_eq!(inventory.role(PF), FunctionRole::Physical);
-        assert_eq!(inventory.role(gpu), FunctionRole::Physical);
+        assert_eq!(inventory.role(PF, &[]), FunctionRole::Physical);
+        assert_eq!(inventory.role(gpu, &[]), FunctionRole::Physical);
     }
     #[test]
     fn disabled_vfs_do_not_reclassify_an_ordinary_present_function() {
         let mut source = pf(2, 8, 2);
         source[0x108 / 4] = 0;
         let spaces = BTreeMap::from([(PF, source), (at(0, 0x100), plain())]);
-        assert_eq!(capture(&spaces).role(at(0, 0x100)), FunctionRole::Physical);
+        assert_eq!(
+            capture(&spaces).role(at(0, 0x100), &[]),
+            FunctionRole::Physical
+        );
     }
     #[test]
-    fn malformed_or_overflowing_enabled_vf_geometry_invalidates_the_segment() {
+    fn malformed_or_overflowing_enabled_vf_geometry_refuses_what_could_be_its_vfs() {
         for (source, words) in [
             (PF, pf(0, 8, 1)),
             (PF, pf(17, 8, 1)),
@@ -414,12 +541,21 @@ mod tests {
             let spaces = BTreeMap::from([
                 (source, words),
                 (at(0, 0x100), plain()),
+                (at(0, 0xff08), plain()),
                 (at(1, 0x100), plain()),
             ]);
             let inventory = capture(&spaces);
             assert!(!inventory.issues().is_empty());
-            assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Unverified);
-            assert_eq!(inventory.role(at(1, 0x100)), FunctionRole::Physical);
+            assert_eq!(inventory.role(source, &[]), FunctionRole::Unverified);
+            assert_eq!(inventory.role(at(0, 0xff08), &[]), FunctionRole::Unverified);
+            assert_eq!(inventory.role(at(1, 0x100), &[]), FunctionRole::Physical);
+            // A VF's requester ID is its PF's plus the offset and strides.
+            let before = if source == PF {
+                FunctionRole::Unverified
+            } else {
+                FunctionRole::Physical
+            };
+            assert_eq!(inventory.role(at(0, 0x100), &[]), before);
         }
     }
     #[test]
@@ -434,7 +570,7 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Unverified);
+        assert_eq!(inventory.role(at(0, 0x100), &[]), FunctionRole::Unverified);
     }
     #[test]
     fn overlapping_pf_vf_ranges_and_nested_pf_capabilities_are_refused() {
@@ -446,10 +582,10 @@ mod tests {
                 .any(|issue| matches!(issue, Issue::Collision(_)))
         );
         let spaces = BTreeMap::from([(PF, pf(1, 8, 1)), (at(0, 0x100), pf(1, 8, 1))]);
-        assert_eq!(capture(&spaces).role(PF), FunctionRole::Unverified);
+        assert_eq!(capture(&spaces).role(PF, &[]), FunctionRole::Unverified);
     }
     #[test]
-    fn changing_numvfs_during_capture_refuses_the_whole_segment() {
+    fn changing_numvfs_during_capture_refuses_the_pf() {
         let words = pf(2, 8, 1);
         let mut samples = 0;
         let inventory = Inventory::capture(&[PF], |_, offset| {
@@ -460,7 +596,7 @@ mod tests {
             Ok(Some(words[usize::from(offset) / 4]))
         })
         .unwrap();
-        assert_eq!(inventory.role(PF), FunctionRole::Unverified);
+        assert_eq!(inventory.role(PF, &[]), FunctionRole::Unverified);
     }
     #[test]
     fn duplicate_and_unsupported_sriov_refuse_classification() {
@@ -471,14 +607,14 @@ mod tests {
         unknown[0x100 / 4] = 0x20010;
         for words in [duplicate, unknown] {
             assert_eq!(
-                capture(&BTreeMap::from([(PF, words)])).role(PF),
+                capture(&BTreeMap::from([(PF, words)])).role(PF, &[]),
                 FunctionRole::Unverified
             );
         }
         let mut conventional = plain();
         conventional[0x100 / 4] = u32::MAX;
         assert_eq!(
-            capture(&BTreeMap::from([(PF, conventional)])).role(PF),
+            capture(&BTreeMap::from([(PF, conventional)])).role(PF, &[]),
             FunctionRole::Physical
         );
     }
@@ -498,7 +634,7 @@ mod tests {
         for words in [cycle, unaligned, vendor] {
             let inventory = capture(&BTreeMap::from([(PF, words)]));
             assert!(inventory.issues().is_empty());
-            assert_eq!(inventory.role(PF), FunctionRole::Physical);
+            assert_eq!(inventory.role(PF, &[]), FunctionRole::Physical);
         }
     }
 
@@ -511,10 +647,10 @@ mod tests {
             (at(3, 0x100), plain()),
         ])));
         assert!(inventory.issues().is_empty());
-        assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Virtual);
-        assert_eq!(inventory.role(at(0, 0x102)), FunctionRole::Virtual);
-        assert_eq!(inventory.role(at(3, 0x100)), FunctionRole::Physical);
-        assert_eq!(inventory.role(PF), FunctionRole::Physical);
+        assert_eq!(inventory.role(at(0, 0x100), &[]), FunctionRole::Virtual);
+        assert_eq!(inventory.role(at(0, 0x102), &[]), FunctionRole::Virtual);
+        assert_eq!(inventory.role(at(3, 0x100), &[]), FunctionRole::Physical);
+        assert_eq!(inventory.role(PF, &[]), FunctionRole::Physical);
     }
     #[test]
     fn repeated_unclaimed_observations_preserve_the_same_pf_epoch() {
@@ -522,8 +658,8 @@ mod tests {
         let mut inventory = capture(&spaces);
         inventory.extend(capture(&spaces));
         assert!(inventory.issues().is_empty());
-        assert_eq!(inventory.role(PF), FunctionRole::Physical);
-        assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Virtual);
+        assert_eq!(inventory.role(PF, &[]), FunctionRole::Physical);
+        assert_eq!(inventory.role(at(0, 0x100), &[]), FunctionRole::Virtual);
     }
     #[test]
     fn arrival_cannot_change_an_existing_pf_or_reclassify_an_owned_physical_function() {
@@ -536,20 +672,233 @@ mod tests {
             let mut inventory = capture(&BTreeMap::from([(PF, pf(2, 8, 2))]));
             inventory.extend(capture(&fresh));
             assert!(!inventory.issues().is_empty());
-            assert_eq!(inventory.role(PF), FunctionRole::Unverified);
+            assert_eq!(inventory.role(PF, &[]), FunctionRole::Unverified);
         }
         let mut inventory = capture(&BTreeMap::from([(at(0, 0x100), plain())]));
         inventory.extend(capture(&BTreeMap::from([(PF, pf(1, 8, 1))])));
-        assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Unverified);
+        assert_eq!(inventory.role(at(0, 0x100), &[]), FunctionRole::Unverified);
     }
 
     #[test]
-    fn an_unready_pf_makes_the_segment_incomplete_instead_of_certifying_other_functions() {
+    fn an_unready_pf_refuses_the_functions_after_it_on_its_link() {
         for vendor in [0, 1, u16::MAX] {
             let mut words = plain();
             words[0] = u32::from(vendor);
             let inventory = capture(&BTreeMap::from([(PF, words), (at(0, 0x100), plain())]));
-            assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Unverified);
+            assert_eq!(inventory.role(at(0, 0x100), &[]), FunctionRole::Unverified);
         }
+    }
+
+    fn bridge(rid: u16, secondary: u8, subordinate: u8) -> Bridge {
+        Bridge {
+            address: at(0, rid),
+            secondary,
+            subordinate,
+        }
+    }
+
+    /// A refused SR-IOV capability on a root-complex function (as on a PCH
+    /// xHCI at 00:14.0) leaves the GPU behind a root port, the integrated
+    /// graphics before it and every other link verified: only what could be
+    /// its VFs is refused.
+    #[test]
+    fn a_defect_on_one_function_refuses_only_what_could_be_its_vfs() {
+        let mut xhci = pf(2, 8, 1);
+        xhci[0x100 / 4] |= 0x140 << 20;
+        xhci[0x140 / 4] = 0x10010;
+        let xhci_at = at(0, 0xa0);
+        let gpu = at(0, 0x100);
+        let mut gpu_space = pf(2, 8, 1);
+        gpu_space[0x108 / 4] = 0;
+        let spaces = BTreeMap::from([
+            (at(0, 0x10), plain()),
+            (xhci_at, xhci),
+            (at(0, 0xfb), plain()),
+            (gpu, gpu_space),
+            (at(0, 0x101), plain()),
+            (at(0, 0x200), plain()),
+        ]);
+        let inventory = capture(&spaces);
+        assert!(
+            inventory.issues() == [Issue::Sriov(xhci_at)],
+            "{:?}",
+            inventory.issues()
+        );
+        let bridges = [bridge(0x08, 1, 1), bridge(0xe0, 2, 2)];
+        assert_eq!(inventory.role(xhci_at, &bridges), FunctionRole::Unverified);
+        assert_eq!(
+            inventory.refusal(xhci_at, &bridges),
+            Some(Issue::Sriov(xhci_at))
+        );
+        // On the root complex's link after the xHCI: a VF of it could be there.
+        assert_eq!(
+            inventory.role(at(0, 0xfb), &bridges),
+            FunctionRole::Unverified
+        );
+        // Before it on the same link, and on other links: never its VFs.
+        assert_eq!(
+            inventory.role(at(0, 0x10), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(inventory.role(gpu, &bridges), FunctionRole::Physical);
+        assert_eq!(inventory.refusal(gpu, &bridges), None);
+        assert_eq!(
+            inventory.role(at(0, 0x101), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x200), &bridges),
+            FunctionRole::Physical
+        );
+        // Without the bridges' routes the whole root link is in doubt.
+        assert_eq!(inventory.role(gpu, &[]), FunctionRole::Unverified);
+    }
+
+    /// A defect behind a root port stays on that port's link; a PF examined
+    /// after it still has its VFs classified.
+    #[test]
+    fn a_defect_behind_a_bridge_stays_on_its_link_and_later_pfs_are_still_classified() {
+        let mut unready = plain();
+        unready[0] = 0xffff_0000 | 1;
+        let spaces = BTreeMap::from([
+            (at(0, 0x100), unready),
+            (at(0, 0x101), plain()),
+            (at(0, 0x200), pf(2, 8, 2)),
+            (at(0, 0x208), plain()),
+            (at(0, 0x20a), plain()),
+            (at(0, 0x300), plain()),
+            (PF, plain()),
+        ]);
+        let inventory = capture(&spaces);
+        let bridges = [bridge(0x08, 1, 1), bridge(0xe0, 2, 3)];
+        assert_eq!(
+            inventory.role(at(0, 0x100), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x101), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x200), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x208), &bridges),
+            FunctionRole::Virtual
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x20a), &bridges),
+            FunctionRole::Virtual
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x300), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(inventory.role(PF, &bridges), FunctionRole::Physical);
+    }
+
+    /// Bridges whose ranges do not nest cannot say where a VF could be:
+    /// any issue then refuses its whole segment.
+    #[test]
+    fn bridges_that_do_not_form_a_tree_refuse_the_whole_segment() {
+        let mut unready = plain();
+        unready[0] = 0xffff_0000 | 1;
+        let spaces = BTreeMap::from([
+            (at(0, 0x100), unready),
+            (at(0, 0x300), plain()),
+            (at(1, 0x300), plain()),
+        ]);
+        let inventory = capture(&spaces);
+        let good = [bridge(0x08, 1, 1), bridge(0x10, 2, 4)];
+        assert_eq!(inventory.role(at(0, 0x300), &good), FunctionRole::Physical);
+        for bad in [
+            // Overlapping without nesting.
+            [bridge(0x08, 1, 3), bridge(0x10, 2, 4)],
+            // A range holding its own bridge's bus.
+            [bridge(0x08, 1, 1), bridge(0x10, 0, 4)],
+            // A bridge on bus 1 routing buses outside its parent's range.
+            [bridge(0x08, 1, 1), bridge(0x108, 3, 4)],
+            // Two bridges routing the same buses.
+            [bridge(0x08, 1, 4), bridge(0x10, 1, 4)],
+        ] {
+            assert_eq!(inventory.role(at(0, 0x300), &bad), FunctionRole::Unverified);
+            assert_eq!(inventory.role(at(1, 0x300), &bad), FunctionRole::Physical);
+        }
+    }
+
+    #[test]
+    fn a_failed_bridge_observation_refuses_its_subtree_or_the_segment_when_unknown() {
+        let spaces = BTreeMap::from([
+            (at(0, 0x10), plain()),
+            (at(0, 0x100), plain()),
+            (at(0, 0x200), plain()),
+            (at(0, 0x300), plain()),
+        ]);
+        let mut inventory = capture(&spaces);
+        let bridges = [bridge(0x08, 1, 2), bridge(0x108, 2, 2), bridge(0xe0, 3, 3)];
+        inventory.invalidate_topology(at(0, 0x08));
+        assert_eq!(
+            inventory.role(at(0, 0x100), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x200), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x10), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x300), &bridges),
+            FunctionRole::Physical
+        );
+        assert_eq!(
+            inventory.refusal(at(0, 0x200), &bridges),
+            Some(Issue::Topology(at(0, 0x08)))
+        );
+        inventory.invalidate_topology(at(0, 0x30));
+        assert_eq!(
+            inventory.role(at(0, 0x300), &bridges),
+            FunctionRole::Unverified
+        );
+    }
+
+    #[test]
+    fn a_collision_refuses_its_link_both_ways_and_a_nested_pf_refuses_its_owner() {
+        let spaces = BTreeMap::from([
+            (at(0, 0x200), pf(2, 0x10, 1)),
+            (at(0, 0x208), pf(2, 0x8, 1)),
+            (at(0, 0x100), plain()),
+        ]);
+        let inventory = capture(&spaces);
+        assert!(
+            inventory
+                .issues()
+                .iter()
+                .any(|issue| matches!(issue, Issue::Collision(_)))
+        );
+        let bridges = [bridge(0x08, 1, 1), bridge(0xe0, 2, 2)];
+        assert_eq!(
+            inventory.role(at(0, 0x200), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x208), &bridges),
+            FunctionRole::Unverified
+        );
+        assert_eq!(
+            inventory.role(at(0, 0x100), &bridges),
+            FunctionRole::Physical
+        );
+        // A VF that states SR-IOV of its own puts its PF in doubt, which is
+        // before it.
+        let spaces = BTreeMap::from([(at(0, 0x200), pf(1, 8, 1)), (at(0, 0x208), pf(1, 8, 1))]);
+        let inventory = capture(&spaces);
+        assert_eq!(
+            inventory.role(at(0, 0x200), &bridges),
+            FunctionRole::Unverified
+        );
     }
 }

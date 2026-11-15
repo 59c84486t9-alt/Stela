@@ -79,8 +79,8 @@ impl core::fmt::Display for ClaimError {
             }
             Self::UnsupportedHeader(kind) => write!(f, "its header type {kind} is unsupported"),
             Self::UnsupportedRole(FunctionRole::Unverified) => f.write_str(
-                "Stela could not confirm it is a physical PCI function: its PCI census did not \
-                 complete",
+                "Stela could not confirm it is a physical PCI function: the PCI census found a \
+                 defect on it, or on a function whose virtual function it could be",
             ),
             Self::UnsupportedRole(FunctionRole::Virtual) => {
                 f.write_str("it is an SR-IOV virtual function, which no driver here takes")
