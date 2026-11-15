@@ -49,6 +49,41 @@ pub trait PassiveRegisters: Send + Sync {
     fn read(&self, physical: u64, bytes: u8) -> Option<u64>;
 }
 
+/// Device registers every PE reaches under the device's own lock instead of
+/// the board's: a device a driver polls in tight loops (an SPI controller's
+/// FIFO), whose register accesses reach no other device. An access that
+/// changes one of the device's interrupt lines queues the change, in order,
+/// under that lock; [`Devices::deliver_own`] hands what is queued to the
+/// rest of the board. A board shared between PEs does that at the start of
+/// every hold of its lock and, for the access that queued a change, before
+/// that access completes, so the change reaches the interrupt controller in
+/// the order and at the count it was made, before any later board call.
+/// Lock order: the board's, then the device's; the device's path never
+/// takes the board's lock while it holds its own.
+pub trait OwnLockRegisters: Send + Sync {
+    /// Whether this serves `physical`, fixed for the board's life.
+    fn serves(&self, physical: u64) -> bool;
+    /// A `bytes`-byte read at `physical` by PE `cpu` at count `now`.
+    fn read(&self, cpu: usize, physical: u64, bytes: u8, now: u64) -> OwnLockAccess<u64>;
+    /// A `bytes`-byte write of `value` at `physical` by PE `cpu` at `now`.
+    fn write(
+        &self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> OwnLockAccess<()>;
+}
+
+/// What an [`OwnLockRegisters`] access came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnLockAccess<T> {
+    pub result: Result<T, DeviceError>,
+    /// It queued an interrupt line change for [`Devices::deliver_own`].
+    pub queued: bool,
+}
+
 /// A data copy a device's DMA left to run outside the devices' lock
 /// ([`Devices::take_unlocked`]): it reaches only guest RAM and state of its
 /// own, which the device reads back under the lock once the copy is done.
@@ -607,6 +642,20 @@ pub trait Devices {
     ) -> Result<(), DeviceError> {
         self.write(cpu, physical, bytes, value, now)
     }
+    /// A write served under its device's own lock
+    /// ([`Devices::own_lock_registers`]): `None` for a write the other paths
+    /// serve. Such a write starts no DMA and reaches no memory controller or
+    /// call gate, so it needs no settlement.
+    fn write_own(
+        &mut self,
+        _cpu: usize,
+        _physical: u64,
+        _bytes: u8,
+        _value: u64,
+        _now: u64,
+    ) -> Option<Result<(), DeviceError>> {
+        None
+    }
     /// A device write by PE `cpu` through to its settlement, in one call:
     /// the write ([`Self::write_with_processors`]) and, when it succeeded,
     /// what follows it ([`Self::settle_write`]) on the guest RAM
@@ -732,6 +781,17 @@ pub trait Devices {
     /// board's life once its PEs run.
     fn passive_registers(&self) -> Option<Arc<dyn PassiveRegisters>> {
         None
+    }
+    /// The registers any PE reaches under their device's own lock, fixed
+    /// for the board's life once its PEs run.
+    fn own_lock_registers(&self) -> Option<Arc<dyn OwnLockRegisters>> {
+        None
+    }
+    /// Hand the interrupt line changes [`OwnLockRegisters`] accesses queued
+    /// to the rest of the board, in the order and at the counts they were
+    /// made: whether there were any, or what their delivery came to.
+    fn deliver_own(&mut self) -> Result<bool, DeviceError> {
+        Ok(false)
     }
     /// Leave the data copies of the devices' DMA to [`Self::take_unlocked`]
     /// from now on: a board shared between PEs runs each outside the

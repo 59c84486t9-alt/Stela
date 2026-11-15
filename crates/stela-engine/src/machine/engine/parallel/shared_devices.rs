@@ -1,7 +1,10 @@
 //! The board's devices shared by the PE threads: the locked board and its
 //! device-bus calls.
 
-use super::super::{GateCall, GateOutcome, LocalRegisters, PassiveRegisters, UnlockedDma};
+use super::super::{
+    GateCall, GateOutcome, LocalRegisters, OwnLockAccess, OwnLockRegisters, PassiveRegisters,
+    UnlockedDma,
+};
 use super::*;
 use core::mem::ManuallyDrop;
 
@@ -125,7 +128,7 @@ impl<D: Devices> Board<D> {
     }
 
     pub(super) fn lock(&self, call: Call) -> Held<'_, D> {
-        let (state, since, waited) = match self.devices.try_lock() {
+        let (mut state, since, waited) = match self.devices.try_lock() {
             Ok(state) => (state, self.hub.ticks(), 0),
             Err(_) => {
                 self.waits[call as usize].fetch_add(1, Ordering::Relaxed);
@@ -137,6 +140,7 @@ impl<D: Devices> Board<D> {
                 (state, since, waited)
             }
         };
+        let delivered = deliver_own(&mut state.devices);
         Held {
             board: self,
             state: ManuallyDrop::new(state),
@@ -146,6 +150,8 @@ impl<D: Devices> Board<D> {
             wakes: 0,
             changed: 0,
             pe: usize::MAX,
+            delivered,
+            notified: false,
         }
     }
 
@@ -204,6 +210,18 @@ impl<D: Devices> Board<D> {
         wake_home
     }
 
+    /// The count the devices see for a call at `now`: at least as high as
+    /// every earlier call's, under the lock or under a device's own.
+    fn now(&self, now: u64) -> u64 {
+        // A read alone while the count is already past: the line stays
+        // shared between the PEs that only read it.
+        let seen = self.now.load(Ordering::Acquire);
+        if now <= seen {
+            return seen;
+        }
+        self.now.fetch_max(now, Ordering::AcqRel).max(now)
+    }
+
     /// Publish the devices' next deadline in time.
     fn publish_time(&self, deadline: Option<u64>) {
         let time = deadline.unwrap_or(u64::MAX);
@@ -214,16 +232,20 @@ impl<D: Devices> Board<D> {
 
     /// The devices' lock for `call` if no call holds it now.
     fn try_lock(&self, call: Call) -> Option<Held<'_, D>> {
-        let state = self.devices.try_lock().ok()?;
+        let mut state = self.devices.try_lock().ok()?;
+        let since = self.hub.ticks();
+        let delivered = deliver_own(&mut state.devices);
         Some(Held {
             board: self,
             state: ManuallyDrop::new(state),
             call,
-            since: self.hub.ticks(),
+            since,
             waited: 0,
             wakes: 0,
             changed: 0,
             pe: usize::MAX,
+            delivered,
+            notified: false,
         })
     }
 
@@ -271,17 +293,26 @@ pub(super) struct Held<'a, D: Devices> {
     /// say: the host work its release leaves ([`Kick::released`]) runs only
     /// on a PE outside its run loop ([`Hub::serves_released`]).
     pe: usize,
+    /// The hold began by handing on line changes accesses under a device's
+    /// own lock queued ([`Devices::deliver_own`]), and whether the call told
+    /// the other PEs what changed ([`Self::notify`]): its release does when
+    /// the call did not.
+    delivered: bool,
+    notified: bool,
+}
+
+/// Hand on what accesses under a device's own lock queued, as every hold of
+/// the board's lock begins: whether anything went, or failed to. A failure
+/// stays with the devices, whose next settlement reports it.
+fn deliver_own<D: Devices>(devices: &mut D) -> bool {
+    devices.deliver_own().unwrap_or(true)
 }
 
 impl<D: Devices> Held<'_, D> {
     /// The count the devices see for a call at `now`, at least as high as
-    /// every earlier call's. Only this guard can advance the count.
+    /// every earlier call's ([`Board::now`]).
     fn now(&self, now: u64) -> u64 {
-        let previous = self.board.now.load(Ordering::Relaxed);
-        if now > previous {
-            self.board.now.store(now, Ordering::Release);
-        }
-        previous.max(now)
+        self.board.now(now)
     }
 
     /// Tell every PE but `cpu` whose lines changed since it last saw them.
@@ -292,6 +323,7 @@ impl<D: Devices> Held<'_, D> {
     /// ([`Devices::take_pins_changed`]); a change the others' pins never saw
     /// leaves their lines as they last saw them.
     fn notify(&mut self, cpu: usize, now: u64) {
+        self.notified = true;
         let BoardState {
             devices,
             lines: seen,
@@ -376,6 +408,12 @@ impl<D: Devices> core::ops::DerefMut for Held<'_, D> {
 
 impl<D: Devices> Drop for Held<'_, D> {
     fn drop(&mut self) {
+        // What the hold's start handed on reaches the PEs whatever the call
+        // was ([`Held::delivered`]).
+        if self.delivered && !self.notified {
+            let now = self.board.now.load(Ordering::Acquire);
+            self.notify(usize::MAX, now);
+        }
         let changed = self.changed | self.state.devices.take_pins_changed();
         if self.board.publish(&mut self.state.devices, changed) {
             let home = self.board.hub.home.load(Ordering::Acquire);
@@ -465,7 +503,9 @@ impl<D: Devices> Held<'_, D> {
 
 // SAFETY: the devices are reached only under `devices`' lock, so state they
 // share through `Rc` or `RefCell` is never touched by two cores at once, and
-// no reference into them outlives the guard.
+// no reference into them outlives the guard. What they share with the PEs
+// outside it ([`OwnLockRegisters`], [`PassiveRegisters`], [`LocalRegisters`])
+// is `Send + Sync`.
 unsafe impl<D> Send for Board<D> {}
 // SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl<D> Sync for Board<D> {}
@@ -500,6 +540,8 @@ pub struct SharedDevices<D> {
     local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
     /// [`Devices::passive_registers`], asked for once the board is built.
     passive: Option<Arc<dyn PassiveRegisters>>,
+    /// [`Devices::own_lock_registers`], asked for once the board is built.
+    own: Option<Arc<dyn OwnLockRegisters>>,
     /// Plain reads this handle served through the devices
     /// ([`Devices::plain_epoch`]), which it serves again without them while
     /// their model's epoch holds.
@@ -585,6 +627,7 @@ impl<D: Devices> SharedDevices<D> {
         let pes = hub.pes();
         devices.defer_dma();
         let passive = devices.passive_registers();
+        let own = devices.own_lock_registers();
         let mut registers = [0u64; 16];
         for bit in 0..1 << 10 {
             let (op1, crm, op2) = ((bit >> 7) as u8, (bit >> 3 & 15) as u8, (bit & 7) as u8);
@@ -640,6 +683,7 @@ impl<D: Devices> SharedDevices<D> {
             home: true,
             local: Vec::new(),
             passive,
+            own,
             plain: PlainReads::default(),
             last_plain: None,
             waited: AtomicU64::new(0),
@@ -653,6 +697,7 @@ impl<D: Devices> SharedDevices<D> {
             home: false,
             local: Vec::new(),
             passive: self.passive.clone(),
+            own: self.own.clone(),
             plain: PlainReads::default(),
             last_plain: None,
             waited: AtomicU64::new(0),
@@ -729,6 +774,35 @@ impl<D: Devices> SharedDevices<D> {
 
     pub(super) fn call<R>(&self, call: Call, f: impl FnOnce(&mut D) -> R) -> R {
         f(&mut self.lock(call))
+    }
+
+    /// The registers at `physical` served under their device's own lock,
+    /// if any ([`Devices::own_lock_registers`]).
+    fn own_at(&self, physical: u64) -> Option<Arc<dyn OwnLockRegisters>> {
+        self.own
+            .as_ref()
+            .filter(|own| own.serves(physical))
+            .cloned()
+    }
+
+    /// An access by PE `cpu` at `now` under its device's own lock, which
+    /// takes the board's lock only when it queued a line change: that hold
+    /// hands the change on as it begins and tells the PEs whose lines it
+    /// changed, before the access completes.
+    fn own_access<T>(
+        &self,
+        cpu: usize,
+        now: u64,
+        access: impl FnOnce(u64) -> OwnLockAccess<T>,
+    ) -> Result<T, DeviceError> {
+        let OwnLockAccess { result, queued } = access(self.board.now(now));
+        if !queued {
+            return result;
+        }
+        let delivered = self.changing(Call::Access, cpu, now, |devices, _| {
+            devices.deliver_own().map(|_| ())
+        });
+        result.and_then(|value| delivered.map(|()| value))
     }
 
     /// The board's lock for `call`, counting the ticks it waited.
@@ -877,6 +951,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
         if let Some(value) = self.passive.as_ref().and_then(|p| p.read(physical, bytes)) {
             return Ok(value);
         }
+        if let Some(own) = self.own_at(physical) {
+            return self.own_access(cpu, now, |now| own.read(cpu, physical, bytes, now));
+        }
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.read(cpu, physical, bytes, now)
         })
@@ -889,6 +966,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
             return ScalarRead::Served(Ok(value));
         }
         self.last_plain = None;
+        if let Some(own) = self.own_at(physical) {
+            return ScalarRead::Served(
+                self.own_access(cpu, now, |now| own.read(cpu, physical, bytes, now)),
+            );
+        }
         // A device deadline that passed may change what a model reads.
         let until = self.board.time.load(Ordering::Acquire);
         if now < until
@@ -1016,9 +1098,23 @@ impl<D: Devices> Devices for SharedDevices<D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        if let Some(own) = self.own_at(physical) {
+            return self.own_access(cpu, now, |now| own.write(cpu, physical, bytes, value, now));
+        }
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.write(cpu, physical, bytes, value, now)
         })
+    }
+    fn write_own(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Option<Result<(), DeviceError>> {
+        let own = self.own_at(physical)?;
+        Some(self.own_access(cpu, now, |now| own.write(cpu, physical, bytes, value, now)))
     }
     fn write_with_processors(
         &mut self,
@@ -1029,6 +1125,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
         now: u64,
         processors: super::super::ProcessorWrite<'_>,
     ) -> Result<(), DeviceError> {
+        if let Some(own) = self.own_at(physical) {
+            return self.own_access(cpu, now, |now| own.write(cpu, physical, bytes, value, now));
+        }
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.write_with_processors(cpu, physical, bytes, value, now, processors)
         })

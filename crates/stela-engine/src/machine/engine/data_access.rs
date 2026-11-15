@@ -60,6 +60,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<super::super::mmu::MemoryLocks, DeviceError> {
+        // A write under its device's own lock leaves the memory
+        // controllers' write lock as this PE holds it.
+        if let Some(written) = self
+            .devices
+            .write_own(self.current, physical, bytes, value, now)
+        {
+            self.watch(physical, bytes, written.is_ok().then_some(value), true);
+            if written.is_err() {
+                self.run_refused_store_call();
+            }
+            return written.map(|()| self.cpu.memory_lock);
+        }
         let started = self
             .step_timing
             .is_some()
