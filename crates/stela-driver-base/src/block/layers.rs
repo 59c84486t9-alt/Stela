@@ -326,8 +326,9 @@ impl BlockDevice for Runs {
         self.collect(tag, |ticket| held.requests().finished.remove(&ticket))
     }
 
-    /// One of these runs' pieces has a result, or the disk has posted a
-    /// completion: another owner's results never count.
+    /// One of these runs' pieces has a result, the disk has posted a
+    /// completion, or a look would run the next piece of a disk of depth 0:
+    /// another owner's results never count.
     fn posted(&self) -> bool {
         let Some(mut disk) = self.disk.try_lock() else {
             return true;
@@ -337,6 +338,7 @@ impl BlockDevice for Runs {
             .iter()
             .flat_map(|spread| &spread.pending)
             .any(|(ticket, _)| finished.contains_key(ticket))
+            || disk.runs_waiting()
             || disk.posted()
     }
 

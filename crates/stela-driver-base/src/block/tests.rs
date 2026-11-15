@@ -1311,3 +1311,123 @@ fn a_rotation_rate_reads_as_ata_word_217_and_scsi_vpd_b1_encode_it() {
     assert_eq!(alloc::format!("{}", Rotation::None), "none");
     assert_eq!(alloc::format!("{}", Rotation::default()), "unreported");
 }
+
+/// A disk that runs each command where it is asked, as a card reader or a
+/// port without a command queue does, recording the bytes of each call: a
+/// slow stick or a spinning disk takes a time to match.
+struct Synchronous {
+    disk: RamDisk,
+    calls: Rc<core::cell::RefCell<Vec<usize>>>,
+}
+
+impl BlockDevice for Synchronous {
+    fn identity(&self) -> &Identity {
+        &self.disk.identity
+    }
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.calls.borrow_mut().push(buffer.len());
+        self.disk.read(lba, buffer)
+    }
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.calls.borrow_mut().push(data.len());
+        self.disk.write(lba, data)
+    }
+}
+
+/// One look at a disk without a queue runs one piece of one command: a
+/// 1 MiB write queued behind another, then a read of both, never hold the
+/// looking processor for a whole transfer, or for every waiting command,
+/// as one look did before.
+#[test]
+fn a_disk_without_a_queue_runs_one_bounded_piece_a_look() {
+    let calls: Rc<core::cell::RefCell<Vec<usize>>> = Rc::default();
+    let disk = Shared::new(Box::new(Synchronous {
+        disk: RamDisk::new("sync", 8192, 512),
+        calls: calls.clone(),
+    }));
+    let mut window = disk.whole();
+    let mebibyte = 1 << 20;
+    let first: Vec<u8> = (0..mebibyte).map(|at| (at / 512) as u8).collect();
+    let second: Vec<u8> = (0..mebibyte).map(|at| (at / 512 + 7) as u8).collect();
+    let mut tags = Vec::new();
+    for (lba, data) in [(0, first.clone()), (2048, second.clone())] {
+        let before = calls.borrow().len();
+        tags.push(
+            window
+                .start(Command::Write {
+                    lba,
+                    data,
+                    fua: false,
+                })
+                .unwrap(),
+        );
+        assert!(calls.borrow().len() - before <= 1);
+    }
+    let read = window
+        .start(Command::Read {
+            lba: 0,
+            bytes: 2 * mebibyte,
+        })
+        .unwrap();
+    tags.push(read);
+    let mut results = BTreeMap::new();
+    for _ in 0..1000 {
+        if results.len() == tags.len() {
+            break;
+        }
+        assert!(window.posted());
+        for &tag in &tags {
+            if results.contains_key(&tag) {
+                continue;
+            }
+            let before = calls.borrow().len();
+            if let Some(result) = window.finish(tag) {
+                results.insert(tag, result);
+            }
+            assert!(calls.borrow().len() - before <= 1, "a look ran two pieces");
+        }
+    }
+    assert!(!window.posted());
+    assert!(calls.borrow().iter().all(|&bytes| bytes <= 64 << 10));
+    assert_eq!(calls.borrow().len(), 4 * mebibyte / (64 << 10));
+    assert_eq!(results[&tags[0]], Ok(None));
+    assert_eq!(results[&tags[1]], Ok(None));
+    let mut both = first;
+    both.extend_from_slice(&second);
+    assert_eq!(results[&read], Ok(Some(both)));
+}
+
+/// A piece that fails ends its request, whose rest never runs, and the
+/// next request runs.
+#[test]
+fn a_failed_piece_ends_its_request_and_the_queue_goes_on() {
+    let calls: Rc<core::cell::RefCell<Vec<usize>>> = Rc::default();
+    let disk = Shared::new(Box::new(Synchronous {
+        disk: RamDisk::new("short", 256, 512),
+        calls: calls.clone(),
+    }));
+    // A window of the whole disk lets a read past its end through to the
+    // device's own check, which fails the second piece.
+    let mut window = disk.whole();
+    window.identity.blocks = 1024;
+    let past = window
+        .start(Command::Read {
+            lba: 0,
+            bytes: 256 << 10,
+        })
+        .unwrap();
+    let next = window.start(write(0, 9)).unwrap();
+    let mut results = BTreeMap::new();
+    for _ in 0..100 {
+        for tag in [past, next] {
+            if !results.contains_key(&tag)
+                && let Some(result) = window.finish(tag)
+            {
+                results.insert(tag, result);
+            }
+        }
+    }
+    assert!(results[&past].is_err());
+    assert_eq!(results[&next], Ok(None));
+    assert_eq!(*calls.borrow(), [64 << 10, 64 << 10, 64 << 10, 512]);
+}

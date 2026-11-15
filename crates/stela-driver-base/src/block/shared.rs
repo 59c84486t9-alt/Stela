@@ -36,6 +36,56 @@ pub(super) struct Requests {
     pub(super) next: u32,
     pub(super) stats: Stats,
     pub(super) busy_since: u64,
+    /// A command a device of depth 0 runs piece by piece
+    /// ([`SYNC_PIECE_BYTES`]): its ticket and the read data of its pieces
+    /// so far. Its rest waits at the front of `waiting`.
+    pub(super) partial: Option<(u32, Vec<u8>)>,
+}
+
+/// The most a device that runs each command where it is asked (depth 0)
+/// moves in one call: a larger read, write or Write Zeroes runs in pieces,
+/// one a look, so a look holds its processor for one piece, not for the
+/// whole transfer or for every waiting command, as a slow stick or a
+/// spinning disk could take seconds for those. Linux bounds a request by
+/// `max_sectors` for the same reason.
+pub(super) const SYNC_PIECE_BYTES: usize = 64 << 10;
+
+/// The first piece of `command` for a device of depth 0 with blocks of
+/// `block` bytes, leaving the rest in `command`; `None` when it runs whole.
+pub(super) fn first_piece(command: &mut Command, block: usize) -> Option<Command> {
+    let most = (SYNC_PIECE_BYTES / block.max(1)).max(1);
+    match command {
+        Command::Read { lba, bytes } if *bytes > most * block => {
+            let piece = Command::Read {
+                lba: *lba,
+                bytes: most * block,
+            };
+            *lba += most as u64;
+            *bytes -= most * block;
+            Some(piece)
+        }
+        Command::Write { lba, data, fua } if data.len() > most * block => {
+            let rest = data.split_off(most * block);
+            let piece = Command::Write {
+                lba: *lba,
+                data: core::mem::replace(data, rest),
+                fua: *fua,
+            };
+            *lba += most as u64;
+            Some(piece)
+        }
+        Command::WriteZeroes { lba, blocks, unmap } if *blocks > most as u64 => {
+            let piece = Command::WriteZeroes {
+                lba: *lba,
+                blocks: most as u64,
+                unmap: *unmap,
+            };
+            *lba += most as u64;
+            *blocks -= most as u64;
+            Some(piece)
+        }
+        _ => None,
+    }
 }
 
 /// A device command and its first ticket and read length. Additional tickets
@@ -155,7 +205,8 @@ impl Held<'_> {
             .waiting
             .push_back((ticket, command, crate::Clock::ticks()));
         self.step(false);
-        if !self.requests().waiting.is_empty() {
+        // A device of depth 0 ran one piece in the first step: no more.
+        if !self.requests().waiting.is_empty() && self.depth() > 0 {
             self.step(true);
         }
         if !more {
@@ -227,8 +278,8 @@ impl Held<'_> {
     }
 
     /// Collect the device's completed commands, then start those waiting
-    /// while it has room. A device that takes no queued commands runs each
-    /// here, its caller waiting.
+    /// while it has room. A device that takes no queued commands runs one
+    /// piece of the first here, its caller waiting.
     pub(super) fn advance(&mut self) {
         self.step(true);
         self.commit();
@@ -336,8 +387,9 @@ impl Held<'_> {
     }
 
     /// Start the waiting commands, in order, while the device has room. A
-    /// device that takes no queued commands runs each here, its caller
-    /// waiting.
+    /// device that takes no queued commands runs the first waiting one
+    /// here, its caller waiting, and only one piece of it
+    /// ([`SYNC_PIECE_BYTES`]): the next look runs the next.
     fn start_waiting(&mut self, work: &mut profile::Work) {
         if self.requests().waiting.is_empty() {
             return;
@@ -355,10 +407,8 @@ impl Held<'_> {
                 return;
             };
             if !queued {
-                let accounted = command.accounted(block);
-                let result = self.direct(accounted, submitted, |device| device.execute(command));
-                self.requests().finished.insert(ticket, result);
-                continue;
+                self.run_piece(ticket, command, submitted, block);
+                return;
             }
             let first = match &command {
                 Command::Read { bytes, .. } => *bytes,
@@ -403,6 +453,64 @@ impl Held<'_> {
                 }
             }
         }
+    }
+
+    /// Run the first piece of waiting `command`, ticket `ticket`, on a
+    /// device of depth 0, leaving its rest at the front of the queue; once
+    /// the last piece ran or one failed, the ticket has its result.
+    fn run_piece(&mut self, ticket: u32, mut command: Command, submitted: u64, block: usize) {
+        let continued = self
+            .requests()
+            .partial
+            .as_ref()
+            .is_some_and(|(partial, _)| *partial == ticket);
+        let piece = first_piece(&mut command, block);
+        let (run, rest) = match piece {
+            Some(piece) => (piece, Some(command)),
+            None => (command, None),
+        };
+        let accounted = run.accounted(block);
+        // A later piece counts from its own start, not the request's.
+        let since = if continued {
+            crate::Clock::ticks()
+        } else {
+            submitted
+        };
+        let result = self.direct(accounted, since, |device| device.execute(run));
+        let requests = self.requests();
+        let mut data = match requests.partial.take() {
+            Some((partial, data)) if partial == ticket => Some(data),
+            _ => None,
+        };
+        match (result, rest) {
+            (Ok(read), Some(rest)) => {
+                if let Some(read) = read {
+                    data.get_or_insert_default().extend_from_slice(&read);
+                }
+                requests.partial = Some((ticket, data.unwrap_or_default()));
+                requests.waiting.push_front((ticket, rest, submitted));
+            }
+            (Ok(read), None) => {
+                let result = match (data, read) {
+                    (Some(mut data), Some(read)) => {
+                        data.extend_from_slice(&read);
+                        Some(data)
+                    }
+                    (_, read) => read,
+                };
+                requests.finished.insert(ticket, Ok(result));
+            }
+            // A failed piece ends the request; its rest never runs.
+            (Err(error), _) => {
+                requests.finished.insert(ticket, Err(error));
+            }
+        }
+    }
+
+    /// Whether a look would run a piece of a waiting command on a device
+    /// of depth 0, which has nothing of its own to post.
+    pub(super) fn runs_waiting(&mut self) -> bool {
+        self.depth() == 0 && !self.requests().waiting.is_empty()
     }
 
     /// Ticket `ticket`'s result, once it has one.
@@ -745,8 +853,9 @@ impl BlockDevice for Window {
         Some(finished)
     }
 
-    /// One of this window's commands has a result, or the disk has posted
-    /// a completion: another window's results never count.
+    /// One of this window's commands has a result, the disk has posted
+    /// a completion, or a look would run the next piece of a disk of depth
+    /// 0: another window's results never count.
     fn posted(&self) -> bool {
         let Some(mut disk) = self.disk.try_lock() else {
             return true;
@@ -755,6 +864,7 @@ impl BlockDevice for Window {
         self.started
             .iter()
             .any(|ticket| finished.contains_key(ticket))
+            || disk.runs_waiting()
             || disk.posted()
     }
 
