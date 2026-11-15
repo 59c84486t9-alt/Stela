@@ -374,8 +374,16 @@ stela_nmi_gate:
 
 /// Whether the NMI at `rip` was a shootdown's, now answered: the gate then
 /// returns. The step watchdog's keeps its stop even when a shootdown's came
-/// with it, as two NMIs pending at once are taken as one.
+/// with it, as two NMIs pending at once are taken as one. On a processor
+/// already in a terminal handler, which no retirement sends one to, an NMI
+/// (a platform's, or the step watchdog's for the step the handler
+/// interrupted) returns too: that handler's stop goes on and keeps its
+/// reason, where the NMI's terminal stub would find the terminal entry slot
+/// in use and halt.
 extern "sysv64" fn nmi_answer(rip: u64) -> bool {
+    if crate::native_mmio::shootdown::terminal_here() {
+        return true;
+    }
     if !crate::native_mmio::shootdown::take_poke() || super::step_watchdog::nmi_is_watchdog() {
         return false;
     }

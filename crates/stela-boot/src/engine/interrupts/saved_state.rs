@@ -79,6 +79,9 @@ pub(super) extern "sysv64" fn dispatch(frame: *mut Frame, image: *const u8) {
 }
 
 pub(super) fn terminal(frame: *mut Frame, image: *const u8) -> ! {
+    // From here on no retirement waits for this processor or sends it an
+    // NMI, which would land on a handler that cannot take one.
+    crate::native_mmio::shootdown::enter_terminal();
     let (tables, _, active) = host::local::interrupt_owner();
     let captured = tables
         .capture_entry(frame, image, active)

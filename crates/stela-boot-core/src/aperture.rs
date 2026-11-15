@@ -157,6 +157,8 @@ struct Sharer {
     /// Halted with no translation it uses before it flushes again
     /// ([`Processors::enter_idle`]).
     idle: AtomicBool,
+    /// In a terminal handler, flushed, for good ([`Processors::enter_terminal`]).
+    terminal: AtomicBool,
     /// Its NMI gate answers a retirement's NMI ([`Processors::set_reachable`]).
     reachable: AtomicBool,
     /// A retirement sent it an NMI its gate has not taken yet.
@@ -235,6 +237,7 @@ impl Processors {
                     acknowledged: AtomicU64::new(0),
                     doing: AtomicU64::new(0),
                     idle: AtomicBool::new(false),
+                    terminal: AtomicBool::new(false),
                     reachable: AtomicBool::new(false),
                     poked: AtomicBool::new(false),
                     answered: AtomicU64::new(0),
@@ -439,10 +442,33 @@ impl Processors {
             .is_some_and(|sharer| sharer.idle.load(Ordering::Relaxed))
     }
 
+    /// Slot `slot`'s processor, which flushed through its last request,
+    /// runs a terminal handler (#MC, #DF, a stop's NMI) and never returns to
+    /// the work it interrupted: from now on no retirement waits for it or
+    /// sends it an NMI ([`Self::poke`]), which would land on the stack of a
+    /// handler that cannot take one. It flushes itself again before it draws
+    /// the stop's screen. Pairs, as [`Self::leave_idle`] does, with the
+    /// fence in [`Self::request`]: either a retirement sees the processor
+    /// terminal, or the caller, flushing after this, sees its request.
+    pub fn enter_terminal(&self, slot: usize) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            sharer.terminal.store(true, Ordering::Release);
+        }
+        fence(Ordering::SeqCst);
+    }
+
+    /// Whether slot `slot`'s processor runs a terminal handler
+    /// ([`Self::enter_terminal`]).
+    pub fn terminal(&self, slot: usize) -> bool {
+        self.sharers
+            .get(slot)
+            .is_some_and(|sharer| sharer.terminal.load(Ordering::Acquire))
+    }
+
     /// Whether a retirement of `generation` waits for slot `slot`'s
-    /// processor: it neither acknowledged it nor is idle.
+    /// processor: it neither acknowledged it nor is idle or terminal.
     pub fn pending(&self, slot: usize, generation: u64) -> bool {
-        self.acknowledged(slot) < generation && !self.idle(slot)
+        self.acknowledged(slot) < generation && !self.idle(slot) && !self.terminal(slot)
     }
 
     /// Slot `slot`'s processor runs with its own interrupt tables, whose
@@ -977,6 +1003,41 @@ mod tests {
         assert!(!processors.leave_idle(MAX_PROCESSORS));
         processors.enter_idle(MAX_PROCESSORS);
         assert!(!processors.idle(MAX_PROCESSORS));
+    }
+
+    /// A processor in a terminal handler holds up no retirement and gets no
+    /// NMI, whatever it acknowledged, for the rest of the boot; the others
+    /// still do.
+    #[test]
+    fn a_terminal_processor_is_never_waited_for_or_sent_an_nmi() {
+        let processors = Processors::new();
+        let bsp = processors.join_bsp(0).unwrap();
+        let ap = processors.join_ap(2).unwrap();
+        let other = processors.join_ap(4).unwrap();
+        processors.set_reachable(ap);
+        processors.set_reachable(other);
+        let first = processors.request(None);
+        assert!(processors.pending(ap, first));
+        processors.acknowledge(ap, first);
+        processors.enter_terminal(ap);
+        assert!(processors.terminal(ap) && !processors.terminal(other));
+        let second = processors.request(Some(0x1000..0x2000));
+        assert!(!processors.pending(ap, second));
+        assert!(!processors.poke(ap, second));
+        assert!(!processors.take_poke(ap));
+        // An idle wait that ends does not make it wait-for again.
+        processors.enter_idle(ap);
+        assert!(processors.leave_idle(ap));
+        assert!(!processors.pending(ap, second));
+        // The other processor still holds the retirement up and is poked.
+        assert!(processors.pending(other, second));
+        assert!(!processors.flushed(second, Some(bsp)));
+        assert!(processors.poke(other, second));
+        processors.acknowledge(other, second);
+        assert!(processors.flushed(second, Some(bsp)));
+        // A slot that never joined is never terminal.
+        processors.enter_terminal(MAX_PROCESSORS);
+        assert!(!processors.terminal(MAX_PROCESSORS));
     }
 
     /// A retirement may send a late processor one NMI at a time, only
