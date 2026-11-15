@@ -1687,11 +1687,6 @@ fn place_devices(
             usb: stela_soc::machine::UsbCables {
                 disks: placement.usb_disks,
                 network: placement.guest_mac,
-                network_model: if options.guest_network_ecm {
-                    stela_soc::machine::UsbNetworkModel::Ecm
-                } else {
-                    stela_soc::machine::UsbNetworkModel::Ncm
-                },
                 bluetooth: placement.guest_bluetooth,
             },
             scanout,

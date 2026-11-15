@@ -157,7 +157,6 @@ impl AppleDevices {
         let UsbCables {
             disks,
             network,
-            network_model,
             bluetooth,
         } = cables;
         let extras = usize::from(network.is_some()) + usize::from(bluetooth);
@@ -165,7 +164,7 @@ impl AppleDevices {
             return Err(refuse!("the native hub has seven ports"));
         }
         let network = network
-            .map(|mac| Ecm::with_model(mac, network_model))
+            .map(|mac| Ecm::with_model(mac, crate::usb::ecm::Model::Ncm))
             .transpose()?;
         let disks = disks
             .into_iter()

@@ -30,7 +30,6 @@ use crate::usb::{
 };
 pub use crate::usb::{
     ecm::Counters as UsbNetworkCounters,
-    ecm::Model as UsbNetworkModel,
     hci::{Counters as UsbBluetoothCounters, Outbound},
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{
@@ -382,9 +381,6 @@ pub struct UsbCables {
     pub disks: Vec<Box<dyn BlockDevice>>,
     /// A USB Ethernet adapter with this station address.
     pub network: Option<Mac>,
-    /// The USB Ethernet class that adapter presents: NCM unless ECM is
-    /// asked for.
-    pub network_model: UsbNetworkModel,
     /// A USB Bluetooth controller: bridged to one of the host's, or the
     /// model the owner selects with [`AppleDevices::bluetooth_model`].
     pub bluetooth: bool,
