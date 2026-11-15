@@ -111,9 +111,21 @@ const REBAR_CONTROL: u16 = 8;
 const REBAR_BARS_SHIFT: u32 = 5;
 const REBAR_BARS: u32 = 7;
 const REBAR_SIZE: u32 = 0x3f << 8;
+/// A control register's BAR Index field (Linux `PCI_REBAR_CTRL_BAR_IDX`).
+const REBAR_INDEX: u32 = 7;
+/// The smallest BAR size a BAR Size field encodes, 1 MiB at value 0.
+const REBAR_SIZE_UNIT: u64 = 1 << 20;
 /// The Vendor ID a function still initializing answers with Configuration
 /// RRS Software Visibility on.
 const VENDOR_NOT_READY: u16 = 0x0001;
+
+/// A Resizable BAR ([`Function::resizable_bars`]): its BAR index and the
+/// size its control register selects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResizableBar {
+    pub bar: u8,
+    pub bytes: u64,
+}
 
 /// A function-local reset [`Function::reset`] performs, in Linux
 /// `pci_reset_function`'s order.
@@ -232,26 +244,14 @@ impl Saved {
             .collect()
     }
     /// Write the saved state back: each Resizable BAR's size first, as
-    /// Linux `pci_restore_rebar_state` does before the BARs, read back so a
-    /// BAR never stays smaller than the size its owner keeps for it.
+    /// Linux `pci_restore_rebar_state` does before the BARs, and like it
+    /// without checking that the size took. A BAR that kept another size
+    /// decodes that one: its owner reads it back ([`Function::resizable_bars`])
+    /// and goes on with it, as the reset itself succeeded.
     fn restore<C: ConfigSpace>(&self, config: &mut C) -> Result<(), ConfigError> {
         for &(control, saved) in &self.rebar {
             let current = config.read32(control)?;
-            let expected = current & !REBAR_SIZE | saved & REBAR_SIZE;
-            config.write32(control, expected)?;
-            let observed = config.read32(control)?;
-            if observed & REBAR_SIZE != saved & REBAR_SIZE {
-                return Err(ConfigError::write_may_have_applied(
-                    control,
-                    4,
-                    ConfigFailure::Readback {
-                        offset: control,
-                        width: 4,
-                        expected,
-                        observed,
-                    },
-                ));
-            }
+            config.write32(control, current & !REBAR_SIZE | saved & REBAR_SIZE)?;
         }
         for (offset, width, value) in self.writes() {
             match width {
@@ -971,6 +971,35 @@ impl<C: ConfigSpace> Function<C> {
     /// The PCI Express capability's offset, from the complete checked list.
     fn express_offset(&self) -> Result<Option<u16>, CapabilityError> {
         express_offset(&self.config)
+    }
+    /// Each Resizable BAR and the size its control register selects now: a
+    /// reset restores the sizes before it without checking them, as Linux
+    /// does, so an owner that keeps BAR sizes compares them with these
+    /// afterwards. Empty for a function without the capability. Reads only.
+    pub fn resizable_bars(&self) -> Result<Vec<ResizableBar>, BlockError> {
+        let Some(rebar) = (match self.express_offset()? {
+            Some(_) => self.extended_capability(EXTENDED_REBAR)?,
+            None => None,
+        }) else {
+            return Ok(Vec::new());
+        };
+        let first = self.config.read32(rebar + REBAR_CONTROL)?;
+        let mut bars = Vec::new();
+        for index in 0..((first >> REBAR_BARS_SHIFT) & REBAR_BARS) as u16 {
+            let control = self.config.read32(rebar + REBAR_CONTROL + index * 8)?;
+            if control == u32::MAX {
+                return Err(BlockError::Unsupported("PCI function does not answer"));
+            }
+            let shift = REBAR_SIZE_UNIT.trailing_zeros() + ((control & REBAR_SIZE) >> 8);
+            let Some(bytes) = 1u64.checked_shl(shift) else {
+                continue;
+            };
+            bars.push(ResizableBar {
+                bar: (control & REBAR_INDEX) as u8,
+                bytes,
+            });
+        }
+        Ok(bars)
     }
     /// Complete checked conventional capability inventory; malformed/access
     /// failures are distinct from an absent capability.

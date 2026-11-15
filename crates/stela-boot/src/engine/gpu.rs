@@ -1158,6 +1158,7 @@ fn claim(
         .map(|(index, region)| (index, region.size))
         .collect();
     let sizes = stela_boot_core::gpu_status::bar_sizes(&sizes);
+    let reset = ready.reset().is_some();
     match ready.reset() {
         None => output::arguments(format_args!(
             "GPU {address}: no function-local reset; started as firmware left it, DMA translated; {sizes}\n"
@@ -1182,6 +1183,9 @@ fn claim(
     let (bound, views) = unsafe { ready.into_parts() };
     let attachment = ManuallyDrop::new(bound.attachment);
     let mut function = ManuallyDrop::new(bound.requester.into_function());
+    if reset {
+        resized_bars(address, &function, &mut placement, &mut bars);
+    }
     let mut views = ManuallyDrop::new(views);
     views
         .check(&mut function)
@@ -1246,6 +1250,61 @@ fn claim(
         #[cfg(feature = "nvk")]
         link,
     })
+}
+
+/// After a reset, which puts each Resizable BAR back at the size firmware
+/// set without checking it, as Linux `pci_restore_rebar_state` does: a BAR
+/// that kept a smaller size decodes only that, so the GPU's placement and
+/// windows take the size it reads back, with a line. One that reads back
+/// larger keeps the size its window was placed for, which it decodes too.
+fn resized_bars<C: ConfigSpace>(
+    address: stela_drivers::bus::pci::Address,
+    function: &Function<C>,
+    placement: &mut Placement,
+    bars: &mut [core::ops::Range<u64>],
+) {
+    let resizable = match function.resizable_bars() {
+        Ok(resizable) => resizable,
+        Err(error) => {
+            output::arguments(format_args!(
+                "GPU {address}: its Resizable BAR sizes did not read after its reset ({error:?}); \
+                 going on with the sizes firmware set\n"
+            ));
+            return;
+        }
+    };
+    for bar in resizable {
+        let Some(region) = placement.regions.get_mut(usize::from(bar.bar)) else {
+            continue;
+        };
+        if region.size == 0 || region.size == bar.bytes {
+            continue;
+        }
+        let mib = |bytes: u64| bytes >> 20;
+        if bar.bytes > region.size {
+            output::arguments(format_args!(
+                "GPU {address}: BAR{} reads back at {} MiB after its reset, where firmware set {} MiB; \
+                 keeping {} MiB, the window it was placed in\n",
+                bar.bar,
+                mib(bar.bytes),
+                mib(region.size),
+                mib(region.size)
+            ));
+            continue;
+        }
+        output::arguments(format_args!(
+            "GPU {address}: BAR{} came back at {} MiB after its reset, where firmware set {} MiB; \
+             going on with {} MiB, as Linux goes on from the reset\n",
+            bar.bar,
+            mib(bar.bytes),
+            mib(region.size),
+            mib(bar.bytes)
+        ));
+        if let Some(window) = bars.iter_mut().find(|window| window.start == region.start) {
+            window.end = window.start + bar.bytes;
+        }
+        region.size = bar.bytes;
+    }
 }
 
 /// Read one BAR0 register through a scoped read-only page of `registers`,

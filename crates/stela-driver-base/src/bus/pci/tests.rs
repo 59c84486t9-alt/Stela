@@ -1077,23 +1077,36 @@ fn a_reset_puts_back_the_resizable_bar_size_firmware_set() {
 }
 
 #[test]
-fn a_resizable_bar_that_keeps_its_default_size_after_a_reset_is_an_error() {
+fn a_resizable_bar_that_keeps_its_default_size_after_a_reset_reads_back_at_it() {
     let mut function = resizable();
-    function.config.rebar_fixed = true;
-    let error = function.reset_with(|_| Ok(())).unwrap_err();
     assert_eq!(
-        error,
-        BlockError::Config(ConfigError::write_may_have_applied(
-            0x108,
-            4,
-            ConfigFailure::Readback {
-                offset: 0x108,
-                width: 4,
-                expected: 1 << 5 | 14 << 8 | 1,
-                observed: 1 << 5 | 8 << 8 | 1,
-            },
-        ))
+        function.resizable_bars(),
+        Ok(vec![ResizableBar {
+            bar: 1,
+            bytes: 16 << 30
+        }])
     );
+    function.config.rebar_fixed = true;
+    // As Linux `pci_restore_rebar_state`: the size is written, not checked,
+    // and the rest of the function's state goes back after it.
+    assert_eq!(
+        function.reset_with(|_| Ok(())),
+        Ok(Some(ResetMethod::FunctionLevel))
+    );
+    let config = &function.config;
+    assert_eq!(config.words[0x108 / 4], 1 << 5 | 8 << 8 | 1);
+    assert_eq!(config.words[4], 0xfe00_0000);
+    assert_eq!(config.words[1] & 0xffff, 6);
+    // Its owner reads the size it kept, 256 MiB, and goes on with it.
+    assert_eq!(
+        function.resizable_bars(),
+        Ok(vec![ResizableBar {
+            bar: 1,
+            bytes: 256 << 20
+        }])
+    );
+    // A function without the capability has none.
+    assert_eq!(resettable(1 << 28, 0).resizable_bars(), Ok(vec![]));
 }
 
 #[test]
