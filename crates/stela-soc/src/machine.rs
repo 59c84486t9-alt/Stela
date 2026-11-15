@@ -165,6 +165,7 @@ mod canonical_reads;
 mod canonical_writes;
 mod display_resources;
 pub mod memory_resources;
+mod own_lock;
 mod pmp_dma;
 mod pmp_services;
 pub use pmp_dma::{ExplicitRuntimeConfiguration, SourceProvenance};
@@ -213,10 +214,13 @@ pub struct AppleDevices {
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
     coprocessors: Vec<(&'static str, DeviceId)>,
-    /// The SPI controller holding the NOR die, and the mark its accesses
-    /// set for [`Devices::lock_released`].
+    /// The SPI controller holding the NOR die: its port on the bus and the
+    /// state it shares with the engine's handle ([`own_lock`]), and whether
+    /// the board's current hold handed on its line changes, for
+    /// [`Devices::lock_released`].
     nor: Option<DeviceId>,
-    nor_touch: crate::spi::TouchStamp,
+    nor_shared: Option<Arc<own_lock::Shared<Spi>>>,
+    nor_touch: core::cell::Cell<bool>,
     /// StelaGPU's call gates (`gpu_gate`), a GPU's each.
     gpu_gates: Vec<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
@@ -669,6 +673,7 @@ impl AppleDevices {
             gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
+            nor_shared: None,
             nor_touch: Default::default(),
             gpu_gates: Vec::new(),
             sep_masters: Vec::new(),
@@ -753,9 +758,9 @@ impl AppleDevices {
     /// The NOR sectors the guest changed since the last call, as (offset,
     /// bytes), for the host to persist.
     pub fn nor_dirty(&mut self) -> Vec<(usize, Vec<u8>)> {
-        self.nor
-            .and_then(|id| self.bus.device_mut::<Spi>(id))
-            .map_or_else(Vec::new, Spi::take_dirty)
+        self.nor_shared
+            .as_ref()
+            .map_or_else(Vec::new, |nor| nor.with(Spi::take_dirty))
     }
 
     /// The deferred fast IPIs' counts since the last call
@@ -767,17 +772,23 @@ impl AppleDevices {
     /// The SPI NOR controller's activity since the last call
     /// ([`crate::spi::Activity`]); `None` without a NOR.
     pub fn take_nor_activity(&mut self) -> Option<crate::spi::Activity> {
-        self.nor
-            .and_then(|id| self.bus.device_mut::<Spi>(id))
-            .map(Spi::take_activity)
+        self.nor_shared.as_ref().map(|nor| {
+            let mut activity = nor.with(Spi::take_activity);
+            (
+                activity.own_accesses,
+                activity.own_waits,
+                activity.delivered,
+            ) = nor.take_counts();
+            activity
+        })
     }
 
     /// A copy of the NOR image as the guest left it, for the host to change
     /// NVRAM once the guest has stopped.
     pub fn nor_image(&mut self) -> Option<stela_soc_data::nor::Image> {
-        self.nor
-            .and_then(|id| self.bus.device_mut::<Spi>(id))
-            .map(|spi| spi.image().clone())
+        self.nor_shared
+            .as_ref()
+            .map(|nor| nor.with(|spi| spi.image().clone()))
     }
 
     /// Drain the `sks`/`pnon`/`scrd` traffic the SEP observed this run under
@@ -997,14 +1008,27 @@ impl Devices for AppleDevices {
             .find_map(|&(cpu, register, _)| (physical == register && bytes == 4).then_some(cpu))
     }
 
-    /// A call that accessed the NOR's controller counts its lock time
-    /// there; any other costs one load.
+    /// A call that handed on the NOR controller's line changes counts its
+    /// lock time there; any other costs one load.
     fn lock_released(&mut self, waited: u64, held: u64) {
         if self.nor_touch.replace(false)
-            && let Some(spi) = self.nor.and_then(|id| self.bus.device_mut::<Spi>(id))
+            && let Some(nor) = &self.nor_shared
         {
-            spi.locked(waited, held);
+            nor.with(|spi| spi.locked(waited, held));
         }
+    }
+
+    fn own_lock_registers(
+        &self,
+    ) -> Option<Arc<dyn stela_engine::machine::engine::OwnLockRegisters>> {
+        self.nor_shared.as_ref().map(|nor| {
+            Arc::new(own_lock::Handle(Arc::clone(nor)))
+                as Arc<dyn stela_engine::machine::engine::OwnLockRegisters>
+        })
+    }
+
+    fn deliver_own(&mut self) -> Result<bool, DeviceError> {
+        self.deliver_own_queued()
     }
 
     fn observe_pc_sample(&mut self, physical: u64, pc: u64) {

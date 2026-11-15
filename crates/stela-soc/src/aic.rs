@@ -163,8 +163,34 @@ use {
 const NAME: &str = "aic2";
 
 /// The system counter and CPU of the last event read that claimed a watched
-/// input ([`Aic2::watch_claims`]), shared with the model that drives it.
-pub type ClaimStamp = alloc::rc::Rc<core::cell::Cell<Option<(u64, CpuIndex)>>>;
+/// input ([`Aic2::watch_claims`]), shared with the model that drives it,
+/// which may read it under a lock of its own while the AIC writes it.
+pub type ClaimStamp = alloc::sync::Arc<Claim>;
+
+/// [`ClaimStamp`]'s word: the count above 8 bits of CPU, all ones for none.
+pub struct Claim(core::sync::atomic::AtomicU64);
+
+impl Default for Claim {
+    fn default() -> Self {
+        Self(core::sync::atomic::AtomicU64::new(u64::MAX))
+    }
+}
+
+impl Claim {
+    const COUNT: u64 = (1 << 56) - 1;
+    /// Keep `claim`: a count past 56 bits keeps its low bits, and a CPU
+    /// past 254 reads as 254.
+    pub fn set(&self, claim: Option<(u64, CpuIndex)>) {
+        let word = claim.map_or(u64::MAX, |(now, cpu)| {
+            (now & Self::COUNT) << 8 | cpu.min(0xfe) as u64
+        });
+        self.0.store(word, core::sync::atomic::Ordering::Release);
+    }
+    pub fn get(&self) -> Option<(u64, CpuIndex)> {
+        let word = self.0.load(core::sync::atomic::Ordering::Acquire);
+        (word != u64::MAX).then_some((word >> 8, (word & 0xff) as CpuIndex))
+    }
+}
 
 const INFO2: u64 = 0x0008;
 const RESET: u64 = 0x0010;

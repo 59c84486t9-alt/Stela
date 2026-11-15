@@ -112,7 +112,7 @@ impl AppleDevices {
         .then_some(batch)
     }
 
-    fn capture_inputs(&mut self, cpu: CpuIndex, now: u64) {
+    pub(super) fn capture_inputs(&mut self, cpu: CpuIndex, now: u64) {
         self.latch
             .append_aic_inputs(&mut self.service.inputs, |(input, level)| {
                 ServiceInput::Aic(AicDelivery {
@@ -148,6 +148,9 @@ impl AppleDevices {
     /// subsequently refuses. Capturing never delivers an input or retries a
     /// peripheral effect, and keeps its original CPU/counter context.
     pub(super) fn capture_reached(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) {
+        // Line changes of the models behind their own locks are older than
+        // what this call reached.
+        self.hand_on_own();
         self.service.retain_reset(&mut self.reset, reset);
         // Capture both queues before either family can refuse. A release error
         // must not leave the reached wire batch unrepresented or discard it.

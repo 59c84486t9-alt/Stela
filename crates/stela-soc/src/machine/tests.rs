@@ -481,19 +481,28 @@ fn the_host_copies_the_nor_image_only_when_a_nor_exists() {
 }
 
 /// The board's lock time of a call counts against the NOR's controller
-/// when the call accessed it, and only then: another device's access, or a
-/// call that touched no register, leaves the NOR's counts alone.
+/// when the call handed on the controller's line changes, and only then: a
+/// NOR access that moved no line, or a call that handed on nothing, leaves
+/// the NOR's counts alone.
 #[test]
-fn a_lock_release_counts_against_the_nor_only_after_its_access() {
-    let (mut d, _console, _supply, [uart, _, spi]) = powered_serial_controllers();
+fn a_lock_release_counts_against_the_nor_only_after_handing_on_its_line() {
+    let mut d = aic_gpio_nor();
     d.lock_released(9, 9);
-    d.write(0, spi + 0x30, 4, 7, 0).unwrap();
-    d.lock_released(3, 40);
-    d.read(0, uart, 4, 0).unwrap();
+    for (address, value) in [
+        (NOR_CS, 2),
+        (0x10004, 1 << 5 | 1 << 21),
+        (0x1004c, 1),
+        (0x10010, 0x06),
+    ] {
+        d.write(0, address, 4, value, 0).unwrap();
+    }
     d.lock_released(5, 11);
-    assert_eq!(d.read(0, spi + 0x30, 4, 0), Ok(7));
-    d.lock_released(0, 25);
+    // The run raises the line, the clear lowers it.
+    d.write(0, 0x10000, 4, 1, 0).unwrap();
+    d.lock_released(3, 40);
     d.lock_released(2, 2);
+    d.write(0, 0x10008, 4, 1 << 22, 0).unwrap();
+    d.lock_released(0, 25);
     let nor = d.take_nor_activity().unwrap();
     assert_eq!(
         (
@@ -504,7 +513,7 @@ fn a_lock_release_counts_against_the_nor_only_after_its_access() {
         ),
         (2, 3, 65, 40)
     );
-    assert_eq!(nor.accesses, 2);
+    assert_eq!((nor.accesses, nor.delivered), (5, 2));
 }
 
 #[test]
@@ -1395,20 +1404,18 @@ fn implementation_windows_share_lockdown_energy_and_cpm_without_overlap() {
     assert!(d.read(0, cpm + 0x1234, 8, 0).is_err());
 }
 
-#[test]
-fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
+/// An AICv2 at 0x100000, a GPIO bank at 0x20000 whose pin 49 is the NOR's
+/// chip select, and the SPI NOR at 0x10000 on AIC input 749.
+fn aic_gpio_nor() -> AppleDevices {
     use stela_soc_data::board::{Device, GpioBank, SpiNor};
-    const SPI: u64 = 0x10000;
-    const GPIO: u64 = 0x20000;
-    const PIN: u64 = GPIO + 49 * 4;
     let mut devices = AppleDevices::new();
     devices
-        .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 0))
+        .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 1))
         .unwrap();
     let bank = GpioBank {
         profile: stela_soc_data::gpio::Profile::T8101,
         no_restore_pins: Vec::new(),
-        physical: GPIO,
+        physical: 0x20000,
         bytes: 0x1000,
         pins: 213,
         groups: 7,
@@ -1420,7 +1427,7 @@ fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
     devices
         .add_spi_nor(&SpiNor {
             device: Device {
-                physical: SPI,
+                physical: 0x10000,
                 bytes: 0x4000,
                 irq: 749,
             },
@@ -1428,6 +1435,165 @@ fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
             select: Some(49),
         })
         .unwrap();
+    devices
+}
+
+/// The NOR's chip select, AIC input 749's HW_STATE word and bit, and the
+/// AIC's first timestamp slot in [`aic_gpio_nor`].
+const NOR_CS: u64 = 0x20000 + 49 * 4;
+const NOR_HW_STATE: u64 = 0x100000 + 0x6800 + 749 / 32 * 4;
+const NOR_HW_BIT: u64 = 1 << (749 % 32);
+const NOR_STAMP: u64 = 0x100000 + stela_soc_data::aic::AIC2_TIMESTAMPS;
+
+/// A WREN through the NOR controller with its TX complete interrupt
+/// enabled: the line rises at the run (step 5) and falls when the driver
+/// clears TX complete (step 10). Each step is (address, a write's value or
+/// a read), at count 100 per step.
+const NOR_STEPS: [(u64, Option<u64>); 13] = [
+    (NOR_STAMP, Some(1 << 31 | 749)),
+    (NOR_CS, Some(2)),
+    (0x10004, Some(1 << 5 | 1 << 21)),
+    (0x1004c, Some(1)),
+    (0x10010, Some(0x06)),
+    (0x10000, Some(1)),
+    (NOR_HW_STATE, None),
+    (NOR_STAMP + 8, None),
+    (0x10008, None),
+    (0x1010c, None),
+    (0x10008, Some(1 << 22)),
+    (NOR_HW_STATE, None),
+    (NOR_CS, Some(3)),
+];
+
+fn run_nor_steps(
+    mut access: impl FnMut(u64, Option<u64>, u64) -> Result<u64, DeviceError>,
+) -> Vec<Result<u64, DeviceError>> {
+    NOR_STEPS
+        .iter()
+        .zip(1u64..)
+        .map(|(&(address, write), step)| access(address, write, 100 * step))
+        .collect()
+}
+
+/// The NOR's registers under their own lock answer as through the board:
+/// the same values, the AIC input rising and falling at the same accesses
+/// and stamped with the count of the access that raised it. Only the two
+/// accesses that moved the line took the board's lock for the NOR.
+#[test]
+fn the_nor_answers_under_its_own_lock_as_through_the_board() {
+    use stela_engine::machine::engine::{Hub, Kick, ScalarRead, SharedDevices};
+    struct Idle;
+    impl Kick for Idle {
+        fn kick(&self, _: usize) {}
+    }
+    let mut plain = aic_gpio_nor();
+    let board = run_nor_steps(|address, write, now| match write {
+        Some(value) => plain.write(1, address, 4, value, now).map(|()| value),
+        None => plain.read(1, address, 4, now),
+    });
+    let home = SharedDevices::new(aic_gpio_nor(), Hub::new(2, Idle));
+    let mut worker = home.worker();
+    let own = run_nor_steps(|address, write, now| match write {
+        Some(value) => worker.write(1, address, 4, value, now).map(|()| value),
+        None => match worker.read_scalar(1, address, 4, now) {
+            ScalarRead::Served(read) => read,
+            _ => panic!("a served read"),
+        },
+    });
+    assert_eq!(own, board);
+    assert_eq!(board[6], Ok(NOR_HW_BIT), "raised at the run");
+    assert_eq!(board[7], Ok(600), "stamped with the run's count");
+    assert_eq!(board[8], Ok(1 << 22));
+    assert_eq!(board[11], Ok(0), "lowered by the clear");
+    let plain = plain.take_nor_activity().unwrap();
+    assert_eq!((plain.own_accesses, plain.delivered), (0, 2));
+    let shared = home.with(|devices| devices.take_nor_activity()).unwrap();
+    assert_eq!(
+        (shared.accesses, shared.own_accesses, shared.own_waits),
+        (7, 7, 0)
+    );
+    assert_eq!((shared.delivered, shared.locked), (2, 2));
+}
+
+/// A line change queued under the NOR's own lock reaches the AIC with the
+/// count of the access that made it, whichever later board call hands it
+/// on.
+#[test]
+fn a_queued_nor_line_change_keeps_its_access_count() {
+    let mut d = aic_gpio_nor();
+    for (address, value) in [
+        (NOR_STAMP, 1 << 31 | 749),
+        (NOR_CS, 2),
+        (0x10004, 1 << 5 | 1 << 21),
+        (0x1004c, 1),
+        (0x10010, 0x06),
+    ] {
+        d.write(0, address, 4, value, 10).unwrap();
+    }
+    let own = d.own_lock_registers().unwrap();
+    let input = stela_contracts::interrupt::Wire::Aic(AicInput::new(0, 749));
+    let run = own.write(3, 0x10000, 4, 1, 40);
+    assert_eq!(run.result, Ok(()));
+    assert!(run.queued, "the run raised the line");
+    assert!(!d.latch.is_asserted(input), "not on the board yet");
+    // Handed on later, at the run's count.
+    assert_eq!(d.deliver_own(), Ok(true));
+    assert_eq!(d.deliver_own(), Ok(false), "nothing waits");
+    assert_eq!(d.read(0, NOR_HW_STATE, 4, 900), Ok(NOR_HW_BIT));
+    assert_eq!(d.read(0, NOR_STAMP + 8, 4, 900), Ok(40));
+    // A board access's settlement hands on what waits, as its own.
+    let clear = own.write(3, 0x10008, 4, 1 << 22, 950);
+    assert!(clear.queued);
+    d.read(0, NOR_HW_STATE, 4, 1000).unwrap();
+    assert!(!d.latch.is_asserted(input));
+    assert_eq!(d.read(0, NOR_HW_STATE, 4, 1000), Ok(0));
+    // A read that changes no line queues nothing.
+    let status = own.read(3, 0x10008, 4, 1100);
+    assert_eq!((status.result, status.queued), (Ok(0), false));
+}
+
+/// The host's NVRAM copy reads the sectors under the NOR's own lock while
+/// no access holds it: the board's paths and the engine's handle share one
+/// image.
+#[test]
+fn the_nor_image_is_one_for_the_board_and_the_own_lock_path() {
+    let mut d = aic_gpio_nor();
+    let own = d.own_lock_registers().unwrap();
+    let transfer = |bytes: &[u8]| {
+        for (offset, value) in [
+            (0x0, 0),
+            (0x0, 12),
+            (0x34, bytes.len() as u64),
+            (0x4c, bytes.len() as u64),
+        ] {
+            assert_eq!(own.write(0, 0x10000 + offset, 4, value, 0).result, Ok(()));
+        }
+        for &byte in bytes {
+            assert_eq!(own.write(0, 0x10010, 4, u64::from(byte), 0).result, Ok(()));
+        }
+        assert_eq!(own.write(0, 0x10000, 4, 1, 0).result, Ok(()));
+        for _ in bytes {
+            assert!(own.read(0, 0x10020, 4, 0).result.is_ok());
+        }
+    };
+    d.write(0, NOR_CS, 4, 2, 0).unwrap();
+    transfer(&[0x06]);
+    d.write(0, NOR_CS, 4, 3, 0).unwrap();
+    d.write(0, NOR_CS, 4, 2, 0).unwrap();
+    transfer(&[0x02, 0, 0, 0, 0x42]);
+    d.write(0, NOR_CS, 4, 3, 0).unwrap();
+    let dirty = d.nor_dirty();
+    assert_eq!(dirty.len(), 1);
+    assert_eq!((dirty[0].0, dirty[0].1[0]), (0, 0x42));
+    assert_eq!(d.nor_image().unwrap().bytes()[0], 0x42);
+}
+
+#[test]
+fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
+    const SPI: u64 = 0x10000;
+    const GPIO: u64 = 0x20000;
+    const PIN: u64 = GPIO + 49 * 4;
+    let mut devices = aic_gpio_nor();
     fn transfer(devices: &mut AppleDevices, bytes: &[u8]) -> Vec<u8> {
         devices.write(0, SPI, 4, 0, 0).unwrap();
         devices.write(0, SPI, 4, 12, 0).unwrap();
@@ -4195,3 +4361,57 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
 mod data_integration;
 mod passive;
 mod pc_sampler;
+
+/// Host nanoseconds per modelled NOR SPI register access through a board
+/// shared between PEs, the PIO loop's STATUS read, STATUS write and FIFO
+/// level read: alone, and while another PE keeps the board's lock busy with
+/// another device's writes. A measurement, not a check:
+/// `cargo test --release -p stela-soc nor_access_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "benchmark"]
+fn nor_access_cost() {
+    use stela_engine::machine::engine::{Devices as _, Hub, Kick, ScalarRead, SharedDevices};
+    struct Idle;
+    impl Kick for Idle {
+        fn kick(&self, _: usize) {}
+    }
+    const ACCESSES: u64 = 1_000_000;
+    let (d, _console, _supply, [_, i2c, spi]) = powered_serial_controllers();
+    let home = SharedDevices::new(d, Hub::new(3, Idle));
+    let run = |worker: &mut SharedDevices<AppleDevices>| {
+        let started = std::time::Instant::now();
+        for i in 0..ACCESSES / 3 {
+            let now = i;
+            assert!(matches!(
+                worker.read_scalar(1, spi + 0x8, 4, now),
+                ScalarRead::Served(Ok(_))
+            ));
+            worker.write(1, spi + 0x8, 4, 0, now).unwrap();
+            assert!(matches!(
+                worker.read_scalar(1, spi + 0x10c, 4, now),
+                ScalarRead::Served(Ok(_))
+            ));
+        }
+        started.elapsed().as_nanos() as f64 / (ACCESSES / 3 * 3) as f64
+    };
+    let alone = run(&mut home.worker());
+    let stop = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let mut other = home.worker();
+    let busy = {
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut writes = 0u64;
+            while !stop.load(core::sync::atomic::Ordering::Relaxed) {
+                other.write(2, i2c + 0x30, 4, 0x1234, writes).unwrap();
+                writes += 1;
+            }
+            writes
+        })
+    };
+    let contended = run(&mut home.worker());
+    stop.store(true, core::sync::atomic::Ordering::Relaxed);
+    let writes = busy.join().unwrap();
+    std::println!(
+        "NOR access ns: alone={alone:.1} beside_board_writes={contended:.1} (other PE wrote {writes})"
+    );
+}

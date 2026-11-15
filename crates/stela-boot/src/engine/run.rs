@@ -1510,9 +1510,10 @@ impl Heartbeat {
                     // host's delivery and the guest's masking), claim to the
                     // driver's next access (the guest's handler and work
                     // loop), the claiming PEs, and waits with no claim. Then
-                    // the board's lock around its accesses (host counter
-                    // ticks): the rest of `selected_ms` is the guest's own
-                    // code and exits between accesses.
+                    // the accesses served under the controller's own lock and
+                    // those that found it held, the line changes handed to
+                    // the AIC, and the board holds that did it (host counter
+                    // ticks).
                     let lock = host::COUNTER_HZ;
                     let mut by_pe = alloc::string::String::new();
                     for (pe, &count) in nor.claims_by_cpu.iter().enumerate() {
@@ -1526,8 +1527,8 @@ impl Heartbeat {
                          interrupt_wait_ms={} longest_interrupt_wait_us={} raised_in_access={} \
                          claimed={} claim_ms={} longest_claim_us={} answer_ms={} \
                          longest_answer_us={} by_raiser={} claims_by_pe={} unclaimed={} \
-                         unclaimed_ms={} locked={} lock_waited_ms={} lock_held_ms={} \
-                         longest_lock_held_us={}\n",
+                         unclaimed_ms={} own_accesses={} own_waits={} delivered={} locked={} \
+                         lock_waited_ms={} lock_held_ms={} longest_lock_held_us={}\n",
                         nor.accesses,
                         nor.commands,
                         nor.bytes,
@@ -1545,6 +1546,9 @@ impl Heartbeat {
                         if by_pe.is_empty() { "-" } else { &by_pe },
                         nor.unclaimed,
                         nor.unclaimed_ticks * 1000 / hz,
+                        nor.own_accesses,
+                        nor.own_waits,
+                        nor.delivered,
                         nor.locked,
                         nor.lock_waited_ticks * 1000 / lock,
                         nor.lock_held_ticks * 1000 / lock,

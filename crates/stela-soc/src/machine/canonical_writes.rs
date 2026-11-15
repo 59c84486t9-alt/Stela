@@ -40,9 +40,10 @@ impl AppleDevices {
                     DeviceError::Refused("SPI CS must remain a GPIO output".into())
                 })?;
                 self.bus
-                    .device::<Spi>(wire.spi)
+                    .device::<own_lock::Port<Spi>>(wire.spi)
                     .expect("SPI wire")
-                    .check_cs(high)
+                    .0
+                    .with(|spi| spi.check_cs(high))
                     .map_err(DeviceError::Refused)?;
             }
             if width == Width::Word {
@@ -101,9 +102,10 @@ impl AppleDevices {
             for wire in self.selects.iter().filter(|w| w.physical == physical) {
                 let result = self
                     .bus
-                    .device_mut::<Spi>(wire.spi)
+                    .device::<own_lock::Port<Spi>>(wire.spi)
                     .expect("SPI wire")
-                    .set_cs(value & 1 != 0);
+                    .0
+                    .with(|spi| spi.set_cs(value & 1 != 0));
                 if let Err(error) = result {
                     self.capture_reached(cpu, now, reset);
                     return Err(DeviceError::Refused(error));
