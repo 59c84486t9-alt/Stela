@@ -107,7 +107,7 @@ pub fn rsdp() -> Option<u64> {
     })
 }
 
-/// Before ExitBootServices: find ECAM, reserve DMA pages, measure the TSC
+/// Before ExitBootServices: find ECAM, reserve DMA pages, take the TSC rate
 /// and collect the storage controllers' register ranges.
 pub fn prepare(
     options: &[u8],
@@ -380,11 +380,6 @@ pub fn discover() -> Result<Handoff> {
             DMA_PAGES,
         ),
     };
-    // SAFETY: RDTSC has no memory effects.
-    let start = unsafe { core::arch::x86_64::_rdtsc() };
-    boot::stall(Duration::from_millis(10));
-    // SAFETY: RDTSC has no memory effects.
-    let ticks = unsafe { core::arch::x86_64::_rdtsc() } - start;
     let mut mapped: Vec<_> = ecam.iter().map(|window| window.range()).collect();
     match crate::pci_io::capture() {
         Ok(census) => {
@@ -444,8 +439,10 @@ pub fn discover() -> Result<Handoff> {
         ecam,
         mapped,
         dma: dma..dma + (pages * crate::paging::PAGE) as u64,
+        // The boot's one counter rate (`firmware::tsc_hz`), which the engine,
+        // the guest's count and the log's times take too.
         clock: Clock {
-            ticks_per_microsecond: (ticks / 10_000).max(1),
+            ticks_per_microsecond: (crate::firmware::tsc_hz() / 1_000_000).max(1),
         },
     })
 }
