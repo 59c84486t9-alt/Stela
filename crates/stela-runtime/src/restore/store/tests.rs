@@ -803,3 +803,214 @@ fn a_pending_device_verified_read_goes_on_from_its_bytes_so_far() {
         assert!(store.cursors.0.is_empty(), "deflate={deflate}");
     }
 }
+
+use crate::platform::net::{
+    NetError,
+    ranges::{AHEAD, BUDGET_MS, KEEP, RangeSource, Ranges, SKIP, STREAMS},
+};
+
+/// A remote image's network for [`Ranges`]: an open range's body arrives
+/// only while the reader waits, `per_wait` bytes each wait, and every wait
+/// takes a whole turn's budget. Counts the times each image byte arrives.
+struct Network {
+    image: Vec<u8>,
+    per_wait: u64,
+    now: u64,
+    bodies: Vec<Option<Body>>,
+    arrivals: Vec<u8>,
+}
+/// An open range: handed over up to `next`, arrived up to `arrived`.
+struct Body {
+    next: u64,
+    arrived: u64,
+    last: u64,
+}
+impl RangeSource for Network {
+    type Range = usize;
+
+    fn open(&mut self, first: u64, last: u64) -> core::result::Result<usize, NetError> {
+        self.bodies.push(Some(Body {
+            next: first,
+            arrived: first,
+            last,
+        }));
+        Ok(self.bodies.len() - 1)
+    }
+
+    fn read(
+        &mut self,
+        range: &mut usize,
+        take: &mut dyn FnMut(&[u8]),
+    ) -> core::result::Result<bool, NetError> {
+        let body = self.bodies[*range].as_mut().expect("an open range");
+        let (from, to) = (body.next as usize, body.arrived as usize);
+        body.next = body.arrived;
+        let done = body.next > body.last;
+        for count in &mut self.arrivals[from..to] {
+            *count = count.saturating_add(1);
+        }
+        take(&self.image[from..to]);
+        Ok(done)
+    }
+
+    fn close(&mut self, range: usize) {
+        self.bodies[range] = None;
+    }
+
+    fn wait(&mut self, _: u64) -> core::result::Result<(), NetError> {
+        self.now += BUDGET_MS;
+        for body in self.bodies.iter_mut().flatten() {
+            body.arrived = (body.arrived + self.per_wait).min(body.last + 1);
+        }
+        Ok(())
+    }
+
+    fn millis(&mut self) -> u64 {
+        self.now
+    }
+
+    fn note(&mut self, _: core::fmt::Arguments<'_>) {}
+}
+
+/// Bytes like an Image4 payload's that deflate barely shrinks.
+fn noise(len: usize, mut state: u32) -> Vec<u8> {
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// A remote image read in service turns, as the restore host reads it:
+/// each turn bounds the reads, the system image's stream reads on, and the
+/// request asked again reads a component's head and then digests the
+/// component to its end. The component is far larger than one turn
+/// delivers and than a stream keeps behind its reads. The request goes on
+/// each turn from what earlier turns received (the pass, the inflater and
+/// the range's buffer), so it ends in about as many turns as its bytes
+/// take, not never. Bytes arrive twice only where the ranges read ahead
+/// for the head's own stream or fill a skipped gap, and a hashed member's
+/// scan and read each read it.
+#[test]
+fn a_remote_component_longer_than_a_turn_is_read_across_turns_once() {
+    use sha2::{Digest, Sha384};
+    use stela_formats::payload::zip::Archive;
+
+    const PER_WAIT: u64 = 256 << 10;
+    // Past what a stream keeps behind its reads and the gap a read skips.
+    let component = noise(KEEP + SKIP as usize + 3 * MAX_READ_BYTES + 777, 0x2545_f491);
+    let digest: [u8; 48] = Sha384::digest(&component).into();
+    // Stored, and long enough that its stream stays far from the component.
+    let system: Vec<u8> = (0..2 * (KEEP + SKIP as usize) + AHEAD)
+        .map(|at| (at ^ (at >> 9)) as u8)
+        .collect();
+    for (beside, hashed, deflate) in [
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+        (true, false, false),
+        (false, false, false),
+    ] {
+        let case = format!("beside={beside} hashed={hashed} deflate={deflate}");
+        let (mut stored, mut manifest) = parts(
+            &system,
+            false,
+            &[("KernelCache", "kernelcache", &component)],
+            &[],
+            ERASE,
+        );
+        let build = {
+            let archive = Archive::open(&mut stored).unwrap();
+            let entry = archive.find("BuildManifest.plist").unwrap().clone();
+            let mut bytes = vec![0; entry.bytes as usize];
+            archive
+                .read_member_resuming(&mut stored, &entry, &mut None, 0, &mut bytes)
+                .unwrap();
+            bytes
+        };
+        let image = archive(
+            &[
+                ("BuildManifest.plist", &build, false),
+                ("os.dmg", &system, false),
+                ("kernelcache", &component, deflate),
+            ],
+            true,
+        );
+        manifest.layout = stela_formats::payload::Layout::Remote {
+            url: "http://updates-http.cdn-apple.com/a.ipsw".into(),
+            etag: "\"e\"".into(),
+        };
+        manifest.source.sha256 = None;
+        for member in &mut manifest.members {
+            if !hashed || member.name == "os.dmg" {
+                member.sha256 = None;
+            }
+        }
+        let len = image.len() as u64;
+        let network = Network {
+            arrivals: vec![0; image.len()],
+            image,
+            per_wait: PER_WAIT,
+            now: 0,
+            bodies: Vec::new(),
+        };
+        let mut store = Store::open(Ranges::new(network, len), manifest, 0).unwrap();
+        store.reader.source_mut().arrivals.fill(0);
+        let mut turns = 0u64;
+        let mut system_at = 0;
+        loop {
+            turns += 1;
+            assert!(turns < 4000, "{case}: no end after {turns} turns");
+            store.reader.bound();
+            // The system image's stream, as ASR reads it ahead.
+            if beside && system_at < system.len() {
+                let n = (64 << 10).min(system.len() - system_at);
+                match store.read_at("os.dmg", system_at as u64, n) {
+                    Ok(bytes) => {
+                        assert!(bytes == system[system_at..system_at + n], "{case}");
+                        system_at += n;
+                    }
+                    Err(Error::Pending) => {}
+                    Err(error) => panic!("{case}: {error:?}"),
+                }
+            }
+            let request = store.prepare().and_then(|()| {
+                let head = store.read_at("kernelcache", 0, 64)?;
+                store.digest_after("kernelcache", &head)
+            });
+            match request {
+                Ok(hash) => {
+                    assert_eq!(hash, digest, "{case}");
+                    break;
+                }
+                Err(Error::Pending) => {}
+                Err(error) => panic!("{case}: {error:?}"),
+            }
+            store.reader.pump();
+        }
+        let network = store.reader.source();
+        // Each turn's one wait brings PER_WAIT to the read's range; a
+        // hashed member is read twice, by its scan and by the request.
+        let passes = if hashed { 2 } else { 1 };
+        let needed = passes * (component.len() as u64).div_ceil(PER_WAIT);
+        let refills = 2 * SKIP / PER_WAIT;
+        assert!(
+            turns <= needed + refills + 8,
+            "{case}: {turns} turns for {needed} turns' bytes"
+        );
+        let twice: u64 = network
+            .arrivals
+            .iter()
+            .map(|&count| u64::from(count.saturating_sub(1)))
+            .sum();
+        let scan = if hashed { component.len() as u64 } else { 0 };
+        let allowed = scan + (AHEAD / STREAMS) as u64 + 2 * SKIP;
+        assert!(
+            twice <= allowed,
+            "{case}: {twice} bytes arrived again in {turns} turns, allowed {allowed}"
+        );
+    }
+}
