@@ -31,8 +31,8 @@ use crate::{
 };
 use alloc::string::ToString;
 use alloc::{format, string::String, vec, vec::Vec};
-use stela_boot_core::chosen_disk;
 use stela_boot_core::screen::{disk_size as size, window};
+use stela_boot_core::{chosen_disk, disk_speed};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest;
@@ -75,8 +75,10 @@ struct Disk {
     refusal: Option<&'static str>,
     /// Its nominal rotation rate, as it reports it.
     rotation: stela_drivers::block::Rotation,
+    /// How fast it answered reads, once the picker measured it.
+    speed: Option<disk_speed::Speed>,
     /// Why macOS may run too slowly on it, which does not refuse it
-    /// (`chosen_disk::picker_caution`).
+    /// (`disk_speed::caution`).
     caution: Option<String>,
 }
 
@@ -103,6 +105,32 @@ impl Disk {
             .read_blocks(self.media, lba, buffer.bytes())
             .map_err(|_| refuse!("the disk cannot be read"))?;
         Ok(buffer.bytes().to_vec())
+    }
+
+    /// How fast the disk answers reads (`disk_speed::measure`): read only,
+    /// about 1.5 s at most unless one read takes longer. `None` before the
+    /// counter's rate is known or when a read fails.
+    fn measure(&mut self) -> Option<disk_speed::Speed> {
+        let per_micro = output::counter_hz() / 1_000_000;
+        if per_micro == 0 {
+            return None;
+        }
+        let block_bytes = self.geometry.block_bytes;
+        let mut buffer = Aligned::new(disk_speed::SEQUENTIAL_BYTES as usize);
+        let (io, media) = (&mut self.io, self.media);
+        disk_speed::measure(
+            self.geometry.blocks,
+            block_bytes,
+            output::now(),
+            |lba, blocks| {
+                let bytes = usize::try_from(blocks * block_bytes).unwrap_or(usize::MAX);
+                buffer
+                    .bytes()
+                    .get_mut(..bytes)
+                    .is_some_and(|part| io.read_blocks(media, lba, part).is_ok())
+            },
+            || output::now() / per_micro,
+        )
     }
 
     /// The digest of the disk's first blocks as they are now, which the
@@ -200,8 +228,27 @@ pub fn choose() -> Option<Plan> {
         return None;
     };
     let mut canvas = Canvas::new(screen, font);
+    let mut disks = disks();
+    // Each disk that can be chosen answers a second or two of reads, so
+    // the list can say which are too slow for macOS to start on.
+    if disks.iter().any(|disk| disk.refusal.is_none()) {
+        let (width, height) = canvas.size();
+        canvas.fill(0, 0, width, height, ui::BACKGROUND);
+        canvas.text_centred(
+            width / 2,
+            height / 2,
+            "Checking the disks' speed",
+            1,
+            ui::DIM,
+        );
+        canvas.show();
+    }
+    for disk in disks.iter_mut().filter(|disk| disk.refusal.is_none()) {
+        disk.speed = disk.measure();
+        disk.caution = disk_speed::caution(disk.rotation, disk.speed);
+    }
     let mut picker = Picker {
-        disks: disks(),
+        disks,
         page: Page::Disks,
         disk: 0,
         row: 0,
@@ -214,12 +261,15 @@ pub fn choose() -> Option<Plan> {
     };
     for disk in &picker.disks {
         output::arguments(format_args!(
-            "INSTALLER disk {} {} serial={:?} bytes={} rotation={} table={} refusal={:?}\n",
+            "INSTALLER disk {} {} serial={:?} bytes={} rotation={} random_us={} \
+             sequential_kib_s={} table={} refusal={:?}\n",
             disk.bus,
             disk.model,
             disk.serial,
             disk.bytes(),
             disk.rotation,
+            disk.speed.map_or(0, |speed| speed.random_us),
+            disk.speed.map_or(0, |speed| speed.sequential_kib_s),
             disk.table.as_ref().map_or(0, |t| t.partitions.len()),
             disk.refusal
         ));
@@ -571,7 +621,8 @@ fn disks() -> Vec<Disk> {
             foreign: false,
             refusal: None,
             rotation,
-            caution: chosen_disk::picker_caution(rotation),
+            speed: None,
+            caution: disk_speed::caution(rotation, None),
         };
         let found = gpt::read(geometry, |lba, blocks| {
             disk.read(lba, blocks)

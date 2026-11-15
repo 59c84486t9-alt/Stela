@@ -26,6 +26,7 @@ pub mod chosen_disk;
 pub mod console_lines;
 #[cfg(feature = "native-acpi")]
 pub mod crs;
+pub mod disk_speed;
 pub mod dmar;
 pub mod doorbell;
 pub mod drivers_turn;
