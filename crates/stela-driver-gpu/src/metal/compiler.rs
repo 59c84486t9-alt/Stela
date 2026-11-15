@@ -469,6 +469,16 @@ impl AirCompiler {
         self.recall = Some(recall);
     }
 
+    /// Where a job finds the serialized NIR of `key`, when this image keeps
+    /// any: the lookup of this boot's copies the bytes, so the job makes it.
+    fn restorable(&self, key: &[u8; 32]) -> Option<Restore> {
+        let stored = self.stored.get(key).copied();
+        (stored.is_some() || self.recall.is_some()).then_some(Restore {
+            stored,
+            recall: self.recall,
+        })
+    }
+
     /// The serialized NIR of `key`: an earlier boot's, else this boot's.
     fn serialized(&self, key: &[u8; 32]) -> Option<(Cow<'static, [u8]>, bool)> {
         if let Some(&blob) = self.stored.get(key) {
@@ -548,12 +558,17 @@ impl AirCompiler {
 
     /// Keeps what a deferred compilation made, for the call's next run.
     pub fn adopt(&mut self, finished: Finished) {
-        self.compiled += 1;
         let Finished {
             key,
             result,
             serialized,
+            restored,
         } = finished;
+        match restored {
+            Some(false) => self.restored += 1,
+            Some(true) => self.recalled += 1,
+            None => self.compiled += 1,
+        }
         self.keep_serialized(&key, serialized.as_deref());
         let Some(nir) = self.nir.as_mut() else {
             if let Ok((shader, _)) = result {
@@ -1245,22 +1260,28 @@ impl AirCompiler {
         {
             return Ok(shader);
         }
-        if let Some((shader, bytes)) = self.restore(&job) {
-            let key = job.key.expect("restored by its key");
-            let nir = self.nir.as_mut().expect("restoring keeps compilations");
-            nir.insert(key, shader.clone(), bytes, true);
-            self.release_doomed();
-            return Ok(shader);
-        }
+        // Deserializing stored NIR took a large shader's turn 50-60 ms: a
+        // call that defers leaves it to the job, which compiles only when
+        // no stored NIR deserializes.
         if let Some(key) = job.key
             && self.deferring
             && self.deferred.is_none()
             && !self.failed.contains(&key)
         {
             self.deferrals += 1;
-            self.deferred = Some(job);
+            self.deferred = Some(CompileJob {
+                restore: self.restorable(&key),
+                ..job
+            });
             self.lock.set_deferred(true);
             return Err(DEFERRED);
+        }
+        if let Some((shader, bytes)) = self.restore(&job) {
+            let key = job.key.expect("restored by its key");
+            let nir = self.nir.as_mut().expect("restoring keeps compilations");
+            nir.insert(key, shader.clone(), bytes, true);
+            self.release_doomed();
+            return Ok(shader);
         }
         if let Some(key) = job.key {
             self.failed.remove(&key);
@@ -1483,6 +1504,7 @@ impl AirCompiler {
             provenance,
             key,
             serializing: self.persist.is_some(),
+            restore: None,
         })
     }
 }
@@ -1529,11 +1551,22 @@ pub struct CompileJob {
     key: Option<[u8; 32]>,
     /// The next boot keeps its NIR.
     serializing: bool,
+    /// Where a deferred compilation's serialized NIR may be, which its job
+    /// deserializes in place of compiling.
+    restore: Option<Restore>,
 }
 
 // SAFETY: its pointers are the held libraries' immutable bytes and the
 // driver's NIR options, which any thread reads; nothing else holds them.
 unsafe impl Send for CompileJob {}
+
+/// Where a deferred compilation's serialized NIR may be: an earlier boot's
+/// bytes, else this boot's, which the store copies out.
+#[derive(Clone, Copy)]
+struct Restore {
+    stored: Option<&'static [u8]>,
+    recall: Option<Recall>,
+}
 
 /// A job that waits for the compile lock, for a call whose turn would.
 #[derive(Default)]
@@ -1609,6 +1642,9 @@ pub struct Finished {
     result: core::result::Result<(CompiledShader, usize), ()>,
     /// Its NIR, serialized for the next boot, when that keeps it.
     serialized: Option<Vec<u8>>,
+    /// Deserialized rather than compiled: `true` from this boot's NIR,
+    /// `false` from an earlier boot's.
+    restored: Option<bool>,
 }
 
 impl CompileJob {
@@ -1619,8 +1655,17 @@ impl CompileJob {
         self.complete()
     }
 
-    /// [`Self::run_outside`], for a [`Job`] whose runner holds the lock.
+    /// [`Self::run_outside`], for a [`Job`] whose runner holds the lock:
+    /// the stored NIR deserialized, where it is, else the compilation.
     fn complete(self) -> Finished {
+        if let Some((shader, recalled)) = self.restore() {
+            return Finished {
+                key: self.key.expect("a deferred compilation has its key"),
+                result: Ok(shader),
+                serialized: None,
+                restored: Some(recalled),
+            };
+        }
         let serializing = self.serializing;
         let result = self.run();
         let serialized = match &result {
@@ -1631,7 +1676,21 @@ impl CompileJob {
             key: self.key.expect("a deferred compilation has its key"),
             result: result.map_err(|_| ()),
             serialized,
+            restored: None,
         }
+    }
+
+    /// The shader of the serialized NIR [`Restore`] finds, and whether it
+    /// was this boot's.
+    fn restore(&self) -> Option<((CompiledShader, usize), bool)> {
+        let Restore { stored, recall } = self.restore?;
+        let (blob, recalled) = match (stored, recall) {
+            (Some(blob), _) => (Cow::Borrowed(blob), false),
+            (None, Some(recall)) => (Cow::Owned(recall(&self.key?)?), true),
+            (None, None) => return None,
+        };
+        let shader = deserialize(&blob, self.target.nir)?;
+        Some((self.finish(shader), recalled))
     }
 
     /// The function's name.
@@ -1898,8 +1957,14 @@ fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
     }
     #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
     {
-        let _ = (blob, options);
-        None
+        let _ = options;
+        #[cfg(test)]
+        return cache_tests::deserialize(blob);
+        #[cfg(not(test))]
+        {
+            let _ = blob;
+            None
+        }
     }
 }
 
