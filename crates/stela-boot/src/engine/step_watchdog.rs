@@ -440,6 +440,23 @@ pub(super) fn leave() {
 
 /// The stop's reason when an NMI on this processor is the watchdog's.
 pub(super) fn nmi_reason() -> Option<alloc::string::String> {
+    let (stage, finding) = nmi_finding()?;
+    Some(match finding {
+        Ok(caught) => decide::caught_message(stage, &caught),
+        Err(stuck) => decide::message(stage, &stuck),
+    })
+}
+
+/// Whether an NMI on this processor is the watchdog's, as [`nmi_reason`]
+/// decides, without allocating: a returnable NMI gate asks this first, as
+/// the processor it interrupted may hold the heap.
+pub(crate) fn nmi_is_watchdog() -> bool {
+    nmi_finding().is_some()
+}
+
+/// What the watchdog found when an NMI on this processor is its own: the
+/// stage, and the watchers' catch or the counter's stuck step.
+fn nmi_finding() -> Option<(&'static str, Result<decide::Caught, decide::Stuck>)> {
     if PROCESSOR.load(Ordering::Relaxed) != super::host::local::processor() {
         return None;
     }
@@ -456,8 +473,7 @@ pub(super) fn nmi_reason() -> Option<alloc::string::String> {
     // SAFETY: `stage` stores only references to statics.
     let stage = unsafe { stage.as_ref() }.copied().unwrap_or(DRIVER_WORK);
     if let Some(caught) = decide::caught(SENT.load(Ordering::Acquire), &observation) {
-        return Some(decide::caught_message(stage, &caught));
+        return Some((stage, Ok(caught)));
     }
-    let stuck = decide::attribute(&observation)?;
-    Some(decide::message(stage, &stuck))
+    Some((stage, Err(decide::attribute(&observation)?)))
 }

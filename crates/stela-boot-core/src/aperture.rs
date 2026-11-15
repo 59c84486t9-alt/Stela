@@ -157,6 +157,14 @@ struct Sharer {
     /// Halted with no translation it uses before it flushes again
     /// ([`Processors::enter_idle`]).
     idle: AtomicBool,
+    /// Its NMI gate answers a retirement's NMI ([`Processors::set_reachable`]).
+    reachable: AtomicBool,
+    /// A retirement sent it an NMI its gate has not taken yet.
+    poked: AtomicBool,
+    /// The latest generation its NMI gate flushed through, and the
+    /// instruction the NMI found it at.
+    answered: AtomicU64,
+    rip: AtomicU64,
 }
 
 /// The range one request retired, by generation; read like a sequence
@@ -227,6 +235,10 @@ impl Processors {
                     acknowledged: AtomicU64::new(0),
                     doing: AtomicU64::new(0),
                     idle: AtomicBool::new(false),
+                    reachable: AtomicBool::new(false),
+                    poked: AtomicBool::new(false),
+                    answered: AtomicU64::new(0),
+                    rip: AtomicU64::new(0),
                 }
             }; MAX_PROCESSORS],
             recorded: [const {
@@ -431,6 +443,76 @@ impl Processors {
     /// processor: it neither acknowledged it nor is idle.
     pub fn pending(&self, slot: usize, generation: u64) -> bool {
         self.acknowledged(slot) < generation && !self.idle(slot)
+    }
+
+    /// Slot `slot`'s processor runs with its own interrupt tables, whose
+    /// NMI gate answers a retirement's NMI ([`Self::poke`]): only from then
+    /// on may one be sent to it.
+    pub fn set_reachable(&self, slot: usize) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            sharer.reachable.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether slot `slot`'s processor may be sent an NMI
+    /// ([`Self::set_reachable`]).
+    pub fn reachable(&self, slot: usize) -> bool {
+        self.sharers
+            .get(slot)
+            .is_some_and(|sharer| sharer.reachable.load(Ordering::Acquire))
+    }
+
+    /// Ask slot `slot`'s processor, which has not acknowledged `generation`
+    /// in time, to answer by NMI: whether the caller sends it one. One that
+    /// cannot take it (not reachable), needs none (idle or acknowledged) or
+    /// has one outstanding gets none, so its gate takes each NMI sent for a
+    /// retirement as one ([`Self::take_poke`]) and two never merge into one.
+    pub fn poke(&self, slot: usize, generation: u64) -> bool {
+        let Some(sharer) = self.sharers.get(slot) else {
+            return false;
+        };
+        sharer.reachable.load(Ordering::Acquire)
+            && self.pending(slot, generation)
+            && sharer
+                .poked
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+    }
+
+    /// The NMI [`Self::poke`] asked for could not be sent: a later
+    /// escalation may send one.
+    pub fn unpoke(&self, slot: usize) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            sharer.poked.store(false, Ordering::Release);
+        }
+    }
+
+    /// In slot `slot`'s NMI gate: whether a retirement sent the NMI it
+    /// takes, which it then answers. Cleared first, so a retirement may
+    /// send the next one at once; the processor holds NMIs until its gate
+    /// returns, so that one arrives after.
+    pub fn take_poke(&self, slot: usize) -> bool {
+        self.sharers
+            .get(slot)
+            .is_some_and(|sharer| sharer.poked.swap(false, Ordering::AcqRel))
+    }
+
+    /// Slot `slot`'s NMI gate flushed through `generation`, having found the
+    /// processor at instruction `rip`.
+    pub fn answered_by_nmi(&self, slot: usize, generation: u64, rip: u64) {
+        if let Some(sharer) = self.sharers.get(slot) {
+            sharer.rip.store(rip, Ordering::Relaxed);
+            sharer.answered.fetch_max(generation, Ordering::Release);
+        }
+    }
+
+    /// The instruction slot `slot`'s processor was at when its NMI gate
+    /// answered `generation` or a later request; `None` when it answered
+    /// otherwise.
+    pub fn nmi_answer(&self, slot: usize, generation: u64) -> Option<u64> {
+        let sharer = self.sharers.get(slot)?;
+        (sharer.answered.load(Ordering::Acquire) >= generation)
+            .then(|| sharer.rip.load(Ordering::Relaxed))
     }
 
     /// What slot `slot`'s processor does, and the TSC it began at.
@@ -813,6 +895,50 @@ mod tests {
         assert!(!processors.leave_idle(MAX_PROCESSORS));
         processors.enter_idle(MAX_PROCESSORS);
         assert!(!processors.idle(MAX_PROCESSORS));
+    }
+
+    /// A retirement may send a late processor one NMI at a time, only
+    /// once its gate answers NMIs, and none to an idle or acknowledged one;
+    /// the gate takes each as a retirement's and records where it was.
+    #[test]
+    fn a_late_processor_gets_one_nmi_at_a_time_from_a_retirement() {
+        let processors = Processors::new();
+        let bsp = processors.join_bsp(0).unwrap();
+        let ap = processors.join_ap(2).unwrap();
+        let generation = processors.request(None);
+        // Its gate is not installed yet: no NMI.
+        assert!(!processors.poke(ap, generation));
+        assert!(!processors.reachable(ap));
+        processors.set_reachable(ap);
+        assert!(processors.reachable(ap));
+        processors.set_reachable(bsp);
+        assert!(processors.poke(ap, generation));
+        // One outstanding at a time, whoever asks.
+        assert!(!processors.poke(ap, generation));
+        // A gate that takes an NMI nobody sent does not answer it.
+        assert!(!processors.take_poke(bsp));
+        assert!(processors.take_poke(ap));
+        assert!(!processors.take_poke(ap));
+        assert_eq!(processors.nmi_answer(ap, generation), None);
+        processors.answered_by_nmi(ap, generation, 0x1234);
+        processors.acknowledge(ap, generation);
+        assert_eq!(processors.nmi_answer(ap, generation), Some(0x1234));
+        // Acknowledged: no NMI; nor once the NMI could not be sent, until
+        // it is asked for again.
+        assert!(!processors.poke(ap, generation));
+        let next = processors.request(None);
+        assert_eq!(processors.nmi_answer(ap, next), None);
+        assert!(processors.poke(ap, next));
+        processors.unpoke(ap);
+        assert!(processors.poke(ap, next));
+        assert!(processors.take_poke(ap));
+        // An idle processor needs none.
+        processors.enter_idle(ap);
+        assert!(!processors.poke(ap, next));
+        assert!(processors.leave_idle(ap));
+        assert!(processors.poke(ap, next));
+        assert!(!processors.poke(MAX_PROCESSORS, next));
+        assert!(!processors.take_poke(MAX_PROCESSORS));
     }
 
     #[test]

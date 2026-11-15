@@ -13,7 +13,12 @@
 //! halted for its guest's wait is idle ([`idle`]): it makes no access through
 //! a window translation until it wakes and flushes ([`wake`]), so a
 //! retirement neither interrupts nor waits for it, as Linux leaves a CPU in
-//! lazy TLB mode alone.
+//! lazy TLB mode alone. Every other processor's acknowledgement is bounded
+//! whatever it runs with interrupts off (a device's or the host's service
+//! turn, a log store, heap growth, a firmware call, a GPU turn, a lock spin
+//! with no safe point): one that has not acknowledged after [`NMI_MICROS`]
+//! gets an NMI, whose gate flushes and acknowledges as the vector's handler
+//! does ([`answer_nmi`]) and notes the instruction it found the processor at.
 //!
 //! [`SHOOTDOWN_VECTOR`]: crate::engine::interrupts::SHOOTDOWN_VECTOR
 //! [`aperture::Processors::request`]: stela_boot_core::aperture::Processors::request
@@ -30,6 +35,12 @@ use stela_boot_core::aperture::{Doing, RANGE_PAGES};
 /// How long a retirement waits before it reports the processors it waits
 /// for.
 const REPORT_MS: u64 = 100;
+/// How long a retirement waits for the vector before it sends each processor
+/// still holding it up an NMI, and again between NMIs while one holds it up.
+/// A halted processor's deepest C-state exit takes up to a few hundred
+/// microseconds; anything slower runs with interrupts off and reaches no safe
+/// point.
+const NMI_MICROS: u64 = 250;
 /// How long a retirement waits for every acknowledgement. A processor goes
 /// this long without a safe point only when it is stuck: every engine wait
 /// and engine or driver lock spin is one, a native epoch ends at its
@@ -196,6 +207,29 @@ pub(crate) fn wake() {
     }
 }
 
+/// In this processor's NMI gate: whether a retirement sent the NMI
+/// ([`aperture::Processors::poke`]). The gate answers it ([`answer_nmi`])
+/// unless it is also the step watchdog's.
+///
+/// [`aperture::Processors::poke`]: stela_boot_core::aperture::Processors::poke
+pub(crate) fn take_poke() -> bool {
+    crate::engine::host::shootdown()
+        .0
+        .is_some_and(|slot| PROCESSORS.take_poke(slot))
+}
+
+/// Answer a retirement's NMI, which found this processor at `rip`: flush
+/// and acknowledge as the vector's handler does, at any instruction, as a
+/// TLB flush changes nothing the interrupted code sees. Takes no lock and
+/// allocates nothing.
+pub(crate) fn answer_nmi(rip: u64) {
+    let requested = PROCESSORS.requested();
+    service();
+    if let Some(slot) = crate::engine::host::shootdown().0 {
+        PROCESSORS.answered_by_nmi(slot, requested, rip);
+    }
+}
+
 /// Note what this processor does until the returned guard drops.
 fn doing(doing: Doing) -> Option<Restore> {
     let slot = crate::engine::host::shootdown().0?;
@@ -316,13 +350,15 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
         // A processor in a job with the vector open, or halted in a wait
         // that is not idle, takes it and sees the request stored above; one
         // with interrupts off takes it at its next safe point, whether or
-        // not this delivery completes.
+        // not this delivery completes, or an NMI later ([`nmi_late`]).
         // SAFETY: every joined processor's IDT routes the vector to its
         // shootdown handler. No handler this processor may take while it
         // retires (the doorbell's, the shootdown's) writes the ICR.
         let _ = unsafe { sender.notify(apic, SHOOTDOWN_VECTOR, tsc_hz) };
     }
     let (report, limit) = (tsc_hz / 1000 * REPORT_MS, tsc_hz / 1000 * WAIT_MS);
+    let escalation = (tsc_hz / 1_000_000 * NMI_MICROS).max(1);
+    let mut escalate = escalation;
     let mut reported = false;
     // A peer may be publishing a retirement at the same time and cannot
     // finish until this processor acknowledges its generation.
@@ -330,6 +366,10 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
         service();
         let now = crate::engine::host::rdtsc();
         let waited = now.wrapping_sub(start);
+        if waited >= escalate {
+            nmi_late(&sender, generation, me, tsc_hz);
+            escalate = waited.saturating_add(escalation);
+        }
         if waited >= limit {
             report_unacknowledged(generation, me, now, tsc_hz, "the mapping stays reserved");
             return false;
@@ -342,6 +382,29 @@ pub(super) fn retire(tsc_hz: u64, retired: Option<Range<u64>>) -> bool {
     }
     true
 }
+
+/// Send an NMI to each processor that still holds up `generation` and has
+/// none outstanding ([`aperture::Processors::poke`]).
+///
+/// [`aperture::Processors::poke`]: stela_boot_core::aperture::Processors::poke
+fn nmi_late(sender: &crate::apic::Apic, generation: u64, me: Option<usize>, tsc_hz: u64) {
+    for (slot, apic) in PROCESSORS.sharers() {
+        if Some(slot) == me || !PROCESSORS.poke(slot, generation) {
+            continue;
+        }
+        // SAFETY: a reachable processor's NMI gate answers a poke and
+        // returns; no handler this processor may take while it retires
+        // writes the ICR.
+        if unsafe { sender.notify_nmi(apic, tsc_hz) }.is_err() {
+            PROCESSORS.unpoke(slot);
+        } else {
+            NMIS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// NMIs retirements sent since [`take_waits`].
+static NMIS: AtomicU64 = AtomicU64::new(0);
 
 /// Shootdowns this processor's peers had to acknowledge since [`take_waits`],
 /// and the TSC ticks their retirements waited for them.
@@ -362,15 +425,16 @@ impl Drop for Counted {
     }
 }
 
-/// The shootdowns since the last call, the ticks they waited and how many
-/// of them retired a range peers flushed page by page, for the GPU gate's
-/// report.
+/// The shootdowns since the last call, the ticks they waited, how many of
+/// them retired a range peers flushed page by page, and the NMIs they sent
+/// late processors, for the GPU gate's report.
 #[cfg(feature = "nvk")]
-pub(crate) fn take_waits() -> (u64, u64, u64) {
+pub(crate) fn take_waits() -> (u64, u64, u64, u64) {
     (
         WAITS[0].swap(0, Ordering::Relaxed),
         WAITS[1].swap(0, Ordering::Relaxed),
         RANGED.swap(0, Ordering::Relaxed),
+        NMIS.swap(0, Ordering::Relaxed),
     )
 }
 
@@ -390,9 +454,15 @@ fn report_unacknowledged(generation: u64, me: Option<usize>, now: u64, tsc_hz: u
             // A processor never marked has been masked since it joined.
             let (doing, since) = PROCESSORS.doing(slot);
             let held_ms = (since != 0).then(|| now.saturating_sub(since) / (tsc_hz / 1000).max(1));
+            // An NMI went to every processor that takes one (`nmi_late`).
+            let nmi = if PROCESSORS.reachable(slot) {
+                "sent"
+            } else {
+                "unreachable"
+            };
             crate::output::arguments(format_args!(
                 "NATIVE MMIO shootdown {generation} unacknowledged by APIC {apic:#x} \
-                 doing={}/{}ms behind={}; {outcome}\n",
+                 doing={}/{}ms behind={} nmi={nmi}; {outcome}\n",
                 doing.name(),
                 Since(held_ms),
                 generation - acknowledged,
