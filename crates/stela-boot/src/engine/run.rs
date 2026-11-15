@@ -1662,6 +1662,22 @@ impl Heartbeat {
                         micros(longest),
                     ));
                 }
+                // A core whose counter moved after its synchronization:
+                // the device clock held it at the last value given, once a
+                // boot past a millisecond.
+                static BEHIND_REPORTED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                let behind = host::device_counter_behind();
+                if behind > tsc_hz / 1000
+                    && !BEHIND_REPORTED.swap(true, core::sync::atomic::Ordering::Relaxed)
+                {
+                    output::arguments(format_args!(
+                        "HOST CLOCK a processor's counter read {} us behind the device clock: \
+                         it moved after its TSC synchronization, and device times on it held \
+                         until it caught up\n",
+                        u128::from(behind) * 1_000_000 / u128::from(tsc_hz.max(1)),
+                    ));
+                }
                 survey_report(machine);
                 occupancy_report(machine, &mut self.occupancy);
                 let next = if self.beats.is_multiple_of(SUSPENSION_BEATS) {

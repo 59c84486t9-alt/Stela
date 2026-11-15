@@ -70,8 +70,10 @@ impl Usb4Platform {
 }
 
 impl Platform for Usb4Platform {
+    /// The device clock: the transport refuses a time before its last, and
+    /// its polls run on whichever processor serves the host.
     fn now_ms(&self) -> u64 {
-        super::host::rdtsc() / self.tsc_per_ms
+        super::host::device_counter() / self.tsc_per_ms
     }
 
     fn report(&mut self, report: Report) {

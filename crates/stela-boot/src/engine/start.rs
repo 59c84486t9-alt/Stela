@@ -284,8 +284,9 @@ fn start(handoff: u64) -> Started {
     crate::status::set_clock(handoff.tsc_hz);
     // Before any AP agrees with the BSP through a software offset: from
     // then on the drivers' times and deadlines read the BSP's counter on
-    // every core, as the engine's own reads do.
-    stela_drivers::on_counter(super::host::rdtsc);
+    // every core, as the engine's own reads do, and never one earlier than
+    // another core already took.
+    stela_drivers::on_counter(super::host::device_counter);
     stela_drivers::on_wait(crate::status::tick);
     stela_drivers::on_work(device_starting);
     stela_drivers::budget::on_processor(processor_gs);

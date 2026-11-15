@@ -139,8 +139,10 @@ static COUNTER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 /// Have [`Clock`] read `counter` instead of the raw time-stamp counter. A
 /// platform that corrects a core's counter in software gives the corrected
 /// one, so a time or deadline one core takes holds on another, as the
-/// network stack's and every driver's do when they move between cores. It
-/// must take no lock and drive no device.
+/// network stack's and every driver's do when they move between cores; and
+/// it never answers a value below one any core was given, as the network
+/// stack and the USB4 transport refuse a time that goes back. It must take
+/// no lock and drive no device.
 pub fn on_counter(counter: fn() -> u64) {
     COUNTER.store(counter as *mut (), Ordering::Release);
 }

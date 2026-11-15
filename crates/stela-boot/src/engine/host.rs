@@ -428,6 +428,26 @@ pub fn rdtsc() -> u64 {
     }
 }
 
+/// The device clock: [`rdtsc`] on any core, never earlier than a value any
+/// core was given (`tsc::sync::Monotonic`).
+static DEVICE_COUNTER: stela_boot_core::tsc::sync::Monotonic =
+    stela_boot_core::tsc::sync::Monotonic::new();
+
+/// The counter the drivers' clock reads on every core (`on_counter`), and
+/// every other host time that one core takes and another compares: the
+/// network stack's, a USB4 fabric's, the boot screen's running step. It
+/// never goes back, even where a core's counter moved after its
+/// synchronization: that core reads the last value given until its own
+/// passes it ([`device_counter_behind`]).
+pub fn device_counter() -> u64 {
+    DEVICE_COUNTER.read(rdtsc())
+}
+
+/// The most a core's [`rdtsc`] trailed the device clock, in ticks.
+pub(crate) fn device_counter_behind() -> u64 {
+    DEVICE_COUNTER.longest_behind()
+}
+
 impl State {
     /// The base native count reads, which take this core's raw counter,
     /// subtract: `tsc_base`, the BSP's, moved by this core's software

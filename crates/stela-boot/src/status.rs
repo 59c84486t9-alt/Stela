@@ -24,10 +24,7 @@ use crate::{
     output,
 };
 use alloc::{format, string::String, vec::Vec};
-use core::{
-    arch::x86_64::_rdtsc,
-    fmt::{self, Write as _},
-};
+use core::fmt::{self, Write as _};
 use stela_boot_core::screen::Exclusive;
 
 /// Frames of the running marker: three cells moving across six and back.
@@ -108,9 +105,10 @@ static STATE: Exclusive<State> = Exclusive::new(State {
     history: String::new(),
 });
 
+/// The device clock (`engine::host::device_counter`): a step stamped on one
+/// processor is timed by a tick on another.
 fn now() -> u64 {
-    // SAFETY: RDTSC has no memory effects.
-    unsafe { _rdtsc() }
+    crate::engine::host::device_counter()
 }
 
 #[derive(Clone, Copy)]
