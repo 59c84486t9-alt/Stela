@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{blocking::Client, header, redirect::Policy};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::Path,
     time::Duration,
 };
@@ -383,6 +383,15 @@ fn prefetch(
         return Ok(0);
     }
     let bytes: usize = wanted.iter().map(|(artifact, _)| artifact.length).sum();
+    // The bar draws only on a terminal; a redirected run gets one line at
+    // each end of the download instead.
+    let plain = !io::stderr().is_terminal();
+    if plain {
+        eprintln!(
+            "Downloading firmware ({:.1} MiB)",
+            bytes as f64 / MIB as f64
+        );
+    }
     let progress = crate::progress::Phase::bytes("Downloading firmware", bytes as u64);
     for (artifact, _) in &wanted {
         let bytes = download(artifact)?;
@@ -390,6 +399,9 @@ fn prefetch(
         progress.advance(artifact.length as u64);
     }
     progress.finish();
+    if plain {
+        eprintln!("Firmware downloaded");
+    }
     Ok(wanted.len())
 }
 
