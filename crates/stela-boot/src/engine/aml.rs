@@ -41,7 +41,7 @@ use stela_boot_core::ecam::memory as ecam_memory;
 use stela_drivers::{
     bus::pci::{Address, EcamWindow},
     platform::acpi::{
-        Interrupt, Mode, PciId, SERVICES_ABI_BYTES, SERVICES_ABI_VERSION, Services, Session,
+        Bound, Interrupt, Mode, PciId, SERVICES_ABI_BYTES, SERVICES_ABI_VERSION, Services, Session,
         Status, Value, Work,
     },
     usb::typec::ucsi::acpi::attachment as ucsi,
@@ -69,6 +69,32 @@ const PCI_ADDRESS: u16 = 0xcf8;
 const PCI_DATA: u16 = 0xcfc;
 /// The header [`allocate`] keeps before each allocation: its layout's size.
 const HEADER: usize = 16;
+/// How long one call into the firmware's AML may run ([`bounded`]): far
+/// past a whole table load and namespace initialization (about 100 ms on
+/// the PCs logged so far) and ACPICA's 2 s Sleep, and well below the step
+/// watchdog's 30 s, so AML that never finishes ends in its degraded answer
+/// rather than a stop. Linux has no such bound; it has ACPICA's 30 s per
+/// While loop, which nested methods and repeated loops add up past.
+const AML_BOUND_MS: u32 = 10_000;
+
+/// `call` into the firmware's AML under [`AML_BOUND_MS`], and whether it
+/// finished within it. Past it, the methods running end with errors
+/// ([`Bound`]), and one line names `what` did not finish, where AML was
+/// then, and `then`, what follows.
+fn bounded<T>(what: &str, then: &str, call: impl FnOnce() -> T) -> (T, bool) {
+    let bound = Bound::begin(AML_BOUND_MS);
+    let value = call();
+    match bound.end() {
+        Ok(()) => (value, true),
+        Err(overrun) => {
+            output::arguments(format_args!(
+                "UNSUPPORTED ACPI {what} did not finish within {} s, {overrun}: {then}\n",
+                AML_BOUND_MS / 1000
+            ));
+            (value, false)
+        }
+    }
+}
 
 /// What the provider reports once, as unsupported.
 #[derive(Clone, Copy)]
@@ -1095,10 +1121,32 @@ impl HostAcpi {
             fatal,
             preflight_wait_events,
         };
-        // SAFETY: every callback keeps the OSL contract above, the provider
-        // is the session's, and only this processor runs ACPICA.
-        let session = match unsafe { Session::start(services, Mode::InterpreterOnly) } {
-            Ok(session) => session,
+        // The tables' module-level code and the namespace's initialization
+        // run inside the start, and the bound covers them: firmware AML that
+        // never finishes leaves the AML unloaded, as one the interpreter
+        // refuses does, instead of a boot that hangs at this step.
+        let (started, finished) = bounded(
+            "firmware AML load",
+            "the firmware's AML is not loaded",
+            || {
+                // SAFETY: every callback keeps the OSL contract above, the
+                // provider is the session's, and only this processor runs ACPICA.
+                let session = unsafe { Session::start(services, Mode::InterpreterOnly) }?;
+                let s5 = Self::describe_s5(&session);
+                Ok::<_, stela_drivers::platform::acpi::Error>((session, s5))
+            },
+        );
+        let session = match started {
+            Ok((session, s5)) if finished => {
+                output::arguments(format_args!("ACPI firmware AML loaded: {s5}\n"));
+                session
+            }
+            // Its namespace is left as the aborted methods left it: the
+            // session stops, and with it the provider.
+            Ok((session, _)) => {
+                drop(session);
+                return None;
+            }
             Err(error) => {
                 output::arguments(format_args!(
                     "ACPI firmware AML refused: ACPICA status {:#x}\n",
@@ -1107,31 +1155,6 @@ impl HostAcpi {
                 return None;
             }
         };
-        let s5 = session
-            .handle("\\_S5")
-            .and_then(|s5| s5.evaluate(None, &[]));
-        match s5 {
-            Ok(Some(Value::Package(values))) => {
-                let values: Vec<_> = values
-                    .iter()
-                    .map(|value| match value {
-                        Value::Integer(value) => alloc::format!("{value:#x}"),
-                        _ => String::from("?"),
-                    })
-                    .collect();
-                output::arguments(format_args!(
-                    "ACPI firmware AML loaded: \\_S5 {}\n",
-                    values.join(",")
-                ));
-            }
-            Ok(_) => output::arguments(format_args!(
-                "ACPI firmware AML loaded: \\_S5 is not a package\n"
-            )),
-            Err(error) => output::arguments(format_args!(
-                "ACPI firmware AML loaded: no \\_S5 (ACPICA status {:#x})\n",
-                error.0
-            )),
-        }
         let host = Box::leak(Box::new(Self {
             session,
             provider,
@@ -1213,6 +1236,27 @@ impl HostAcpi {
         Some(host)
     }
 
+    /// What `\_S5` evaluates to, for the load's line.
+    fn describe_s5(session: &Session) -> String {
+        match session
+            .handle("\\_S5")
+            .and_then(|s5| s5.evaluate(None, &[]))
+        {
+            Ok(Some(Value::Package(values))) => {
+                let values: Vec<_> = values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Integer(value) => alloc::format!("{value:#x}"),
+                        _ => String::from("?"),
+                    })
+                    .collect();
+                alloc::format!("\\_S5 {}", values.join(","))
+            }
+            Ok(_) => String::from("\\_S5 is not a package"),
+            Err(error) => alloc::format!("no \\_S5 (ACPICA status {:#x})", error.0),
+        }
+    }
+
     pub(super) fn embedded_controller(
         &self,
     ) -> Result<
@@ -1271,6 +1315,13 @@ impl HostAcpi {
         }
     }
     fn poll_entered(&self) {
+        bounded(
+            "deferred work",
+            "the work it left waits for the next poll",
+            || self.poll_bounded(),
+        );
+    }
+    fn poll_bounded(&self) {
         // SAFETY: the work dispatcher owns the loader root and driver
         // exclusion across this continuation; the Session keeps the provider.
         let provider = unsafe { &*self.provider };
@@ -1382,12 +1433,14 @@ impl HostAcpi {
     ) -> Option<stela_drivers::platform::acpi::processor::Declaration> {
         // SAFETY: this permanent provider is held by the leaked Session.
         let provider = unsafe { &*self.provider };
-        match provider
-            .executor
-            .call_owned(5_000_000, move || self.session.processor_idle(capabilities))
-        {
-            Ok(Ok(declaration)) => Some(declaration),
-            Ok(Err(error)) => {
+        match provider.executor.call_owned(5_000_000, move || {
+            bounded("processor idle declaration", "processors halt", || {
+                self.session.processor_idle(capabilities)
+            })
+        }) {
+            Ok((Ok(declaration), true)) => Some(declaration),
+            Ok((Ok(_), false)) => None,
+            Ok((Err(error), _)) => {
                 output::arguments(format_args!(
                     "UNSUPPORTED ACPI processor idle declaration: ACPICA status {:#x}\n",
                     error.0
@@ -1429,6 +1482,12 @@ impl HostAcpi {
         }
     }
     fn prepare_soft_off_entered(&self) -> Option<(u8, u8)> {
+        bounded("S5 preparation", "S5 follows", || {
+            self.prepare_soft_off_bounded()
+        })
+        .0
+    }
+    fn prepare_soft_off_bounded(&self) -> Option<(u8, u8)> {
         let types = match self.session.sleep_types(5) {
             Ok(types) => types,
             Err(error) => {
