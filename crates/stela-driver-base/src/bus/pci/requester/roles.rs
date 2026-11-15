@@ -370,6 +370,31 @@ mod tests {
         assert_eq!(inventory.role(at(3, 0x100)), FunctionRole::Physical);
         assert_eq!(inventory.role(at(0, 0x200)), FunctionRole::Unverified);
     }
+    /// Linux `pci_cfg_space_size`: a conventional function has no extended
+    /// space. An Intel PCH SMBus read at 0x100 through ECAM answers with its
+    /// first bytes again, whose next pointer is no list: the segment, and
+    /// the GPU in it, are still classified.
+    #[test]
+    fn a_conventional_function_aliasing_its_extended_space_leaves_the_segment_classified() {
+        let mut smbus = plain();
+        smbus[0] = 0x7aa3_8086;
+        // Power management alone, which is no PCI Express.
+        smbus[1] |= 1 << 20;
+        smbus[0x34 / 4] = 0x50;
+        smbus[0x50 / 4] = 0x0003_0001;
+        for at in 0..64 {
+            smbus[0x100 / 4 + at] = smbus[at];
+        }
+        // A PCI Express function, with SR-IOV and no VF enabled.
+        let gpu = at(0, 0x100);
+        let mut express = pf(2, 8, 1);
+        express[0x108 / 4] = 0;
+        let spaces = BTreeMap::from([(PF, smbus), (gpu, express)]);
+        let inventory = capture(&spaces);
+        assert!(inventory.issues().is_empty(), "{:?}", inventory.issues());
+        assert_eq!(inventory.role(PF), FunctionRole::Physical);
+        assert_eq!(inventory.role(gpu), FunctionRole::Physical);
+    }
     #[test]
     fn disabled_vfs_do_not_reclassify_an_ordinary_present_function() {
         let mut source = pf(2, 8, 2);
