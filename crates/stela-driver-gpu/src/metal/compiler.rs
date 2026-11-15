@@ -34,6 +34,7 @@ mod library_cache;
 #[cfg(feature = "metal-linked")]
 mod linked;
 mod nir_cache;
+mod pins;
 #[cfg(test)]
 mod tests;
 
@@ -76,6 +77,7 @@ use triomphe::Arc;
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
 pub use nir_cache::{CompileGuard, CompileLock, SharedHold};
 use nir_cache::{NirCache, ReflectionCache, ReflectionKey, Returned};
+pub use pins::{PinnedNir, pin_nir};
 
 /// The shader stages the AIR frontend lowers completely; other constructs
 /// are refused with a typed diagnostic.
@@ -275,23 +277,16 @@ impl Drop for InternalKernelCode {
     }
 }
 
-/// How many NIR shaders the compilers released: while it stands, a
-/// [`ShaderCode`] still names the shader it named, since only a release
-/// frees an address another shader may take ([`nir_releases`]).
-static NIR_RELEASES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// The count of NIR releases, which a holder of a [`ShaderCode`] compares
-/// later to know that the code still names the same shader.
-pub fn nir_releases() -> u64 {
-    NIR_RELEASES.load(core::sync::atomic::Ordering::Acquire)
-}
-
-/// Releases `code` through the service's `release`, counting it first.
+/// Releases `code` through the service's `release`, at once or, while a
+/// pipeline job pins it ([`pin_nir`]), at its last unpin.
 ///
 /// # Safety
-/// `code` is NIR the service built, released once, which nothing uses.
+/// `code` is NIR the service built, released once, which nothing but pins
+/// uses.
 unsafe fn release_nir(release: unsafe extern "C" fn(*mut c_void), code: ShaderCode) {
-    NIR_RELEASES.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    if pins::release_when_unpinned(code, release) {
+        return;
+    }
     // SAFETY: the caller's.
     unsafe { release(code.0 as usize as *mut c_void) }
 }
@@ -1968,37 +1963,6 @@ fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
             None
         }
     }
-}
-
-/// A copy of `code`'s NIR that the caller owns until [`free_nir_copy`], as
-/// a deferred pipeline creation needs once its call has returned the
-/// original; `None` where this image links no Mesa.
-pub fn clone_nir(code: ShaderCode) -> Option<ShaderCode> {
-    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
-    {
-        unsafe extern "C" {
-            fn nir_shader_clone(context: *mut c_void, shader: *const c_void) -> *mut c_void;
-        }
-        // SAFETY: the compiler's live NIR, which cloning only reads.
-        let copy = unsafe { nir_shader_clone(ptr::null_mut(), code.0 as usize as *const c_void) };
-        (!copy.is_null()).then_some(ShaderCode(copy as usize as u64))
-    }
-    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
-    {
-        let _ = code;
-        None
-    }
-}
-
-/// Frees a copy [`clone_nir`] made.
-pub fn free_nir_copy(code: ShaderCode) {
-    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
-    // SAFETY: the copy, a ralloc context of its own that nothing else holds.
-    unsafe {
-        free_nir(code.0 as usize as *mut c_void);
-    }
-    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
-    let _ = code;
 }
 
 /// Frees NIR deserialized here.

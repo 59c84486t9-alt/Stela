@@ -4,18 +4,20 @@
 //! While a call may defer, no pipeline is created in its turn: even found in
 //! a cache, a creation serializes and hashes each stage's NIR and loads the
 //! shaders, which took a large shader 45-55 ms. The call fails with
-//! `DEFERRED` and leaves a job that creates the pipeline from a copy of its
+//! `DEFERRED` and leaves a job that creates the pipeline from its stages'
 //! NIR, through the pipeline store's cache while that grows, else the full
 //! store's and then the backend's own: NIR to machine code, when no cache
 //! holds it, runs in the job too. The job keeps the pipeline, and the call's
 //! next run takes it with no driver work.
 //!
-//! A creation's key holds its stages by their NIR handles, which name the
-//! same shaders while no NIR is released ([`nir_releases`]): a made pipeline
-//! whose key outlived a release may be another shader's, so it is destroyed
-//! and its call creates in its turn. So does a key whose job failed, so no
-//! call defers forever. Made pipelines no call takes are destroyed, the
-//! oldest once [`KEPT`] wait.
+//! The job shares the compiler's NIR rather than copying it in the turn
+//! (copies took 15-35 ms): it pins each stage ([`pin_nir`]), which the
+//! driver only reads, until the call takes the pipeline. So a creation's
+//! key, which holds its stages by their NIR handles, names the same shaders
+//! for as long as its pipeline is kept: a NIR release elsewhere no longer
+//! voids it. A key whose job failed creates in its turn, so no call defers
+//! forever. Made pipelines no call takes are destroyed, the oldest once
+//! [`KEPT`] wait.
 //!
 //! Pipeline creation is thread-safe and the caches are internally
 //! synchronized (none is created `EXTERNALLY_SYNCHRONIZED`), so a job needs
@@ -24,7 +26,7 @@
 //! one, and later jobs see it gone.
 use super::{NativeBackend, failure, objects, raw};
 use crate::metal::{
-    compiler::{DEFERRED, clone_nir, free_nir_copy, nir_releases},
+    compiler::{DEFERRED, PinnedNir, pin_nir},
     deferred::{
         Done, Job, JobLock, Made, Owner,
         kept::{Kept, Taken},
@@ -99,15 +101,26 @@ pub(super) struct Deferral {
     own: vk::PipelineCache,
     /// Keys whose calls create in their turns.
     failed: BTreeSet<[u8; 32]>,
-    /// Pipelines jobs made, under [`nir_releases`] as their keys were taken.
-    made: Kept<vk::Pipeline>,
+    /// Pipelines jobs made, with their stages pinned.
+    made: Kept<MadePipeline>,
 }
 
-impl Default for Kept<vk::Pipeline> {
+impl Default for Kept<MadePipeline> {
     fn default() -> Self {
         Self::new(KEPT)
     }
 }
+
+/// A pipeline a job made, and the pins that keep its key's NIR handles
+/// naming its stages until a call takes it.
+struct MadePipeline {
+    pipeline: vk::Pipeline,
+    _pins: Vec<PinnedNir>,
+}
+
+/// Kept pipelines are made under one generation: their pins, not a count
+/// of NIR releases, keep their keys true.
+const GENERATION: u64 = 0;
 
 /// What a pipeline job made, for the backend whose `gone` it holds: the
 /// pipeline, and whether the growing store's cache held it. Dropped
@@ -116,7 +129,7 @@ struct Ran {
     pipeline: Option<vk::Pipeline>,
     into_store: bool,
     hit: bool,
-    releases: u64,
+    pins: Vec<PinnedNir>,
     gone: Arc<AtomicBool>,
     device: ash::Device,
 }
@@ -226,9 +239,9 @@ impl Deferral {
     /// # Safety
     /// The device is idle and no job runs ([`Self::retire`]).
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for pipeline in self.made.drain() {
+        for made in self.made.drain() {
             // SAFETY: the caller's; no call took the pipeline.
-            unsafe { device.destroy_pipeline(pipeline, None) };
+            unsafe { device.destroy_pipeline(made.pipeline, None) };
         }
         if self.own != vk::PipelineCache::null() {
             // SAFETY: the caller's.
@@ -254,17 +267,9 @@ impl NativeBackend {
             return None;
         }
         let key = wanted.key();
-        let releases = nir_releases();
-        match self.deferral.made.take(&key, releases) {
-            Taken::Fresh(pipeline) => return Some(Ok(pipeline)),
-            Taken::Stale(pipeline) => {
-                // A release since may have freed a stage the key names,
-                // whose handle another shader may hold now.
-                // SAFETY: the job's pipeline, which nothing uses.
-                unsafe { self.device.destroy_pipeline(pipeline, None) };
-                Deferral::remember(&mut self.deferral.failed, key);
-            }
-            Taken::Missing => {}
+        // The pins drop here: the key is spent.
+        if let Taken::Fresh(made) | Taken::Stale(made) = self.deferral.made.take(&key, GENERATION) {
+            return Some(Ok(made.pipeline));
         }
         let lock = self.deferral.deferring.clone()?;
         if self.deferral.failed.contains(&key) {
@@ -275,7 +280,7 @@ impl NativeBackend {
             return Some(Err(DEFERRED));
         }
         let started = (self.ticks)();
-        let job = self.pipeline_job(wanted, key, releases);
+        let job = self.pipeline_job(wanted, key);
         LEFT.note((self.ticks)().wrapping_sub(started));
         self.deferral.job = Some(job?);
         lock.lock.set_deferred(true);
@@ -298,9 +303,13 @@ impl NativeBackend {
         if ran.into_store {
             self.store.created(&self.device, ran.hit);
         }
-        if let Some(oldest) = self.deferral.made.keep(done.key, ran.releases, pipeline) {
+        let made = MadePipeline {
+            pipeline,
+            _pins: core::mem::take(&mut ran.pins),
+        };
+        if let Some(oldest) = self.deferral.made.keep(done.key, GENERATION, made) {
             // SAFETY: the job's pipeline, which no call took.
-            unsafe { self.device.destroy_pipeline(oldest, None) };
+            unsafe { self.device.destroy_pipeline(oldest.pipeline, None) };
         }
     }
 
@@ -314,10 +323,9 @@ impl NativeBackend {
         Some(self.deferral.own)
     }
 
-    /// A job that creates `wanted` from copies of its NIR and keeps the
-    /// pipeline, or `None` when its NIR cannot be copied or no cache can be
-    /// made. `releases` is [`nir_releases`] as `key` was taken.
-    fn pipeline_job(&mut self, wanted: Wanted<'_>, key: [u8; 32], releases: u64) -> Option<Job> {
+    /// A job that creates `wanted` from its stages' NIR, pinned, and keeps
+    /// the pipeline, or `None` when no cache can be made.
+    fn pipeline_job(&mut self, wanted: Wanted<'_>, key: [u8; 32]) -> Option<Job> {
         // A growing store's cache takes what the job compiles; a full one is
         // looked in, and the backend's own takes what it lacks.
         let (first, into_store, then) = match self.store.cache() {
@@ -338,27 +346,18 @@ impl NativeBackend {
             ),
         };
         let source = first;
-        let owned = match wanted {
-            Wanted::Compute(info) => Owned::Compute(ComputePipelineInfo {
-                code: clone_nir(info.code)?,
-                source,
-                ..*info
-            }),
-            Wanted::Graphics(info) => {
-                let mut stages = Vec::with_capacity(info.stages.len());
-                for &(stage, code) in &info.stages {
-                    let Some(copy) = clone_nir(code) else {
-                        stages.into_iter().for_each(|(_, code)| free_nir_copy(code));
-                        return None;
-                    };
-                    stages.push((stage, copy));
-                }
+        let (owned, pins) = match wanted {
+            Wanted::Compute(info) => (
+                Owned::Compute(ComputePipelineInfo { source, ..*info }),
+                alloc::vec![pin_nir(info.code)],
+            ),
+            Wanted::Graphics(info) => (
                 Owned::Graphics(Box::new(GraphicsPipelineInfo {
-                    stages,
                     source,
                     ..info.clone()
-                }))
-            }
+                })),
+                info.stages.iter().map(|&(_, code)| pin_nir(code)).collect(),
+            ),
         };
         let device = self.device.clone();
         let layout = self.layout;
@@ -390,7 +389,7 @@ impl NativeBackend {
                 pipeline,
                 into_store,
                 hit,
-                releases,
+                pins,
                 gone,
                 device,
             }) as Made
@@ -398,13 +397,14 @@ impl NativeBackend {
     }
 }
 
-/// A job's copy of a creation, holding copies of its NIR.
+/// A job's copy of a creation, naming its stages' pinned NIR.
 enum Owned {
     Compute(ComputePipelineInfo),
     Graphics(Box<GraphicsPipelineInfo>),
 }
 
-// SAFETY: its NIR copies are the job's alone, and the rest is plain values.
+// SAFETY: plain values but the NIR handles, whose shaders the job's pins
+// keep alive and which the driver and every holder only read.
 unsafe impl Send for Owned {}
 
 impl Owned {
@@ -412,19 +412,6 @@ impl Owned {
         match self {
             Self::Compute(info) => Wanted::Compute(info),
             Self::Graphics(info) => Wanted::Graphics(info),
-        }
-    }
-}
-
-/// A job dropped unrun frees its copies too.
-impl Drop for Owned {
-    fn drop(&mut self) {
-        match self {
-            Self::Compute(info) => free_nir_copy(info.code),
-            Self::Graphics(info) => info
-                .stages
-                .iter()
-                .for_each(|&(_, code)| free_nir_copy(code)),
         }
     }
 }
