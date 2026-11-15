@@ -1,6 +1,7 @@
 //! One recovered cohort, one stop, and ordered consuming bus accesses.
 use super::*;
 use shared_memory::RecoveredDeviceAccess;
+use stela_compiler::aarch64::Instruction;
 
 /// The most instructions a machine completes as device sites: one past
 /// them takes the fault path, as before it learned any.
@@ -22,6 +23,37 @@ pub(super) struct DeviceSite {
     /// Left to native code again: it reaches RAM far more often.
     retired: bool,
 }
+
+/// Device sites whose last access the machine remembers
+/// ([`KnownSite`]), a slot per site by its PA.
+pub(super) const KNOWN_SITES: usize = 64;
+
+/// The decoded instruction of a device site and the translation of the page
+/// its last access reached, which the next access there reuses instead of
+/// decoding and walking again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KnownSite {
+    /// The site's PA, and the VA and word its instruction was decoded at.
+    site: u64,
+    pc: u64,
+    word: u32,
+    instruction: Instruction,
+    /// The smallest granule of VA the last access reached, its PA, and the
+    /// key under which that translation holds: the device read key
+    /// ([`DEVICE_READ_KEY`]) with PSTATE.PAN, which every change of the PE's
+    /// translation, its controls, watchpoints or state moves or closes.
+    translation: Option<(u64, u64, u64)>,
+}
+
+/// The slot of the device site at PA `site` in [`Machine::known_sites`].
+fn known_site_slot(site: u64) -> usize {
+    ((site >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - KNOWN_SITES.ilog2())) as usize
+}
+
+/// The smallest translation granule: an access the engine completes at a
+/// device site lies in one, and the PA of every byte in it follows the
+/// first's.
+const GRANULE: u64 = 0x1000;
 
 /// A load or store the engine completes at a device site: its address,
 /// direction and the bytes from it it reaches. Others run natively.
@@ -132,23 +164,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
         installed
     }
 
-    /// The access the instruction `word` at `pc` makes, when the engine can
-    /// complete it at a device as the fault path would: a scalar or pair
-    /// integer load or store through a register other than SP, which is not
-    /// unprivileged (LDTR, STTR).
-    fn site_access(&self, pc: u64, word: u32) -> Option<SiteAccess> {
-        // LDTR*, STTR*: their permission checks are EL0's.
+    /// The instruction `word` at `pc` decoded, when the engine may complete
+    /// it at a device site: not unprivileged (LDTR, STTR), whose permission
+    /// checks are EL0's.
+    fn site_instruction(pc: u64, word: u32) -> Option<Instruction> {
         if word & 0x3b20_0c00 == 0x3800_0800 {
             return None;
         }
-        let instruction = Decoder.lift(GuestAddress(pc), word).ok()?;
+        Decoder.lift(GuestAddress(pc), word).ok()
+    }
+
+    /// The access `instruction` makes, when the engine can complete it at a
+    /// device as the fault path would: a scalar or pair integer load or
+    /// store through a register other than SP. Others run natively.
+    fn site_access(&self, instruction: &Instruction) -> Option<SiteAccess> {
         let base = |address: &ScalarLoadAddress| match *address {
             ScalarLoadAddress::Immediate { base, .. }
             | ScalarLoadAddress::RegisterOffset { base, .. } => Some(base),
             ScalarLoadAddress::Literal { .. } => None,
         };
         let (address, write, bytes, base) =
-            if let Some(load) = ScalarLoad::from_instruction(&instruction) {
+            if let Some(load) = ScalarLoad::from_instruction(instruction) {
                 let address = load.address();
                 (
                     self.scalar_address(address).0,
@@ -156,7 +192,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     u64::from(load.bytes()),
                     base(&address)?,
                 )
-            } else if let Some(store) = ScalarStore::from_instruction(&instruction) {
+            } else if let Some(store) = ScalarStore::from_instruction(instruction) {
                 let address = store.address();
                 (
                     self.scalar_address(address).0,
@@ -194,59 +230,99 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn complete_device_site(&mut self, index: usize, pc: u64) -> Step {
         let physical = self.code.blocks[index].physical;
         let word = self.code.blocks[index].terminal;
-        let access = self.site_access(pc, word);
-        let device = access.and_then(|access| {
-            let kind = if access.write {
-                mmu::Access::Write
-            } else {
-                mmu::Access::Read
-            };
-            let Translated::Mapped(translation) = self.translate_data(access.address, kind) else {
-                return None;
+        let slot = known_site_slot(physical);
+        let known = self.known_sites[slot]
+            .take()
+            .filter(|known| (known.site, known.pc, known.word) == (physical, pc, word))
+            .or_else(|| {
+                Self::site_instruction(pc, word).map(|instruction| KnownSite {
+                    site: physical,
+                    pc,
+                    word,
+                    instruction,
+                    translation: None,
+                })
+            });
+        let Some(mut known) = known else {
+            return self.device_site_reached_ram(physical, pc);
+        };
+        let device = self.site_access(&known.instruction).and_then(|access| {
+            let page = access.address & !(GRANULE - 1);
+            // The translation the last access here made holds while the
+            // native device reads' key does: native code completes plain
+            // reads under it alone.
+            let kept = known
+                .translation
+                .filter(|&(kept, _, key)| kept == page && Some(key) == self.device_read_key())
+                .map(|(_, frame, _)| frame | access.address & (GRANULE - 1));
+            let target = match kept {
+                Some(target) => target,
+                None => {
+                    let kind = if access.write {
+                        mmu::Access::Write
+                    } else {
+                        mmu::Access::Read
+                    };
+                    let key = self.open_device_read_key();
+                    let Translated::Mapped(translation) = self.translate_data(access.address, kind)
+                    else {
+                        return None;
+                    };
+                    known.translation = Some((page, translation.physical & !(GRANULE - 1), key));
+                    translation.physical
+                }
             };
             let last = access.address.wrapping_add(access.bytes - 1);
-            let page = translation.physical & !(FETCH_PAGE - 1);
-            let ram = self.host.read_ram(page, &mut [0]);
-            (!ram && !self.watch.overlaps(access.address, last))
-                .then_some((access, translation.physical))
+            let ram = self.host.read_ram(target & !(FETCH_PAGE - 1), &mut [0]);
+            (!ram && !self.watch.overlaps(access.address, last)).then_some((access, target))
         });
+        let Some((access, target)) = device else {
+            self.known_sites[slot] = Some(known);
+            return self.device_site_reached_ram(physical, pc);
+        };
         let site = self.device_sites.entry(physical).or_default();
-        match device {
-            Some((access, target)) => {
-                site.device = site.device.saturating_add(1);
-                let load = register_read::DeviceLoad::of(word).filter(|_| !access.write);
-                let address = load.map(|load| {
-                    self.cpu.state.x[usize::from(load.rn)]
-                        .wrapping_add_signed(i64::from(load.offset))
-                });
-                self.devices.take_plain_read();
-                let step = self.outside_run(|machine| {
-                    machine.completing(pc, |machine| {
-                        machine.device_access(word, access.address, target, access.write)
-                    })
-                });
-                let plain = self.devices.take_plain_read();
-                if let (Ok(()), Some(load), Some(address), Some(plain)) =
-                    (&step, load, address, plain)
-                    && u64::from(load.bytes) == access.bytes
-                    && !self
-                        .watches
-                        .iter()
-                        .any(|&(first, last)| (first..=last).contains(&target))
-                {
-                    self.keep_device_read(physical, address, plain);
-                }
-                step
-            }
-            None => {
-                site.ram = site.ram.saturating_add(1);
-                if site.ram >= RAM_SITE_ACCESSES && site.ram / 8 > site.device {
-                    site.retired = true;
-                    self.invalidate_code_page(physical);
-                }
-                self.run_one_natively(pc)
-            }
+        site.device = site.device.saturating_add(1);
+        let load = register_read::DeviceLoad::of(word).filter(|_| !access.write);
+        let address = load.map(|load| {
+            self.cpu.state.x[usize::from(load.rn)].wrapping_add_signed(i64::from(load.offset))
+        });
+        self.devices.take_plain_read();
+        let step = self.outside_run(|machine| {
+            machine.completing(pc, |machine| {
+                machine.decoded_device_access(
+                    &known.instruction,
+                    access.address,
+                    target,
+                    access.write,
+                )
+            })
+        });
+        self.known_sites[slot] = Some(known);
+        let plain = self.devices.take_plain_read();
+        if let (Ok(()), Some(load), Some(address), Some(plain)) = (&step, load, address, plain)
+            && u64::from(load.bytes) == access.bytes
+            && !self
+                .watches
+                .iter()
+                .any(|&(first, last)| (first..=last).contains(&target))
+        {
+            self.keep_device_read(physical, address, plain);
         }
+        step
+    }
+
+    /// The instruction at the device site `physical`, at `pc`, reached RAM,
+    /// faulted, hit a watchpoint or is a form the engine does not complete:
+    /// it runs natively, and a site that reaches RAM far more often than a
+    /// device is left to native code again.
+    fn device_site_reached_ram(&mut self, physical: u64, pc: u64) -> Step {
+        let site = self.device_sites.entry(physical).or_default();
+        site.ram = site.ram.saturating_add(1);
+        if site.ram >= RAM_SITE_ACCESSES && site.ram / 8 > site.device {
+            site.retired = true;
+            self.invalidate_code_page(physical);
+        }
+        self.run_one_natively(pc)
     }
 
     /// Keep the plain read the load at the device site `site` made at
@@ -255,18 +331,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// PAN, while nothing that may change its translation happens
     /// ([`Self::forget_device_reads`]).
     fn keep_device_read(&mut self, site: u64, address: u64, plain: PlainRead) {
-        use register_read::{DeviceRead, device_read_key, device_read_slot};
-        let state = self.mirror_state();
-        if self.mirrors.cells()[DEVICE_READ_KEY].readable == 0 {
-            // Closed by a change of derived state: what earlier keys kept
-            // may not hold, in this state or another.
-            self.forget_device_reads();
-            self.mirrors.banks[state][DEVICE_READ_KEY] = register_read::Cell {
-                readable: 1,
-                value: device_read_key(self.device_read_generation, state, false),
-            };
-        }
-        let key = self.mirrors.banks[state][DEVICE_READ_KEY].value | u64::from(self.cpu.pstate.pan);
+        use register_read::{DeviceRead, device_read_slot};
+        let key = self.open_device_read_key();
         let slot = device_read_slot(site);
         self.mirrors.device_reads[slot] = DeviceRead {
             site,
@@ -278,6 +344,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
             until: plain.until,
         };
         self.device_read_epochs[slot] = Some(plain.epoch);
+    }
+
+    /// The key under which what this PE keeps of its translation now holds,
+    /// with PSTATE.PAN: the device read key ([`DEVICE_READ_KEY`]), opened
+    /// again when a change of derived state closed it.
+    fn open_device_read_key(&mut self) -> u64 {
+        if let Some(key) = self.device_read_key() {
+            return key;
+        }
+        // Closed by a change of derived state: what earlier keys kept may
+        // not hold, in this state or another.
+        self.forget_device_reads();
+        let state = self.mirror_state();
+        self.mirrors.banks[state][DEVICE_READ_KEY] = register_read::Cell {
+            readable: 1,
+            value: register_read::device_read_key(self.device_read_generation, state, false),
+        };
+        self.device_read_key()
+            .expect("the device read key was opened")
+    }
+
+    /// [`Self::open_device_read_key`] while it is open.
+    fn device_read_key(&self) -> Option<u64> {
+        (self.mirrors.cells()[DEVICE_READ_KEY].readable != 0).then(|| {
+            self.mirrors.banks[self.mirror_state()][DEVICE_READ_KEY].value
+                | u64::from(self.cpu.pstate.pan)
+        })
     }
 
     /// The PE's translations or their controls may have changed: no device

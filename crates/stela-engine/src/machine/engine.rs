@@ -1110,6 +1110,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// register from native code: blocks end before them and the engine
     /// completes them ([`device_access::DeviceSite`]).
     device_sites: BTreeMap<u64, device_access::DeviceSite>,
+    /// What the last access at recent device sites learnt, a slot per site
+    /// ([`device_access::KnownSite`]).
+    known_sites: Box<[Option<device_access::KnownSite>; device_access::KNOWN_SITES]>,
     /// The block being installed is a device site's stub.
     installing_stub: bool,
     /// A System exit at a word that is not System was reported
@@ -1466,6 +1469,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             suspended: BTreeMap::new(),
             translated_pages: BTreeSet::new(),
             device_sites: BTreeMap::new(),
+            known_sites: Box::new([const { None }; device_access::KNOWN_SITES]),
             installing_stub: false,
             exit_mismatch_reported: false,
             first_translated: None,

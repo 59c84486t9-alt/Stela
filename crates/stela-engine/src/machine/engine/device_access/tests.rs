@@ -1,4 +1,7 @@
-use super::super::tests::{BASE, board, installed_code, native_fault_site_in_entry};
+use super::super::tests::{
+    BASE, FakeHost, board, installed_code, native_fault_site_in_entry, paged_space, tlbi_page,
+    write_entry,
+};
 use super::*;
 use stela_compiler::block::RecoverySiteKind;
 
@@ -291,4 +294,96 @@ fn a_plain_read_at_a_device_site_is_kept_for_native_code_until_translation_may_c
     machine.host.exits.push(exit(BASE + 4, ExitKind::System));
     machine.step().unwrap();
     assert_eq!(machine.mirrors.device_reads[slot].site, BASE + 4);
+}
+
+/// A device site keeps the translation its last access made, as a TLB
+/// would: a remap without TLB maintenance leaves its accesses at the old PA
+/// (Arm DDI 0487 D8.16, a TLB may hold an entry until it is invalidated);
+/// a TLBI of the page moves them to the new one.
+#[test]
+fn a_device_site_keeps_its_translation_until_tlb_maintenance() {
+    // add x3, x3, #1; ldr w0, [x1]; add x2, x2, #1; ret
+    let words = [0x9100_0463, 0xb940_0020, 0x9100_0442, 0xd65f_03c0];
+    let mut machine = board(&words, Registers::default(), Vec::new());
+    let page = BASE + 0x1000;
+    let [old, new] = [DEVICE & !0xfff, (DEVICE & !0xfff) + 0x1000];
+    machine.cpu.state.x[1] = DEVICE;
+    let (_, offset) =
+        native_fault_site_in_entry(&mut machine, BASE, BASE + 4, RecoverySiteKind::GuestAccess);
+    machine.host.exits.push(device_fault(offset, DEVICE, false));
+    machine.step().unwrap();
+    assert!(machine.device_site(BASE + 4));
+    paged_space(&mut machine, 0, &[BASE, old]);
+    machine.cpu.state.x[1] = page | DEVICE & 0xfff;
+    let access = |machine: &mut Machine<FakeHost, Registers>| {
+        machine.cpu.pc = BASE + 4;
+        machine.host.exits.push(exit(BASE + 4, ExitKind::System));
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 8);
+        machine.devices.accesses.last().unwrap().0
+    };
+    assert_eq!(access(&mut machine), DEVICE);
+    // Page 1 of space 0's level 3 table now maps the other frame.
+    write_entry(&mut machine, 0xd000 + 8, new | 1 << 10 | 3 << 8 | 0b11);
+    assert_eq!(access(&mut machine), DEVICE);
+    tlbi_page(&mut machine, page);
+    assert_eq!(access(&mut machine), new | DEVICE & 0xfff);
+    assert_eq!(access(&mut machine), new | DEVICE & 0xfff);
+    // Another address space, selected by TTBR0, maps the old frame again.
+    paged_space(&mut machine, 1, &[BASE, old]);
+    assert_eq!(access(&mut machine), DEVICE);
+}
+
+/// Registers that count their accesses and read a constant.
+#[derive(Default)]
+struct Counted(u64);
+
+impl Devices for Counted {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        self.0 += 1;
+        Ok(7)
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        self.0 += 1;
+        Ok(())
+    }
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
+        Lines::default()
+    }
+}
+
+/// Host nanoseconds of the engine's part of one trapped device load at a
+/// learnt device site, through a three-level stage 1: the step that takes
+/// the stub's exit, completes the load and leaves the PC past it, with the
+/// native exit itself simulated.
+/// A measurement, not a check:
+/// `cargo test --release -p stela-engine device_site_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "manual: opt-in"]
+fn device_site_cost() {
+    const STEPS: u64 = 1_000_000;
+    // add x3, x3, #1; ldr w0, [x1]; add x2, x2, #1; ret
+    let words = [0x9100_0463, 0xb940_0020, 0x9100_0442, 0xd65f_03c0];
+    let mut machine = board(&words, Counted::default(), Vec::new());
+    machine.cpu.state.x[1] = DEVICE;
+    let (_, offset) =
+        native_fault_site_in_entry(&mut machine, BASE, BASE + 4, RecoverySiteKind::GuestAccess);
+    machine.host.exits.push(device_fault(offset, DEVICE, false));
+    machine.step().unwrap();
+    assert!(machine.device_site(BASE + 4));
+    // Through the MMU, as a guest's accesses are: VA page 1 maps the
+    // device's frame.
+    paged_space(&mut machine, 0, &[BASE, DEVICE & !0xfff]);
+    machine.cpu.state.x[1] = (BASE + 0x1000) | DEVICE & 0xfff;
+    machine.host.exits.reserve(1);
+    let started = std::time::Instant::now();
+    for _ in 0..STEPS {
+        machine.cpu.pc = BASE + 4;
+        machine.host.exits.push(exit(BASE + 4, ExitKind::System));
+        machine.step().unwrap();
+    }
+    let each = started.elapsed().as_nanos() as f64 / STEPS as f64;
+    assert_eq!(machine.devices.0, STEPS + 1);
+    assert_eq!(machine.cpu.pc, BASE + 8);
+    std::println!("DEVICE SITE ns per trapped load: {each:.1}");
 }

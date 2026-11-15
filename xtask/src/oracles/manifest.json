@@ -4947,5 +4947,13 @@
     "kind": "manual",
     "inputs": [],
     "reason": "host timing of SPI NOR register accesses through the board and through the device's own lock; run on request"
+  },
+  {
+    "package": "stela-engine",
+    "test": "device_site_cost",
+    "source": "crates/stela-engine/src/machine/engine/device_access/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing of the engine's part of a trapped device load at a device site; run on request"
   }
 ]
