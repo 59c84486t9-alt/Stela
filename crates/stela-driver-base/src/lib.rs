@@ -127,6 +127,19 @@ pub fn on_spin(hook: fn()) {
     SPINNING.store(hook as *mut (), Ordering::Release);
 }
 
+/// What [`Clock`] reads on every core: the platform's time-stamp counter as
+/// one core reads it. A `fn() -> u64` pointer, null for the raw counter.
+static COUNTER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Have [`Clock`] read `counter` instead of the raw time-stamp counter. A
+/// platform that corrects a core's counter in software gives the corrected
+/// one, so a time or deadline one core takes holds on another, as the
+/// network stack's and every driver's do when they move between cores. It
+/// must take no lock and drive no device.
+pub fn on_counter(counter: fn() -> u64) {
+    COUNTER.store(counter as *mut (), Ordering::Release);
+}
+
 /// One turn of a lock spin: the [`on_spin`] hook, then a pause.
 pub fn spinning() {
     let hook = SPINNING.load(Ordering::Acquire);
@@ -165,11 +178,20 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// The raw time-stamp counter, for intervals another party converts.
+    /// The time-stamp counter, for intervals another party converts: the
+    /// one [`on_counter`] names, which reads the same on every core, else
+    /// this core's raw counter.
     pub fn ticks() -> u64 {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(ticks) = test_clock::read() {
             return ticks;
+        }
+        let counter = COUNTER.load(Ordering::Acquire);
+        if !counter.is_null() {
+            // SAFETY: `on_counter` stored a `fn() -> u64`, the pointer's only
+            // source.
+            let counter: fn() -> u64 = unsafe { core::mem::transmute(counter) };
+            return counter();
         }
         #[cfg(target_arch = "x86_64")]
         // SAFETY: RDTSC has no memory effects; x86-64 always has it.
@@ -371,6 +393,43 @@ impl Deadline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    extern crate std;
+
+    std::thread_local! {
+        /// What this test thread's platform counter adds to the raw one, as
+        /// a core whose counter agrees only through a software offset.
+        static OFFSET: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// The raw counter moved by this thread's offset; the raw counter
+    /// itself on every other test thread.
+    fn corrected() -> u64 {
+        // SAFETY: RDTSC has no memory effects; x86-64 always has it.
+        let raw = unsafe { core::arch::x86_64::_rdtsc() };
+        raw.wrapping_add(OFFSET.with(core::cell::Cell::get))
+    }
+
+    #[test]
+    fn the_clock_reads_the_platforms_counter_where_one_is_named() {
+        // Seconds at any real rate: a raw read would stay far below it.
+        const OFFSET_TICKS: u64 = 1 << 50;
+        on_counter(corrected);
+        OFFSET.with(|offset| offset.set(OFFSET_TICKS));
+        // SAFETY: as in `corrected`.
+        let before = unsafe { core::arch::x86_64::_rdtsc() };
+        let ticks = Clock::ticks();
+        let clock = Clock {
+            ticks_per_microsecond: 1,
+        };
+        let micros = clock.try_now_us().unwrap();
+        // SAFETY: as in `corrected`.
+        let after = unsafe { core::arch::x86_64::_rdtsc() };
+        OFFSET.with(|offset| offset.set(0));
+        let range = before.wrapping_add(OFFSET_TICKS)..=after.wrapping_add(OFFSET_TICKS);
+        assert!(range.contains(&ticks), "{ticks:#x} outside {range:x?}");
+        assert!(range.contains(&micros), "{micros:#x} outside {range:x?}");
+    }
 
     #[test]
     fn mapped_ranges_must_contain_the_whole_range() {
