@@ -125,9 +125,37 @@ impl Fifo {
     }
 }
 
+/// What the controller did since the host last asked ([`Spi::take_activity`]),
+/// on every PE: the guest's NVRAM sync runs through it inside XNU's 30 s
+/// halt/restart timer, so the host logs where a slow sync spent its time.
+/// Times are system counter ticks (`counter::FREQUENCY_HZ`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Activity {
+    /// Register accesses, refused ones included.
+    pub accesses: u64,
+    /// NOR commands: chip select falling edges.
+    pub commands: u64,
+    /// Bytes the shifter moved.
+    pub bytes: u64,
+    /// Times the interrupt line rose.
+    pub interrupts: u64,
+    /// Ticks the line stayed high until an access or power change lowered
+    /// it, summed, and the longest of them.
+    pub interrupt_ticks: u64,
+    pub longest_interrupt_ticks: u64,
+    /// Ticks from each command's first register access to its last one
+    /// before chip select rose, summed.
+    pub selected_ticks: u64,
+}
+
 pub struct Spi {
     nor: Nor,
     irq: AicInput,
+    activity: Activity,
+    /// When the interrupt line last rose, while it stays high.
+    raised: Option<u64>,
+    /// The current command's first and latest register access.
+    selected: Option<(u64, u64)>,
     control: u32,
     config: u32,
     pin: u32,
@@ -150,6 +178,9 @@ impl Spi {
         Self {
             nor: Nor::new(image),
             irq,
+            activity: Activity::default(),
+            raised: None,
+            selected: None,
             control: 0,
             config: 0,
             pin: CS_HIGH,
@@ -187,7 +218,36 @@ impl Spi {
         self.nor.check_select(!high)
     }
     pub fn set_cs(&mut self, high: bool) -> Result<()> {
-        self.nor.select(!high)
+        let was = self.nor.selected();
+        self.nor.select(!high)?;
+        match (was, self.nor.selected()) {
+            (false, true) => {
+                self.activity.commands += 1;
+                self.selected = None;
+            }
+            (true, false) => self.deselected(),
+            _ => (),
+        }
+        Ok(())
+    }
+    /// Close the current command's span at chip select rising.
+    fn deselected(&mut self) {
+        if let Some((first, last)) = self.selected.take() {
+            self.activity.selected_ticks += last.saturating_sub(first);
+        }
+    }
+    /// The activity since the last call ([`Activity`]).
+    pub fn take_activity(&mut self) -> Activity {
+        core::mem::take(&mut self.activity)
+    }
+    /// Count a register access at `now`, within the current command's
+    /// span while the die is selected.
+    fn accessed(&mut self, now: u64) {
+        self.activity.accesses += 1;
+        if self.nor.selected() {
+            let first = self.selected.map_or(now, |(first, _)| first);
+            self.selected = Some((first, now));
+        }
     }
     fn error(
         offset: u64,
@@ -211,14 +271,27 @@ impl Spi {
     fn status(&self) -> u32 {
         self.status | if self.threshold() { THRESHOLD } else { 0 }
     }
-    fn interrupt(&self, access: &mut Access<'_>) {
+    fn interrupt(&mut self, access: &mut Access<'_>) {
         let status = self.status();
         let enabled = (status & RX_COMPLETE != 0 && self.config & IE_RX_COMPLETE != 0)
             || (status & THRESHOLD != 0 && self.config & IE_THRESHOLD != 0)
             || (status & TX_COMPLETE != 0 && self.config & IE_TX_COMPLETE != 0);
-        access
-            .interrupts
-            .set_level(Wire::Aic(self.irq), self.active() && enabled);
+        let level = self.active() && enabled;
+        match (self.raised, level) {
+            (None, true) => {
+                self.raised = Some(access.now);
+                self.activity.interrupts += 1;
+            }
+            (Some(raised), false) => {
+                let ticks = access.now.saturating_sub(raised);
+                self.raised = None;
+                self.activity.interrupt_ticks += ticks;
+                self.activity.longest_interrupt_ticks =
+                    self.activity.longest_interrupt_ticks.max(ticks);
+            }
+            _ => (),
+        }
+        access.interrupts.set_level(Wire::Aic(self.irq), level);
     }
 
     fn mmio_ready(&self) -> Result<()> {
@@ -244,8 +317,14 @@ impl Spi {
             return Ok(());
         }
         let checkpoint = self.nor.checkpoint();
-        let (tx, rx, tx_count, rx_count, status) =
-            (self.tx, self.rx, self.tx_count, self.rx_count, self.status);
+        let (tx, rx, tx_count, rx_count, status, bytes) = (
+            self.tx,
+            self.rx,
+            self.tx_count,
+            self.rx_count,
+            self.status,
+            self.activity.bytes,
+        );
         if let Err(error) = self.pump_inner() {
             self.nor.restore(checkpoint);
             self.tx = tx;
@@ -253,6 +332,7 @@ impl Spi {
             self.tx_count = tx_count;
             self.rx_count = rx_count;
             self.status = status;
+            self.activity.bytes = bytes;
             return Err(error);
         }
         Ok(())
@@ -279,6 +359,7 @@ impl Spi {
                 0xff
             };
             let incoming = self.nor.shift(byte)?;
+            self.activity.bytes += 1;
             if self.tx_count != 0 {
                 self.tx.pop_front();
                 self.tx_count -= 1;
@@ -317,6 +398,7 @@ impl Lifecycle for Spi {
                 // Internal CS rising may commit an accepted NOR
                 // program prefix. Its preflight ran before PMGR completion.
                 self.nor.select(false).expect("checked internal SPI CS");
+                self.deselected();
             }
             // External GPIO CS and the flash die are separate hardware:
             // keep their transaction, image, WEL and dirty sectors.
@@ -348,6 +430,7 @@ impl MmioDevice for Spi {
         width: Width,
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
+        self.accessed(access.now);
         let error = |reason: Refusal| Self::error(offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(error(refuse!(
@@ -409,6 +492,7 @@ impl MmioDevice for Spi {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        self.accessed(access.now);
         let error = |reason: Refusal| Self::error(offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(error(refuse!(
@@ -805,6 +889,51 @@ mod tests {
         assert_eq!(spi.read(STATUS, Width::Word, &mut a), Ok(0));
         assert!(!latch.is_asserted(Wire::Aic(irq)));
     }
+    #[test]
+    fn activity_counts_commands_bytes_interrupt_waits_and_command_spans() {
+        let irq = AicInput::new(0, 749);
+        let mut spi = Spi::new(Image::fresh(), irq, false);
+        let mut latch = InterruptLatch::new();
+        let at = |spi: &mut Spi, latch: &mut InterruptLatch, now: u64, offset: u64, value: u32| {
+            write(spi, offset, value, &mut Access::new(0, now, latch));
+        };
+        at(&mut spi, &mut latch, 0, PIN, 0);
+        at(&mut spi, &mut latch, 24, CFG, IRQ_MODE | IE_TX_COMPLETE);
+        at(&mut spi, &mut latch, 48, TXCNT, 1);
+        at(&mut spi, &mut latch, 60, TXDATA, 0x06);
+        at(&mut spi, &mut latch, 72, CTRL, RUN);
+        at(&mut spi, &mut latch, 72 + 2400, STATUS, TX_COMPLETE);
+        at(&mut spi, &mut latch, 3000, PIN, CS_HIGH);
+        // A refused shift moves no byte: the opcode is not a NOR command.
+        at(&mut spi, &mut latch, 4000, PIN, 0);
+        at(&mut spi, &mut latch, 4024, CTRL, TX_RESET);
+        at(&mut spi, &mut latch, 4048, TXCNT, 1);
+        at(&mut spi, &mut latch, 4060, TXDATA, 0x5a);
+        assert!(
+            spi.write(
+                CTRL,
+                Width::Word,
+                u64::from(RUN),
+                &mut Access::new(0, 4072, &mut latch)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            spi.take_activity(),
+            Activity {
+                accesses: 12,
+                commands: 2,
+                bytes: 1,
+                interrupts: 1,
+                interrupt_ticks: 2400,
+                longest_interrupt_ticks: 2400,
+                selected_ticks: 3000 - 24,
+            }
+        );
+        assert!(spi.nor.selected());
+        assert_eq!(spi.take_activity(), Activity::default());
+    }
+
     #[test]
     fn unknown_modes_and_fifo_errors_refuse() {
         let mut spi = Spi::new(Image::fresh(), AicInput::new(0, 1), false);

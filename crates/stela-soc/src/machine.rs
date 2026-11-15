@@ -755,6 +755,14 @@ impl AppleDevices {
             .map_or_else(Vec::new, Spi::take_dirty)
     }
 
+    /// The SPI NOR controller's activity since the last call
+    /// ([`crate::spi::Activity`]); `None` without a NOR.
+    pub fn take_nor_activity(&mut self) -> Option<crate::spi::Activity> {
+        self.nor
+            .and_then(|id| self.bus.device_mut::<Spi>(id))
+            .map(Spi::take_activity)
+    }
+
     /// A copy of the NOR image as the guest left it, for the host to change
     /// NVRAM once the guest has stopped.
     pub fn nor_image(&mut self) -> Option<stela_soc_data::nor::Image> {

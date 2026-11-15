@@ -1498,6 +1498,26 @@ impl Heartbeat {
                 for state in machine.devices.with(|devices| devices.usb_diagnostics()) {
                     output::arguments(format_args!("USB {state}\n"));
                 }
+                // The SPI NOR's work on every PE since the last beat: an
+                // NVRAM sync runs through it inside XNU's halt/restart timer.
+                if let Some(nor) = machine
+                    .devices
+                    .with(|devices| devices.take_nor_activity())
+                    .filter(|nor| nor.accesses != 0)
+                {
+                    let hz = stela_soc::counter::FREQUENCY_HZ;
+                    output::arguments(format_args!(
+                        "NOR SPI accesses={} commands={} bytes={} selected_ms={} interrupts={} \
+                         interrupt_wait_ms={} longest_interrupt_wait_us={}\n",
+                        nor.accesses,
+                        nor.commands,
+                        nor.bytes,
+                        nor.selected_ticks * 1000 / hz,
+                        nor.interrupts,
+                        nor.interrupt_ticks * 1000 / hz,
+                        nor.longest_interrupt_ticks * 1_000_000 / hz,
+                    ));
+                }
                 survey_report(machine);
                 occupancy_report(machine, &mut self.occupancy);
                 let next = if self.beats.is_multiple_of(SUSPENSION_BEATS) {
