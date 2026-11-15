@@ -1,4 +1,5 @@
 use super::*;
+use core::cell::RefCell;
 use stela_soc_data::nor::nvram::empty_bank;
 
 /// NVRAM with `record`, as this Stela's loader left it.
@@ -112,7 +113,13 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
     let all = "/System/Volumes/Data/Library/GPUBundles/StelaGPU.bundle \
                /System/Volumes/Data/Library/GPUBundles/StelaGPU.bundle/Contents \
                /System/Volumes/Data/Library/GPUBundles/StelaGPU.bundle/Contents/MacOS";
-    assert!(commands.contains(&format!("/bin/mkdir -p -m 0755 {all}").as_str()));
+    assert!(commands.contains(&format!("/bin/mkdir -p -m 0755 {PLUGINS} {all}").as_str()));
+    // No step requires what a later one creates.
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.starts_with("/bin/test"))
+    );
     assert!(commands.contains(&format!("/usr/sbin/chown root:wheel {all}").as_str()));
     // The rootless attribute fails with EPERM even with protection off,
     // and Metal loads the plugin without it.
@@ -283,6 +290,135 @@ fn a_failing_required_step_syncs_and_restarts_without_the_rest() {
     driver.tick(now + RESTART_SECONDS * 1000);
     assert!(driver.failed());
     assert_eq!(driver.take_events(), [Event::Failed(Failure::NoRestart)]);
+}
+
+/// The guest's file system as the repair's commands see it: the sealed
+/// system volume until `mount -P 2` mounts the Data volume.
+struct Guest {
+    mounted: bool,
+    directories: Vec<String>,
+    files: Vec<String>,
+}
+
+impl Guest {
+    fn new(plugins: Option<bool>) -> Self {
+        let mut guest = Self {
+            mounted: false,
+            directories: ["/System/Volumes/Data/Library".to_string()].into(),
+            files: Vec::new(),
+        };
+        match plugins {
+            Some(true) => guest.directories.push(PLUGINS.into()),
+            Some(false) => guest.files.push(PLUGINS.into()),
+            None => {}
+        }
+        guest
+    }
+
+    /// The exit status `command` has here, as the shell's utilities give it.
+    fn status(&mut self, command: &str) -> u32 {
+        let mut words = command.split(' ');
+        let program = words.next().unwrap();
+        let paths: Vec<&str> = words.filter(|word| word.starts_with('/')).collect();
+        let exists = |guest: &Self, path: &str| {
+            guest.directories.iter().any(|known| known == path)
+                || guest.files.iter().any(|known| known == path)
+        };
+        match program {
+            "/sbin/mount" if command == "/sbin/mount -P 2" => {
+                self.mounted = true;
+                0
+            }
+            "/sbin/mount" | "/usr/libexec/init_data_protection" | "/bin/sync" => 0,
+            "/bin/test" => u32::from(!self.directories.iter().any(|d| d == paths[0])),
+            "/bin/mkdir" => {
+                for path in paths {
+                    let mut at = String::new();
+                    for part in path.split('/').skip(1) {
+                        at = format!("{at}/{part}");
+                        if self.files.contains(&at) {
+                            return 1;
+                        }
+                        if !self.directories.contains(&at) {
+                            if !self.mounted {
+                                return 1;
+                            }
+                            self.directories.push(at.clone());
+                        }
+                    }
+                }
+                0
+            }
+            "/usr/sbin/chown" | "/usr/bin/chflags" => {
+                u32::from(!paths.iter().all(|path| exists(self, path)))
+            }
+            _ => 127,
+        }
+    }
+}
+
+fn repair_in(guest: &RefCell<Guest>) -> (Driver, Console) {
+    let mut now = 0;
+    let mut driver = Driver::new(steps(), now);
+    let mut console = Console::new();
+    start(&mut driver, &mut now);
+    let status = |command: &str| Some(guest.borrow_mut().status(command));
+    pump(&mut driver, &mut console, &mut now, &status);
+    (driver, console)
+}
+
+#[test]
+fn the_repair_creates_the_plugins_parent_when_the_data_volume_lacks_it() {
+    for plugins in [None, Some(true)] {
+        let guest = RefCell::new(Guest::new(plugins));
+        let (mut driver, console) = repair_in(&guest);
+        assert_eq!(driver.outcome(), Some(&Outcome::Done), "{plugins:?}");
+        assert_eq!(console.lines.last().map(String::as_str), Some(REBOOT));
+        let guest = guest.into_inner();
+        for directory in DIRECTORIES {
+            let path = format!("{PLUGINS}/{directory}");
+            assert!(guest.directories.contains(&path), "{path}");
+        }
+        assert!(
+            !driver
+                .take_events()
+                .iter()
+                .any(|event| matches!(event, Event::Skipped { .. } | Event::Failed(_)))
+        );
+    }
+}
+
+#[test]
+fn a_file_where_the_plugins_parent_belongs_fails_the_repair_at_mkdir_and_stays() {
+    let guest = RefCell::new(Guest::new(Some(false)));
+    let (driver, console) = repair_in(&guest);
+    let mkdir = steps()
+        .iter()
+        .position(|step| step.command.starts_with("/bin/mkdir"))
+        .unwrap();
+    assert_eq!(
+        driver.outcome(),
+        Some(&Outcome::Failed(Failure::Exit {
+            index: mkdir,
+            status: 1
+        }))
+    );
+    assert_eq!(
+        driver.outcome().unwrap().text(&steps()),
+        format!(
+            "step {} (/bin/mkdir -p -m 0755) exited with status 1",
+            mkdir + 1
+        )
+    );
+    // The rest is not typed; the guest syncs and restarts.
+    assert_eq!(console.lines.len(), mkdir + 2);
+    assert_eq!(
+        console.lines.last().map(String::as_str),
+        Some(SYNC_AND_REBOOT)
+    );
+    let guest = guest.into_inner();
+    assert_eq!(guest.files, [PLUGINS]);
+    assert!(!guest.directories.iter().any(|d| d.starts_with(PLUGINS)));
 }
 
 #[test]

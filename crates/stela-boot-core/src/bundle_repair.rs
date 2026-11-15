@@ -20,7 +20,8 @@
 //! repair by itself. In that boot the engine types [`steps`] at the guest's
 //! root console ([`Driver`]) once the shell's prompt shows, as the manual
 //! remedy does: it mounts the Data
-//! volume, creates the plugin's directories root-owned and 0755, marks them
+//! volume, creates the plugin's directories (and `GPUBundles`, when the
+//! Data volume lacks it) root-owned and 0755, marks them
 //! restricted, syncs, remounts it read-only and restarts quickly
 //! ([`REBOOT`]). The next boot's kext then creates the
 //! files in place. Only mounting and the directories are required: a
@@ -423,8 +424,11 @@ pub fn steps() -> Vec<Step> {
         step("/sbin/mount -P 1".into(), 120),
         step("/usr/libexec/init_data_protection".into(), 180),
         step("/sbin/mount -P 2".into(), 180),
-        // Create the complete hierarchy; GPUBundles may not exist yet.
-        step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
+        // The Data volume may lack Apple's `GPUBundles`, so the plugins'
+        // parent is created too; each is named so `-m` gives each its mode,
+        // and `-p` leaves an existing one as it is. A file in a directory's
+        // place fails here (`File exists`): nothing is removed.
+        step(format!("/bin/mkdir -p -m 0755 {PLUGINS} {directories}"), 30),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),
