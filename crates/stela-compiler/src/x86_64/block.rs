@@ -326,6 +326,18 @@ impl SelfLoop {
     }
 }
 
+/// A [`SelfLoop`]'s branch run past: its jump (none for a join, whose exit
+/// stays for `successor_exits`), target, the rows up to it, the locals its
+/// copy's run has written there and the borrow of the NZCV only the host
+/// flags hold there, which the exit stores first.
+type LoopSide = (
+    Option<super::asm::Patch>,
+    GuestAddress,
+    usize,
+    super::pinned::Dirty,
+    Option<bool>,
+);
+
 /// A [`SelfLoop`]'s jumps to its exits, from both copies of its body.
 #[derive(Default)]
 struct LoopExits {
@@ -334,18 +346,11 @@ struct LoopExits {
     first_rows: usize,
     /// The back edges' jumps when the branch falls through.
     fallthrough: Vec<super::asm::Patch>,
-    /// Each branch run past: its jump (none for a join, whose exit stays for
-    /// `successor_exits`), target, the rows up to it and the locals its
-    /// copy's run has written there.
-    side: Vec<(
-        Option<super::asm::Patch>,
-        GuestAddress,
-        usize,
-        super::pinned::Dirty,
-    )>,
-    /// Each join's jump ([`loop_joins`]): the copy, its landing and the
-    /// instructions it skips.
-    joins: Vec<(super::asm::Patch, usize, usize, u8)>,
+    /// Each branch run past ([`LoopSide`]).
+    side: Vec<LoopSide>,
+    /// Each join's jump ([`loop_joins`]): the copy, its landing, the
+    /// instructions it skips and, as for `side`, the NZCV it stores first.
+    joins: Vec<(super::asm::Patch, usize, usize, u8, Option<bool>)>,
     /// Where each copy's landings start.
     landings: [Vec<Option<usize>>; 2],
     /// The locals the loop's run has written at its back edge.
@@ -649,6 +654,10 @@ fn emit_selected(
     // Each branch the block runs past: its jump to a side exit, its target
     // and the instructions up to it.
     let mut side_exits = vec![];
+    // The side exits whose branch the host flags alone decide (`pending`):
+    // the index of each in `side_exits` and its borrow. Out of line, before
+    // the terminal, each stores the word and jumps on to its exit.
+    let mut flag_exits: Vec<(usize, bool)> = vec![];
     // Accesses that address memory from an earlier access's masked address
     // (`masked_base`), which the instructions emitted alone keep track of.
     let reuse_bases = pinned
@@ -1181,29 +1190,25 @@ fn emit_selected(
                         active.flush(code);
                     }
                 }
-                let jump = match pending {
-                    // The exit stores the word the fallthrough keeps in the
-                    // host flags.
-                    Some(borrow) => {
-                        let stay = code.asm().jcc(taken.negate());
-                        super::flag_word::capture(code, borrow);
-                        let jump = code.asm().jmp();
-                        code.asm().bind(stay);
-                        jump
-                    }
-                    None => code.asm().jcc(taken),
-                };
+                // Where the fallthrough keeps NZCV in the host flags, the
+                // taken branch's path stores the word first, out of line.
+                let jump = code.asm().jcc(taken);
                 if self_loop.is_some() {
                     // Both copies' jumps go to one exit, which settles first.
                     let rows = block.source_map.len() - loop_exits.first_rows * copy;
                     if let Some(&(at, to)) = joins.iter().find(|&&(at, _)| at == cursor) {
                         let skipped = u8::try_from(to - at - 1).expect("bounded body");
-                        loop_exits.joins.push((jump, copy, to, skipped));
-                        loop_exits.side.push((None, target, rows, dirty));
+                        loop_exits.joins.push((jump, copy, to, skipped, pending));
+                        loop_exits.side.push((None, target, rows, dirty, None));
                     } else {
-                        loop_exits.side.push((Some(jump), target, rows, dirty));
+                        loop_exits
+                            .side
+                            .push((Some(jump), target, rows, dirty, pending));
                     }
                 } else {
+                    if let Some(borrow) = pending {
+                        flag_exits.push((side_exits.len(), borrow));
+                    }
                     side_exits.push((jump, target, block.source_map.len()));
                 }
                 bases.after(instruction, None);
@@ -1283,7 +1288,9 @@ fn emit_selected(
                     target,
                     checks: checks_at(cursor),
                     live_nzcv: native_branch_after(cursor),
-                    defer_flags: lazy_flags && !frame_bound,
+                    defer_flags: lazy_flags
+                        && !frame_bound
+                        && deferral_pays(instructions, cursor, landing, &joins),
                 },
                 held,
                 &mut pending,
@@ -1429,7 +1436,7 @@ fn emit_selected(
         if loop_exits
             .joins
             .iter()
-            .any(|&(_, copy, to, _)| loop_exits.landings[copy][to].is_none())
+            .any(|&(_, copy, to, _, _)| loop_exits.landings[copy][to].is_none())
         {
             return emit_selected(
                 instructions,
@@ -1449,9 +1456,12 @@ fn emit_selected(
         }
         // Each join takes the instructions it skips off the loop's count
         // and lands in its copy; the flags are not held there.
-        for (jump, copy, to, skipped) in core::mem::take(&mut loop_exits.joins) {
+        for (jump, copy, to, skipped, flags) in core::mem::take(&mut loop_exits.joins) {
+            code.asm().bind(jump);
+            if let Some(borrow) = flags {
+                super::flag_word::capture(code, borrow);
+            }
             let mut asm = code.asm();
-            asm.bind(jump);
             asm.alu_imm8(
                 Alu::Sub,
                 Size::Qword,
@@ -1472,8 +1482,17 @@ fn emit_selected(
     let flags_live = after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
     out_of_line.place(code);
     // Before the terminal, whose direct exits end the code.
-    if !pointer_paths.is_empty() || !mirrored_paths.is_empty() || !amx_paths.is_empty() {
+    if !pointer_paths.is_empty()
+        || !mirrored_paths.is_empty()
+        || !amx_paths.is_empty()
+        || !flag_exits.is_empty()
+    {
         let over = code.asm().jmp();
+        for (index, borrow) in flag_exits.drain(..) {
+            code.asm().bind(side_exits[index].0);
+            super::flag_word::capture(code, borrow);
+            side_exits[index].0 = code.asm().jmp();
+        }
         if let Some(cells) = native.pointer {
             for path in pointer_paths {
                 super::pointer::inline::place(code, path, cells);
@@ -1524,7 +1543,7 @@ fn emit_selected(
         let mut rows: Vec<usize> = loop_exits
             .side
             .iter()
-            .map(|&(_, _, rows, _)| rows)
+            .map(|&(_, _, rows, _, _)| rows)
             .collect();
         rows.dedup();
         let mut seen = vec![];
@@ -1535,12 +1554,15 @@ fn emit_selected(
             seen.push(row);
             let mut target = None;
             let mut stored = vec![];
-            for &(jump, to, at, dirty) in &loop_exits.side {
+            for &(jump, to, at, dirty, flags) in &loop_exits.side {
                 if at == row {
                     target = Some(to);
                     // A join's exit stays, with no jump to it.
                     let Some(jump) = jump else { continue };
                     code.asm().bind(jump);
+                    if let Some(borrow) = flags {
+                        super::flag_word::capture(code, borrow);
+                    }
                     super::pinned::write_back_locals(code, dirty);
                     stored.push(code.asm().jmp());
                 }
@@ -1788,6 +1810,33 @@ fn sets_flags_alone(operation: &Operation) -> bool {
             | Operation::LogicalImmediate { flags: true, .. }
             | Operation::LogicalRegister { flags: true, .. }
     )
+}
+
+/// Whether leaving the NZCV `instructions[at]` sets in the host flags pays:
+/// none of its readers ([`reads_host_flags`]), up to the first other
+/// instruction, landing or join, is a side exit, or the word is dead there
+/// ([`super::flag_word::dead_from`]). Otherwise the fallthrough stores the
+/// word there anyway, and each side exit would store it a second time.
+fn deferral_pays(
+    instructions: &[Instruction],
+    at: usize,
+    landing: &[bool],
+    joins: &[(usize, usize)],
+) -> bool {
+    let mut side_exit = false;
+    let mut next = at + 1;
+    while next < instructions.len()
+        && !landing[next]
+        && !joins.iter().any(|&(join, _)| join == next)
+        && reads_host_flags(&instructions[next].operation)
+    {
+        side_exit |= matches!(
+            instructions[next].operation,
+            Operation::BranchCondition { .. }
+        );
+        next += 1;
+    }
+    !side_exit || super::flag_word::dead_from(instructions, next)
 }
 
 /// Whether `operation` takes NZCV from the host flags of a setter before

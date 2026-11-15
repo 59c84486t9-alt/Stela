@@ -225,10 +225,10 @@ cmp+csel vs: 13 4 4 1
 cmp+b.vc side: 10 3 4 2
 cmp+b.vc end: 8 1 4 2
 cmp+csel vc: 13 4 4 1
-cmp+b.hi side: 10 3 4 2
+cmp+b.hi side: 11 3 5 2
 cmp+b.hi end: 9 1 5 2
 cmp+csel hi: 13 4 4 1
-cmp+b.ls side: 10 3 4 2
+cmp+b.ls side: 11 3 5 2
 cmp+b.ls end: 9 1 5 2
 cmp+csel ls: 13 4 4 1
 cmp+b.ge side: 10 3 4 2
@@ -245,14 +245,14 @@ cmp+b.le end: 8 1 4 2
 cmp+csel le: 13 4 4 1
 cmp w+b.ne side: 10 3 4 2
 subs x+b.ne side: 12 4 4 2
-subs w+b.ne side: 12 4 4 2
+subs w+b.ne side: 13 4 4 2
 adds x+b.ne side: 12 4 3 2
 adds w+b.ne side: 12 4 3 2
 ands x+b.ne side: 12 4 3 2
 ands w+b.ne side: 11 4 3 2
 tst x+b.ne side: 11 3 3 2
 tst w+b.ne side: 10 3 3 2
-adds x+b.hi side: 13 4 5 2
+adds x+b.hi side: 12 4 4 2
 cmp+cset hi: 13 4 4 1
 cmp+csinc lt: 15 4 4 1
 cmp+csinv hs: 15 4 4 1
@@ -261,7 +261,7 @@ cmp+csetm ne: 13 4 4 1
 cmp+ccmp+b.ne side: 21 5 9 2
 cmp+ccmp+ccmp+b.eq side: 30 7 14 2
 cmp+ccmn+b.eq side: 21 5 8 2
-cmp+b.eq cmp+b.eq side: 13 3 4 3
+cmp+b.eq cmp+b.eq side: 13 3 4 4
 cbz side: 7 2 0 2
 tbz side: 7 2 0 2
 adds+adcs+adcs end: 17 5 6 1
@@ -270,9 +270,9 @@ fcmp+b.mi side: 19 7 2 5
 cmp live out: 9 3 4 1
 dead cmp+adds+b.ne side: 12 4 3 2
 cmp+add+b.ne side: 15 6 5 2
-cmp+b.eq side, subs+b.ne end: 14 4 4 3
+cmp+b.eq side, subs+b.ne end: 15 4 4 4
 cmp+csel lt, cmp+b.lt end: 12 2 4 2
-tst+b.ne side, cmp+b.hi end: 15 3 5 3
+tst+b.ne side, cmp+b.hi end: 16 3 5 4
 cmp+ccmp+b.ne side, cmp+b.lt end: 23 4 13 3
 ";
 
