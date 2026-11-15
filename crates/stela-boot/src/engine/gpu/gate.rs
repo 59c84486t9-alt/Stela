@@ -792,8 +792,9 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             ));
         }
     }
-    // Which part of that latency was waiting for the GPU to start, the GPU's
-    // own time, and waiting for the look after it finished.
+    // Which part of that latency was waiting for the GPU to start (behind
+    // earlier work, or on the host's way to the GPU), the GPU's own time,
+    // and waiting for the look after it finished.
     for service in shared().iter() {
         let Some(times) = service.gpu_times() else {
             continue;
@@ -804,7 +805,7 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         let average = |total: u64, count: u64| total.checked_div(count).unwrap_or(0);
         output::arguments(format_args!(
             "GPU TIMES timed={} busy_us={} average_us={} longest_us={}@{}:{} idle_us={} \
-             overlap_us={} placed={} queued_us={}/{} noticed_us={}/{} waiting={} \
+             overlap_us={} placed={} queued_us={}/{} behind_us={} noticed_us={}/{} waiting={} \
              span_us={}@{}:{}/{}:{} longest_submits={}\n",
             times.timed,
             times.busy_ns / 1000,
@@ -817,6 +818,7 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             times.placed,
             micros(average(times.queued_ticks, times.placed)),
             micros(times.longest_queued_ticks),
+            micros(average(times.behind_ticks, times.placed)),
             micros(average(times.noticed_ticks, times.placed)),
             micros(times.longest_noticed_ticks),
             times.waiting,
