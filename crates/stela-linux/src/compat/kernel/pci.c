@@ -385,14 +385,24 @@ void pci_disable_device(struct pci_dev *dev)
     }
 }
 
+/* Linux's __pci_set_master reads Command only to compare the old and new
+ * values, writes it and goes on whatever the function kept. A function may
+ * drop the write (Bus Master Enable hardwired to zero, or a write the
+ * function ignores), and its DMA then never reaches memory: this reads the
+ * register back after the write and says so, then goes on as Linux does. */
 void pci_set_master(struct pci_dev *dev)
 {
     u16 command;
     if (pci_read_config_word(dev, PCI_COMMAND, &command))
         stela_linux_fatal("PCI bus-master access failed without completion");
-    if (!(command & PCI_COMMAND_MASTER) &&
-        pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER))
-        stela_linux_fatal("PCI bus-master access failed without completion");
+    if (!(command & PCI_COMMAND_MASTER)) {
+        if (pci_write_config_word(dev, PCI_COMMAND, command | PCI_COMMAND_MASTER) ||
+            pci_read_config_word(dev, PCI_COMMAND, &command))
+            stela_linux_fatal("PCI bus-master access failed without completion");
+        if (!(command & PCI_COMMAND_MASTER))
+            pci_warn(dev, "bus mastering stayed off (command %#06x): its DMA cannot reach memory\n",
+                     command);
+    }
     dev->is_busmaster = 1;
 }
 
@@ -490,6 +500,8 @@ void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 
 static u8 config[256];
 static int config_error;
+static bool ignore_bus_master_write;
+static unsigned int warnings;
 static u8 rom_window[0x1000] __aligned(PAGE_SIZE);
 
 static int read_config(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 *value)
@@ -508,6 +520,9 @@ static int write_config(struct pci_bus *bus, unsigned int devfn, int where, int 
 {
 	(void)bus;
 	(void)devfn;
+	if (ignore_bus_master_write && where == PCI_COMMAND && size == 2 &&
+	    (value & PCI_COMMAND_MASTER))
+		return 0;
 	memcpy(&config[where], &value, (size_t)size);
 	return 0;
 }
@@ -529,9 +544,17 @@ static void unmap_device(void *context, void *address)
 	assert(address == rom_window);
 }
 
+static void log_line(void *context, int level, const char *message)
+{
+	(void)context;
+	if (level == LOGLEVEL_WARNING && strstr(message, "bus mastering stayed off (command 0x0002)"))
+		warnings++;
+}
+
 static const struct stela_linux_services services = {
 	.map_device = map_device,
 	.unmap_device = unmap_device,
+	.log = log_line,
 };
 static const struct stela_linux_owner owner = {.services = &services};
 
@@ -588,7 +611,13 @@ int main(void)
 
 	dev.resource[0].flags = IORESOURCE_MEM;
 	assert(!pci_enable_device(&dev) && !pci_enable_device(&dev));
+	/* A function that drops the write: a warning, and on as Linux goes. */
+	ignore_bus_master_write = true;
 	pci_set_master(&dev);
+	assert(config[PCI_COMMAND] == PCI_COMMAND_MEMORY && dev.is_busmaster && warnings == 1);
+	ignore_bus_master_write = false;
+	pci_set_master(&dev);
+	assert(warnings == 1);
 	assert(config[PCI_COMMAND] == (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER));
 	pci_disable_device(&dev);
 	assert(config[PCI_COMMAND] & PCI_COMMAND_MASTER);
