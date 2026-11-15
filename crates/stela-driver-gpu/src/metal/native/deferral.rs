@@ -34,8 +34,49 @@ use crate::metal::{
 };
 use alloc::{boxed::Box, collections::BTreeSet, format, sync::Arc, vec::Vec};
 use ash::vk;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use stela_crypto::{Sha256, digest::Digest};
+
+/// Pipeline work in the service's turns since the last [`take_turn_work`],
+/// of one kind: how many, and the ticks of all and of the longest.
+pub(super) struct Counted {
+    count: AtomicU64,
+    ticks: AtomicU64,
+    longest: AtomicU64,
+}
+
+impl Counted {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            longest: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn note(&self, ticks: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.ticks.fetch_add(ticks, Ordering::Relaxed);
+        self.longest.fetch_max(ticks, Ordering::Relaxed);
+    }
+
+    fn take(&self) -> [u64; 3] {
+        [&self.count, &self.ticks, &self.longest].map(|counter| counter.swap(0, Ordering::Relaxed))
+    }
+}
+
+/// Pipeline jobs a turn left, most of whose time is copying each stage's
+/// NIR for the job.
+static LEFT: Counted = Counted::new();
+/// Pipelines a turn created itself: none deferred, as a call that may not
+/// defer, a full store's lookup or a key whose job failed creates.
+pub(super) static CREATED: Counted = Counted::new();
+
+/// Since the last call, cleared: the pipeline jobs turns left, then the
+/// pipelines turns created, each as count, ticks in all and longest ticks.
+pub fn take_turn_work() -> [[u64; 3]; 2] {
+    [LEFT.take(), CREATED.take()]
+}
 
 /// Keys a backend remembers as failed; past this it forgets them all, which
 /// costs at most one more job each.
@@ -224,8 +265,10 @@ impl NativeBackend {
         if self.deferral.job.is_some() {
             return Some(Err(DEFERRED));
         }
-        let job = self.pipeline_job(wanted, key, releases)?;
-        self.deferral.job = Some(job);
+        let started = (self.ticks)();
+        let job = self.pipeline_job(wanted, key, releases);
+        LEFT.note((self.ticks)().wrapping_sub(started));
+        self.deferral.job = Some(job?);
         lock.lock.set_deferred(true);
         Some(Err(DEFERRED))
     }
@@ -416,5 +459,19 @@ fn create(
                     .map_err(|(_, error)| failure(error))
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Counted;
+
+    #[test]
+    fn counted_work_is_taken_once_with_its_longest() {
+        let counted = Counted::new();
+        counted.note(30);
+        counted.note(70);
+        assert_eq!(counted.take(), [2, 100, 70]);
+        assert_eq!(counted.take(), [0, 0, 0]);
     }
 }

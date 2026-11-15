@@ -17,6 +17,7 @@
 //! submission, and stay there.
 mod blocks;
 mod deferral;
+pub use deferral::take_turn_work as take_pipeline_turn_work;
 mod device_generated;
 mod memory;
 mod objects;
@@ -1589,6 +1590,7 @@ impl NativeBackend {
             self.report_executables(pipeline);
             return Ok(pipeline);
         }
+        let started = (self.ticks)();
         let pipeline = self.through_store(info.source, |backend, source, feedback| {
             let info = ComputePipelineInfo { source, ..*info };
             objects::compute_pipeline(&info, backend.layout, |create| {
@@ -1606,6 +1608,7 @@ impl NativeBackend {
                 .map_err(|(_, error)| failure(error))
             })
         })?;
+        deferral::CREATED.note((self.ticks)().wrapping_sub(started));
         self.report_executables(pipeline);
         Ok(pipeline)
     }
@@ -2683,7 +2686,8 @@ impl Backend for NativeBackend {
             self.report_executables(pipeline);
             return Ok(Pipeline(raw(pipeline)));
         }
-        self.through_store(info.source, |backend, source, feedback| {
+        let started = (self.ticks)();
+        let created = self.through_store(info.source, |backend, source, feedback| {
             // Only a full store's lookup changes the creation flags.
             let replaced;
             let info = if create_flags_differ(info.source, source) {
@@ -2711,8 +2715,9 @@ impl Backend for NativeBackend {
                 .map(|pipelines| pipelines[0])
                 .map_err(|(_, error)| failure(error))
             })
-        })
-        .map(|pipeline| {
+        });
+        deferral::CREATED.note((self.ticks)().wrapping_sub(started));
+        created.map(|pipeline| {
             self.report_executables(pipeline);
             Pipeline(raw(pipeline))
         })

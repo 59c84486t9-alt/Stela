@@ -29,7 +29,9 @@ use stela_drivers::gpu::metal::{
     deferred::busy_pause_millis,
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
-    native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, Refusals, pipeline_store, vk},
+    native::{
+        self, ExportedMemory, Loader, MemoryExporter, NativeBackend, Refusals, pipeline_store, vk,
+    },
     nvidia::{
         Attachment,
         open::{Gpu, OpenError, open, reopen},
@@ -798,6 +800,23 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             store.hit_ns / 1000,
             store.miss_ns / 1000,
             store.miss_longest_ns / 1000,
+        ));
+    }
+    // Pipeline work in turns: the jobs turns left, with what making them
+    // (each stage's NIR copied for its job) took, and the pipelines turns
+    // created themselves.
+    let [
+        [left, copied, copy_longest],
+        [created, create, create_longest],
+    ] = native::take_pipeline_turn_work();
+    if left != 0 || created != 0 {
+        output::arguments(format_args!(
+            "GPU PIPELINE TURNS jobs_left={left} copy_us={} copy_longest_us={} created={created} \
+             create_us={} create_longest_us={}\n",
+            micros(copied),
+            micros(copy_longest),
+            micros(create),
+            micros(create_longest),
         ));
     }
     // Where the time of the slowest operations went, phase by phase.
