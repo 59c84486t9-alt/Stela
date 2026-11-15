@@ -1597,6 +1597,8 @@ impl Emitter {
 }
 
 #[cfg(test)]
+mod exit_boundary_tests;
+#[cfg(test)]
 mod range_check_tests;
 #[cfg(test)]
 mod tests;

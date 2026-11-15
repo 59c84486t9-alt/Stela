@@ -4955,5 +4955,13 @@
     "kind": "manual",
     "inputs": [],
     "reason": "host timing of the engine's part of a trapped device load at a device site; run on request"
+  },
+  {
+    "package": "stela-compiler",
+    "test": "device_site_boundary_cost",
+    "source": "crates/stela-compiler/src/x86_64/exit_boundary_tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing of one native entry into a device site's stub and the return; run on request"
   }
 ]
