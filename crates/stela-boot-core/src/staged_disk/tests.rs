@@ -907,3 +907,46 @@ fn a_step_only_starts_while_no_command_runs_on_a_queueing_disk() {
     model.start(write(1, 1)).unwrap();
     assert!(!worker.starts_only(), "the disk runs it where it is asked");
 }
+
+/// Only a call over 50 ms is named, the longest since the last report,
+/// with how many there were, once: a report with none says nothing.
+#[test]
+fn a_held_call_is_named_once_a_report_and_only_over_fifty_milliseconds() {
+    let held = HeldCalls::new();
+    let named = core::cell::Cell::new(0);
+    let describe = |command: &'static str| {
+        named.set(named.get() + 1);
+        (String::from("disk"), "finish", String::from(command))
+    };
+    held.record(HELD_MICROS, || describe("read/0/8"));
+    assert_eq!(named.get(), 0);
+    assert_eq!(held.take(), None);
+    held.record(80_000, || describe("flush"));
+    held.record(60_000, || describe("write/8/8"));
+    held.record(2_400_000, || describe("write/16/128"));
+    assert_eq!(
+        held.take().as_deref(),
+        Some("HOST DISK HELD serial=disk call=finish command=write/16/128 ms=2400 over_50ms=3")
+    );
+    assert_eq!(named.get(), 2);
+    assert_eq!(held.take(), None);
+}
+
+#[test]
+fn a_held_command_is_named_by_kind_first_block_and_blocks() {
+    let write = Command::Write {
+        lba: 8,
+        data: vec![0; 4096],
+        fua: true,
+    };
+    let name = |command: &Command| alloc::format!("{}", CommandName::of(command, 512));
+    assert_eq!(name(&write), "write_fua/8/8");
+    assert_eq!(name(&Command::Flush), "flush");
+    assert_eq!(
+        name(&Command::Read {
+            lba: 3,
+            bytes: 1024
+        }),
+        "read/3/2"
+    );
+}

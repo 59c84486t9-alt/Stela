@@ -26,7 +26,10 @@
 //! model's synchronous calls ([`BlockDevice::read`] and the like) wait for
 //! every queued command first, then run on the host disk: only before the PEs
 //! run, as the ANS model's shutdown flush is queued as any other command.
-use alloc::{boxed::Box, collections::BTreeMap, collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box, collections::BTreeMap, collections::VecDeque, format, string::String, sync::Arc,
+    vec::Vec,
+};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -56,7 +59,7 @@ unsafe impl<T> Sync for Spin<T> {}
 struct Held<'a, T>(&'a Spin<T>);
 
 impl<T> Spin<T> {
-    fn new(value: T) -> Self {
+    const fn new(value: T) -> Self {
         Self {
             held: AtomicBool::new(false),
             value: UnsafeCell::new(value),
@@ -656,6 +659,125 @@ impl BlockDevice for StagedDisk {
     /// model looks for it as for a disk that sends none.
     fn signals(&self) -> bool {
         false
+    }
+}
+
+/// A host disk call this long holds its processor out of its guest long
+/// enough to name: XNU's watchdogs and cross-calls give a processor about
+/// half a second.
+pub const HELD_MICROS: u64 = 50_000;
+
+/// What a host disk call that held its processor was: the disk, the call
+/// (start, finish, look, or a call its caller waits for) and its command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldCall {
+    pub device: String,
+    pub call: &'static str,
+    pub command: String,
+    pub micros: u64,
+}
+
+/// The longest host disk call over [`HELD_MICROS`] since the last report,
+/// and how many there were, for one line a beat at most. A record never
+/// waits: one that finds another processor recording is only counted.
+pub struct HeldCalls {
+    longest: Spin<Option<HeldCall>>,
+    count: AtomicU64,
+}
+
+impl HeldCalls {
+    pub const fn new() -> Self {
+        Self {
+            longest: Spin::new(None),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// A call took `micros`; `describe` names its disk, call and command,
+    /// asked only for one over [`HELD_MICROS`].
+    pub fn record(&self, micros: u64, describe: impl FnOnce() -> (String, &'static str, String)) {
+        if micros <= HELD_MICROS {
+            return;
+        }
+        self.count.fetch_add(1, Ordering::Relaxed);
+        let Some(mut longest) = self.longest.try_lock() else {
+            return;
+        };
+        if longest.as_ref().is_some_and(|held| held.micros >= micros) {
+            return;
+        }
+        let (device, call, command) = describe();
+        *longest = Some(HeldCall {
+            device,
+            call,
+            command,
+            micros,
+        });
+    }
+
+    /// The report since the last: a line naming the longest held call and
+    /// the count, or nothing when none held its processor that long.
+    pub fn take(&self) -> Option<String> {
+        let held = self.longest.try_lock()?.take()?;
+        let count = self.count.swap(0, Ordering::Relaxed);
+        Some(format!(
+            "HOST DISK HELD serial={} call={} command={} ms={} over_50ms={count}",
+            held.device,
+            held.call,
+            held.command,
+            held.micros / 1000,
+        ))
+    }
+}
+
+impl Default for HeldCalls {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A command as a held call names it: its kind, first block and blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandName {
+    kind: &'static str,
+    lba: u64,
+    blocks: u64,
+}
+
+impl CommandName {
+    /// `command` of a disk whose blocks are `block` bytes.
+    pub fn of(command: &Command, block: u32) -> Self {
+        let blocks = |bytes: usize| bytes as u64 / u64::from(block.max(1));
+        let (kind, lba, blocks) = match command {
+            Command::Read { lba, bytes } => ("read", *lba, blocks(*bytes)),
+            Command::Write { lba, data, fua } => (
+                if *fua { "write_fua" } else { "write" },
+                *lba,
+                blocks(data.len()),
+            ),
+            Command::Flush => ("flush", 0, 0),
+            Command::Discard { extents } => (
+                "discard",
+                extents.first().map_or(0, |extent| extent.lba),
+                extents.iter().map(|extent| extent.blocks).sum(),
+            ),
+            Command::WriteZeroes { lba, blocks, .. } => ("write_zeroes", *lba, *blocks),
+        };
+        Self { kind, lba, blocks }
+    }
+
+    /// A call its caller waits for: `kind` of `bytes` from `lba`.
+    pub fn waited(kind: &'static str, lba: u64, blocks: u64) -> Self {
+        Self { kind, lba, blocks }
+    }
+}
+
+impl core::fmt::Display for CommandName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.kind {
+            "flush" => f.write_str("flush"),
+            kind => write!(f, "{kind}/{}/{}", self.lba, self.blocks),
+        }
     }
 }
 

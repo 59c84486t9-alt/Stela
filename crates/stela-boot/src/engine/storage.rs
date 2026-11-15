@@ -645,7 +645,14 @@ struct Service {
     /// Host commands that failed, which the guest sees only as its
     /// controller's error status.
     failures: u64,
+    /// The commands started and not finished, by tag, to name one whose
+    /// finish held its processor ([`HELD`]).
+    started: Vec<(u32, staged_disk::CommandName)>,
 }
+
+/// The longest host disk call over 50 ms since the last report, which
+/// names it ([`staged_disk::HeldCalls`]).
+static HELD: staged_disk::HeldCalls = staged_disk::HeldCalls::new();
 
 impl Service {
     /// Logs a failed host command: the first few, then each power-of-two
@@ -671,6 +678,43 @@ impl Service {
 }
 
 impl Service {
+    /// A call `call` of this disk for `command`, begun at counter `since`,
+    /// has ended: one that held its processor over 50 ms is named once a
+    /// report ([`HELD`]), as XNU's watchdogs give a processor half a
+    /// second.
+    fn held(&self, since: u64, call: &'static str, command: staged_disk::CommandName) {
+        let micros = super::host::fresh_counter().wrapping_sub(since)
+            / (super::host::COUNTER_HZ / 1_000_000);
+        HELD.record(micros, || {
+            (
+                self.inner.identity().serial.clone(),
+                call,
+                format!("{command}"),
+            )
+        });
+    }
+
+    /// The blocks of a transfer of `bytes`.
+    fn blocks(&self, bytes: usize) -> u64 {
+        bytes as u64 / u64::from(self.inner.identity().block_size.max(1))
+    }
+
+    /// The command started under `tag`, which a finish took.
+    fn finished_command(&mut self, tag: u32) -> staged_disk::CommandName {
+        match self.started.iter().position(|(started, _)| *started == tag) {
+            Some(at) => self.started.swap_remove(at).1,
+            None => staged_disk::CommandName::waited("unknown", 0, 0),
+        }
+    }
+
+    /// A command still running, for a look or commit that held.
+    fn running_command(&self) -> staged_disk::CommandName {
+        self.started.first().map_or(
+            staged_disk::CommandName::waited("none", 0, 0),
+            |(_, name)| *name,
+        )
+    }
+
     /// A command completed: a disk said to signal that has sent no signal
     /// over [`staged_disk::SILENT_COMPLETIONS`] completions is looked at
     /// as one that sends none, and reported once.
@@ -716,6 +760,8 @@ impl Service {
     /// store, whose commit may be put off.
     fn start_with(&mut self, command: Command, more: bool) -> Result<u32, BlockError> {
         let lba = command_lba(&command);
+        let name = staged_disk::CommandName::of(&command, self.inner.identity().block_size);
+        let since = super::host::fresh_counter();
         let more = !drivers_turn::rings_at_once(turn_here(), more);
         let started = {
             let _root = self.enter_for(Call::Start);
@@ -728,6 +774,10 @@ impl Service {
             })
         };
         self.running += u32::from(started.is_ok());
+        if let Ok(tag) = started {
+            self.started.push((tag, name));
+        }
+        self.held(since, "start", name);
         self.looked.set(staged_disk::LookGate::default());
         // Reported with the loader's root and interrupts restored.
         self.failed("start lba", lba, started)
@@ -750,56 +800,74 @@ impl BlockDevice for Service {
         self.inner.identity()
     }
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let read = {
             // SAFETY: open() captured the loader root; callers supply window RAM.
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.read(lba, buffer)
         };
+        let name = staged_disk::CommandName::waited("read", lba, self.blocks(buffer.len()));
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("read lba", lba, read)
     }
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let written = {
             // SAFETY: as in read().
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.write(lba, data)
         };
+        let name = staged_disk::CommandName::waited("write", lba, self.blocks(data.len()));
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("write lba", lba, written)
     }
     fn flush_cache(&mut self) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let flushed = {
             // SAFETY: as in read().
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.flush_cache()
         };
+        let name = staged_disk::CommandName::waited("flush", 0, 0);
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("flush lba", 0, flushed)
     }
     fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let written = {
             // SAFETY: as in read().
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.write_fua(lba, data)
         };
+        let name = staged_disk::CommandName::waited("write_fua", lba, self.blocks(data.len()));
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("write_fua lba", lba, written)
     }
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let discarded = {
             // SAFETY: as in read().
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.discard(lba, blocks)
         };
+        let name = staged_disk::CommandName::waited("discard", lba, blocks);
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("discard lba", lba, discarded)
     }
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        let since = super::host::fresh_counter();
         let zeroed = {
             // SAFETY: as in read().
             let _root = unsafe { RestoreRoot::enter(self.root) };
             self.inner.write_zeroes(lba, blocks, unmap)
         };
+        let name = staged_disk::CommandName::waited("write_zeroes", lba, blocks);
+        self.held(since, "waited", name);
         // Reported with the loader's root and interrupts restored.
         self.failed("write_zeroes lba", lba, zeroed)
     }
@@ -817,15 +885,23 @@ impl BlockDevice for Service {
     }
     /// Put off in a service turn's store, whose starts rang at once.
     fn commit(&mut self) {
+        let since = super::host::fresh_counter();
         if let Some(_root) = self.enter_for(Call::Commit) {
             self.inner.commit();
         }
+        self.held(since, "commit", self.running_command());
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
+        let since = super::host::fresh_counter();
         let finished = {
             let _root = self.enter_for(Call::Look)?;
             timed(DiskPart::Finish, || self.inner.finish(tag))
         };
+        let name = match finished {
+            Some(_) => self.finished_command(tag),
+            None => self.running_command(),
+        };
+        self.held(since, "finish", name);
         self.running = self.running.saturating_sub(u32::from(finished.is_some()));
         self.looked.set(staged_disk::LookGate::default());
         if finished.is_some() {
@@ -841,6 +917,7 @@ impl BlockDevice for Service {
     /// maps: no driver call and no root change.
     fn finished(&mut self, tag: u32) -> Option<Finished> {
         let finished = self.inner.finished(tag)?;
+        self.finished_command(tag);
         self.running = self.running.saturating_sub(1);
         self.heard();
         Some(self.failed("finished tag", u64::from(tag), finished))
@@ -857,10 +934,12 @@ impl BlockDevice for Service {
         if gate.skip(self.signals(), doorbells, now, window) {
             return false;
         }
+        let since = super::host::fresh_counter();
         let Some(_root) = self.enter_for(Call::Look) else {
             return false;
         };
         let posted = timed(DiskPart::Posted, || self.inner.posted());
+        self.held(since, "look", self.running_command());
         gate.looked(posted, doorbells, now);
         self.looked.set(gate);
         posted
@@ -1037,6 +1116,7 @@ impl stela_drivers::probe::Observer for Observer {
             looked: Cell::new(staged_disk::LookGate::default()),
             heard: staged_disk::SignalWatch::default(),
             failures: 0,
+            started: Vec::new(),
         });
         self.resumed = between_drivers(|| crate::log_file::resume_quietly(Box::new(log)));
         HELD_USB_LOG.store(self.resumed, Ordering::Release);
@@ -1523,6 +1603,11 @@ impl HostDisks {
             counter_micros(&OWED_TIMES[2]),
         ));
         output::arguments(format_args!("{line}\n"));
+        // The host disk call that held its processor longest over 50 ms
+        // since the last report, if any did.
+        if let Some(line) = HELD.take() {
+            output::arguments(format_args!("{line}\n"));
+        }
     }
 
     /// One bounded snapshot before stop-time persistence; never waits for a
@@ -1761,6 +1846,7 @@ pub unsafe fn open(
             looked: Cell::new(staged_disk::LookGate::default()),
             heard: staged_disk::SignalWatch::default(),
             failures: 0,
+            started: Vec::new(),
         })
     };
     // The USB's log, when its disk is here and the start does not write on
@@ -2156,6 +2242,7 @@ pub unsafe fn open(
                 looked: Cell::new(staged_disk::LookGate::default()),
                 heard: staged_disk::SignalWatch::default(),
                 failures: 0,
+                started: Vec::new(),
             }) as Box<dyn BlockDevice>
         })
         .collect();
