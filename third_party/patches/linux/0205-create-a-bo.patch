@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 16:04:37 +0000
+Subject: [PATCH] fix(nouveau): create a BO without waiting on its reservation
+ object's fences, where a BO that is not shared waited for every job on its
+ VM, so an allocation lasted as long as the GPU work in flight
+
+---
+ drivers/gpu/drm/nouveau/nouveau_bo.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_bo.c b/drivers/gpu/drm/nouveau/nouveau_bo.c
+index 6dcb92575eb466fe74ebe597fb8cfef149f41e5d..f4fd5e4a0bfb92bdd65d9af099dbacaf4a7cc0c0 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_bo.c
++++ b/drivers/gpu/drm/nouveau/nouveau_bo.c
+@@ -1152,6 +1152,12 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
+ 	struct drm_gem_object *obj = &bo->base;
+ 	struct ttm_resource *old_reg = bo->resource;
+ 	struct nouveau_drm_tile *new_tile = NULL;
++	/* A BO without backing yet has no contents and no GPU access to it in
++	 * flight. A BO that is not shared uses its VM's reservation object,
++	 * whose fences are every job's on that VM: waiting on them made each
++	 * new BO wait for the GPU to finish all of the VM's work.
++	 */
++	bool empty = !old_reg || (old_reg->mem_type == TTM_PL_SYSTEM && !bo->ttm);
+ 	int ret = 0;
+ 
+ 	if (new_reg->mem_type == TTM_PL_TT) {
+@@ -1162,9 +1168,11 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
+ 
+ 	drm_gpuvm_bo_gem_evict(obj, evict);
+ 	nouveau_bo_move_ntfy(bo, new_reg);
+-	ret = ttm_bo_wait_ctx(bo, ctx);
+-	if (ret)
+-		goto out_ntfy;
++	if (!empty) {
++		ret = ttm_bo_wait_ctx(bo, ctx);
++		if (ret)
++			goto out_ntfy;
++	}
+ 
+ 	if (drm->client.device.info.family < NV_DEVICE_INFO_V0_TESLA) {
+ 		ret = nouveau_bo_vm_bind(bo, new_reg, &new_tile);
+@@ -1173,8 +1181,7 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
+ 	}
+ 
+ 	/* Fake bo copy. */
+-	if (!old_reg || (old_reg->mem_type == TTM_PL_SYSTEM &&
+-			 !bo->ttm)) {
++	if (empty) {
+ 		ttm_bo_move_null(bo, new_reg);
+ 		goto out;
+ 	}
