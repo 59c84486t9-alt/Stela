@@ -313,8 +313,6 @@ pub enum Decision {
     Log,
     /// Record the request and restart into the repair.
     Repair,
-    /// Queue one bounded retry.
-    Retry,
     /// Stop ([`stop_reason`]); `attempted` when the automatic repair
     /// already ran and did not help, otherwise it cannot run.
     StopMissing { attempted: bool },
@@ -341,9 +339,7 @@ pub fn decide(report: Report, boot: Boot, record: Record, persistent: bool) -> D
             | Record::Pending
             | Record::Installed
             | Record::Retry => Decision::StopMissing { attempted: false },
-            Record::Attempted if persistent => Decision::Retry,
-            Record::Attempted => Decision::StopMissing { attempted: true },
-            Record::Retried => Decision::StopMissing { attempted: true },
+            Record::Attempted | Record::Retried => Decision::StopMissing { attempted: true },
         },
     }
 }
@@ -428,7 +424,7 @@ pub fn steps() -> Vec<Step> {
         step("/usr/libexec/init_data_protection".into(), 180),
         step("/sbin/mount -P 2".into(), 180),
         // Create the complete hierarchy even if GPUBundles is absent.
-        step(format!("/bin/mkdir -p -m 0755 {directories}"), 60),
+        step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),
