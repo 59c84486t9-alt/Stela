@@ -393,6 +393,14 @@ impl Deadline {
         let now = Clock::ticks();
         self.passed_at(now) || budget::passed_at(now, core::panic::Location::caller())
     }
+    /// [`Self::passed`] for a wait set up at `at`, which a caller-tracked
+    /// function took before an `async` step polls the deadline: a passed
+    /// device start budget names that line, as [`Clock::wait`] names its
+    /// caller's.
+    pub fn passed_from(&self, at: &'static core::panic::Location<'static>) -> bool {
+        let now = Clock::ticks();
+        self.passed_at(now) || budget::passed_at(now, at)
+    }
 }
 
 #[cfg(test)]

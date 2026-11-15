@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl AhciDisk {
+impl Disk {
     /// Reset the link on one port and, when an ATA disk answers, start the
     /// port and identify the disk.
     #[cfg(test)]
@@ -64,7 +64,13 @@ impl AhciDisk {
             .map(|(port, _)| *port)
             .collect();
         let debounced = released.and_then(|()| {
-            debounce_ports(&reset, clock, minimum, DEBOUNCE_NORMAL, DEBOUNCE_NORMAL[2])
+            block_on(debounce_ports(
+                &reset,
+                clock,
+                minimum,
+                DEBOUNCE_NORMAL,
+                DEBOUNCE_NORMAL[2],
+            ))
         });
         let mut debounced = match debounced {
             Ok(debounced) => debounced.into_iter(),
@@ -250,7 +256,7 @@ impl AhciDisk {
             });
             let disk = kept.get_mut().disk.as_mut().expect("same initialized disk");
             let port = disk.port;
-            let found = disk.first_identify(&port)?;
+            let found = block_on(disk.first_identify(&port))?;
             if found.quirks & quirks::DISABLE != 0 {
                 stop_port(&port, clock)?;
                 return Err(BlockError::Unsupported("SATA device libata disables"));
@@ -280,10 +286,10 @@ impl AhciDisk {
             (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
             // ata_dev_configure, then ATA_EHI_SETMODE and config_lpm; a failure
             // takes EH's next try.
-            let mut configured = disk.configure(&port, &found);
+            let mut configured = block_on(disk.configure(&port, &found));
             if configured.is_ok() {
-                disk.set_mode(&port)?;
-                configured = disk.configure_lpm(&port, DEVICE_TRIES);
+                block_on(disk.set_mode(&port))?;
+                configured = block_on(disk.configure_lpm(&port, DEVICE_TRIES));
             }
             if let Err(error) = configured {
                 let tries = if error == AGAIN {
@@ -292,7 +298,7 @@ impl AhciDisk {
                     DEVICE_TRIES - 1
                 };
                 disk.minimum.ready()?;
-                disk.reconfigure(&port, true, false, error, tries)?;
+                block_on(disk.reconfigure(&port, true, false, error, tries))?;
             }
             // Linux `__ata_change_queue_depth`: as many queued commands as the
             // host's slots and the disk take, at most ATA_MAX_QUEUE. Memory
@@ -337,9 +343,10 @@ impl AhciDisk {
     }
     /// Linux `ata_dev_revalidate`: IDENTIFY again and require the same model,
     /// serial and capacity (`ata_dev_same_device`).
-    pub(super) fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
+    pub(super) async fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
         let buffer = self.table.bus_address() + IDENTIFY_DATA as u64;
         self.internal(port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
+            .await
             .map_err(|failure| failure.error)?;
         let data = &self.table.bytes()[IDENTIFY_DATA..IDENTIFY_DATA + ATA_SECTOR_BYTES as usize];
         let found = identify(data).map_err(|_| DETACHED)?;
@@ -354,7 +361,7 @@ impl AhciDisk {
         self.transfer = found.transfer;
         self.locked = found.locked;
         (self.lpm.hipm, self.lpm.dipm) = (found.hipm, found.dipm);
-        self.configure(port, &found)
+        self.configure(port, &found).await
     }
 
     /// What Linux `ata_dev_configure`, which `ata_dev_revalidate` reruns,
@@ -369,7 +376,7 @@ impl AhciDisk {
     /// a hard reset turns off again (`ata_dev_config_sense_reporting` only
     /// logs a refusal). The kept IDENTIFY data says it is enabled only once
     /// a revalidation rereads it.
-    pub(super) fn configure(
+    pub(super) async fn configure(
         &mut self,
         port: &impl CommandPort,
         found: &Identified,
@@ -391,14 +398,16 @@ impl AhciDisk {
         self.log_dma = found.read_log_dma;
         self.no_dma_log |= self.quirks & quirks::NO_DMA_LOG != 0;
         if ncq && self.ncq.host && found.fpdma_aa && !self.ncq.aa_broken {
-            let enabled = self.internal(
-                port,
-                ATA_SET_FEATURES,
-                FEATURE_SATA_ENABLE,
-                SATA_FPDMA_AA,
-                0,
-                buffer,
-            );
+            let enabled = self
+                .internal(
+                    port,
+                    ATA_SET_FEATURES,
+                    FEATURE_SATA_ENABLE,
+                    SATA_FPDMA_AA,
+                    0,
+                    buffer,
+                )
+                .await;
             if let Err(failure) = enabled
                 && !failure.refused()
             {
@@ -414,20 +423,28 @@ impl AhciDisk {
             self.lpm.broken = true;
         }
         if !self.lpm.host_dipm() && found.dipm {
-            let _ = self.internal(
-                port,
-                ATA_SET_FEATURES,
-                FEATURE_SATA_DISABLE,
-                SATA_DIPM,
-                0,
-                buffer,
-            );
+            let _ = self
+                .internal(
+                    port,
+                    ATA_SET_FEATURES,
+                    FEATURE_SATA_DISABLE,
+                    SATA_DIPM,
+                    0,
+                    buffer,
+                )
+                .await;
         }
         self.devslp = found.devslp
-            && self.identify_page_supported(port, LOG_SATA_SETTINGS)?
-            && self.read_log(port, LOG_IDENTIFY_DEVICE, LOG_SATA_SETTINGS)?;
+            && self
+                .identify_page_supported(port, LOG_SATA_SETTINGS)
+                .await?
+            && self
+                .read_log(port, LOG_IDENTIFY_DEVICE, LOG_SATA_SETTINGS)
+                .await?;
         if found.sense_reporting == (true, false) {
-            let _ = self.internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
+            let _ = self
+                .internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer)
+                .await;
         }
         Ok(())
     }
@@ -436,7 +453,7 @@ impl AhciDisk {
     /// READ LOG DMA EXT where IDENTIFY offers it, and once that fails READ
     /// LOG EXT for good (`ATA_QUIRK_NO_DMA_LOG`), at once unless the port
     /// froze. Whether the page was read.
-    pub(super) fn read_log(
+    pub(super) async fn read_log(
         &mut self,
         port: &impl CommandPort,
         log: u8,
@@ -452,22 +469,25 @@ impl AhciDisk {
                 ATA_READ_LOG_EXT
             };
             let bytes = ATA_SECTOR_BYTES as usize;
-            let Err(failure) = self.attempt(
-                port,
-                AtaRequest {
-                    command,
-                    feature: 0,
-                    lba,
-                    count: 1,
-                    bytes,
-                    write: false,
-                    buffer: Some(buffer),
-                },
-            ) else {
+            let Err(failure) = self
+                .attempt(
+                    port,
+                    AtaRequest {
+                        command,
+                        feature: 0,
+                        lba,
+                        count: 1,
+                        bytes,
+                        write: false,
+                        buffer: Some(buffer),
+                    },
+                )
+                .await
+            else {
                 return Ok(true);
             };
             self.minimum.ready()?;
-            stop_engine(port, self.clock)?;
+            stop_engine(port, self.clock).await?;
             start_engine(port);
             if !dma {
                 return Ok(false);
@@ -483,7 +503,7 @@ impl AhciDisk {
     /// general purpose log directory, reread at each configuration, lists
     /// the IDENTIFY DEVICE data log, whose page 0 lists `page`. Without that
     /// log the disk gets `ATA_QUIRK_NO_ID_DEV_LOG`.
-    pub(super) fn identify_page_supported(
+    pub(super) async fn identify_page_supported(
         &mut self,
         port: &impl CommandPort,
         page: u8,
@@ -493,13 +513,13 @@ impl AhciDisk {
         }
         let entry = LOG_DATA + 2 * usize::from(LOG_IDENTIFY_DEVICE);
         let listed = self.quirks & quirks::NO_LOG_DIR == 0
-            && self.read_log(port, LOG_DIRECTORY, 0)?
+            && self.read_log(port, LOG_DIRECTORY, 0).await?
             && self.table.bytes()[entry..entry + 2] != [0, 0];
         if !listed {
             self.quirks |= quirks::NO_ID_DEV_LOG;
             return Ok(false);
         }
-        if !self.read_log(port, LOG_IDENTIFY_DEVICE, 0)? {
+        if !self.read_log(port, LOG_IDENTIFY_DEVICE, 0).await? {
             return Ok(false);
         }
         let pages = &self.table.bytes()[LOG_DATA..LOG_DATA + ATA_SECTOR_BYTES as usize];
@@ -509,7 +529,7 @@ impl AhciDisk {
     /// `ata_eh_recover`'s config_lpm: move to the target policy. A failure
     /// with at most two tries left disables LPM on the link, as
     /// `ata_eh_link_set_lpm` does.
-    pub(super) fn configure_lpm(
+    pub(super) async fn configure_lpm(
         &mut self,
         port: &impl CommandPort,
         tries: usize,
@@ -518,14 +538,14 @@ impl AhciDisk {
         if self.lpm.policy == target {
             return Ok(());
         }
-        self.set_lpm(port, target, tries)
+        self.set_lpm(port, target, tries).await
     }
 
     /// Linux `ata_eh_link_set_lpm` with `ahci_set_lpm`: DIPM off, the
     /// SControl IPM restrictions and PxCMD aggressive LPM the policy and HIPM
     /// allow, then DIPM on from MED_POWER_WITH_DIPM. A device's refusal is
     /// ignored; any other failure keeps the old policy.
-    pub(super) fn set_lpm(
+    pub(super) async fn set_lpm(
         &mut self,
         port: &impl CommandPort,
         policy: u8,
@@ -534,14 +554,27 @@ impl AhciDisk {
         if !self.lpm.allowed {
             return Ok(());
         }
-        let result = self.apply_lpm(port, policy);
+        let result = self.apply_lpm(port, policy).await;
         if result.is_err() && tries <= 2 {
             self.lpm.allowed = false;
         }
         result
     }
 
-    pub(super) fn apply_lpm(
+    /// SET FEATURES turning DIPM on or off (`feature`); the device's
+    /// refusal is no failure.
+    async fn set_dipm(&mut self, port: &impl CommandPort, feature: u8) -> Result<(), BlockError> {
+        let buffer = self.bounce.bus_address();
+        match self
+            .internal(port, ATA_SET_FEATURES, feature, SATA_DIPM, 0, buffer)
+            .await
+        {
+            Err(failure) if !failure.refused() => Err(failure.error),
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) async fn apply_lpm(
         &mut self,
         port: &impl CommandPort,
         policy: u8,
@@ -549,19 +582,8 @@ impl AhciDisk {
         self.minimum.check()?;
         let lpm = self.lpm;
         let buffer = self.bounce.bus_address();
-        let dipm = |disk: &mut Self, feature| match disk.internal(
-            port,
-            ATA_SET_FEATURES,
-            feature,
-            SATA_DIPM,
-            0,
-            buffer,
-        ) {
-            Err(failure) if !failure.refused() => Err(failure.error),
-            _ => Ok(()),
-        };
         if lpm.dipm {
-            dipm(self, FEATURE_SATA_DISABLE)?;
+            self.set_dipm(port, FEATURE_SATA_DISABLE).await?;
         }
         // sata_link_scr_lpm. Linux masks the port's PhyRdy interrupt
         // first, as PxIE does here for a port that sends messages; a look
@@ -596,10 +618,12 @@ impl AhciDisk {
             let mut command = port.read32(PORT_COMMAND);
             if policy == LPM_MAX_POWER || !lpm.hipm {
                 command &= !(COMMAND_AGGRESSIVE_SLUMBER | COMMAND_AGGRESSIVE_LPM);
-                self.minimum.wait_after(LPM_WAKE_US, || {
-                    port.write32(PORT_COMMAND, command | COMMAND_INTERFACE_ACTIVE);
-                    port.read32(PORT_COMMAND);
-                })?;
+                self.minimum
+                    .hold_after(LPM_WAKE_US, || {
+                        port.write32(PORT_COMMAND, command | COMMAND_INTERFACE_ACTIVE);
+                        port.read32(PORT_COMMAND);
+                    })
+                    .await?;
             } else {
                 port.write32(PORT_COMMAND, command | COMMAND_AGGRESSIVE_LPM);
             }
@@ -614,14 +638,16 @@ impl AhciDisk {
             && devslp & DEVICE_SLEEP_AGGRESSIVE != 0
         {
             port.write32(PORT_DEVICE_SLEEP, devslp & !DEVICE_SLEEP_AGGRESSIVE);
-            let _ = self.internal(
-                port,
-                ATA_SET_FEATURES,
-                FEATURE_SATA_DISABLE,
-                SATA_DEVICE_SLEEP,
-                0,
-                buffer,
-            );
+            let _ = self
+                .internal(
+                    port,
+                    ATA_SET_FEATURES,
+                    FEATURE_SATA_DISABLE,
+                    SATA_DEVICE_SLEEP,
+                    0,
+                    buffer,
+                )
+                .await;
         }
         if policy == LPM_MAX_POWER {
             scr_lpm();
@@ -633,7 +659,7 @@ impl AhciDisk {
         if policy >= LPM_MED_POWER_WITH_DIPM
             && lpm.host_dipm()
             && lpm.dipm
-            && let Err(error) = dipm(self, FEATURE_SATA_ENABLE)
+            && let Err(error) = self.set_dipm(port, FEATURE_SATA_ENABLE).await
         {
             self.lpm.policy = old;
             self.mask_interrupts(port, old);
@@ -647,7 +673,7 @@ impl AhciDisk {
     /// choose the fastest PIO and UDMA modes the host, the IDENTIFY data and
     /// earlier speed-downs allow, program the UDMA mode with SET FEATURES and
     /// revalidate. A changed mode makes the transfer unverified again.
-    pub(super) fn set_mode(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
+    pub(super) async fn set_mode(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
         // A verified transfer clears DUBIOUS on the newest error.
         if !self.dubious
             && let Some(top) = self.errors.top()
@@ -680,20 +706,23 @@ impl AhciDisk {
         let skip = self.quirks & quirks::NOSETXFER != 0 && self.transfer.sata;
         if !skip && (pio > MODE_PIO_2 || self.transfer.iordy) {
             let buffer = self.bounce.bus_address();
-            match self.internal(
-                port,
-                ATA_SET_FEATURES,
-                FEATURE_TRANSFER_MODE,
-                u16::from(mode),
-                0,
-                buffer,
-            ) {
+            match self
+                .internal(
+                    port,
+                    ATA_SET_FEATURES,
+                    FEATURE_TRANSFER_MODE,
+                    u16::from(mode),
+                    0,
+                    buffer,
+                )
+                .await
+            {
                 Ok(()) => {}
                 Err(failure) if failure.refused() => refused = true,
                 Err(failure) => return Err(failure.error),
             }
         }
-        self.revalidate(port)?;
+        self.revalidate(port).await?;
         // A device error is ignored when the disk already runs its fastest
         // mode.
         if refused && highest_mode(self.transfer.udma, MODE_UDMA_0) != Some(mode) {

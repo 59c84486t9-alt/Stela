@@ -19,6 +19,9 @@ pub(super) struct Control {
     pub(super) function: RefCell<Option<Function>>,
     pub(super) minimum: Rc<dyn Timer>,
     phase: RefCell<Phase>,
+    /// A disk's error handling runs a step at a time ([`Self::stepping`]):
+    /// its minimum delays end steps rather than waiting in them.
+    steps: Cell<bool>,
 }
 impl Control {
     pub(super) fn ready(&self) -> Result<(), BlockError> {
@@ -59,6 +62,11 @@ impl Control {
             effect();
             self.minimum.wait_us(us).map_err(BlockError::PciPower)
         })();
+        self.settle(result)
+    }
+    /// The phase after a provider callback's `result`: Ready again, or the
+    /// failure, terminal for every disk of the controller.
+    fn settle(&self, result: Result<(), BlockError>) -> Result<(), BlockError> {
         match result {
             Ok(()) => {
                 *self.phase.borrow_mut() = Phase::Ready;
@@ -70,12 +78,62 @@ impl Control {
             }
         }
     }
+    /// Run `step`, one step of a disk's error handling, with its minimum
+    /// delays as step ends ([`Self::hold_after`]).
+    pub(super) fn stepping<R>(&self, step: impl FnOnce() -> R) -> R {
+        let outer = self.steps.replace(true);
+        let result = step();
+        self.steps.set(outer);
+        result
+    }
+    /// [`Self::wait_after`] for work that may run a step at a time. Within
+    /// [`Self::stepping`], with a timer that times an interval it does not
+    /// wait in (`begin_interval`), each look at the interval that finds it
+    /// running ends the step, and the phase is Ready between looks, so the
+    /// controller's other ports go on; each look is a provider callback
+    /// under Acting, as the wait is. Otherwise it waits in place, as
+    /// [`Self::wait_after`] does: the work then runs to its end.
+    pub(super) async fn hold_after(
+        &self,
+        us: u64,
+        effect: impl FnOnce(),
+    ) -> Result<(), BlockError> {
+        if !self.steps.get() {
+            return self.wait_after(us, effect);
+        }
+        self.ready()?;
+        *self.phase.borrow_mut() = Phase::Acting;
+        let begun = (|| {
+            self.minimum.check().map_err(BlockError::PciPower)?;
+            effect();
+            self.minimum
+                .begin_interval(us)
+                .map_err(BlockError::PciPower)
+        })();
+        let interval = match begun {
+            Ok(Some(interval)) => interval,
+            Ok(None) => return self.settle(self.minimum.wait_us(us).map_err(BlockError::PciPower)),
+            Err(error) => return self.settle(Err(error)),
+        };
+        *self.phase.borrow_mut() = Phase::Ready;
+        loop {
+            self.ready()?;
+            *self.phase.borrow_mut() = Phase::Acting;
+            match interval.elapsed() {
+                Ok(true) => return self.settle(Ok(())),
+                Ok(false) => *self.phase.borrow_mut() = Phase::Ready,
+                Err(error) => return self.settle(Err(BlockError::PciPower(error))),
+            }
+            yield_now().await;
+        }
+    }
     #[cfg(test)]
     pub(super) fn model(minimum: Rc<dyn Timer>) -> Rc<Self> {
         Rc::new(Self {
             function: RefCell::new(None),
             minimum,
             phase: RefCell::new(Phase::Ready),
+            steps: Cell::new(false),
         })
     }
 }
@@ -94,6 +152,7 @@ impl Host {
                 function: RefCell::new(Some(function)),
                 minimum,
                 phase: RefCell::new(Phase::Ready),
+                steps: Cell::new(false),
             }),
             retained_ports: Vec::new(),
         }
@@ -150,7 +209,7 @@ pub(super) struct PortBuild {
     pub(super) commands: Option<DmaBuffer>,
     pub(super) table: Option<DmaBuffer>,
     pub(super) bounce: Option<DmaBuffer>,
-    pub(super) disk: Option<AhciDisk>,
+    pub(super) disk: Option<Disk>,
 }
 pub(super) struct PortRefusal {
     pub(super) error: BlockError,
@@ -177,7 +236,7 @@ impl PortRefusal {
 pub(super) struct Build {
     pub(super) host: Host,
     pub(super) hba: Option<Mmio>,
-    pub(super) disks: Vec<AhciDisk>,
+    pub(super) disks: Vec<Disk>,
     pub(super) failures: Vec<(u32, BlockError)>,
     pub(super) remapped_nvme: u32,
 }

@@ -101,21 +101,21 @@ fn identify_capabilities_select_transfer_modes() {
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     fixture.disk.mode = 0;
     let link = Link::new(&[]);
-    fixture.disk.set_mode(&link).unwrap();
+    block_on(fixture.disk.set_mode(&link)).unwrap();
     assert_eq!(fixture.disk.mode, 0x46);
     assert!(fixture.disk.dubious);
     assert_eq!(link.issued.get(), 2);
     // A refusal is ignored only at the disk's fastest mode.
     let link = Link::new(&[Fault::TaskFile(0x0451)]);
-    assert_eq!(fixture.disk.set_mode(&link), Ok(()));
+    assert_eq!(block_on(fixture.disk.set_mode(&link)), Ok(()));
     fixture.disk.udma_mask = 0x1f;
     let link = Link::new(&[Fault::TaskFile(0x0451)]);
-    assert!(fixture.disk.set_mode(&link).is_err());
+    assert!(block_on(fixture.disk.set_mode(&link)).is_err());
     assert_eq!(fixture.disk.mode, 0x44);
     // No UDMA: libata would use PIO commands these drivers do not issue.
     fixture.disk.udma_mask = 0;
     assert!(matches!(
-        fixture.disk.set_mode(&Link::new(&[])),
+        block_on(fixture.disk.set_mode(&Link::new(&[]))),
         Err(BlockError::Unsupported(_))
     ));
 
@@ -158,7 +158,10 @@ fn device_quirks_adjust_transfer_configuration() {
     let configure = |found: &Identified| {
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
         fixture.disk.ncq.host = true;
-        (fixture.disk.configure(&Link::new(&[]), found), fixture)
+        (
+            block_on(fixture.disk.configure(&Link::new(&[]), found)),
+            fixture,
+        )
     };
 
     // Without a quirk: NCQ and auto-activation.

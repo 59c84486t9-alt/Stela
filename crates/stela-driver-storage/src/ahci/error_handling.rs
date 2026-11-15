@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl AhciDisk {
+impl Disk {
     /// `ata_eh_finish` and sd's completion for a command `failure` was
     /// charged to, after recovery: retry it, or complete it by its fetched
     /// or generated sense data.
@@ -56,8 +56,9 @@ impl AhciDisk {
     /// speed-down; when a reset is due, hard reset the
     /// link (one try per `ata_eh_reset_timeouts` entry) and revalidate the
     /// disk, up to `ATA_EH_DEV_TRIES` times. An error disables the disk.
-    /// Each run starts its internal commands at their first timeouts.
-    pub(super) fn recover(
+    /// Each run starts its internal commands at their first timeouts. Every
+    /// wait is an await: run a step at a time ([`AhciDisk`]), no step waits.
+    pub(super) async fn recover(
         &mut self,
         port: &impl CommandPort,
         failure: &mut Failure,
@@ -66,14 +67,14 @@ impl AhciDisk {
         self.minimum.check()?;
         self.timeout_steps = [0; INTERNAL_TIMEOUTS_US.len()];
         if !failure.frozen {
-            stop_engine(port, self.clock)?;
+            stop_engine(port, self.clock).await?;
             start_engine(port);
         }
         // ahci_error_intr charges a queued command's device error to the
         // link, where valid sense does not clear it, unless the NCQ error log
         // names the command.
         let mut link_device = failure.queued && failure.interrupts & INTERRUPT_TASK_FILE_ERROR != 0;
-        if link_device && !failure.frozen && self.analyze_ncq_error(port, failure)? {
+        if link_device && !failure.frozen && self.analyze_ncq_error(port, failure).await? {
             link_device = false;
         }
         // ata_eh_analyze_tf fetches reported sense data the log did not hold
@@ -84,7 +85,7 @@ impl AhciDisk {
             && !failure.frozen
             && self.sense_reporting
         {
-            failure.sense = self.request_sense(port)?;
+            failure.sense = self.request_sense(port).await?;
         }
         if let Some(sense) = failure.sense {
             failure.error = BlockError::Sense(sense);
@@ -102,11 +103,12 @@ impl AhciDisk {
         }
         let last = failure.error.clone();
         self.reconfigure(port, reset, failure.hotplug, last, DEVICE_TRIES)
+            .await
     }
 
     /// `ata_eh_recover`: a reset when one is due, then revalidation and
     /// configuration, `tries` times at most; each retry resets.
-    pub(super) fn reconfigure(
+    pub(super) async fn reconfigure(
         &mut self,
         port: &impl CommandPort,
         mut reset: bool,
@@ -117,21 +119,21 @@ impl AhciDisk {
         loop {
             self.minimum.ready()?;
             if reset {
-                self.reset(port, hotplug, last.clone())?;
+                self.reset(port, hotplug, last.clone()).await?;
             }
             reset = true;
             // ata_eh_revalidate_and_attach wakes a power-saving link first;
             // then ATA_EHI_SETMODE and config_lpm.
-            let woken = if self.lpm.policy > LPM_MAX_POWER {
-                self.set_lpm(port, LPM_MAX_POWER, tries)
-            } else {
-                Ok(())
-            };
-            let Err(error) = woken
-                .and_then(|()| self.revalidate(port))
-                .and_then(|()| self.set_mode(port))
-                .and_then(|()| self.configure_lpm(port, tries))
-            else {
+            let configured: Result<(), BlockError> = async {
+                if self.lpm.policy > LPM_MAX_POWER {
+                    self.set_lpm(port, LPM_MAX_POWER, tries).await?;
+                }
+                self.revalidate(port).await?;
+                self.set_mode(port).await?;
+                self.configure_lpm(port, tries).await
+            }
+            .await;
+            let Err(error) = configured else {
                 return Ok(());
             };
             self.minimum.ready()?;
@@ -158,14 +160,14 @@ impl AhciDisk {
     /// `ata_eh_reset`: a hard reset, one try per `ata_eh_reset_timeouts`
     /// entry, the last failure's error, `last` before any, once all fail;
     /// [`DETACHED`] when no ATA disk is online after it.
-    pub(super) fn reset(
+    pub(super) async fn reset(
         &mut self,
         port: &impl CommandPort,
         hotplug: bool,
         mut last: BlockError,
     ) -> Result<(), BlockError> {
         for timeout in RESET_TIMEOUTS_US {
-            match self.hardreset(port, timeout, hotplug) {
+            match self.hardreset(port, timeout, hotplug).await {
                 Ok(true) => return Ok(()),
                 Ok(false) => return Err(DETACHED),
                 Err(error) => {
@@ -182,7 +184,7 @@ impl AhciDisk {
     /// (`ata_eh_handle_dev_fail`), the last one at a lower link speed, and
     /// the next try follows a hard reset; a timed-out one waits longer
     /// ([`Self::internal_timeout_us`]). The IDENTIFY data once read.
-    pub(super) fn first_identify(
+    pub(super) async fn first_identify(
         &mut self,
         port: &impl CommandPort,
     ) -> Result<Identified, BlockError> {
@@ -190,7 +192,7 @@ impl AhciDisk {
         loop {
             let buffer = self.bounce.bus_address();
             let bytes = ATA_SECTOR_BYTES as usize;
-            let error = match self.internal(port, ATA_IDENTIFY, 0, 0, bytes, buffer) {
+            let error = match self.internal(port, ATA_IDENTIFY, 0, 0, bytes, buffer).await {
                 Ok(()) => return identify(self.bounce.bytes()),
                 Err(failure) if failure.refused() => return Err(failure.error),
                 Err(failure) => failure.error,
@@ -203,7 +205,7 @@ impl AhciDisk {
             if tries == 1 {
                 self.lower_speed_limit(port);
             }
-            self.reset(port, false, error)?;
+            self.reset(port, false, error).await?;
         }
     }
 
@@ -329,7 +331,7 @@ impl AhciDisk {
 
     /// Linux `ahci_do_hardreset` with `sata_link_hardreset`: whether an ATA
     /// disk is online afterwards.
-    pub(super) fn hardreset(
+    pub(super) async fn hardreset(
         &mut self,
         port: &impl CommandPort,
         timeout_us: u64,
@@ -340,7 +342,7 @@ impl AhciDisk {
         let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
         let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
         // Its failure is not fatal here, as in Linux.
-        let _ = stop_engine(port, clock);
+        let _ = stop_engine(port, clock).await;
         // Clear the D2H reception area to BSY to wait for the new D2H FIS.
         let mut d2h = [0u8; FIS_BYTES];
         d2h[0] = FIS_REGISTER_HOST_TO_DEVICE;
@@ -358,28 +360,33 @@ impl AhciDisk {
             port.write32(PORT_SATA_CONTROL, control | target << SPEED_SHIFT);
         }
         let speed = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED;
-        self.minimum.wait_after(COMRESET_HOLD_US, || {
-            port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
-            port.read32(PORT_SATA_CONTROL);
-        })?;
+        self.minimum
+            .hold_after(COMRESET_HOLD_US, || {
+                port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
+                port.read32(PORT_SATA_CONTROL);
+            })
+            .await?;
         // sata_link_resume
         let mut resumed = false;
         let mut control = port.read32(PORT_SATA_CONTROL);
         for _ in 0..RESUME_TRIES {
-            self.minimum.wait_after(RESUME_SETTLE_US, || {
-                port.write32(
-                    PORT_SATA_CONTROL,
-                    control & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED,
-                );
-                port.read32(PORT_SATA_CONTROL);
-            })?;
+            self.minimum
+                .hold_after(RESUME_SETTLE_US, || {
+                    port.write32(
+                        PORT_SATA_CONTROL,
+                        control & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED,
+                    );
+                    port.read32(PORT_SATA_CONTROL);
+                })
+                .await?;
             control = port.read32(PORT_SATA_CONTROL);
             if control & SATA_CONTROL_RESUME_MASK == SATA_CONTROL_RESUMED {
                 resumed = true;
                 break;
             }
         }
-        let result = (|| {
+        let minimum = &self.minimum;
+        let result: Result<bool, BlockError> = async {
             if resumed {
                 let timing = if hotplug {
                     DEBOUNCE_HOTPLUG
@@ -389,10 +396,11 @@ impl AhciDisk {
                 debounce(
                     port,
                     clock,
-                    &self.minimum,
+                    minimum,
                     timing,
                     timeout_us.saturating_sub(elapsed()?),
-                )?;
+                )
+                .await?;
                 port.write32(PORT_SATA_ERROR, port.read32(PORT_SATA_ERROR));
             }
             if port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION != DEVICE_PRESENT {
@@ -400,13 +408,16 @@ impl AhciDisk {
             }
             // ata_wait_ready with ahci_check_ready.
             let remaining = timeout_us.saturating_sub(elapsed()?);
-            if !clock.wait(remaining, || {
+            if !wait_for(clock, remaining, || {
                 port.read32(PORT_TASK_FILE) as u8 & STATUS_BUSY == 0
-            }) {
+            })
+            .await
+            {
                 return Err(BlockError::Timeout);
             }
             Ok(true)
-        })();
+        }
+        .await;
         // A timing callback may have failed during debounce. Do not execute
         // Linux's ordinary error-path engine restart after that terminal loss.
         self.minimum.ready()?;
@@ -422,12 +433,12 @@ impl AhciDisk {
     /// the failed command and holds its result taskfile and, with NCQ
     /// autosense, its sense data. Whether it named a launched command, whose
     /// slot `failure` then names.
-    pub(super) fn analyze_ncq_error(
+    pub(super) async fn analyze_ncq_error(
         &mut self,
         port: &impl CommandPort,
         failure: &mut Failure,
     ) -> Result<bool, BlockError> {
-        if !self.read_log(port, LOG_SATA_NCQ, 0)? {
+        if !self.read_log(port, LOG_SATA_NCQ, 0).await? {
             return Ok(false);
         }
         let log = &self.table.bytes()[LOG_DATA..LOG_DATA + ATA_SECTOR_BYTES as usize];
@@ -486,24 +497,27 @@ impl AhciDisk {
     /// Linux `ata_eh_request_sense`: REQUEST SENSE DATA EXT, whose D2H FIS
     /// carries the sense key, ASC and ASCQ in LBA bits 23:0. Its own error is
     /// ignored, as ERR might be set; a timeout leaves no result.
-    pub(super) fn request_sense(
+    pub(super) async fn request_sense(
         &mut self,
         port: &impl CommandPort,
     ) -> Result<Option<Sense>, BlockError> {
         let buffer = self.bounce.bus_address();
-        if let Err(failure) = self.attempt(
-            port,
-            AtaRequest {
-                command: ATA_REQUEST_SENSE_DATA_EXT,
-                feature: 0,
-                lba: 0,
-                count: 0,
-                bytes: 0,
-                write: false,
-                buffer: Some(buffer),
-            },
-        ) {
-            stop_engine(port, self.clock)?;
+        if let Err(failure) = self
+            .attempt(
+                port,
+                AtaRequest {
+                    command: ATA_REQUEST_SENSE_DATA_EXT,
+                    feature: 0,
+                    lba: 0,
+                    count: 0,
+                    bytes: 0,
+                    write: false,
+                    buffer: Some(buffer),
+                },
+            )
+            .await
+        {
+            stop_engine(port, self.clock).await?;
             start_engine(port);
             if failure.frozen {
                 return Ok(None);

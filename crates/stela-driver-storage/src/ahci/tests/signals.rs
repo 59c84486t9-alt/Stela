@@ -61,10 +61,7 @@ fn a_signalled_port_enables_completion_and_error_bits_and_masks_phy_events_under
     };
     // Saving power: PhyRdy and COMINIT masked before the link is restricted.
     let link = Link::new(&[]);
-    fixture
-        .disk
-        .apply_lpm(&link, LPM_MED_POWER_WITH_DIPM)
-        .unwrap();
+    block_on(fixture.disk.apply_lpm(&link, LPM_MED_POWER_WITH_DIPM)).unwrap();
     let saving = all & !(INTERRUPT_PHY_READY_CHANGE | INTERRUPT_CONNECT_CHANGE);
     assert_eq!(link.writes_to(PORT_INTERRUPT_ENABLE), [saving]);
     let writes = link.writes.borrow().clone();
@@ -72,7 +69,7 @@ fn a_signalled_port_enables_completion_and_error_bits_and_masks_phy_events_under
     assert!(at(PORT_INTERRUPT_ENABLE) < at(PORT_SATA_CONTROL));
     // Maximum power: unmasked after the restrictions are lifted.
     let link = Link::new(&[]);
-    fixture.disk.apply_lpm(&link, LPM_MAX_POWER).unwrap();
+    block_on(fixture.disk.apply_lpm(&link, LPM_MAX_POWER)).unwrap();
     assert_eq!(link.writes_to(PORT_INTERRUPT_ENABLE), [all]);
     let writes = link.writes.borrow().clone();
     let last = |offset| writes.iter().rposition(|&(written, _)| written == offset);
@@ -81,7 +78,7 @@ fn a_signalled_port_enables_completion_and_error_bits_and_masks_phy_events_under
     let (mut polled, _clock) = recovering(identify_page("S1", 1024));
     assert!(!polled.disk.signals());
     let link = Link::new(&[]);
-    polled.disk.apply_lpm(&link, LPM_MAX_POWER).unwrap();
+    block_on(polled.disk.apply_lpm(&link, LPM_MAX_POWER)).unwrap();
     assert!(link.writes_to(PORT_INTERRUPT_ENABLE).is_empty());
 }
 

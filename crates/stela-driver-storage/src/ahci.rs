@@ -23,15 +23,20 @@ use crate::{
 };
 use alloc::{boxed::Box, format, rc::Rc, vec::Vec};
 use core::cell::Cell;
+use core::future::Future;
 use core::sync::atomic::{Ordering, fence};
+use stela_driver_base::stepped::{block_on, yield_now};
 
 mod commands;
 mod configuration;
 mod error_handling;
 mod minimum;
 mod quirks;
+mod stepped;
 pub use minimum::{AttachRefusal, Host};
 use minimum::{Control, DmaResource, PortRefusal};
+pub use stepped::AhciDisk;
+use stepped::Failed;
 
 pub const CLASS: [u8; 3] = [0x01, 0x06, 0x01];
 /// `ahci_pci_tbl`: AMD uses the RAID class only for AHCI controllers.
@@ -515,7 +520,11 @@ impl CommandPort for Mmio {
     }
 }
 
-pub struct AhciDisk {
+/// A port's ATA disk and its libata state; [`AhciDisk`] is its block
+/// device. Public only in name, for the fixtures' field access through
+/// [`AhciDisk`]: nothing outside this module can build or use one.
+#[doc(hidden)]
+pub struct Disk {
     port: Mmio,
     commands: DmaResource<DmaBuffer>,
     table: DmaResource<DmaBuffer>,
@@ -636,7 +645,7 @@ struct Launched {
     deadline: Deadline,
 }
 
-/// One look at the port's launched commands ([`AhciDisk::look`]): the
+/// One look at the port's launched commands ([`Disk::look`]): the
 /// slots that completed, and a failure with the slots it is charged to
 /// unless the NCQ error log names one.
 struct Seen {
@@ -645,7 +654,7 @@ struct Seen {
     blamed: u32,
 }
 
-/// One command through libata's error handling ([`AhciDisk::issue_with`]),
+/// One command through libata's error handling ([`Disk::issue_with`]),
 /// a step at a time.
 struct Issue {
     /// The slot whose command table and bounce buffer it uses.
@@ -1266,8 +1275,35 @@ fn start_engine(port: &impl CommandPort) {
     port.read32(PORT_COMMAND);
 }
 
+/// [`Clock::wait`] as an awaitable wait: a look at `ready` that finds it
+/// false ends the step, until the deadline or the device start budget,
+/// named by the caller's line, passes; the last look decides, as there.
+/// Run to its end ([`block_on`]) it polls as `Clock::wait` does.
+#[track_caller]
+fn wait_for(
+    clock: Clock,
+    microseconds: u64,
+    mut ready: impl FnMut() -> bool,
+) -> impl Future<Output = bool> {
+    let at = core::panic::Location::caller();
+    let deadline = clock
+        .try_deadline(microseconds)
+        .expect("Clock requires calibrated, representable timing");
+    async move {
+        loop {
+            if ready() {
+                return true;
+            }
+            if deadline.passed_from(at) {
+                return ready();
+            }
+            yield_now().await;
+        }
+    }
+}
+
 /// Linux `ahci_stop_engine`: clear ST and wait for the command list to stop.
-fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
+async fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
     let command = port.read32(PORT_COMMAND);
     if command & (COMMAND_START | COMMAND_LIST_RUNNING) == 0 {
         return Ok(());
@@ -1278,9 +1314,11 @@ fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> 
         ));
     }
     port.write32(PORT_COMMAND, command & !COMMAND_START);
-    if !clock.wait(STOP_ENGINE_TIMEOUT_US, || {
+    if !wait_for(clock, STOP_ENGINE_TIMEOUT_US, || {
         port.read32(PORT_COMMAND) & COMMAND_LIST_RUNNING == 0
-    }) {
+    })
+    .await
+    {
         return Err(BlockError::Timeout);
     }
     Ok(())
@@ -1288,20 +1326,20 @@ fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> 
 
 /// Linux `sata_link_debounce`: wait until SStatus.DET holds still for the
 /// stable duration, or a DET of 1 settles, before the limit.
-fn debounce(
+async fn debounce(
     port: &impl CommandPort,
     clock: Clock,
     minimum: &Control,
     timing: [u64; 3],
     limit_us: u64,
 ) -> Result<(), BlockError> {
-    match debounce_ports(&[port], clock, minimum, timing, limit_us)?[..] {
+    match debounce_ports(&[port], clock, minimum, timing, limit_us).await?[..] {
         [Debounced { settled: true, .. }] => Ok(()),
         _ => Err(BlockError::Timeout),
     }
 }
 
-/// A port's link reset ([`AhciDisk::link_ports`]): PxCMD before the port
+/// A port's link reset ([`Disk::link_ports`]): PxCMD before the port
 /// stopped, the SPD limit and the SControl that releases COMRESET.
 pub(super) struct Link {
     command: u32,
@@ -1319,7 +1357,7 @@ struct Debounced {
 
 /// [`debounce`] for several ports at once, each judged on its own while
 /// one wait serves all, as Linux debounces every port's link in parallel.
-fn debounce_ports<P: CommandPort>(
+async fn debounce_ports<P: CommandPort>(
     ports: &[&P],
     clock: Clock,
     minimum: &Control,
@@ -1348,7 +1386,7 @@ fn debounce_ports<P: CommandPort>(
     while ports.iter().any(|(.., done)| !done) {
         // Actual lower-bound waits establish stability; nominal elapsed time
         // controls only refusal/deadlines and cannot shorten this minimum.
-        minimum.wait_after(interval, || {})?;
+        minimum.hold_after(interval, || {}).await?;
         let now = elapsed()?;
         for (port, last, stable, done) in ports.iter_mut().filter(|port| !port.3) {
             let current = detection(port);
@@ -1467,7 +1505,7 @@ pub fn attach(
         }
         // Every link resets and debounces at once; a port whose link stays
         // down is empty.
-        let links = AhciDisk::link_ports(
+        let links = Disk::link_ports(
             &ports.iter().map(|(_, port)| port).collect::<Vec<_>>(),
             capabilities,
             clock,
@@ -1477,7 +1515,7 @@ pub fn attach(
             // A prior minimum failure forbids even starting the next port.
             control.ready()?;
             let started = match link {
-                Ok(Some(link)) => AhciDisk::configure_port(
+                Ok(Some(link)) => Disk::configure_port(
                     port,
                     link,
                     capabilities,
@@ -1528,7 +1566,7 @@ pub fn attach(
     } = *kept.into_inner();
     Ok(Attached {
         host,
-        disks,
+        disks: disks.into_iter().map(AhciDisk::new).collect(),
         failures,
         remapped_nvme,
     })
@@ -1580,7 +1618,7 @@ fn validate_clock(clock: Clock) -> Result<(), BlockError> {
 /// `ahci_stop_fis_rx`).
 fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
     validate_clock(clock)?;
-    stop_engine(port, clock)?;
+    block_on(stop_engine(port, clock))?;
     port.write32(
         PORT_COMMAND,
         port.read32(PORT_COMMAND) & !COMMAND_FIS_RECEIVE,
@@ -1593,7 +1631,7 @@ fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
     Ok(())
 }
 
-impl AhciDisk {
+impl Disk {
     /// Linux `sata_lpm_ignore_phy_events`: a PhyRdy change means nothing
     /// while LPM is on, nor in the first [`SPURIOUS_PHY_US`] after a policy
     /// change. This driver polls PxIS, which latches PRCS whatever PxIE
@@ -1659,7 +1697,7 @@ impl AhciDisk {
     }
 }
 
-impl Drop for AhciDisk {
+impl Drop for Disk {
     fn drop(&mut self) {
         if self.fault.is_some() {
             self.retain.set(true);
@@ -1667,11 +1705,9 @@ impl Drop for AhciDisk {
     }
 }
 
-impl BlockDevice for AhciDisk {
-    fn identity(&self) -> &Identity {
-        &self.identity
-    }
-
+/// What [`AhciDisk`]'s block device calls do once no error handling is
+/// under way: a call that waits runs any recovery to its end in place.
+impl Disk {
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.identity.check(lba, buffer.len())?;
         self.ready()?;
@@ -1720,7 +1756,7 @@ impl BlockDevice for AhciDisk {
         if power_off {
             let port = self.port;
             let buffer = self.bounce.bus_address();
-            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer)
+            block_on(self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer))
                 .map_err(|failure| failure.error)?;
         }
         Ok(())
@@ -1728,7 +1764,7 @@ impl BlockDevice for AhciDisk {
 
     /// A command per slot while NCQ is on, else one in slot 0, started
     /// under the caller's lock and completed by a later look
-    /// ([`Self::finish`]).
+    /// ([`AhciDisk::finish`]).
     fn depth(&self) -> usize {
         if self.ready().is_ok() {
             self.queue_depth()
@@ -1746,31 +1782,6 @@ impl BlockDevice for AhciDisk {
                 Some(_) => self.pool.free.len() >= CHUNK_PAGES,
                 None => false,
             }
-    }
-
-    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
-        let tag = self.begin(command)?;
-        let port = self.port;
-        self.run(&port);
-        Ok(tag)
-    }
-
-    fn finish(&mut self, tag: u32) -> Option<Finished> {
-        let index = self.running.iter().position(|running| running.tag == tag)?;
-        if self.running[index].result.is_none() {
-            let port = self.port;
-            self.run(&port);
-        }
-        let index = self.running.iter().position(|running| running.tag == tag)?;
-        let result = self.running[index].result.take()?;
-        let slot = self.running.remove(index).slot;
-        self.release(slot);
-        Some(result)
-    }
-
-    /// Whether the port's completions send the HBA's interrupt message.
-    fn signals(&self) -> bool {
-        self.signal.is_some()
     }
 
     /// A started command has a result, or a launched one's ending FIS has

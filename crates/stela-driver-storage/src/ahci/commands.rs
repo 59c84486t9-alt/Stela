@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl AhciDisk {
+impl Disk {
     /// The commands the port runs at once: a slot each while NCQ is on.
     pub(super) fn queue_depth(&self) -> usize {
         if self.ncq.enabled() {
@@ -196,25 +196,53 @@ impl AhciDisk {
 
     /// Move `issues`, each in its own slot, on without waiting: launch
     /// those that may run, take one look at the port, and recover it from a
-    /// failure, after which each failed command is retried as
+    /// failure in place, after which each failed command is retried as
     /// `ata_eh_finish` decides and completes by its fetched or generated
-    /// sense data, as sd does. Each issue's result once it has one.
-    ///
-    /// Linux `ata_std_qc_defer`: in turn, a queued command launches beside
-    /// queued ones, any other alone. A failure reaches every launched
-    /// command, as `ata_link_abort` does; one the NCQ Command Error log does
-    /// not blame runs again uncharged (`ata_eh_qc_retry` without an error).
+    /// sense data, as sd does ([`Self::settle`]). Each issue's result once
+    /// it has one.
     pub(super) fn advance(
         &mut self,
         port: &impl CommandPort,
         issues: &mut [&mut Issue],
     ) -> Vec<Option<Result<(), BlockError>>> {
+        let (mut results, failed) = self.launch_and_look(port, issues);
+        if let Some(Failed {
+            mut failure,
+            blamed,
+            io,
+        }) = failed
+        {
+            let recovered = block_on(self.recover(port, &mut failure, io));
+            let settled = self.settle(issues, blamed, &failure, recovered);
+            for (result, settled) in results.iter_mut().zip(settled) {
+                if settled.is_some() {
+                    *result = settled;
+                }
+            }
+        }
+        results
+    }
+
+    /// The part of [`Self::advance`] before error handling: launch the
+    /// issues that may run and take one look at the port. Each issue's
+    /// result once it has one, and the failure the look found, which the
+    /// launched commands wait on until the port is recovered.
+    ///
+    /// Linux `ata_std_qc_defer`: in turn, a queued command launches beside
+    /// queued ones, any other alone. A failure reaches every launched
+    /// command, as `ata_link_abort` does; one the NCQ Command Error log does
+    /// not blame runs again uncharged (`ata_eh_qc_retry` without an error).
+    pub(super) fn launch_and_look(
+        &mut self,
+        port: &impl CommandPort,
+        issues: &mut [&mut Issue],
+    ) -> (Vec<Option<Result<(), BlockError>>>, Option<Failed>) {
         let mut results: Vec<_> = issues.iter().map(|_| None).collect();
         if let Err(error) = self.minimum.ready() {
             for result in &mut results {
                 *result = Some(Err(error.clone()));
             }
-            return results;
+            return (results, None);
         }
         let mut launched = issues
             .iter()
@@ -269,11 +297,11 @@ impl AhciDisk {
                 .filter_map(|issue| issue.launched.as_ref())
                 .collect();
             if launched.is_empty() {
-                return results;
+                return (results, None);
             }
             match self.look(port, &launched) {
                 Some(seen) => seen,
-                None => return results,
+                None => return (results, None),
             }
         };
         for (index, issue) in issues.iter_mut().enumerate() {
@@ -290,13 +318,36 @@ impl AhciDisk {
                 results[index] = Some(Ok(()));
             }
         }
-        let Some(mut failure) = seen.failure else {
-            return results;
+        let Some(failure) = seen.failure else {
+            return (results, None);
         };
         let io = issues
             .iter()
             .any(|issue| issue.launched.is_some() && issue.io);
-        if let Err(error) = self.recover(port, &mut failure, io) {
+        let failed = Failed {
+            failure,
+            blamed: seen.blamed,
+            io,
+        };
+        (results, Some(failed))
+    }
+
+    /// What error handling's end, `recovered`, means for the launched
+    /// `issues` a failure reached: once the port is recovered each command
+    /// it charged, the one the NCQ Command Error log names in `failure` or
+    /// those in `blamed`, is disposed of ([`Self::dispose`]) and the others
+    /// run again uncharged; a disk it could not recover is disabled and
+    /// every launched command fails with its error. Each issue's result
+    /// once it has one.
+    pub(super) fn settle(
+        &mut self,
+        issues: &mut [&mut Issue],
+        blamed: u32,
+        failure: &Failure,
+        recovered: Result<(), BlockError>,
+    ) -> Vec<Option<Result<(), BlockError>>> {
+        let mut results: Vec<_> = issues.iter().map(|_| None).collect();
+        if let Err(error) = recovered {
             self.fault = Some(error.clone());
             for (index, issue) in issues.iter_mut().enumerate() {
                 if issue.launched.take().is_some() {
@@ -309,11 +360,11 @@ impl AhciDisk {
             let Some(launched) = issue.launched.take() else {
                 continue;
             };
-            let blamed = match failure.named {
+            let charged = match failure.named {
                 Some(slot) => slot == launched.slot,
-                None => seen.blamed >> launched.slot & 1 != 0,
+                None => blamed >> launched.slot & 1 != 0,
             };
-            if blamed {
+            if charged {
                 results[index] = self.dispose(issue, failure.clone());
             }
         }
@@ -336,7 +387,7 @@ impl AhciDisk {
         clippy::result_large_err,
         reason = "Return complete typed command failure and recovery context without allocation on the failure path."
     )]
-    pub(super) fn internal(
+    pub(super) async fn internal(
         &mut self,
         port: &impl CommandPort,
         command: u8,
@@ -346,22 +397,25 @@ impl AhciDisk {
         buffer: u64,
     ) -> Result<(), Failure> {
         self.ready().map_err(Failure::new)?;
-        let Err(failure) = self.attempt(
-            port,
-            AtaRequest {
-                command,
-                feature: u16::from(feature),
-                lba: 0,
-                count,
-                bytes,
-                write: false,
-                buffer: Some(buffer),
-            },
-        ) else {
+        let Err(failure) = self
+            .attempt(
+                port,
+                AtaRequest {
+                    command,
+                    feature: u16::from(feature),
+                    lba: 0,
+                    count,
+                    bytes,
+                    write: false,
+                    buffer: Some(buffer),
+                },
+            )
+            .await
+        else {
             return Ok(());
         };
         self.minimum.ready().map_err(Failure::new)?;
-        if stop_engine(port, self.clock).is_ok() {
+        if stop_engine(port, self.clock).await.is_ok() {
             start_engine(port);
         }
         Err(failure)
@@ -390,12 +444,13 @@ impl AhciDisk {
 
     /// Issue the internal command once in slot 0, the port running nothing
     /// else, and wait for its completion or error, at most its
-    /// [`Self::internal_timeout_us`].
+    /// [`Self::internal_timeout_us`]: each look that finds neither ends the
+    /// step.
     #[expect(
         clippy::result_large_err,
         reason = "Return complete typed command failure and recovery context without allocation on the failure path."
     )]
-    pub(super) fn attempt(
+    pub(super) async fn attempt(
         &mut self,
         port: &impl CommandPort,
         request: AtaRequest,
@@ -414,8 +469,7 @@ impl AhciDisk {
                 }
                 return Err(failure);
             }
-            crate::waiting();
-            core::hint::spin_loop();
+            yield_now().await;
         }
     }
 
@@ -691,10 +745,28 @@ impl AhciDisk {
         Ok(tag)
     }
 
-    /// Move the started block commands on as far as they go without
-    /// waiting.
+    /// Move the started block commands on as far as they go, recovering
+    /// the port in place from each failure, the caller waiting: error
+    /// handling run to its end, as for a caller that waits anyway.
+    /// [`AhciDisk`] runs it a step at a time instead.
     pub(super) fn run(&mut self, port: &impl CommandPort) {
+        while let Some(Failed {
+            mut failure,
+            blamed,
+            io,
+        }) = self.run_stepped(port)
+        {
+            let recovered = block_on(self.recover(port, &mut failure, io));
+            self.settle_running(blamed, &failure, recovered);
+        }
+    }
+
+    /// Move the started block commands on as far as they go without
+    /// waiting, up to a failure: the launched commands it reached wait for
+    /// error handling, whose end [`Self::settle_running`] takes.
+    pub(super) fn run_stepped(&mut self, port: &impl CommandPort) -> Option<Failed> {
         let mut running = core::mem::take(&mut self.running);
+        let mut failed = None;
         loop {
             for command in running
                 .iter_mut()
@@ -717,35 +789,72 @@ impl AhciDisk {
             if issues.is_empty() {
                 break;
             }
-            let results = self.advance(port, &mut issues);
-            let mut progressed = false;
-            for (command, result) in running
-                .iter_mut()
-                .filter(|command| command.issue.is_some())
-                .zip(results)
-            {
-                let Some(result) = result else {
-                    continue;
-                };
-                progressed = true;
-                let Some(issue) = command.issue.take() else {
-                    continue;
-                };
-                match result {
-                    Err(error) => command.result = Some(Err(error)),
-                    Ok(()) => {
-                        if let Command::Read { .. } = command.command {
-                            self.gather(command.slot, issue.bytes, &mut command.data);
-                        }
-                        command.done += issue.bytes.max(1);
-                    }
-                }
+            let (results, failure) = self.launch_and_look(port, &mut issues);
+            let progressed = self.take_results(&mut running, results);
+            if failure.is_some() {
+                failed = failure;
+                break;
             }
             if !progressed {
                 break;
             }
         }
         self.running = running;
+        failed
+    }
+
+    /// The end of the error handling a [`Self::run_stepped`] failure
+    /// started, for the started commands it reached ([`Self::settle`]).
+    pub(super) fn settle_running(
+        &mut self,
+        blamed: u32,
+        failure: &Failure,
+        recovered: Result<(), BlockError>,
+    ) {
+        let mut running = core::mem::take(&mut self.running);
+        let results = {
+            let mut issues: Vec<&mut Issue> = running
+                .iter_mut()
+                .filter_map(|command| command.issue.as_mut())
+                .collect();
+            self.settle(&mut issues, blamed, failure, recovered)
+        };
+        self.take_results(&mut running, results);
+        self.running = running;
+    }
+
+    /// Give the started commands with an issue their issues' `results`, in
+    /// order: a failed part fails its command, a completed one adds its
+    /// data. Whether any had one.
+    fn take_results(
+        &mut self,
+        running: &mut [Running],
+        results: Vec<Option<Result<(), BlockError>>>,
+    ) -> bool {
+        let mut progressed = false;
+        for (command, result) in running
+            .iter_mut()
+            .filter(|command| command.issue.is_some())
+            .zip(results)
+        {
+            let Some(result) = result else {
+                continue;
+            };
+            progressed = true;
+            let Some(issue) = command.issue.take() else {
+                continue;
+            };
+            match result {
+                Err(error) => command.result = Some(Err(error)),
+                Ok(()) => {
+                    if let Command::Read { .. } = command.command {
+                        self.gather(command.slot, issue.bytes, &mut command.data);
+                    }
+                    command.done += issue.bytes.max(1);
+                }
+            }
+        }
+        progressed
     }
 
     /// The next part of `running`'s command, its data staged in its slot's

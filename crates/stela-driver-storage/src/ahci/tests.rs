@@ -13,6 +13,8 @@ use identify_fixture::identify_page;
 struct MinimumModel {
     now: Cell<u64>,
     waits: RefCell<Vec<u64>>,
+    /// The intervals the stepped error handling began.
+    intervals: RefCell<Vec<u64>>,
     checks: Cell<usize>,
     fail_wait: Cell<Option<usize>>,
     fail_check: Cell<Option<usize>>,
@@ -53,6 +55,31 @@ unsafe impl crate::bus::pci::power::Timer for MinimumModel {
         }
         Ok(())
     }
+    /// On the fixtures' virtual clock, an interval the stepped error
+    /// handling looks at without waiting in it; the blocking waits above
+    /// stay the model of every other caller.
+    fn begin_interval(
+        &self,
+        us: u64,
+    ) -> Result<Option<Box<dyn crate::bus::pci::power::Interval>>, crate::bus::pci::power::Error>
+    {
+        self.intervals.borrow_mut().push(us);
+        let deadline = Clock {
+            ticks_per_microsecond: 1,
+        }
+        .try_deadline(us)
+        .map_err(|_| crate::bus::pci::power::Error::Clock)?;
+        Ok(Some(Box::new(ModelInterval(deadline))))
+    }
+}
+
+/// [`MinimumModel::begin_interval`]'s interval.
+struct ModelInterval(Deadline);
+
+impl crate::bus::pci::power::Interval for ModelInterval {
+    fn elapsed(&self) -> Result<bool, crate::bus::pci::power::Error> {
+        Ok(self.0.passed())
+    }
 }
 
 /// How the disk answers the next issued command.
@@ -87,6 +114,8 @@ struct Link {
     /// The disk's fastest SPD.
     fastest: Cell<u32>,
     reads: Cell<usize>,
+    /// The disk stays busy after every COMRESET: it never comes ready.
+    stuck: Cell<bool>,
 }
 
 const READY: u32 = 0x50;
@@ -110,6 +139,7 @@ impl Link {
             present: Cell::new(true),
             fastest: Cell::new(2),
             reads: Cell::new(0),
+            stuck: Cell::new(false),
         }
     }
 
@@ -173,7 +203,7 @@ impl CommandPort for Link {
                             limit.min(fastest)
                         };
                         registers[PORT_SATA_STATUS / 4] = 0x103 | speed << SPEED_SHIFT;
-                        registers[PORT_TASK_FILE / 4] = READY;
+                        registers[PORT_TASK_FILE / 4] = if self.stuck.get() { 0x80 } else { READY };
                     }
                     0 => {}
                     // Phy offline.
@@ -228,6 +258,17 @@ impl CommandPort for Link {
     }
 }
 
+/// One link shared by a disk whose error handling runs a step at a time
+/// ([`AhciDisk::look_on`]), which keeps its port for the task.
+impl CommandPort for Rc<Link> {
+    fn read32(&self, offset: usize) -> u32 {
+        (**self).read32(offset)
+    }
+    fn write32(&self, offset: usize, value: u32) {
+        (**self).write32(offset, value);
+    }
+}
+
 /// A disk identified from `identify_page`, answering revalidation with
 /// `page`, on a virtual one-tick-per-microsecond clock.
 fn recovering(page: [u8; 512]) -> (Fixture, crate::test_clock::Guard) {
@@ -236,8 +277,18 @@ fn recovering(page: [u8; 512]) -> (Fixture, crate::test_clock::Guard) {
 
 /// [`recovering`] with `slots` more command slots.
 fn recovering_with(page: [u8; 512], slots: usize) -> (Fixture, crate::test_clock::Guard) {
+    let minimum = Control::model(Rc::new(MinimumModel::default()));
+    recovering_on(page, slots, minimum)
+}
+
+/// [`recovering_with`] on the controller timing `minimum`.
+fn recovering_on(
+    page: [u8; 512],
+    slots: usize,
+    minimum: Rc<Control>,
+) -> (Fixture, crate::test_clock::Guard) {
     let clock = crate::test_clock::virtualize();
-    let mut fixture = Fixture::with_slots(slots);
+    let mut fixture = Fixture::with_control(slots, minimum);
     let found = identify(&identify_page("S1", 1024)).unwrap();
     fixture.disk.identity.model = found.model;
     fixture.disk.identity.serial = found.serial;
@@ -278,7 +329,7 @@ impl Fixture {
             )
         };
         let retain = Rc::new(Cell::new(false));
-        let mut disk = AhciDisk {
+        let mut disk = Disk {
             port,
             commands: DmaResource::new(
                 dma.allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)
@@ -354,7 +405,7 @@ impl Fixture {
         }
         disk.pool.free = (0..disk.pool.pages.len() as u16).rev().collect();
         Self {
-            disk,
+            disk: AhciDisk::new(disk),
             _registers: registers,
             _memory: memory,
         }
@@ -398,3 +449,4 @@ mod recovery;
 mod sense_completion;
 mod sense_tables;
 mod signals;
+mod stepped;

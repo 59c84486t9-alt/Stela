@@ -160,18 +160,17 @@ fn applying_a_policy_starts_the_spurious_window() {
         ..Lpm::new(CAP_AGGRESSIVE_LPM | CAP_SLUMBER | CAP_PARTIAL, 0, 0)
     };
     assert!(fixture.disk.lpm.changed.is_none());
-    fixture
-        .disk
-        .apply_lpm(&Link::new(&[]), LPM_MAX_POWER)
-        .unwrap();
+    block_on(fixture.disk.apply_lpm(&Link::new(&[]), LPM_MAX_POWER)).unwrap();
     assert!(fixture.disk.lpm.changed.is_some());
     assert!(fixture.disk.ignore_phy_events());
     crate::test_clock::advance(fixture.disk.clock, SPURIOUS_PHY_US);
     assert!(!fixture.disk.ignore_phy_events());
-    fixture
-        .disk
-        .apply_lpm(&Link::new(&[]), LPM_MED_POWER_WITH_DIPM)
-        .unwrap();
+    block_on(
+        fixture
+            .disk
+            .apply_lpm(&Link::new(&[]), LPM_MED_POWER_WITH_DIPM),
+    )
+    .unwrap();
     crate::test_clock::advance(fixture.disk.clock, SPURIOUS_PHY_US);
     assert!(fixture.disk.ignore_phy_events());
 }

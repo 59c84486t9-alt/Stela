@@ -46,7 +46,7 @@ fn initial_constructor_waits_for_resume_before_setup_and_keeps_failed_port() {
         };
         let owner = Rc::downgrade(&control);
         {
-            let result = AhciDisk::start(
+            let result = Disk::start(
                 port,
                 CAP_64BIT,
                 0,
@@ -94,7 +94,10 @@ fn comreset_and_resume_use_the_same_real_model_minima() {
         ticks_per_microsecond: 1,
     };
     let link = Link::new(&[]);
-    assert_eq!(fixture.disk.hardreset(&link, 10_000_000, false), Ok(true));
+    assert_eq!(
+        block_on(fixture.disk.hardreset(&link, 10_000_000, false)),
+        Ok(true)
+    );
     let waits = timer.waits.borrow();
     assert_eq!(waits[0], COMRESET_HOLD_US);
     assert_eq!(waits[1], RESUME_SETTLE_US);
@@ -115,7 +118,7 @@ fn failed_hold_or_resume_never_deasserts_early_restarts_or_retries() {
         };
         let link = Link::new(&[]);
         assert_eq!(
-            fixture.disk.hardreset(&link, 10_000_000, false),
+            block_on(fixture.disk.hardreset(&link, 10_000_000, false)),
             Err(timing())
         );
         let controls = link.writes_to(PORT_SATA_CONTROL);
@@ -132,18 +135,28 @@ fn failed_hold_or_resume_never_deasserts_early_restarts_or_retries() {
         );
         let before = (link.reads.get(), link.writes.borrow().len());
         assert_eq!(
-            fixture
-                .disk
-                .reconfigure(&link, true, false, BlockError::Timeout, DEVICE_TRIES),
+            block_on(fixture.disk.reconfigure(
+                &link,
+                true,
+                false,
+                BlockError::Timeout,
+                DEVICE_TRIES
+            )),
             Err(timing())
         );
-        assert_eq!(fixture.disk.apply_lpm(&link, LPM_MAX_POWER), Err(timing()));
+        assert_eq!(
+            block_on(fixture.disk.apply_lpm(&link, LPM_MAX_POWER)),
+            Err(timing())
+        );
         assert_eq!((link.reads.get(), link.writes.borrow().len()), before);
         assert!(!fixture.disk.room());
         assert_eq!(fixture.disk.depth(), 0);
         // Same controller timing failure also refuses another port's hardware.
         let mut peer = Fixture::with_control(0, control);
-        assert_eq!(peer.disk.hardreset(&link, 10_000_000, false), Err(timing()));
+        assert_eq!(
+            block_on(peer.disk.hardreset(&link, 10_000_000, false)),
+            Err(timing())
+        );
         assert_eq!((link.reads.get(), link.writes.borrow().len()), before);
     }
 }
@@ -154,7 +167,7 @@ fn failed_precheck_prevents_the_minimum_transition_and_lpm_followup() {
     let mut fixture = Fixture::with_control(0, Control::model(timer.clone()));
     let link = Link::new(&[]);
     assert_eq!(
-        fixture.disk.hardreset(&link, 10_000_000, false),
+        block_on(fixture.disk.hardreset(&link, 10_000_000, false)),
         Err(timing())
     );
     assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
@@ -164,7 +177,10 @@ fn failed_precheck_prevents_the_minimum_transition_and_lpm_followup() {
     let mut fixture = Fixture::with_control(0, Control::model(timer));
     fixture.disk.lpm.capabilities = CAP_AGGRESSIVE_LPM;
     let link = Link::new(&[]);
-    assert_eq!(fixture.disk.apply_lpm(&link, LPM_MAX_POWER), Err(timing()));
+    assert_eq!(
+        block_on(fixture.disk.apply_lpm(&link, LPM_MAX_POWER)),
+        Err(timing())
+    );
     assert!(!link.writes_to(PORT_COMMAND).is_empty());
     assert!(link.writes_to(PORT_DEVICE_SLEEP).is_empty());
     assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
@@ -269,7 +285,7 @@ fn whole_controller_refusal_keeps_prior_disks_and_partial_port() {
                     retained_ports: vec![partial],
                 },
                 hba: Some(port),
-                disks: vec![disk],
+                disks: vec![disk.into_disk()],
                 failures: vec![(2, BlockError::Timeout)],
                 remapped_nvme: 0,
             })),

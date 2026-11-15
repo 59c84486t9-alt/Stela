@@ -256,10 +256,11 @@ fn an_expired_command_is_named_with_the_registers_it_ended_with() {
     let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
     let link = Link::new(&[Fault::Timeout]);
     let buffer = fixture.disk.bounce.bus_address();
-    let Err(failure) = fixture
-        .disk
-        .internal(&link, ATA_IDENTIFY, 0, 0, 512, buffer)
-    else {
+    let Err(failure) = block_on(
+        fixture
+            .disk
+            .internal(&link, ATA_IDENTIFY, 0, 0, 512, buffer),
+    ) else {
         panic!("a dropped IDENTIFY fails");
     };
     assert_ne!(failure.mask & ERR_TIMEOUT, 0);
@@ -333,7 +334,7 @@ fn internal_commands_take_linux_timeouts_and_wait_longer_after_one_expired() {
     disk.command_timeout_us = COMMAND_TIMEOUT_US;
     let link = Link::new(&[]);
     let mut failure = Failure::new(BlockError::Timeout);
-    disk.recover(&link, &mut failure, false).unwrap();
+    block_on(disk.recover(&link, &mut failure, false)).unwrap();
     assert_eq!(disk.internal_timeout_us(ATA_IDENTIFY), 5_000_000);
     assert_eq!(disk.internal_timeout_us(ATA_SET_FEATURES), 5_000_000);
 }
@@ -346,7 +347,7 @@ fn a_first_identify_the_disk_drops_is_retried_after_a_hard_reset() {
     let clock = fixture.disk.clock;
     let start = clock.try_start().unwrap();
     let link = Link::new(&[Fault::Timeout]);
-    let found = fixture.disk.first_identify(&link).unwrap();
+    let found = block_on(fixture.disk.first_identify(&link)).unwrap();
     assert_eq!(found.serial, "S1");
     assert_eq!(link.issued.get(), 2);
     // The dropped IDENTIFY cost its first timeout, 5 s, then a hard reset.
@@ -368,7 +369,7 @@ fn a_first_identify_that_never_completes_fails_after_three_tries_naming_its_wait
     let clock = fixture.disk.clock;
     let start = clock.try_start().unwrap();
     let link = Link::new(&[Fault::Timeout; 3]);
-    let Err(error) = fixture.disk.first_identify(&link) else {
+    let Err(error) = block_on(fixture.disk.first_identify(&link)) else {
         panic!("a disk that never answers is refused");
     };
     assert_eq!(link.issued.get(), 3);
@@ -400,7 +401,7 @@ fn a_first_identify_the_disk_refuses_is_not_retried() {
     let (mut fixture, _clock) = starting();
     let link = Link::new(&[Fault::TaskFile(0x0451)]);
     assert!(matches!(
-        fixture.disk.first_identify(&link),
+        block_on(fixture.disk.first_identify(&link)),
         Err(BlockError::Device { .. })
     ));
     assert_eq!(link.issued.get(), 1);

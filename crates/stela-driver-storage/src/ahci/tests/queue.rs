@@ -173,16 +173,16 @@ fn ncq_limits_and_error_logs_follow_identify_capabilities() {
     // ata_dev_config_ncq enables auto-activation; a refusal is ignored,
     // any other failure marks it broken.
     let link = Link::new(&[]);
-    fixture.disk.configure(&link, &found).unwrap();
+    block_on(fixture.disk.configure(&link, &found)).unwrap();
     assert_eq!(fixture.disk.table.bytes()[2..4], [ATA_SET_FEATURES, 0x10]);
     assert_eq!(fixture.disk.table.bytes()[12], 0x02);
     let link = Link::new(&[Fault::TaskFile(0x0451)]);
-    fixture.disk.configure(&link, &found).unwrap();
+    block_on(fixture.disk.configure(&link, &found)).unwrap();
     let link = Link::new(&[Fault::Interface]);
-    assert!(fixture.disk.configure(&link, &found).is_err());
+    assert!(block_on(fixture.disk.configure(&link, &found)).is_err());
     assert!(fixture.disk.ncq.aa_broken);
     let link = Link::new(&[]);
-    fixture.disk.configure(&link, &found).unwrap();
+    block_on(fixture.disk.configure(&link, &found)).unwrap();
     assert_eq!(link.issued.get(), 0);
     assert!(fixture.disk.ncq.enabled());
 
