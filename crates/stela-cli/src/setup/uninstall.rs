@@ -86,14 +86,10 @@ pub(super) fn uninstall(
     for install in record.iter().flat_map(|r| r.installs.iter()) {
         writeln!(
             text,
-            "  keep     install \"{}\": macOS, its NVRAM and SEP state stay on {}{}; delete them \
+            "  keep     install \"{}\": macOS, its NVRAM and SEP state stay on {}; delete them \
              with a disk utility when no longer wanted",
             install.name,
             install.disk.partitions(),
-            install
-                .ecid
-                .map(|ecid| format!(" (ECID {ecid}, which a new setup reuses with --ecid)"))
-                .unwrap_or_default()
         )?;
     }
     if dry_run {
