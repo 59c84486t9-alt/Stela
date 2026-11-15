@@ -30,7 +30,9 @@
 //! A block that does not decode is counted (`malformed`) and discarded;
 //! datagrams outside the Ethernet frame sizes are counted as ECM counts
 //! them.
-use super::{CONTROL_INTERFACE, Counters, HEADER_BYTES, MAX_SEGMENT, State, Statistics};
+use super::{
+    CONTROL_INTERFACE, Counters, HEADER_BYTES, MAX_SEGMENT, NCM_QUEUE_FRAMES, State, Statistics,
+};
 use crate::usb::{
     Reply,
     control::{CLASS, Outcome, RECIPIENT_INTERFACE, Setup, Stall},
@@ -80,6 +82,11 @@ const NTB16_FORMAT: u16 = 0;
 const CRC_NOT_APPENDED: u16 = 0;
 /// Returned frame storage kept for the next OUT datagrams.
 const SPARE_FRAMES: usize = 64;
+/// Frames one OUT transfer queues for the host at most. The queue takes a
+/// transfer only below [`NCM_QUEUE_FRAMES`], so it holds at most twice that.
+/// A transfer naming more, as one naming a datagram over and over can, has
+/// the rest dropped and counted, as Linux drops past its receive backlog.
+const TRANSFER_FRAMES: usize = NCM_QUEUE_FRAMES;
 
 /// The GetNtbParameters structure (6.2.1, table 6-3).
 pub(super) fn parameters() -> [u8; PARAMETER_BYTES] {
@@ -325,6 +332,7 @@ impl Ncm {
         counters: &mut Counters,
     ) {
         let mut rest = received;
+        let mut queued = 0;
         loop {
             let Ok(datagrams) = ntb::decode(rest) else {
                 counters.malformed += 1;
@@ -337,6 +345,12 @@ impl Ncm {
                     statistics.transmit_errors += 1;
                     continue;
                 }
+                if queued == TRANSFER_FRAMES {
+                    counters.overflowed += 1;
+                    statistics.transmit_errors += 1;
+                    continue;
+                }
+                queued += 1;
                 let mut frame = self
                     .spare
                     .pop()
@@ -832,6 +846,44 @@ mod tests {
         assert_eq!(e.take(), Some(frame(MAC, 512 - 30, 3)));
         assert_eq!(e.take(), Some(frame(MAC, 100, 4)));
         assert_eq!(e.counters().malformed, 0);
+    }
+
+    /// One block naming a datagram a thousand times queues no more than a
+    /// transfer may; the rest are counted, and the queue stays bounded.
+    #[test]
+    fn an_out_block_repeating_one_datagram_queues_a_bounded_number_of_frames() {
+        let mut e = adapter(true);
+        let datagram = frame(MAC, 60, 5);
+        let pointers = 1000;
+        let table = NTH16_BYTES;
+        let start = payload_aligned(table + NDP16_HEADER + POINTER * (pointers + 1));
+        let mut block = vec![0u8; start];
+        block.extend_from_slice(&datagram);
+        let total = block.len();
+        block[..4].copy_from_slice(NTH16);
+        put16(&mut block, 4, NTH16_BYTES);
+        put16(&mut block, 8, total);
+        put16(&mut block, 10, table);
+        block[table..table + 4].copy_from_slice(NDP16);
+        put16(
+            &mut block,
+            table + 4,
+            NDP16_HEADER + POINTER * (pointers + 1),
+        );
+        for n in 0..pointers {
+            let at = table + NDP16_HEADER + POINTER * n;
+            put16(&mut block, at, start);
+            put16(&mut block, at + 2, datagram.len());
+        }
+        write(&mut e, &block);
+        let mut taken = 0;
+        while let Some(frame) = e.take() {
+            assert_eq!(frame, datagram);
+            taken += 1;
+        }
+        assert_eq!(taken, TRANSFER_FRAMES);
+        assert_eq!(e.counters().to_host, TRANSFER_FRAMES as u64);
+        assert_eq!(e.counters().overflowed, (pointers - TRANSFER_FRAMES) as u64);
     }
 
     struct One(Ecm);
