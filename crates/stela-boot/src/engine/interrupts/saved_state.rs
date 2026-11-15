@@ -79,8 +79,9 @@ pub(super) extern "sysv64" fn dispatch(frame: *mut Frame, image: *const u8) {
 }
 
 pub(super) fn terminal(frame: *mut Frame, image: *const u8) -> ! {
-    // From here on no retirement waits for this processor or sends it an
-    // NMI, which would land on a handler that cannot take one.
+    // Before anything reaches memory through a window translation: an idle
+    // processor skipped flushes, and the stop draws its screen. From here
+    // on no retirement sends this processor an NMI.
     crate::native_mmio::shootdown::enter_terminal();
     let (tables, _, active) = host::local::interrupt_owner();
     let captured = tables

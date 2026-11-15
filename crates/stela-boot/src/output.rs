@@ -1155,6 +1155,7 @@ fn halt(code: u32) -> ! {
 /// Stela's console, followed by `next`, or on the firmware's before it
 /// exists.
 fn stopped(message: &str, next: &dyn Fn() -> &'static str) {
+    crate::native_mmio::shootdown::before_stop_screen();
     console::reclaim();
     if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
         crate::status::fail(message);
