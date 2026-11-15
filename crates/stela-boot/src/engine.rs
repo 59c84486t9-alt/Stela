@@ -1131,10 +1131,18 @@ fn panic_region_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
 }
 
 /// How the guest went down: the first panic, else `otherwise`.
+/// A check-in stall on a disk too slow for it names that disk first
+/// (`storage::slow_disk_note`).
 fn guest_down(otherwise: String) -> String {
-    match guest_panic() {
-        Some(message) => format!("macOS crashed: {message}"),
-        None => otherwise,
+    let Some(message) = guest_panic() else {
+        return otherwise;
+    };
+    match storage::slow_disk_note(&message) {
+        Some(note) => {
+            output::arguments(format_args!("STOP SLOW DISK {note}\n"));
+            format!("macOS could not start in time: {note}. macOS crashed: {message}")
+        }
+        None => format!("macOS crashed: {message}"),
     }
 }
 

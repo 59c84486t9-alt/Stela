@@ -18,7 +18,9 @@
 //! [`SLOWEST_SEQUENTIAL_KIB_S`] for its bytes.
 //!
 //! The disk picker measures each disk it offers ([`measure`]), read only and
-//! bounded, and cautions on one below that ([`caution`]).
+//! bounded, and cautions on one below that ([`caution`]); a boot that ends in
+//! that panic names the macOS disk and its time per read when it is below
+//! that ([`stop_note`]).
 use alloc::{format, string::String, vec::Vec};
 use stela_drivers::block::Rotation;
 
@@ -154,6 +156,32 @@ pub fn caution(rotation: Rotation, speed: Option<Speed>) -> Option<String> {
         )),
         (None, Rotation::None | Rotation::Unreported) => None,
     }
+}
+
+/// The least commands a disk's busy time is judged on.
+pub const LEAST_COMMANDS: u64 = 1000;
+
+/// A disk's time per command while it worked: its busy time over the
+/// commands it completed, whatever its queue depth. `None` with too few
+/// commands to judge.
+pub fn service_us(commands: u64, busy_us: u64) -> Option<u64> {
+    (commands >= LEAST_COMMANDS).then(|| busy_us / commands)
+}
+
+/// What the stop adds to a guest panic `panic` when it is the kernelmanagerd
+/// check-in stall and the macOS disk, `model`, took more than
+/// [`SLOWEST_READ_US`] a command ([`service_us`]); `None` otherwise.
+pub fn stop_note(panic: &str, model: &str, service_us: Option<u64>) -> Option<String> {
+    if !panic.contains("kernelmanagerd has not checked in") {
+        return None;
+    }
+    let micros = service_us.filter(|&micros| micros > SLOWEST_READ_US)?;
+    Some(format!(
+        "the macOS disk {model} took {} a read, too slow for macOS to start in time (it needs \
+         under {}): install macOS on a faster disk, such as an SSD",
+        millis(micros),
+        millis(SLOWEST_READ_US)
+    ))
 }
 
 #[cfg(test)]

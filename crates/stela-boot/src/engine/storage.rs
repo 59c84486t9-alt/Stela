@@ -1480,6 +1480,23 @@ impl Drop for Stepping {
     }
 }
 
+/// The macOS disk's model, the first of [`HostDisks`], written once as the
+/// disks open, before the PEs run.
+static MACOS_DISK_MODEL: output::Global<String> =
+    output::Global(core::cell::RefCell::new(String::new()));
+/// Its time per command while it worked (`disk_speed::service_us`) at the
+/// last [`HostDisks::report`]; `u64::MAX` before one could judge it.
+static MACOS_DISK_SERVICE_US: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// What a stop on guest panic `panic` says of the macOS disk: its model and
+/// time per read when the panic is the kernelmanagerd check-in stall and
+/// the disk was too slow for it (`disk_speed::stop_note`).
+pub(super) fn slow_disk_note(panic: &str) -> Option<String> {
+    let model = MACOS_DISK_MODEL.0.try_borrow().ok()?;
+    let micros = MACOS_DISK_SERVICE_US.load(Ordering::Relaxed);
+    stela_boot_core::disk_speed::stop_note(panic, &model, (micros != u64::MAX).then_some(micros))
+}
+
 /// The host disks [`open`] took, each once with its serial, to report
 /// their I/O and to shut down before the PC restarts or turns off.
 pub struct HostDisks {
@@ -1514,8 +1531,16 @@ impl HostDisks {
     /// the most commands it ran at once.
     pub fn report(&self, tsc_hz: u64) {
         let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
-        for (serial, disk) in &self.disks {
+        for (index, (serial, disk)) in self.disks.iter().enumerate() {
             let stats = disk.stats();
+            if index == 0 {
+                let commands = stats.directions.iter().map(|counts| counts.ios).sum();
+                let busy = u64::try_from(micros(stats.busy)).unwrap_or(u64::MAX);
+                MACOS_DISK_SERVICE_US.store(
+                    stela_boot_core::disk_speed::service_us(commands, busy).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
             let mut line = format!("HOST DISK IO serial={serial}");
             for direction in Direction::ALL {
                 let counts = stats.directions[direction as usize];
@@ -2174,6 +2199,13 @@ pub unsafe fn open(
     };
     for partition in &opened {
         host_disks.add(partition.device().shared());
+    }
+    // The targets come first: the first disk holds macOS.
+    if let (Some((_, disk)), Ok(mut model)) = (
+        host_disks.disks.first(),
+        MACOS_DISK_MODEL.0.try_borrow_mut(),
+    ) {
+        model.clone_from(&disk.whole().identity().model);
     }
     let (mut store_partition, mut log_partition) = (None, None);
     for (_, which) in optional.iter().rev() {

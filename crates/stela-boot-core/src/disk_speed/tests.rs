@@ -103,3 +103,25 @@ fn unmeasured_a_spinning_disk_keeps_its_caution() {
     assert_eq!(caution(Rotation::None, None), None);
     assert_eq!(caution(Rotation::Unreported, None), None);
 }
+
+#[test]
+fn the_check_in_stall_on_a_slow_disk_names_it() {
+    const PANIC: &str = "IOKit Daemon (kernelmanagerd) stall[0], (60s): registry root held \
+                         busy, kernelmanagerd has not checked in @IOService.cpp:6140";
+    // #132's disk at the panic: busy 126145 ms over 21549 commands.
+    let micros = service_us(21_549, 126_145_000);
+    assert_eq!(micros, Some(5853));
+    assert_eq!(
+        stop_note(PANIC, "ST980811AS", micros).as_deref(),
+        Some(
+            "the macOS disk ST980811AS took 5.8 ms a read, too slow for macOS to start in time \
+             (it needs under 2.0 ms): install macOS on a faster disk, such as an SSD"
+        )
+    );
+    // #138's SSD: busy 47% at 790 reads a second.
+    assert_eq!(stop_note(PANIC, "SSD", service_us(7920, 4_700_000)), None);
+    // Another panic, or too few commands to judge, says nothing more.
+    assert_eq!(stop_note("watchdog timeout", "ST980811AS", micros), None);
+    assert_eq!(service_us(999, 100_000_000), None);
+    assert_eq!(stop_note(PANIC, "ST980811AS", None), None);
+}
