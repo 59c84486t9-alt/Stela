@@ -4368,7 +4368,7 @@ mod pc_sampler;
 /// another device's writes. A measurement, not a check:
 /// `cargo test --release -p stela-soc nor_access_cost -- --ignored --nocapture`.
 #[test]
-#[ignore = "benchmark"]
+#[ignore = "manual: opt-in"]
 fn nor_access_cost() {
     use stela_engine::machine::engine::{Devices as _, Hub, Kick, ScalarRead, SharedDevices};
     struct Idle;

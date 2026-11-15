@@ -4939,5 +4939,13 @@
     "kind": "manual",
     "inputs": [],
     "reason": "host timing of block transfers on this host; run on request"
+  },
+  {
+    "package": "stela-soc",
+    "test": "nor_access_cost",
+    "source": "crates/stela-soc/src/machine/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing of SPI NOR register accesses through the board and through the device's own lock; run on request"
   }
 ]
