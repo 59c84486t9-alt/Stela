@@ -972,6 +972,9 @@ fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, Ser
 
 /// A function claimed from probe, before Linux sees it.
 pub(super) struct Claimed {
+    /// Whether this GPU may be the one showing the firmware's screen.
+    #[cfg_attr(not(feature = "nvk"), allow(dead_code))]
+    shows_screen: bool,
     device: Device,
     firmware: PciFirmware,
     placement: Placement,
@@ -1024,8 +1027,22 @@ fn claim(
             })?;
             true
         }
-        // Any GPU may show the screen, so none starts beside its writer.
-        ScreenOwner::Unknown => true,
+        // A GPU below a bridge that forwards none of the screen cannot hold
+        // it; any other may show it, so none starts beside its writer.
+        ScreenOwner::Unknown(apart) => {
+            let may = stela_boot_core::firmware_screen::gpu_may_show(
+                &apart,
+                address.segment,
+                address.bus,
+            );
+            if !may {
+                output::arguments(format_args!(
+                    "GPU {address}: the firmware's screen lies outside the bridge windows \
+                     above it, so it stays with the adapter showing it\n"
+                ));
+            }
+            may
+        }
         ScreenOwner::Function(_) | ScreenOwner::NoScreen => false,
     };
     // BAR sizing below temporarily turns off memory decode.
@@ -1234,6 +1251,7 @@ fn claim(
         .transpose()
         .map_err(ServiceError::Config)?;
     Ok(Claimed {
+        shows_screen: owns_screen,
         device: Device {
             config: SharedConfig(Rc::new(RefCell::new(ManuallyDrop::into_inner(function)))),
             msi,
@@ -1527,6 +1545,9 @@ pub(super) fn claim_all(
 #[cfg(feature = "nvk")]
 struct Bound {
     name: String,
+    /// Whether it may be the GPU that showed the firmware's screen, when the
+    /// screen's function is unknown.
+    shows_screen: bool,
     drm: client::DrmDevice,
     link: Option<PcieLink>,
 }
@@ -1610,6 +1631,7 @@ fn start(kernel: &LinuxKernel, claimed: Vec<Claimed>) -> Started {
                     #[cfg(feature = "nvk")]
                     job.bound.push(Bound {
                         name: claimed.name,
+                        shows_screen: claimed.shows_screen,
                         drm: claimed.drm,
                         link: claimed.link,
                     });

@@ -402,7 +402,8 @@ pub(in crate::engine) fn take(wanted: (usize, usize), firmware: Shown<'_>) {
         let began = host::rdtsc();
         let awaited = match firmware {
             Shown::By(function) => function == name.as_str(),
-            Shown::Unknown => bound.len() == 1,
+            // Not one below a bridge that forwards none of the screen.
+            Shown::Unknown => bound.len() == 1 && bound_gpu.shows_screen,
             Shown::Nothing => false,
         };
         let patience = match awaited {

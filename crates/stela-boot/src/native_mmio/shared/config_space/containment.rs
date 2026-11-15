@@ -110,6 +110,92 @@ impl<'a> ContainedPci<'a> {
             .map_err(|_| Error::Busy)
     }
 
+    /// The buses of segment 0 whose functions cannot decode the firmware's
+    /// `screen`, when no function's BAR was matched to it: those with a
+    /// bridge on their route whose windows forward none of it
+    /// ([`stela_boot_core::firmware_screen`]). Those windows are held by the
+    /// bridges' routing seals. A refused or misconfigured bridge says
+    /// nothing, so a bus below only such bridges stays a possible owner.
+    ///
+    /// # Safety
+    /// The caller keeps the original configuration writers excluded, and no
+    /// bridge's forwarding has been restored yet (its configuration owner
+    /// would keep the page this reads through).
+    pub(crate) unsafe fn screen_apart(
+        &self,
+        screen: core::ops::Range<u64>,
+    ) -> Result<stela_boot_core::firmware_screen::BusesApart, Error> {
+        use stela_boot_core::firmware_screen::{BridgeWindows, BridgeWords, BusesApart};
+        let cohort = self
+            .source
+            .pci_slots
+            .0
+            .try_borrow()
+            .map_err(|_| Error::Busy)?;
+        let Cohort::Parked(fabric) = &*cohort else {
+            return Err(Error::Unavailable);
+        };
+        // SAFETY: the original source and its configuration exclusion are
+        // kept; these are reads of sealed Type 1 headers.
+        let bridges = unsafe {
+            self.source.with_config_inventory(|_, reader| {
+                let mut bridges = Vec::new();
+                for slot in &fabric.slots {
+                    let Some(buses) = slot.header.bridge else {
+                        continue;
+                    };
+                    if slot.refusal.is_some()
+                        || slot.misconfigured.is_some()
+                        || slot.header.layout >> 16 & 0x7f != 1
+                    {
+                        continue;
+                    }
+                    let address = slot.address;
+                    let words = BridgeWords {
+                        class_revision: slot.header.class_revision,
+                        buses,
+                        memory: reader.read32(address, 0x20)?,
+                        prefetchable: reader.read32(address, 0x24)?,
+                        prefetchable_upper: (
+                            reader.read32(address, 0x28)?,
+                            reader.read32(address, 0x2c)?,
+                        ),
+                        control: reader.read32(address, 0x3c)?,
+                    };
+                    if let Some(windows) = BridgeWindows::from_words(words) {
+                        bridges.try_reserve(1).map_err(|_| Error::Exhausted)?;
+                        bridges.push((address, windows));
+                    }
+                }
+                Ok::<_, Error>(bridges)
+            })
+        }?;
+        let mut apart = BusesApart::on(0);
+        let mut upstream = Vec::new();
+        for slot in &fabric.slots {
+            upstream.clear();
+            let mut route = slot.route;
+            while let topology::Parent::Bridge(bridge) = route {
+                if let Ok(index) = bridges.binary_search_by_key(&bridge, |(address, _)| *address) {
+                    upstream.try_reserve(1).map_err(|_| Error::Exhausted)?;
+                    upstream.push(&bridges[index].1);
+                }
+                let index = fabric
+                    .slots
+                    .binary_search_by_key(&bridge, |slot| slot.address)
+                    .expect("original parent remains in the fabric");
+                route = fabric.slots[index].route;
+            }
+            apart.mark(
+                slot.address.segment,
+                slot.address.bus,
+                upstream.iter().copied(),
+                &screen,
+            );
+        }
+        Ok(apart)
+    }
+
     pub(crate) fn check_observation(
         &self,
         address: Address,

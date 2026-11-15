@@ -138,9 +138,11 @@ pub(crate) enum ScreenOwner {
     NoScreen,
     /// This function, checked before and after firmware exit.
     Function(FramebufferSource),
-    /// No function was found: the firmware screen stops before any GPU
-    /// starts, so no screen writer can race a GPU's BAR changes.
-    Unknown,
+    /// No function was found. A GPU on a bus apart from the screen
+    /// (`firmware_screen`) cannot hold it and leaves it to the adapter
+    /// showing it; any other GPU may, so the firmware screen stops before it
+    /// starts and no screen writer can race its BAR changes.
+    Unknown(stela_boot_core::firmware_screen::BusesApart),
 }
 
 /// The firmware screen at `base` for `bytes`, when one display-class

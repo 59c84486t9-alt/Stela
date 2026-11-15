@@ -2600,13 +2600,28 @@ fn start_platform(
                     )),
                 }
             }
-            (Some(_), None) => {
+            (Some(pci), None) => {
+                let base = screen.base as u64;
+                let span = base..base.saturating_add(screen.bytes as u64);
+                // SAFETY: as above; no bridge's forwarding is restored yet.
+                let apart = match unsafe { pci.screen_apart(span) } {
+                    Ok(apart) => apart,
+                    Err(error) => {
+                        output::arguments(format_args!(
+                            "HOST GOP PCI bridge windows unreadable: {error:?}\n"
+                        ));
+                        stela_boot_core::firmware_screen::BusesApart::none()
+                    }
+                };
                 output::arguments(format_args!(
                     "HOST GOP PCI source unknown: no GOP device path or display function's \
-                     BAR holds the firmware framebuffer; the firmware screen stops before a \
-                     GPU starts\n"
+                     BAR holds the firmware framebuffer at {base:#x}; {} buses lie below a \
+                     bridge that forwards none of it, and a GPU there leaves the screen to \
+                     the adapter showing it; any other GPU ends the firmware screen before \
+                     it starts\n",
+                    apart.count()
                 ));
-                mmio.framebuffer_owner_unknown();
+                mmio.framebuffer_owner_unknown(apart);
                 None
             }
             // The containment failure is kept and logged above.

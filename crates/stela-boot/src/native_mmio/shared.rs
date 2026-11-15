@@ -675,12 +675,15 @@ impl Source {
         let _ = self.framebuffer.set(Err(why));
     }
 
-    /// Keep that no PCI function was found for the firmware screen. The
-    /// first outcome stays.
-    pub(crate) fn framebuffer_owner_unknown(&self) {
+    /// Keep that no PCI function was found for the firmware screen, with
+    /// the buses `apart` from it. The first outcome stays.
+    pub(crate) fn framebuffer_owner_unknown(
+        &self,
+        apart: stela_boot_core::firmware_screen::BusesApart,
+    ) {
         let _ = self
             .framebuffer
-            .set(Ok(crate::pci_io::ScreenOwner::Unknown));
+            .set(Ok(crate::pci_io::ScreenOwner::Unknown(apart)));
     }
 
     pub(crate) fn authority(&self) -> &Authority {
