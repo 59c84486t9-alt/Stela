@@ -392,9 +392,10 @@ pub(super) struct Checked {
 
 /// What the first `bytes` of `partition` hold, the bytes a guest disk may
 /// span: a known signature at its documented offset, near the start or
-/// the end, is that kind of data (`signatures::probe`); only zeros
-/// wherever one can sit are blank. A partition that cannot be read is
-/// refused, never taken for blank.
+/// the end, is that kind of data (`signatures::probe`); zeros where every
+/// format starts, with no signature of its own at the end, are blank, as
+/// an earlier erase of the start left them. A partition that cannot be
+/// read is refused, never taken for blank.
 fn contents(host: &dyn Host, partition: &str, bytes: u64) -> Result<Contents> {
     let found = signatures::probe(bytes, &mut |offset, length| {
         host.read(partition, offset, length)

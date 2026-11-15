@@ -1135,6 +1135,29 @@ fn a_partition_with_a_file_system_past_its_first_8_kib_is_never_taken_for_blank(
 }
 
 #[test]
+fn a_target_erased_by_0_4_1_is_taken_for_blank() {
+    // Stela 0.4.1's --erase-target zeroed only the first MiB: a guest disk
+    // so erased keeps its backup GPT at the end and data past that MiB.
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    let bytes = f.host.partitions[REGION].0.bytes;
+    let path = f.host.partitions[REGION].1.clone();
+    sparse_image(&path, bytes);
+    f.host.write(REGION, bytes - 512, b"EFI PART").unwrap();
+    f.host.write(REGION, 3 << 19, &[0xa5; 4096]).unwrap();
+    let mut dry = installed_command(&f);
+    dry.dry_run = true;
+    setup(&environment(&f.host), dry).unwrap();
+    // With bytes left at its start, the backup GPT is another disk's.
+    f.host.write(REGION, 1 << 19, &[0xa5; 4096]).unwrap();
+    let mut dry = installed_command(&f);
+    dry.dry_run = true;
+    let error = setup(&environment(&f.host), dry).unwrap_err().to_string();
+    assert!(error.contains("holds a backup GPT"), "{error}");
+    assert!(error.contains("--erase-target"), "{error}");
+}
+
+#[test]
 fn setup_erases_usb_and_refuses_internal_disk() {
     let f = fixture(64 * GIB, true);
     let whole = |usb: &str| f.host.whole_disk(Path::new(usb)).unwrap();

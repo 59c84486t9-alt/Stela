@@ -1,19 +1,26 @@
 //! What a partition holds, read from the signatures that file systems,
 //! encryption, volume managers, RAID and partition tables write at their
 //! documented offsets, near the start of the partition or its end. A
-//! partition is blank only when no signature is found and every byte a
-//! signature can sit in is zero: its first [`HEAD_BYTES`] and its last
-//! [`TAIL_BYTES`]. A partition that cannot be read is never blank; the
-//! caller refuses it.
+//! partition is blank only when no signature is found and its first
+//! [`HEAD_BYTES`], where every format probed starts, are zero. Bytes past
+//! them, and in its last [`TAIL_BYTES`], that no signature names are what an
+//! erase that cleared the start left: Stela 0.4.1's `--erase-target`
+//! cleared only the first MiB. A backup GPT whose primary table at the
+//! start is gone is the same. A signature that marks data on its own at
+//! the end, Linux RAID or ZFS's back labels, is never taken for blank. A
+//! partition that cannot be read is never blank; the caller refuses it.
 use anyhow::{Context, Result};
 
-/// The bytes read from the start: past btrfs's and ReiserFS's superblocks
-/// at 64 KiB, ZFS's two front labels (512 KiB) and the UDF anchor at block
-/// 256 of a 4 KiB-block disk (1 MiB).
-pub(super) const HEAD_BYTES: u64 = 2 << 20;
+/// The bytes read from the start, which must be zero for blank: past
+/// btrfs's and ReiserFS's superblocks at 64 KiB, ZFS's two front labels
+/// (512 KiB) and a primary GPT's entries, the bytes an erase clears.
+pub(super) const HEAD_BYTES: u64 = 1 << 20;
 /// The bytes read from the end: ZFS's two back labels (512 KiB), MD RAID
 /// 0.90 and 1.0 superblocks (within 128 KiB) and the backup GPT header.
 pub(super) const TAIL_BYTES: u64 = 1 << 20;
+/// A ZFS label's size: the labels sit at the device's size aligned down to
+/// it, two at the start and two at the end.
+const ZFS_LABEL: u64 = 256 << 10;
 
 /// Where a signature sits in a partition of a given size.
 #[derive(Clone, Copy, Debug)]
@@ -29,6 +36,8 @@ enum At {
     /// A ZFS uberblock: any 1 KiB slot of the ring at 128 KiB of the first
     /// label.
     ZfsRing,
+    /// A ZFS uberblock in either back label's ring (`vdev_label_offset`).
+    ZfsBackRing,
 }
 
 impl At {
@@ -47,6 +56,11 @@ impl At {
                 .into_iter()
                 .collect(),
             Self::ZfsRing => (0..128).map(|slot| (128 << 10) + slot * 1024).collect(),
+            Self::ZfsBackRing => [2, 1]
+                .into_iter()
+                .filter_map(|back| (bytes & !(ZFS_LABEL - 1)).checked_sub(back * ZFS_LABEL))
+                .flat_map(|label| (0..128).map(move |slot| label + (128 << 10) + slot * 1024))
+                .collect(),
         }
     }
 }
@@ -58,10 +72,26 @@ pub(super) struct Signature {
     pub(super) name: &'static str,
     at: At,
     magic: &'static [u8],
+    /// Whether it marks data only beside the start it belongs to: a backup
+    /// GPT whose primary table at the start is gone is what an erase left.
+    with_start: bool,
 }
 
 const fn sig(name: &'static str, at: At, magic: &'static [u8]) -> Signature {
-    Signature { name, at, magic }
+    Signature {
+        name,
+        at,
+        magic,
+        with_start: false,
+    }
+}
+
+/// A backup GPT header `back` bytes before the end.
+const fn backup_gpt(back: u64) -> Signature {
+    Signature {
+        with_start: true,
+        ..sig("a backup GPT", At::End(back), GPT_HEADER)
+    }
 }
 
 /// A GUID partition table's header, at block 1 of 512- or 4096-byte blocks:
@@ -87,6 +117,8 @@ pub(super) const SIGNATURES: &[Signature] = &[
     ),
     sig("ZFS", At::ZfsRing, &[0x0c, 0xb1, 0xba, 0, 0, 0, 0, 0]),
     sig("ZFS", At::ZfsRing, &[0, 0, 0, 0, 0, 0xba, 0xb1, 0x0c]),
+    sig("ZFS", At::ZfsBackRing, &[0x0c, 0xb1, 0xba, 0, 0, 0, 0, 0]),
+    sig("ZFS", At::ZfsBackRing, &[0, 0, 0, 0, 0, 0xba, 0xb1, 0x0c]),
     sig("ReiserFS", At::Start(0x1_0034), b"ReIsEr"),
     sig("ReiserFS", At::Start(0x2034), b"ReIsEr"),
     sig("JFS", At::Start(0x8000), b"JFS1"),
@@ -111,15 +143,15 @@ pub(super) const SIGNATURES: &[Signature] = &[
     sig("ISO 9660", At::Start(32769), b"CD001"),
     sig("UDF", At::Start(32769), b"BEA01"),
     sig("ext2, ext3 or ext4", At::Start(1080), &[0x53, 0xef]),
-    sig("a backup GPT", At::End(512), GPT_HEADER),
-    sig("a backup GPT", At::End(4096), GPT_HEADER),
+    backup_gpt(512),
+    backup_gpt(4096),
     sig("a boot sector", At::Start(510), &[0x55, 0xaa]),
 ];
 
 /// What a partition holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Found {
-    /// No signature, and zeros wherever one can be.
+    /// No signature, and zeros where every format probed starts.
     Blank,
     /// A GUID partition table at its start: a disk of its own.
     Gpt,
@@ -155,7 +187,11 @@ pub(super) fn probe(
     {
         return Ok(Found::Gpt);
     }
+    let cleared = head.iter().all(|&byte| byte == 0);
     for signature in SIGNATURES {
+        if signature.with_start && cleared {
+            continue;
+        }
         let length = signature.magic.len();
         if signature
             .at
@@ -166,7 +202,7 @@ pub(super) fn probe(
             return Ok(Found::Known(signature.name));
         }
     }
-    Ok(match head.iter().chain(&tail).all(|&byte| byte == 0) {
+    Ok(match cleared {
         true => Found::Blank,
         false => Found::Unknown,
     })
@@ -196,8 +232,14 @@ mod tests {
     fn every_signature_is_found_at_its_offset_and_named() {
         for signature in SIGNATURES {
             for offset in signature.at.offsets(BYTES) {
+                // One that marks data only beside its start is found with
+                // bytes there.
+                let start: &[(u64, &[u8])] = match signature.with_start {
+                    true => &[(100, b"x")],
+                    false => &[],
+                };
                 assert_eq!(
-                    found(BYTES, &[(offset, signature.magic)]).unwrap(),
+                    found(BYTES, &[start, &[(offset, signature.magic)]].concat()).unwrap(),
                     Found::Known(signature.name),
                     "{signature:?} at {offset:#x}"
                 );
@@ -246,13 +288,92 @@ mod tests {
             Found::Known("Linux RAID")
         );
         assert_eq!(
-            found(BYTES, &[(BYTES - 512, GPT_HEADER)]).unwrap(),
+            found(BYTES, &[(0, b"x"), (BYTES - 512, GPT_HEADER)]).unwrap(),
             Found::Known("a backup GPT")
         );
-        // Any byte left at the end is data.
+        // ZFS's back labels, the front ones gone.
+        let aligned = BYTES + (100 << 10);
+        let l3 = (aligned & !(ZFS_LABEL - 1)) - ZFS_LABEL + (128 << 10) + 7 * 1024;
         assert_eq!(
-            found(BYTES, &[(BYTES - 100, b"x")]).unwrap(),
+            found(aligned, &[(l3, &[0x0c, 0xb1, 0xba, 0, 0, 0, 0, 0])]).unwrap(),
+            Found::Known("ZFS")
+        );
+        // A byte at the end beside data at the start is data too.
+        assert_eq!(
+            found(BYTES, &[(100, b"x"), (BYTES - 100, b"x")]).unwrap(),
             Found::Unknown
+        );
+    }
+
+    /// A partition that held NTFS, files past its first MiB and the backup
+    /// boot sector in its last sector, as Stela 0.4.1's `--erase-target`
+    /// left it, its first MiB zeroed: blank, as 0.4.1 took it.
+    #[test]
+    fn a_partition_erased_by_0_4_1_is_blank() {
+        let mut boot = [0u8; 512];
+        boot[3..11].copy_from_slice(b"NTFS    ");
+        boot[510..].copy_from_slice(&[0x55, 0xaa]);
+        let files = [0xa5; 4096];
+        let writes: &[(u64, &[u8])] = &[
+            (0, &boot),
+            (HEAD_BYTES - 4096, &files),
+            (HEAD_BYTES, &files),
+            (BYTES / 2, &files),
+            (BYTES - (64 << 10), &files),
+            (BYTES - 512, &boot),
+        ];
+        assert_eq!(found(BYTES, writes).unwrap(), Found::Known("NTFS"));
+        let erased = |writes: &[(u64, &[u8])]| {
+            let mut image = vec![0u8; BYTES as usize];
+            for &(offset, data) in writes {
+                image[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+            }
+            // 0.4.1's FOREIGN_HEAD_BYTES.
+            image[..1 << 20].fill(0);
+            probe(BYTES, &mut |offset, length| {
+                Ok(image[offset as usize..offset as usize + length].to_vec())
+            })
+            .unwrap()
+        };
+        assert_eq!(erased(writes), Found::Blank);
+        // A guest disk an install wrote, so erased: the backup GPT at its
+        // end is left, its primary table gone.
+        let mut primary = [0u8; 92];
+        primary[..8].copy_from_slice(GPT_HEADER);
+        let guest: &[(u64, &[u8])] = &[
+            (512, &primary),
+            (40 * 512, &files),
+            (HEAD_BYTES + 4096, &files),
+            (BYTES - 33 * 512, &files),
+            (BYTES - 512, &primary),
+        ];
+        assert_eq!(found(BYTES, guest).unwrap(), Found::Gpt);
+        assert_eq!(erased(guest), Found::Blank);
+    }
+
+    /// Zeros at the start alone do not make a partition blank where a
+    /// signature at its end marks data of its own: a Linux RAID member's
+    /// superblock, or ZFS's back labels.
+    #[test]
+    fn a_foreign_end_behind_a_zeroed_start_is_not_blank() {
+        let md10 = (((BYTES >> 9) - 16) & !7) << 9;
+        assert_eq!(
+            found(BYTES, &[(md10, &[0xfc, 0x4e, 0x2b, 0xa9])]).unwrap(),
+            Found::Known("Linux RAID")
+        );
+        let l2 = BYTES - 2 * ZFS_LABEL + (128 << 10);
+        assert_eq!(
+            found(BYTES, &[(l2, &[0, 0, 0, 0, 0, 0xba, 0xb1, 0x0c])]).unwrap(),
+            Found::Known("ZFS")
+        );
+        // With the GPT too, the RAID superblock names it.
+        assert_eq!(
+            found(
+                BYTES,
+                &[(BYTES - 512, GPT_HEADER), (md10, &[0xfc, 0x4e, 0x2b, 0xa9])]
+            )
+            .unwrap(),
+            Found::Known("Linux RAID")
         );
     }
 
