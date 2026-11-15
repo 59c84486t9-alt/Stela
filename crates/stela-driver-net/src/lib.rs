@@ -168,6 +168,12 @@ pub trait Link {
     fn retarget(&mut self, _message: bus::irq::MsiMessage) -> bool {
         false
     }
+    /// One line of the adapter's own state for a failure report (its link,
+    /// interrupt, ring and receive counts), with no address in it; None
+    /// where the driver keeps no such state.
+    fn diagnostic(&mut self) -> Option<String> {
+        None
+    }
 }
 
 mod timing;

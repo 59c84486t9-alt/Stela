@@ -105,3 +105,49 @@ fn dma_enable_readback_rejects_failed_bus_reads_and_missing_enable_bits() {
         assert_eq!(publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])), expected);
     }
 }
+
+/// The failure report's line: registers, ring positions and ownership and
+/// the receive events, after a publication on an RTL8168H, with the
+/// station address never printed.
+#[test]
+fn the_diagnostic_line_names_registers_rings_and_events_without_the_address() {
+    use crate::bus::dma::TestRegion;
+    let mut dma = TestRegion::new(200_000 * 8);
+    let mut rx = Ring::new(&mut dma, true).unwrap();
+    let mut tx = Ring::new(&mut dma, true).unwrap();
+    rx.initialize(true);
+    tx.initialize(false);
+    let time = Time::default();
+    let model = Model::ready(&time);
+    let hw = Hardware::new(&model, &time, revision(46), 0);
+    let mac = Mac([2, 3, 4, 5, 6, 7]);
+    publish(&hw, &rx, &tx, mac).unwrap();
+    // One good frame and one with the error summary taken; one frame sent.
+    rx.deliver(&[0x55; 60]);
+    assert!(rx.receive().is_some());
+    let index = rx.next();
+    rx.descriptors
+        .write(index * DESCRIPTOR, FIRST | LAST | RX_RES | 64);
+    assert!(rx.receive().is_none());
+    tx.transmit(&[0xab; 60]).unwrap();
+    model.write16(INTERRUPT_STATUS, RX_OK | RX_DESCRIPTORS_EMPTY);
+    let mut events = Events::default();
+    events.note(RX_OK | RX_DESCRIPTORS_EMPTY | RX_FIFO_OVERFLOW);
+    events.note(RX_DESCRIPTORS_EMPTY | LINK_CHANGE);
+    let line = diagnostic_line(&model, revision(46), mac, &rx, &tx, events, true);
+    for part in [
+        "isr=0x11 ",
+        "imr=0x0 ",
+        "station=kept",
+        "rx next=2 own=dddd taken=2 dropped=1 device_owned=256",
+        "tx next=1 device_owned=1",
+        "descriptors_empty=2 fifo_overflow=1 receive_error=0 link_change=1",
+        "signalled=true",
+    ] {
+        assert!(line.contains(part), "{part} in {line}");
+    }
+    assert!(!line.contains("02:03:04"), "{line}");
+    let other = Mac([2, 3, 4, 5, 6, 8]);
+    let line = diagnostic_line(&model, revision(46), other, &rx, &tx, events, false);
+    assert!(line.contains("station=differs"), "{line}");
+}

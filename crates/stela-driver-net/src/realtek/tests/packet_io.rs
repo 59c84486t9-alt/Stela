@@ -29,6 +29,32 @@ fn modelled(registers: &mut [u32], memory: &mut [u64], signalled: bool) -> Realt
         function: 0,
         location: "model".into(),
         signalled,
+        events: Events::default(),
+    }
+}
+
+/// The empty receive's acknowledgement counts the ring's exhaustion and the
+/// FIFO's overflow, and the failure report's line carries them with the
+/// interrupt registers and both rings' positions.
+#[test]
+fn the_diagnostic_counts_the_receive_events_an_empty_receive_acknowledged() {
+    let mut registers = vec![0u32; 64];
+    let mut memory = vec![0u64; 262_144];
+    let pending = RX_DESCRIPTORS_EMPTY | RX_FIFO_OVERFLOW;
+    registers[INTERRUPT_STATUS / 4] |= u32::from(pending) << 16;
+    let mut net = modelled(&mut registers, &mut memory, true);
+    net.receive.initialize(true);
+    net.transmit.initialize(false);
+    assert_eq!(net.receive(), Ok(None));
+    let line = net.diagnostic().unwrap();
+    for part in [
+        "isr=0x50 ",
+        "rx next=0 own=dddd taken=0 dropped=0 device_owned=256",
+        "tx next=0 device_owned=0",
+        "descriptors_empty=1 fifo_overflow=1 receive_error=0 link_change=0",
+        "signalled=true",
+    ] {
+        assert!(line.contains(part), "{part} in {line}");
     }
 }
 

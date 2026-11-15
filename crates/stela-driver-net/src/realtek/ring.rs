@@ -15,6 +15,9 @@ pub(super) struct Ring {
     pub descriptors: DmaBuffer,
     buffers: DmaBuffer,
     next: usize,
+    /// Completed receive descriptors taken, and those of them dropped.
+    pub taken: u64,
+    pub dropped: u64,
 }
 impl Ring {
     pub fn new(dma: &mut dyn DmaAllocator, wide: bool) -> Result<Self, BlockError> {
@@ -31,6 +34,8 @@ impl Ring {
             descriptors,
             buffers,
             next: 0,
+            taken: 0,
+            dropped: 0,
         })
     }
     pub fn initialize(&mut self, receive: bool) {
@@ -52,6 +57,23 @@ impl Ring {
         fence(Ordering::Release);
         self.descriptors
             .write(index * DESCRIPTOR, OWN | end(index) | BUFFER as u32);
+    }
+    /// The next slot the driver looks at.
+    pub fn next(&self) -> usize {
+        self.next
+    }
+    /// Whether the device owns each of the `N` slots from the next one.
+    pub fn owned<const N: usize>(&self) -> [bool; N] {
+        core::array::from_fn(|ahead| {
+            let index = (self.next + ahead) % DESCRIPTORS;
+            self.descriptors.read::<u32>(index * DESCRIPTOR) & OWN != 0
+        })
+    }
+    /// How many slots the device owns.
+    pub fn device_owned(&self) -> usize {
+        (0..DESCRIPTORS)
+            .filter(|index| self.descriptors.read::<u32>(index * DESCRIPTOR) & OWN != 0)
+            .count()
     }
     pub fn available(&self) -> bool {
         self.descriptors.read::<u32>(self.next * DESCRIPTOR) & OWN == 0
@@ -105,6 +127,8 @@ impl Ring {
             let frame = received_length(status).map(|length| {
                 take(&self.buffers.bytes()[self.next * BUFFER..self.next * BUFFER + length])
             });
+            self.taken += 1;
+            self.dropped += u64::from(frame.is_none());
             self.offer(self.next);
             self.next = (self.next + 1) % DESCRIPTORS;
             if frame.is_some() {

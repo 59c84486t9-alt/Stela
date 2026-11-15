@@ -343,6 +343,13 @@ impl Adapter {
 }
 
 impl Link for Adapter {
+    /// The driver's own state line, where it keeps one (RTL8168 family).
+    fn diagnostic(&mut self) -> Option<String> {
+        match self {
+            Self::Realtek(device) => device.diagnostic(),
+            _ => None,
+        }
+    }
     fn mac(&self) -> Mac {
         match self {
             Self::Virtio(device) => device.mac(),

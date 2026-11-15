@@ -256,7 +256,83 @@ pub struct Realtek {
     pub location: String,
     /// Whether the function's vector sends the handoff's completion signal.
     signalled: bool,
+    /// The receive events acknowledged so far, for [`Link::diagnostic`].
+    events: Events,
 }
+
+/// How often each receive event was among those acknowledged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Events {
+    descriptors_empty: u32,
+    fifo_overflow: u32,
+    receive_error: u32,
+    link_change: u32,
+}
+impl Events {
+    fn note(&mut self, pending: u16) {
+        let count = |bit: u16| u32::from(pending & bit != 0);
+        self.descriptors_empty += count(RX_DESCRIPTORS_EMPTY);
+        self.fifo_overflow += count(RX_FIFO_OVERFLOW);
+        self.receive_error += count(RX_ERROR);
+        self.link_change += count(LINK_CHANGE);
+    }
+}
+
+/// The diagnostic line ([`Link::diagnostic`]): the link, command, interrupt
+/// and configuration registers, whether the station address registers
+/// still hold `mac` (never the address itself), both rings' positions and
+/// ownership, and what the receive path took and saw.
+fn diagnostic_line<R: Registers>(
+    r: &R,
+    revision: Revision,
+    mac: Mac,
+    receive: &Ring,
+    transmit: &Ring,
+    events: Events,
+    signalled: bool,
+) -> String {
+    let (status, mask) = if revision.nbase() {
+        (
+            r.read32(NBASE_INTERRUPT_STATUS),
+            r.read32(NBASE_INTERRUPT_MASK),
+        )
+    } else {
+        (
+            u32::from(r.read16(INTERRUPT_STATUS)),
+            u32::from(r.read16(INTERRUPT_MASK)),
+        )
+    };
+    let station = station(r.read32(MAC0), r.read32(MAC4)) == Some(mac);
+    let own: String = receive
+        .owned::<4>()
+        .iter()
+        .map(|&owned| if owned { 'd' } else { 'h' })
+        .collect();
+    format!(
+        "phystatus={:#04x} chipcmd={:#04x} isr={status:#x} imr={mask:#x} rxconfig={:#010x} \
+         txconfig={:#010x} cpcmd={:#06x} rxmax={} station={} rx next={} own={own} \
+         taken={} dropped={} device_owned={} tx next={} device_owned={} events \
+         descriptors_empty={} fifo_overflow={} receive_error={} link_change={} signalled={signalled}",
+        r.read8(PHY_STATUS),
+        r.read8(COMMAND),
+        r.read32(RX_CONFIG),
+        r.read32(TX_CONFIG),
+        r.read16(CPLUS),
+        r.read16(RX_MAXIMUM),
+        if station { "kept" } else { "differs" },
+        receive.next(),
+        receive.taken,
+        receive.dropped,
+        receive.device_owned(),
+        transmit.next(),
+        transmit.device_owned(),
+        events.descriptors_empty,
+        events.fifo_overflow,
+        events.receive_error,
+        events.link_change,
+    )
+}
+
 impl Realtek {
     /// What the start tolerated, each said once.
     pub fn warnings(&self) -> &[Warning] {
@@ -370,6 +446,7 @@ impl Realtek {
                 function.address, revision.name, revision.xid
             ),
             signalled,
+            events: Events::default(),
         };
         net.receive.initialize(true);
         net.transmit.initialize(false);
@@ -888,6 +965,22 @@ impl Link for Realtek {
     fn signals(&self) -> bool {
         self.signalled
     }
+    fn diagnostic(&mut self) -> Option<String> {
+        if self.device.read32(TX_CONFIG) == u32::MAX {
+            return Some(String::from(
+                "registers read all ones: the chip does not answer",
+            ));
+        }
+        Some(diagnostic_line(
+            &self.device,
+            self.revision,
+            self.mac,
+            &self.receive,
+            &self.transmit,
+            self.events,
+            self.signalled,
+        ))
+    }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.receive_frame(<[u8]>::to_vec)
     }
@@ -921,7 +1014,9 @@ impl Realtek {
         // pending received nothing more after a download's first burst. A
         // frame that arrived before the acknowledgement is in the ring.
         let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
-        if hardware.acknowledge() & LINK_CHANGE != 0 {
+        let pending = hardware.acknowledge();
+        self.events.note(pending);
+        if pending & LINK_CHANGE != 0 {
             self.link.last_phy_poll = None;
             self.update_link()?;
         }

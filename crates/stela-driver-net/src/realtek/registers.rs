@@ -20,6 +20,10 @@ pub(super) const NBASE_INTERRUPT_STATUS: usize = 0x3c;
 pub(super) const RX_OK: u16 = 1 << 0;
 pub(super) const RX_ERROR: u16 = 1 << 1;
 pub(super) const LINK_CHANGE: u16 = 1 << 5;
+/// Interrupt events: no receive descriptor was the device's (Linux
+/// `RxOverflow`), and the receive FIFO overflowed (`RxFIFOOver`).
+pub(super) const RX_DESCRIPTORS_EMPTY: u16 = 1 << 4;
+pub(super) const RX_FIFO_OVERFLOW: u16 = 1 << 6;
 pub(super) const NBASE_TX_POLL: usize = 0x90;
 pub(super) const NBASE_MAC0_BACKUP: usize = 0x19e0;
 pub(super) const NBASE_RSS: usize = 0x4500;

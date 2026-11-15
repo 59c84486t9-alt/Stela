@@ -178,6 +178,11 @@ impl Link for RootLink {
     fn signals(&self) -> bool {
         self.device.signals()
     }
+    fn diagnostic(&mut self) -> Option<String> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.device.diagnostic()
+    }
     fn retarget(&mut self, message: stela_drivers::bus::irq::MsiMessage) -> bool {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
@@ -299,6 +304,14 @@ impl HostNetwork {
                         frames.sent.get(),
                         frames.received.get()
                     ));
+                    // What the adapter's own registers and rings say then,
+                    // where its driver keeps them: a dead receive or
+                    // transmit path is told apart from a silent network.
+                    if let Some(state) = stack.link_mut().diagnostic() {
+                        output::arguments(format_args!(
+                            "NETWORK adapter {location} state: {state}\n"
+                        ));
+                    }
                     failures.push(match error {
                         stela_runtime::net::NetError::NoCarrier => {
                             stela_drivers::probe::no_link(&location, wireless)
@@ -433,6 +446,12 @@ impl HostNetwork {
 
     pub fn close(&mut self, transfer: Transfer) {
         self.stack.close(transfer);
+    }
+
+    /// The adapter's own state line (`Link::diagnostic`), where its driver
+    /// keeps one.
+    pub fn diagnostic(&mut self) -> Option<String> {
+        self.stack.link_mut().diagnostic()
     }
 
     /// Waits up to `micros` for the adapter's next frame (`Stack::wait`).
